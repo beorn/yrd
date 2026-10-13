@@ -55,7 +55,7 @@ import { openEvents } from "gitomic/events"
 import { assertEventListingFence, coreQueueCommand, openEventDetail } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { readEnvOpenRecord } from "../src/env-open-record.ts"
-import { issueLookup, issueLookupBatch, issueResolver } from "../src/issue-resolver.ts"
+import { issueLookup, issueResolver } from "../src/issue-resolver.ts"
 import { SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { eventHistoryEntries } from "../src/watch-change.ts"
@@ -449,42 +449,6 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(readFileSync(join(repo, "resolver-calls"), "utf8").trim().split("\n")).toHaveLength(2)
     expect(await lookup(id)).toEqual({ id, status: "closed" })
     expect(readFileSync(join(repo, "resolver-calls"), "utf8").trim().split("\n")).toHaveLength(3)
-  })
-
-  it("resolves a batch of issue references and reports a legacy single-object resolver", async () => {
-    const batchCommand = [
-      "sh",
-      "-c",
-      'printf \'[{"id":"@example/28001-batch","status":"closed"},null]\\n\'',
-      "resolver",
-    ]
-    const batchRepo = await world(`issueResolver: ${JSON.stringify(batchCommand)}\n`)
-    const batchGit = gitIn(batchRepo)
-    const batchConfig = await readConfig(batchGit, "HEAD", { branch: "main", remote: "origin" })
-    if (batchConfig === undefined) throw new Error("fixture lost target declaration")
-    const batch = issueLookupBatch(batchConfig, batchRepo)
-    if (batch === undefined) throw new Error("fixture lost target issue resolver")
-    await expect(batch(["28001", "28003"])).resolves.toEqual(
-      new Map([["28001", { id: "@example/28001-batch", status: "closed" }]]),
-    )
-
-    const legacyCommand = ["sh", "-c", 'printf \'{"id":"@example/28001-batch"}\\n\'', "resolver"]
-    const legacyRepo = await world(`issueResolver: ${JSON.stringify(legacyCommand)}\n`)
-    const legacyGit = gitIn(legacyRepo)
-    const legacyConfig = await readConfig(legacyGit, "HEAD", { branch: "main", remote: "origin" })
-    if (legacyConfig === undefined) throw new Error("fixture lost target declaration")
-    const legacyBatch = issueLookupBatch(legacyConfig, legacyRepo)
-    if (legacyBatch === undefined) throw new Error("fixture lost target issue resolver")
-    await expect(legacyBatch(["28001", "28003"])).resolves.toBeUndefined()
-
-    const shortCommand = ["sh", "-c", "printf '[]\\n'", "resolver"]
-    const shortRepo = await world(`issueResolver: ${JSON.stringify(shortCommand)}\n`)
-    const shortGit = gitIn(shortRepo)
-    const shortConfig = await readConfig(shortGit, "HEAD", { branch: "main", remote: "origin" })
-    if (shortConfig === undefined) throw new Error("fixture lost target declaration")
-    const shortBatch = issueLookupBatch(shortConfig, shortRepo)
-    if (shortBatch === undefined) throw new Error("fixture lost target issue resolver")
-    await expect(shortBatch(["28001", "28003"])).rejects.toThrow(/returned 0 batch results for 2 issue references/u)
   })
 
   it("refuses an option-shaped raw issue before invoking the target resolver", async () => {
@@ -1758,17 +1722,17 @@ describe("a queue is the selected origin branch carrying config", () => {
   }, 60_000)
 
   /**
-   * @failure Post-close cleanup either misses never-submitted work or removes a submitted branch that advanced.
+   * @failure Issue cleanup deletes unpublished work without origin custody, or removes an advanced submitted branch.
    * @level l3
    * @consumer The closer running yrd drop --issue after durable issue closure
    */
-  it("drop by issue archives unpublished local work and keeps an advanced submitted branch", async () => {
+  it("drop by issue keeps unpublished work and advanced submitted tips; explicit abandonment retains custody", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
     await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
     const issue = "@example/28791-retirement"
     const saved = new Map<string, string>()
-    for (const branch of ["task/local-only", "task/manual-only", "task/advanced"]) {
+    for (const branch of ["task/28791-local-only", "task/manual-only", "task/28791-advanced"]) {
       await git(["checkout", "--quiet", "-b", branch, "main"])
       writeFileSync(join(repo, "work.txt"), branch)
       await git(["add", "work.txt"])
@@ -1779,7 +1743,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         `work\n\nRefs: ${branch === "task/manual-only" ? "@example/other-issue" : issue}`,
       ])
       saved.set(branch, (await git(["rev-parse", "HEAD"])).trim())
-      if (branch === "task/advanced") {
+      if (branch === "task/28791-advanced") {
         const submitted = capture(repo)
         expect(await runYrdProcess(["bun", "yrd", "submit", "--json"], submitted.io), submitted.stderr()).toBe(0)
         await git(["commit", "--quiet", "--allow-empty", "-m", "new work after submission"])
@@ -1796,23 +1760,20 @@ describe("a queue is the selected origin branch carrying config", () => {
       removed: { branch: string; head: string; archiveRef: string }[]
       kept: { branch: string; reason: string }[]
     }
-    expect(report.removed).toEqual([
-      expect.objectContaining({ branch: "task/local-only", head: saved.get("task/local-only") }),
-    ])
-    expect(report.kept).toEqual([
-      expect.objectContaining({ branch: "task/advanced", reason: expect.stringContaining("branch moved") }),
-    ])
-    expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/task/local-only"])).trim()).toBe("")
-    expect((await git(["rev-parse", "refs/heads/task/advanced"])).trim()).toBe(advanced)
-    const archive = report.removed[0]!.archiveRef
-    expect((await git(["rev-parse", archive])).trim()).toBe(saved.get("task/local-only"))
-    expect((await git(["ls-remote", "origin", archive])).split("\t")[0]).toBe(saved.get("task/local-only"))
-    expect((await git(["ls-remote", "origin", "refs/heads/task/advanced"])).split("\t")[0]).toBe(
-      saved.get("task/advanced"),
+    expect(report.removed).toEqual([])
+    expect(report.kept).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ branch: "task/28791-local-only", reason: "unreached" }),
+        expect.objectContaining({ branch: "task/28791-advanced", reason: "advanced" }),
+      ]),
     )
+    expect((await git(["rev-parse", "refs/heads/task/28791-local-only"])).trim()).toBe(
+      saved.get("task/28791-local-only"),
+    )
+    expect((await git(["rev-parse", "refs/heads/task/28791-advanced"])).trim()).toBe(advanced)
     expect(
-      (await listChanges(createEventStore(repo, "origin", git.selection), "main")).get("task/local-only"),
-    ).toMatchObject({ status: "cancelled", reason: "dropped", issue })
+      (await listChanges(createEventStore(repo, "origin", git.selection), "main")).has("task/28791-local-only"),
+    ).toBe(false)
     // Manual cleanup is exact-branch/exact-tip, and does not expand to the issue's other refs.
     const manual = capture(repo)
     const manualHead = saved.get("task/manual-only")!
@@ -1826,7 +1787,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const manualReport = JSON.parse(manual.stdout()) as { removed: { branch: string; archiveRef: string }[] }
     expect(manualReport.removed).toEqual([expect.objectContaining({ branch: "task/manual-only" })])
     expect((await git(["ls-remote", "origin", manualReport.removed[0]!.archiveRef])).split("\t")[0]).toBe(manualHead)
-    expect((await git(["rev-parse", "refs/heads/task/advanced"])).trim()).toBe(advanced)
+    expect((await git(["rev-parse", "refs/heads/task/28791-advanced"])).trim()).toBe(advanced)
     // AC5: the command's journal must remain readable by the existing projection reader.
     // Custody assertions alone miss a writer that omits the required run header.
     const logs = join(await workdirOf(git, { cwd: repo }), "logs")
@@ -1837,150 +1798,218 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(records).toContainEqual(
       expect.objectContaining({
         kind: "local-branch-retirement",
-        branch: "task/local-only",
-        issue,
-        head: saved.get("task/local-only"),
+        branch: "task/manual-only",
+        head: manualHead,
         outcome: "removed",
       }),
     )
   })
 
-  /**
-   * @failure Drop by issue spawns the target resolver once per candidate branch,
-   *          so a slow issue index leaves most branches unclassified.
-   * @level l3
-   * @consumer The closer running yrd drop --issue after durable issue closure
+  /** @failure Root cleanup accepts custody for another branch or tip, ignores an active reopening,
+   * or invokes the external issue resolver. Existing component cases prove only gitlink custody.
+   * @level l3 @consumer A closer previewing and applying exact root branch cleanup
    */
-  it("drop by issue resolves every candidate binding in one resolver read", async () => {
-    const repo = await world("{}\n")
+  it("drop by issue requires exact root custody and preserves active, held and unreadable branches", async () => {
+    const repo = await world('issueResolver: ["sh", "-c", "touch resolver-ran; exit 1"]\n')
     const git = gitIn(repo)
-    const script = join(dirname(repo), "batch-issue-resolver.sh")
-    writeFileSync(
-      script,
-      [
-        "#!/usr/bin/env bash",
-        'if [ "$#" -gt 1 ]; then',
-        '  printf \'%s\\n\' "$*" >> "$(dirname "$0")/resolver-batch-calls"',
-        "  printf '['",
-        "  first=1",
-        '  for raw in "$@"; do',
-        "    if [ \"$first\" -eq 0 ]; then printf ','; fi",
-        "    first=0",
-        '    case "$raw" in',
-        '      28001) printf \'{"id":"@example/28001-batch","status":"closed"}\' ;;',
-        '      28002) printf \'{"id":"@example/28002-other","status":"open"}\' ;;',
-        "      *) printf 'null' ;;",
-        "    esac",
-        "  done",
-        "  printf ']\\n'",
-        "  exit 0",
-        "fi",
-        'case "$1" in',
-        '  @example/28001-batch) printf \'{"id":"@example/28001-batch","status":"closed"}\\n\' ;;',
-        '  28001) printf \'{"id":"@example/28001-batch","status":"closed"}\\n\' ;;',
-        '  28002) printf \'{"id":"@example/28002-other","status":"open"}\\n\' ;;',
-        "  *) printf 'cannot resolve %s\\n' \"$1\" >&2; exit 31 ;;",
-        "esac",
-        "",
-      ].join("\n"),
-    )
-    chmodSync(script, 0o755)
-    writeFileSync(join(repo, ".yrd.yml"), `issueResolver: ${JSON.stringify(["bash", script])}\n`)
-    await git(["add", ".yrd.yml"])
-    await git(["commit", "--quiet", "-m", "declare batch issue resolver"])
-    await git(["push", "--quiet", "origin", "main"])
-    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
-    for (const [branch, trailer] of [
-      ["task/28001-alpha", undefined],
-      ["task/28002-beta", undefined],
-      ["task/28003-gamma", "28003"],
-    ] as const) {
+    const queueTip = await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    const tips = new Map<string, string>()
+    for (const kind of ["landed", "archived", "wrong-branch", "wrong-tip", "active", "held", "unreadable", "invalid"]) {
+      const branch = `task/29010-${kind}`
       await git(["checkout", "--quiet", "-b", branch, "main"])
-      writeFileSync(join(repo, "work.txt"), branch)
-      await git(["add", "work.txt"])
-      await git(["commit", "--quiet", "-m", trailer === undefined ? "work" : `work\n\nRefs: ${trailer}`])
+      await git(["commit", "--quiet", "--allow-empty", "-m", kind])
+      const tip = (await git(["rev-parse", "HEAD"])).trim()
+      tips.set(branch, tip)
+      if (["landed", "active", "held", "unreadable", "invalid"].includes(kind)) {
+        const chain = await openEvents({
+          ...createEventStore(repo, "origin", git.selection),
+          ref: changesRef("main", branch),
+          writer: "yrd",
+        })
+        const written = await chain.append(
+          [
+            changeInput("opened", {
+              queueTip,
+              at: new Date(),
+              commit: tip,
+              by: "fixture",
+              issue: "@example/29010-custody",
+            }),
+            changeInput("merged", { queueTip, at: new Date(), commit: tip }),
+          ],
+          { expect: null },
+        )
+        if (kind === "active") {
+          await chain.append(
+            [
+              changeInput("opened", {
+                queueTip,
+                at: new Date(),
+                commit: tip,
+                by: "fixture",
+                issue: "@example/29010-custody",
+              }),
+            ],
+            { expect: written.head },
+          )
+        }
+        if (kind === "invalid") await chain.append([{ type: "merged" }], { expect: written.head })
+        if (kind === "unreadable") await chain.append([{ type: "not-a-yrd-event" }], { expect: written.head })
+      }
+      if (kind === "archived" || kind === "wrong-branch") {
+        const archivedBranch = kind === "archived" ? branch : `prefix/${branch}`
+        await git(["push", "--quiet", "origin", `${tip}:refs/archive/2026-10-12/fixture/${archivedBranch}`])
+      }
+      if (kind === "wrong-tip") {
+        await git(["push", "--quiet", "origin", `main:refs/archive/2026-10-12/fixture/${branch}`])
+      }
     }
     await git(["checkout", "--quiet", "main"])
-    const output = capture(repo)
-    expect(
-      await runYrdProcess(
-        ["bun", "yrd", "drop", "--issue", "@example/28001-batch", "--submitter", "fixture", "--json"],
-        output.io,
-      ),
-      output.stderr(),
-    ).toBe(0)
-    const report = JSON.parse(output.stdout()) as {
-      removed: { branch: string }[]
-      unclassified: { branch: string; reason: string }[]
+    const args = ["bun", "yrd", "drop", "--issue", "29010", "--submitter", "fixture", "--json"]
+    const preview = capture(repo)
+    preview.io.localBranchProtections = async ({ branch }) => (branch.endsWith("-held") ? ["fixture hold"] : [])
+    expect(await runYrdProcess([...args, "--dry-run"], preview.io), preview.stderr()).toBe(1)
+    const report = JSON.parse(preview.stdout()) as {
+      apply: boolean
+      eligible: { branch: string; reason: string }[]
+      kept: { branch: string; reason: string }[]
+      failed: { branch: string; reason: string; detail: string }[]
+      removed: { branch: string; archiveRef: string }[]
     }
-    expect(report.removed.map((row) => row.branch)).toEqual(["task/28001-alpha"])
-    expect(report.unclassified).toEqual([
-      expect.objectContaining({ branch: "task/28003-gamma", reason: expect.stringContaining("28003") }),
+    expect(report.apply).toBe(false)
+    expect(report.eligible).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ branch: "task/29010-landed", reason: "landed" }),
+        expect.objectContaining({ branch: "task/29010-archived", reason: "archived" }),
+      ]),
+    )
+    expect(report.eligible).toHaveLength(2)
+    expect(report.kept).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ branch: "task/29010-active", reason: "active" }),
+        expect.objectContaining({ branch: "task/29010-held", reason: "held" }),
+        expect.objectContaining({ branch: "task/29010-wrong-branch", reason: "unreached" }),
+        expect.objectContaining({ branch: "task/29010-wrong-tip", reason: "unreached" }),
+      ]),
+    )
+    expect(report.failed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          branch: "task/29010-unreadable",
+          reason: "unreadable",
+          detail: expect.stringContaining("not-a-yrd-event"),
+        }),
+        expect.objectContaining({ branch: "task/29010-invalid", reason: "unreadable" }),
+      ]),
+    )
+    expect(report.failed).toHaveLength(2)
+    expect((await git(["for-each-ref", "--format=%(refname)", "refs/archive/"])).trim()).toBe("")
+    for (const [branch, tip] of tips) expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tip)
+    const apply = capture(repo)
+    apply.io.localBranchProtections = preview.io.localBranchProtections
+    expect(await runYrdProcess(args, apply.io), apply.stderr()).toBe(1)
+    const applied = JSON.parse(apply.stdout()) as typeof report
+    expect(applied.removed.map((row: { branch: string }) => row.branch).sort()).toEqual([
+      "task/29010-archived",
+      "task/29010-landed",
     ])
-    const batchCalls = readFileSync(join(dirname(repo), "resolver-batch-calls"), "utf8")
-      .trim()
-      .split("\n")
-    expect(batchCalls).toHaveLength(1)
-    expect(new Set(batchCalls[0]!.split(" "))).toEqual(new Set(["28001", "28002", "28003"]))
-    expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/task/28001-alpha"])).trim()).toBe("")
-    expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/task/28002-beta"])).trim()).toBe(
-      "refs/heads/task/28002-beta",
-    )
-    expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/task/28003-gamma"])).trim()).toBe(
-      "refs/heads/task/28003-gamma",
-    )
-  }, 60_000)
-
-  /**
-   * @failure A stalling target resolver makes drop by issue wait once per
-   *          candidate branch instead of bounding the whole classification.
-   * @level l3
-   * @consumer The closer running yrd drop --issue after durable issue closure
-   */
-  it("drop by issue bounds a stalling resolver and names every unresolved branch", async () => {
-    const repo = await world("{}\n")
-    const git = gitIn(repo)
-    const script = join(dirname(repo), "stalling-issue-resolver.sh")
-    writeFileSync(
-      script,
-      [
-        "#!/usr/bin/env bash",
-        'if [ "$#" -eq 1 ]; then',
-        '  case "$1" in',
-        '    @example/*) printf \'{"id":"%s","status":"closed"}\\n\' "$1"; exit 0 ;;',
-        "  esac",
-        "fi",
-        "sleep 30",
-        "",
-      ].join("\n"),
-    )
-    chmodSync(script, 0o755)
-    writeFileSync(join(repo, ".yrd.yml"), `issueResolver: ${JSON.stringify(["bash", script])}\n`)
-    await git(["add", ".yrd.yml"])
-    await git(["commit", "--quiet", "-m", "declare stalling issue resolver"])
-    await git(["push", "--quiet", "origin", "main"])
-    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
-    const branches = ["task/28101-one", "task/28102-two", "task/28103-three"]
-    for (const branch of branches) {
-      await git(["checkout", "--quiet", "-b", branch, "main"])
-      await git(["commit", "--quiet", "--allow-empty", "-m", "work"])
+    for (const row of applied.removed) {
+      expect((await git(["rev-parse", row.archiveRef])).trim()).toBe(tips.get(row.branch))
+      expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
     }
+    expect(existsSync(join(repo, "resolver-ran"))).toBe(false)
+    expect(applied).not.toHaveProperty("unclassified")
+  })
+
+  /** @failure Migrated merged history loses its root-tip custody during cleanup.
+   * @level l3 @consumer Cleanup of a branch whose old ending was adopted into the event chain
+   */
+  it("drop by issue accepts validated adopted root landing history", async () => {
+    const repo = await world('issueResolver: ["false"]\n')
+    const git = gitIn(repo)
+    const base = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", base, new Date())
+    const branch = "custom/adopted"
+    await git(["checkout", "--quiet", "-b", branch])
+    await git(["commit", "--quiet", "--allow-empty", "-m", "old work"])
+    const tip = (await git(["rev-parse", "HEAD"])).trim()
     await git(["checkout", "--quiet", "main"])
+    const chain = await openEvents({
+      ...createEventStore(repo, "origin", git.selection),
+      ref: changesRef("main", branch),
+      writer: "yrd",
+    })
+    await chain.append(
+      [
+        changeInput("opened", {
+          queueTip,
+          at: new Date(),
+          commit: tip,
+          by: "fixture",
+          issue: "@example/29010-custody",
+        }),
+        changeInput("cancelled", { queueTip, at: new Date(), reason: "withdrawn" }),
+        {
+          type: "adopted",
+          props: [
+            ["Queue", queueTip],
+            ["Time", new Date().toISOString()],
+            ["By", "yrd-adopter"],
+            ["Adopted-Opened", "2026-10-01T12:00:00.000Z"],
+            ["Adopted-Head", tip],
+            ["Adopted-Status", "merged"],
+            ["Adopted-Ended", "2026-10-01T12:30:00.000Z"],
+            ["Adopted-Submitter", "fixture"],
+            ["Adopted-Merge", base],
+            ["Migrated-From", `refs/yrd/main/${branch}@${tip}@${base}`],
+          ],
+          keeps: [tip, base, queueTip],
+        },
+      ],
+      { expect: null },
+    )
     const output = capture(repo)
-    const started = Date.now()
     expect(
       await runYrdProcess(
-        ["bun", "yrd", "drop", "--issue", "@example/28101-stalled", "--submitter", "fixture", "--json"],
+        ["bun", "yrd", "drop", "--issue", "29010", "--apply", "--submitter", "fixture", "--json"],
         output.io,
       ),
       output.stderr(),
     ).toBe(0)
-    const elapsedMs = Date.now() - started
-    const report = JSON.parse(output.stdout()) as { unclassified: { branch: string; reason: string }[] }
-    expect(report.unclassified.map((row) => row.branch).sort()).toEqual([...branches].sort())
-    for (const row of report.unclassified) expect(row.reason).toContain("issue binding unreadable")
-    expect(elapsedMs).toBeLessThan(25_000)
-  }, 90_000)
+    expect(JSON.parse(output.stdout()), output.stdout()).toMatchObject({
+      removed: [{ branch, head: tip, reason: "landed" }],
+    })
+  })
+
+  /** @failure A host's pure branch mapping is ignored or recorded issue identity requires a lookup.
+   * @level l3 @consumer Standalone repositories using nonconventional branch names
+   */
+  it("drop by issue uses the host's pure mapping for root and expanded cleanup", async () => {
+    const repo = await world('issueResolver: ["false"]\n')
+    const git = gitIn(repo)
+    const tip = (await git(["rev-parse", "HEAD"])).trim()
+    await createQueue(repo, "main", tip, new Date())
+    await git(["branch", "custom/work", tip])
+    await git(["push", "--quiet", "origin", `${tip}:refs/archive/2026-10-12/fixture/custom/work`])
+    for (const expanded of [false, true]) {
+      const preview = capture(repo)
+      preview.io.branchIssue = ({ branch }) => (branch === "custom/work" ? "@example/29010-custody" : undefined)
+      const args = [
+        "bun",
+        "yrd",
+        "drop",
+        "--issue",
+        "29010",
+        "--submitter",
+        "fixture",
+        "--json",
+        "--dry-run",
+        ...(expanded ? ["--submodules"] : []),
+      ]
+      expect(await runYrdProcess(args, preview.io), preview.stderr()).toBe(0)
+      expect(JSON.parse(preview.stdout())).toMatchObject({ eligible: [{ branch: "custom/work" }] })
+    }
+  })
 
   /** @failure Retirement runs before bay cleanup, leaving the merged author ref forever.
    * @level l3 @consumer queue run's author cleanup and retained change history
@@ -2048,56 +2077,6 @@ describe("a queue is the selected origin branch carrying config", () => {
     })
   })
 
-  /** @failure Protected and unrelated unreadable branches make successful issue cleanup retry forever.
-   * @level l3 @consumer issue closer inspecting native drop reports and exit status
-   */
-  it("lists unrelated conflicting trailers as unclassified while retiring the issue branch", async () => {
-    const repo = await world("{}\n")
-    const git = gitIn(repo)
-    const issue = "@example/28791-classified"
-    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
-    await git(["checkout", "--quiet", "-b", "task/classified"])
-    await git(["commit", "--quiet", "--allow-empty", "-m", `work\n\nRefs: ${issue}`])
-    await git(["checkout", "--quiet", "-b", "task/unclassified", "main"])
-    await git(["commit", "--quiet", "--allow-empty", "-m", "one\n\nRefs: @example/other-one"])
-    await git(["commit", "--quiet", "--allow-empty", "-m", "two\n\nRefs: @example/other-two"])
-    const head = (await git(["rev-parse", "HEAD"])).trim()
-    await git(["checkout", "--quiet", "main"])
-    const output = capture(repo)
-    expect(
-      await runYrdProcess(["bun", "yrd", "drop", "--issue", issue, "--submitter", "fixture", "--json"], output.io),
-      output.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      removed: [{ branch: "task/classified" }],
-      kept: [],
-      failed: [],
-      unclassified: [
-        {
-          branch: "task/unclassified",
-          head,
-          reason: expect.stringContaining("conflicting"),
-          cure: expect.stringContaining(`yrd drop task/unclassified --local --tip ${head}`),
-        },
-      ],
-    })
-    expect((await git(["rev-parse", "refs/heads/task/unclassified"])).trim()).toBe(head)
-    const manual = capture(repo)
-    expect(
-      await runYrdProcess(
-        ["bun", "yrd", "drop", "task/unclassified", "--local", "--tip", head, "--submitter", "fixture", "--json"],
-        manual.io,
-      ),
-      manual.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(manual.stdout())).toMatchObject({
-      removed: [{ branch: "task/unclassified", head }],
-      kept: [],
-      failed: [],
-      unclassified: [],
-    })
-  })
-
   /** @failure A publication failure is labelled kept or exits successfully, hiding the need to retry.
    * @level l3 @consumer issue closer and the persisted cleanup journal
    */
@@ -2113,13 +2092,28 @@ describe("a queue is the selected origin branch carrying config", () => {
     const hook = join(dirname(repo), "remote.git", "hooks", "pre-receive")
     writeFileSync(hook, "#!/bin/sh\necho fixture-origin-refusal >&2\nexit 1\n")
     chmodSync(hook, 0o755)
-    const args = ["bun", "yrd", "drop", "--issue", issue, "--submitter", "fixture", "--json"]
+    const args = [
+      "bun",
+      "yrd",
+      "drop",
+      "task/retry",
+      "--local",
+      "--tip",
+      head,
+      "--issue",
+      issue,
+      "--submitter",
+      "fixture",
+      "--json",
+    ]
     const failed = capture(repo)
     expect(await runYrdProcess(args, failed.io), failed.stderr()).toBe(1)
     expect(JSON.parse(failed.stdout())).toMatchObject({
       removed: [],
       kept: [],
-      failed: [{ branch: "task/retry", head, reason: expect.stringContaining("fixture-origin-refusal") }],
+      failed: [
+        { branch: "task/retry", head, reason: "failed", detail: expect.stringContaining("fixture-origin-refusal") },
+      ],
     })
     expect((await git(["rev-parse", "refs/heads/task/retry"])).trim()).toBe(head)
     const logs = join(await workdirOf(git, { cwd: repo }), "logs")

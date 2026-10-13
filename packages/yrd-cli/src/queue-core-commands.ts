@@ -32,7 +32,7 @@ import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import { readCommitSubmodules } from "git-super/commit-graph"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
-import { issueLookupBatch, issueResolver } from "./issue-resolver.ts"
+import { issueResolver } from "./issue-resolver.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup } from "./env-cleanup.ts"
 import { sweepRoundOutputInRound } from "./log-retention.ts"
@@ -50,7 +50,6 @@ import {
   claimWorktrees,
   directMergeLine,
   drop,
-  issueCandidatesOf,
   issueFromBranchName,
   isAncestor,
   seamProcess,
@@ -165,7 +164,6 @@ import {
   type JournalRun,
   type JournalSummary,
   type Git,
-  type IssueCandidate,
   type IssueResolution,
   type AdmissionOutcome,
   type Submitted,
@@ -421,6 +419,7 @@ export type CoreQueueCommand =
       reason?: string
       recipient?: string
       submodules?: boolean
+      dryRun?: boolean
       apply?: boolean
     }>
   | Readonly<{
@@ -875,7 +874,7 @@ export async function coreQueueCommand(
     request.command === "resume" ||
     request.command === "withdraw" ||
     request.command === "drop" ||
-    (request.command === "drop-issue" && (!request.submodules || request.apply)) ||
+    (request.command === "drop-issue" && (request.submodules ? request.apply : !request.dryRun)) ||
     request.command === "drop-local" ||
     request.command === "ignore" ||
     request.command === "unignore" ||
@@ -1363,10 +1362,23 @@ export async function coreQueueCommand(
         throw new Error(`${NAMED[request.command]} requires the authoring repository as cwd`)
       }
       const authorGit = gitIn(authorRepo, undefined, selection, { env })
+      const issueIdentity = (value: string): string => {
+        const normalized = normalizeIssueReference(value)
+        return /^#?(\d+)$/u.exec(normalized)?.[1] ?? issueFromBranchName(normalized) ?? normalized
+      }
+      const mode =
+        "Root issue cleanup applies by default using exact origin custody; --submodules previews because it expands to component repositories."
+      const branchIssue = (branch: string, recordedIssue?: string): string | undefined => {
+        const mapped =
+          io.branchIssue === undefined
+            ? (recordedIssue ?? issueFromBranchName(branch))
+            : io.branchIssue({ branch, recordedIssue })
+        return mapped === undefined ? undefined : issueIdentity(mapped)
+      }
       if (request.command === "drop-issue" && request.submodules) {
         const issue = normalizeIssueReference(request.issue)
-        const numeric = /^#?(\d+)$/u.exec(issue)?.[1] ?? issueFromBranchName(issue)
-        if (numeric === undefined) {
+        const numeric = issueIdentity(issue)
+        if (io.branchIssue === undefined && !/^\d+$/u.test(numeric)) {
           throw new Error(`drop --submodules needs a numeric issue or a path ending in <number>-<slug>: ${issue}`)
         }
         const eventStore = createEventStore(authorRepo, await remoteUrl(git, config.target.remote), selection)
@@ -1417,7 +1429,10 @@ export async function coreQueueCommand(
             excluded.push(counts)
             for (const [ref, head] of heads) {
               const branch = ref.slice("refs/heads/".length)
-              const bound = /^(task|exp)\//u.test(branch) ? issueFromBranchName(branch) : undefined
+              const bound =
+                io.branchIssue !== undefined || /^(task|exp)\//u.test(branch)
+                  ? branchIssue(branch, path === "" ? reading.histories.get(branch)?.state.issue : undefined)
+                  : undefined
               if (branch === targetBranch || bound !== numeric) {
                 if (branch === targetBranch) counts.target++
                 else if (bound === undefined) counts.unnumbered++
@@ -1515,6 +1530,7 @@ export async function coreQueueCommand(
           issue,
           repo: authorRepo,
           apply: request.apply === true,
+          mode,
           inspected,
           excluded,
           eligible,
@@ -1526,7 +1542,7 @@ export async function coreQueueCommand(
           io,
           options.json,
           report,
-          `issue ${issue}: inspected ${inspected.length} repositories in ${authorRepo}; eligible ${eligible.length}, retired ${removed.length}, kept ${kept.length}, failed ${failed.length}` +
+          `issue ${issue}: inspected ${inspected.length} repositories in ${authorRepo}; eligible ${eligible.length}, retired ${removed.length}, kept ${kept.length}, failed ${failed.length}\n${mode}` +
             excluded
               .map(
                 (row) =>
@@ -1542,10 +1558,7 @@ export async function coreQueueCommand(
         )
         return failed.length === 0 ? 0 : 1
       }
-      const issue =
-        request.issue === undefined
-          ? undefined
-          : normalizeIssueReference(resolveIssue === undefined ? request.issue : await resolveIssue(request.issue))
+      const issue = request.issue === undefined ? undefined : normalizeIssueReference(request.issue)
       if (local && (request.branch === config.target.branch || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(request.tip))) {
         throw new Error("drop --local requires a non-target branch and a full expected commit oid")
       }
@@ -1568,191 +1581,124 @@ export async function coreQueueCommand(
         config: config.blob,
       })
       log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
-      const removed: { branch: string; head: string; archiveRef: string }[] = []
-      const kept: { branch: string; head: string; reason: string }[] = []
-      const failed: { branch: string; head: string; reason: string }[] = []
-      const unclassified: { branch: string; head: string; reason: string; cure: string }[] = []
+      type Row = { branch: string; head: string; reason: string; detail?: string; archiveRef?: string }
+      const eligible: Row[] = []
+      const removed: Row[] = []
+      const kept: Row[] = []
+      const failed: Row[] = []
       let excluded = 0
-      type DropEntry = {
-        branch: string
-        head: string
-        changeCommit?: string
-        changeSubmitter?: string
-        candidates?: readonly IssueCandidate[]
-        bound?: string
-        classificationError?: unknown
-      }
-      const entries: DropEntry[] = []
+      const dryRun = !local && request.dryRun === true
       try {
+        // Inventory once. The date and actor occupy exactly two segments; branch names may contain slashes.
+        const archives = local ? new Map<string, string>() : await listRefs("refs/archive/", eventStore)
         for (const [ref, head] of heads) {
           const branch = ref.slice("refs/heads/".length)
           if (branch === config.target.branch || (local && branch !== request.branch)) {
             excluded++
             continue
           }
-          const change = reading.histories.get(branch)?.state
-          const entry: DropEntry = {
-            branch,
-            head,
-            ...(change?.commit === undefined ? {} : { changeCommit: change.commit }),
-            ...(change?.submitter === undefined ? {} : { changeSubmitter: change.submitter }),
-          }
-          if (local || change?.issue !== undefined) {
-            entries.push({ ...entry, bound: change?.issue ?? issue })
+          const history = reading.histories.get(branch)
+          const change = history?.state
+          const row = { branch, head }
+          const invalid = reading.invalid.get(branch)
+          if (invalid !== undefined) {
+            failed.push({ ...row, reason: "unreadable", detail: `${invalid.ref}@${invalid.tip}: ${invalid.error}` })
             continue
           }
-          try {
-            entries.push({ ...entry, candidates: await issueCandidatesOf(authorGit, branch, head, target) })
-          } catch (error) {
-            // delete-fallback-allow: an unreadable binding is reported as unclassified below, so it only shrinks the branches retired.
-            entries.push({ ...entry, classificationError: error })
-          }
-        }
-        const candidateRaws = [
-          ...new Set(entries.flatMap((entry) => entry.candidates?.map((candidate) => candidate.issue) ?? [])),
-        ]
-        const resolvedIssues = new Map<string, string>()
-        const unresolvedIssues = new Map<string, string>()
-        if (candidateRaws.length > 0) {
-          if (resolveIssue === undefined) {
-            for (const raw of candidateRaws) resolvedIssues.set(raw, raw)
-          } else if (candidateRaws.length === 1) {
-            for (const raw of candidateRaws) {
-              try {
-                resolvedIssues.set(raw, normalizeIssueReference(await resolveIssue(raw)))
-              } catch (error) {
-                // delete-fallback-allow: an unresolved reference is named below, so it only shrinks the branches retired.
-                unresolvedIssues.set(raw, String(error))
-              }
-            }
-          } else {
-            const batchLookup = issueLookupBatch(config, repo, env)
-            let batch: ReadonlyMap<string, { id: string }> | undefined
-            let batchError: unknown
-            if (batchLookup !== undefined) {
-              try {
-                batch = await batchLookup(candidateRaws)
-              } catch (error) {
-                // delete-fallback-allow: a failed batch read names every candidate unresolved below, so it only shrinks the branches retired.
-                batchError = error
-              }
-            }
-            if (batchError !== undefined) {
-              for (const raw of candidateRaws) unresolvedIssues.set(raw, String(batchError))
-            } else if (batch !== undefined) {
-              for (const raw of candidateRaws) {
-                const resolved = batch.get(raw)
-                if (resolved === undefined) {
-                  unresolvedIssues.set(
-                    raw,
-                    `target .yrd.yml issueResolver ${JSON.stringify(config.issueResolver)} returned no result for ${JSON.stringify(raw)}`,
-                  )
-                } else {
-                  resolvedIssues.set(raw, normalizeIssueReference(resolved.id))
-                }
-              }
-            } else {
-              for (const raw of candidateRaws) {
-                try {
-                  resolvedIssues.set(raw, normalizeIssueReference(await resolveIssue(raw)))
-                } catch (error) {
-                  // delete-fallback-allow: an unresolved reference is named below, so it only shrinks the branches retired.
-                  unresolvedIssues.set(raw, String(error))
-                }
-              }
-            }
-          }
-        }
-        for (const entry of entries) {
-          const { branch, head } = entry
-          let bound = entry.bound
-          if (entry.classificationError !== undefined) {
-            unclassified.push({
-              branch,
-              head,
-              reason: `issue binding unreadable: ${String(entry.classificationError)}`,
-              cure: `fix the issue trailer, or yrd drop ${branch} --local --tip ${head}`,
-            })
+          if (change?.diagnostic !== undefined) {
+            failed.push({ ...row, reason: "unreadable", detail: change.diagnostic })
             continue
           }
-          if (entry.candidates !== undefined) {
-            try {
-              let binding: { issue: string; commit?: string } | undefined
-              for (const candidate of entry.candidates) {
-                const unresolved = unresolvedIssues.get(candidate.issue)
-                if (unresolved !== undefined) {
-                  throw new Error(
-                    `cannot resolve issue ${JSON.stringify(candidate.issue)} for ${branch}: ${unresolved}`,
-                  )
-                }
-                const canonical = resolvedIssues.get(candidate.issue)
-                if (canonical === undefined) {
-                  throw new Error(
-                    `cannot resolve issue ${JSON.stringify(candidate.issue)} for ${branch}: resolver returned no result`,
-                  )
-                }
-                if (candidate.source === "legacy-branch") {
-                  bound = canonical
-                  continue
-                }
-                if (binding === undefined) binding = { issue: canonical, commit: candidate.commit }
-                else if (binding.issue !== canonical) {
-                  const trailer = candidate.trailer ?? "Refs/Resolves"
-                  throw new Error(
-                    `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${canonical} at ${candidate.commit}; ` +
-                      `the second binding is a ${trailer} trailer, and a Refs or Resolves trailer always binds; ` +
-                      `keep a follow-up link without binding it with a "Follow-up: ${canonical}" line, ` +
-                      `then fix trailer at ${candidate.commit}`,
-                  )
-                }
-              }
-              if (binding !== undefined) bound = binding.issue
-            } catch (error) {
-              // delete-fallback-allow: an unreadable binding is reported as unclassified and immediately continued, so it only shrinks the branches retired.
-              unclassified.push({
-                branch,
-                head,
-                reason: `issue binding unreadable: ${String(error)}`,
-                cure: `fix the issue trailer, or yrd drop ${branch} --local --tip ${head}`,
-              })
-              continue
-            }
-          }
-          if (local && issue !== undefined && bound !== issue) {
-            kept.push({ branch, head, reason: `recorded issue ${bound ?? "absent"} differs from reviewed ${issue}` })
-            continue
-          }
-          if (!local && bound !== issue) {
+          const bound = local ? (change?.issue ?? issue) : branchIssue(branch, change?.issue)
+          if (!local && (bound === undefined || issueIdentity(bound) !== issueIdentity(request.issue))) {
             excluded++
             continue
           }
-          const tip = entry.changeCommit ?? (local ? request.tip : head)
-          if (local && tip !== request.tip) {
+          if (local && issue !== undefined && bound !== undefined && issueIdentity(bound) !== issueIdentity(issue)) {
+            kept.push({ ...row, reason: "mismatch", detail: `recorded issue ${bound} differs from reviewed ${issue}` })
+            continue
+          }
+          if ((local && head !== request.tip) || (change?.commit !== undefined && change.commit !== head)) {
             kept.push({
-              branch,
-              head,
-              reason: `submitted tip ${tip} differs from requested ${request.tip}; advanced work is kept`,
+              ...row,
+              reason: "advanced",
+              detail: `current tip ${head} differs from ${local ? request.tip : change?.commit}`,
             })
             continue
+          }
+          if (!local && change !== undefined && isOpen(change.status)) {
+            kept.push({ ...row, reason: "active", detail: `change is ${change.status}` })
+            continue
+          }
+          let disposition: Parameters<typeof retireLocalBranch>[0]["disposition"]
+          if (local) {
+            disposition = { kind: "closed", store: eventStore, queue: config.target.branch, target }
+          } else {
+            const landing =
+              history === undefined
+                ? undefined
+                : enumerateChangeSegments(history.events, changesRef(config.target.branch, branch), authorRepo).find(
+                    (segment) => segment.head === head && segment.state.status === "merged",
+                  )
+            const archive = [...archives].find(
+              ([archiveRef, tip]) =>
+                tip === head && /^refs\/archive\/[^/]+\/[^/]+\/(.+)$/u.exec(archiveRef)?.[1] === branch,
+            )
+            if (landing !== undefined) {
+              const ending = landing.state.ending
+              if (ending === undefined) {
+                failed.push({
+                  ...row,
+                  reason: "unreadable",
+                  detail: `merged segment ${landing.opened} has no ending event`,
+                })
+                continue
+              }
+              disposition = {
+                kind: "landed",
+                target: head,
+                proof: { kind: "landing", event: ending.id, path: "", tip: head },
+              }
+            } else if (archive !== undefined) {
+              disposition = { kind: "archived", target: head, ref: archive[0] }
+            } else {
+              kept.push({
+                ...row,
+                reason: "unreached",
+                detail: "no exact submitted root tip in merged history or same-branch origin archive",
+              })
+              continue
+            }
           }
           const result = await retireLocalBranch({
             repo: authorRepo,
             git: authorGit,
             branch,
-            tip,
+            tip: head,
             actor: request.by,
-            owner: entry.changeSubmitter ?? (await authorGit(["show", "-s", "--format=%an", tip])).trim(),
+            owner: change?.submitter,
             issue: bound,
-            reason: request.reason ?? (local ? "explicit local branch cleanup" : "issue closed or dropped"),
+            reason: request.reason ?? (local ? "explicit local branch cleanup" : disposition.kind),
             date: new Date().toISOString().slice(0, 10),
+            dryRun,
             log,
             protections: () =>
-              io.localBranchProtections?.({ repo: authorRepo, branch, tip, issue: bound }) ?? Promise.resolve([]),
-            disposition: { kind: "closed", store: eventStore, queue: config.target.branch, target },
+              io.localBranchProtections?.({ repo: authorRepo, branch, tip: head, issue: bound }) ?? Promise.resolve([]),
+            disposition,
           })
-          if (result.outcome === "removed") removed.push({ branch, head: tip, archiveRef: result.archiveRef })
-          else if (result.outcome === "failed") failed.push({ branch, head, reason: result.reason })
-          else kept.push({ branch, head, reason: result.reason })
+          const output = {
+            ...row,
+            reason:
+              !local && (result.outcome === "removed" || result.outcome === "eligible")
+                ? disposition.kind
+                : result.reason,
+            detail: result.detail,
+            archiveRef: result.archiveRef,
+          }
+          if (result.outcome === "eligible") eligible.push(output)
+          else if (result.outcome === "removed") removed.push(output)
+          else if (result.outcome === "failed") failed.push({ ...output, reason: "failed", detail: result.reason })
+          else kept.push({ ...output, reason: local ? "held" : result.reason })
         }
       } finally {
         log.finish()
@@ -1761,21 +1707,23 @@ export async function coreQueueCommand(
       const report = {
         ...(local ? { branch: request.branch } : { issue }),
         repo: authorRepo,
+        apply: !dryRun,
+        mode,
         examined: heads.size,
         excluded,
+        eligible,
         removed,
         kept,
         failed,
-        unclassified,
       }
       emit(
         io,
         options.json,
         report,
-        `${scope}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excluded} target or out-of-scope branches; retired ${removed.length}, kept ${kept.length}, failed ${failed.length}, unclassified ${unclassified.length}` +
-          kept.map((row) => `\nkept ${row.branch}: ${row.reason}`).join("") +
-          failed.map((row) => `\nfailed ${row.branch}: ${row.reason}`).join("") +
-          unclassified.map((row) => `\nunclassified ${row.branch}: ${row.reason}; ${row.cure}`).join(""),
+        `${scope}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excluded} target or out-of-scope branches; eligible ${eligible.length}, retired ${removed.length}, kept ${kept.length}, failed ${failed.length}\n${mode}` +
+          [...eligible, ...removed, ...kept, ...failed]
+            .map((row) => `\n${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`)
+            .join(""),
       )
       return failed.length === 0 ? 0 : 1
     }

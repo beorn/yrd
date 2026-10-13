@@ -24,6 +24,7 @@ export type LocalBranchRetirement = Readonly<{
    */
   protections(): Promise<readonly string[]>
   disposition:
+    | Readonly<{ kind: "archived"; target: string; ref: string }>
     | Readonly<{ kind: "merged"; base: string; target: string }>
     | Readonly<{ kind: "closed"; target: string; store: QueueLocation; queue: string }>
     | Readonly<{
@@ -125,7 +126,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       result = {
         outcome: "kept",
         archiveRef,
-        reason: disposition.kind === "landed" ? kept.code : kept.detail,
+        reason: disposition.kind === "landed" || disposition.kind === "archived" ? kept.code : kept.detail,
         detail: kept.detail,
       }
     } else if (input.dryRun) {
