@@ -13,7 +13,8 @@
  * @consumer the operator reading `yrd list` (@i/10-yrd/24169)
  */
 
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
+import * as silvery from "silvery"
 import { render } from "silvery/test"
 import { journalKey, watchRows, type Journals, type JournalRun, type Row } from "@yrd/queue-core"
 import { ListingPage, printListing } from "../src/watch-print.tsx"
@@ -64,6 +65,37 @@ async function paint(snapshot: WatchSnapshot, columns = 120): Promise<string> {
 }
 
 describe("the printed page's frame", () => {
+  // The list must print every row with global widths/date boundaries while
+  // bounding each renderer's frame. Small-page tests cannot catch an all-row tree.
+  it.each([false, true])("bounds each print frame without changing the complete page (color: %s)", async (color) => {
+    const rows = Array.from({ length: 100 }, (_, index) => ({
+      row: row({
+        branch: `task/change-${String(index).padStart(3, "0")}`,
+        subject: index === 99 ? "the longest subject sets the width for earlier batches" : "work",
+        at: new Date(NOW.getTime() - Math.floor(index / 32) * 86_400_000),
+      }),
+    }))
+    const snap = snapshot({ rows })
+    const options = { columns: 160, color }
+    const complete = await silvery.renderString(<ListingPage snapshot={snap} options={options} />, {
+      width: 160,
+      height: 240,
+      plain: !color,
+    })
+    const renderer = vi.spyOn(silvery, "renderString")
+    try {
+      const printed = await printListing(snap, options)
+      expect(printed).toBe(complete.replace(/\s+$/u, ""))
+      for (const item of rows) expect(table(printed).filter((line) => line.includes(item.row.branch))).toHaveLength(1)
+      expect(renderer.mock.calls.length).toBeGreaterThan(1)
+      expect(Math.max(...renderer.mock.calls.map(([, options]) => options?.height ?? Infinity))).toBeLessThanOrEqual(
+        120,
+      )
+    } finally {
+      renderer.mockRestore()
+    }
+  })
+
   // @failure one invalid event chain crashed the watch state word and hid every other row (25658).
   it("renders an invalid event row beside a healthy row", async () => {
     const invalid = row({
