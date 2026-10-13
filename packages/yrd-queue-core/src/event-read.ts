@@ -18,6 +18,57 @@ export const EVENT_READ_LIMIT = 1024
 
 type Chain = Awaited<ReturnType<typeof openEvents>>
 type ChainStore = Omit<Parameters<typeof chainsUnder>[1], "limit" | "complete">
+export type RecentEventReadOptions = Parameters<typeof readEventCommitMetadata>[2] & { since: number }
+
+/** Eligibility needs scalar metadata only; complete selected chains still belong to Gitomic. */
+async function recentEventRefs(
+  refs: ReadonlyMap<string, Oid>,
+  repo: string,
+  options: RecentEventReadOptions,
+): Promise<Map<string, Oid>> {
+  if (!Number.isFinite(options.since)) {
+    throw new TypeError("recent event reading requires a finite recorded-time cutoff")
+  }
+  type Ending = { kind: string | undefined; time: string | undefined; for: string | undefined }
+  const metadata = new Map<Oid, Ending>()
+  const unique = (commit: CommitMeta, key: string): string | undefined => {
+    const values = commit.trailers.filter(([name]) => name === key)
+    return values.length === 1 ? values[0]?.[1] : undefined
+  }
+  const read = async (ids: readonly Oid[]): Promise<void> => {
+    for (let offset = 0; offset < ids.length; offset += 256) {
+      const commits = await readEventCommitMetadata(repo, ids.slice(offset, offset + 256), options)
+      for (const [id, commit] of commits) {
+        metadata.set(id, { kind: unique(commit, "Event"), time: unique(commit, "Time"), for: unique(commit, "For") })
+      }
+    }
+  }
+  await read([...new Set(refs.values())])
+  const verdicts = new Set<Oid>()
+  for (const ending of metadata.values()) {
+    if (ending.kind === "notified" && ending.for !== undefined && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(ending.for)) {
+      if (!metadata.has(ending.for)) verdicts.add(ending.for)
+    }
+  }
+  await read([...verdicts])
+  const selected = new Map<string, Oid>()
+  for (const [ref, tip] of refs) {
+    const ending = metadata.get(tip)
+    if (ending === undefined) throw new Error(`event metadata in ${repo}: advertised tip ${tip} for ${ref} is absent`)
+    const current = ending.kind === "notified" && ending.for !== undefined ? metadata.get(ending.for) : ending
+    const time = Date.parse(current?.time ?? "")
+    // Unknown, state-neutral and nonterminal tips require their complete history.
+    if (
+      current === undefined ||
+      !Number.isFinite(time) ||
+      !["merged", "failed", "cancelled"].includes(current.kind ?? "") ||
+      time >= options.since
+    ) {
+      selected.set(ref, tip)
+    }
+  }
+  return selected
+}
 
 /** Exact immutable event metadata through the caller's selected Git and captured environment. */
 export async function readEventCommitMetadata(
@@ -85,6 +136,7 @@ export async function readEventChain(chain: Chain, acquiredTip?: Oid): Promise<E
 export async function readEventChains(
   prefix: string | readonly string[],
   store: ChainStore,
+  recent?: RecentEventReadOptions,
 ): Promise<ReadonlyMap<string, Event[]>> {
   if (typeof prefix === "string") return chainsUnder(prefix, { ...store, limit: EVENT_READ_LIMIT, complete: true })
   // One advertisement is the selection boundary. Listing hot and cold separately can miss a chain that
@@ -102,15 +154,37 @@ export async function readEventChains(
     advertised = await fetch(store.repo, prefix, store.remote, { absent: "omit" })
     acquiredExact = true
   } else advertised = await listRefs("refs/", store)
-  const selected = new Map(
+  let selected = new Map(
     [...advertised].filter(([ref]) =>
       prefix.some((part) => ref === part || (part.endsWith("/") && ref.startsWith(part))),
     ),
   )
   if (selected.size === 0) return new Map()
+  if (recent !== undefined && !exact) {
+    if (store.remote !== undefined && !acquiredExact) {
+      if (backend.fetchRefs === undefined) throw new TypeError("remote event reading requires a fetch-capable backend")
+      const acquired = await backend.fetchRefs(store.repo, [...selected.keys()], store.remote, { absent: "omit" })
+      const moved = [...selected].filter(([ref, oid]) => acquired.get(ref) !== oid).map(([ref]) => ref)
+      if (moved.length > 0) {
+        throw new Conflict(`event refs moved after the selected inventory; retry the reading: ${moved.join(", ")}`, {
+          refs: moved,
+        })
+      }
+      acquiredExact = true
+    }
+    selected = await recentEventRefs(selected, store.repo, recent)
+    if (selected.size === 0) return new Map()
+  }
   const captured: GitomicBackend = {
     ...backend,
-    listRefs: () => Promise.resolve(selected),
+    listRefs: (_repo, requested) =>
+      Promise.resolve(
+        new Map(
+          [...selected].filter(([ref]) =>
+            typeof requested === "string" ? ref.startsWith(requested) : requested.includes(ref),
+          ),
+        ),
+      ),
     fetchRefs: async (repo, _refs, remote) => {
       if (acquiredExact) return selected
       if (backend.fetchRefs === undefined) throw new TypeError("remote event reading requires a fetch-capable backend")
@@ -125,6 +199,22 @@ export async function readEventChains(
     },
   }
   // Gitomic still owns the one complete, batched event walk and immutable-tip decoding.
+  if (recent !== undefined && !exact) {
+    const names = [...selected.keys()]
+    const complete = new Map<string, Event[]>()
+    for (let offset = 0; offset < names.length; offset += 64) {
+      const cohort = await chainsUnder("refs/", {
+        ...store,
+        remote: undefined,
+        backend: captured,
+        refs: names.slice(offset, offset + 64),
+        limit: EVENT_READ_LIMIT,
+        complete: true,
+      })
+      for (const [ref, events] of cohort) complete.set(ref, events)
+    }
+    return complete
+  }
   return chainsUnder("refs/", { ...store, backend: captured, limit: EVENT_READ_LIMIT, complete: true })
 }
 

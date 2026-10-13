@@ -25,7 +25,7 @@ import { createScriptedProcess, exitedResult } from "@yrd/process/testing/script
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 import * as gitRunner from "../src/git.ts"
-import { readEventCommitMetadata } from "../src/event-read.ts"
+import { readEventChains, readEventCommitMetadata } from "../src/event-read.ts"
 import { openLog, readRunLog } from "../src/log.ts"
 import { gitSuperExecution, verifyCandidate } from "../src/verifying.ts"
 import { freshWorktree } from "../src/worktree.ts"
@@ -72,6 +72,80 @@ function declareGit(root: string, value: string, file?: string): void {
 }
 
 describe("the git runner", () => {
+  // @failure: a late notification makes an old ending visible, or selection truncates a listed history.
+  // @level l2; @consumer queue list acquisition; @testonly none
+  it("selects current recorded endings and reads every selected history completely", async () => {
+    const root = temporaryRoot("recent-event-chains")
+    const git = gitIn(root)
+    await git(["init", "--quiet"])
+    await git(["config", "user.name", "fixture"])
+    await git(["config", "user.email", "fixture@yrd.test"])
+    const store = { repo: root, backend: git.backend }
+    const prefix = "refs/yrd/main/changes/"
+    const old = "2026-10-01T12:00:00Z"
+    const recent = "2026-10-12T12:00:00Z"
+    for (const [name, kind, time] of [
+      ["old", "cancelled", old],
+      ["recent", "cancelled", recent],
+      ["live", "queued", old],
+      ["unknown", "archived", old],
+      ["notified", "cancelled", old],
+    ]) {
+      const chain = await gitRunner.openEvents({ ...store, ref: prefix + name, writer: "yrd" })
+      const written = await chain.append(
+        [
+          { type: "opened", props: [["Time", old]] },
+          ...(name === "live"
+            ? Array.from({ length: 1024 }, () => ({ type: "marker", props: [["Time", old]] as [string, string][] }))
+            : []),
+          { type: kind!, props: [["Time", time!]] },
+        ],
+        { expect: null },
+      )
+      if (name === "notified") {
+        const ending = written.head
+        if (ending === null) throw new Error("fixture ending absent")
+        await chain.append(
+          [
+            {
+              type: "notified",
+              props: [
+                ["Time", recent],
+                ["For", ending],
+              ],
+            },
+          ],
+          { expect: ending },
+        )
+      }
+    }
+    for (let index = 0; index < 64; index++) {
+      const chain = await gitRunner.openEvents({ ...store, ref: `${prefix}live-${index}`, writer: "yrd" })
+      await chain.append([{ type: "opened", props: [["Time", old]] }], { expect: null })
+    }
+    const historyReads = vi.spyOn(git.backend, "readHistory")
+    const env = gitRunner.gitEnvironment(process.env)
+    const selection = await gitRunner.resolveGitSelection(root, { env })
+    await using owner = createProcess({ cwd: root, env })
+    const listed = await readEventChains([prefix, "refs/yrd-archive/main/"], store, {
+      process: owner,
+      selection,
+      env,
+      maxBytes: 1024 * 1024,
+      timeoutMs: 30_000,
+      since: Date.parse("2026-10-06T12:00:00Z"),
+    })
+    expect(listed.size).toBe(67)
+    expect(listed.has(prefix + "old")).toBe(false)
+    expect(listed.has(prefix + "notified")).toBe(false)
+    expect(listed.get(prefix + "live")).toHaveLength(1026)
+    expect(listed.get(prefix + "live")?.[0]?.type).toBe("opened")
+    expect(listed.get(prefix + "live")?.at(-1)?.type).toBe("queued")
+    expect(historyReads.mock.calls.length).toBeGreaterThanOrEqual(2)
+    for (const [, tips] of historyReads.mock.calls) expect(tips.length).toBeLessThanOrEqual(64)
+    expect((await readEventChains([prefix, "refs/yrd-archive/main/"], store)).size).toBe(69)
+  })
+
   // @failure: event metadata bypasses the configured executable or captured environment.
   // @level l2; @consumer queue list acquisition; @testonly none
   it("reads raw event metadata with the selected executable and captured environment", async () => {

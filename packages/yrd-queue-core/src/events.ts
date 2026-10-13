@@ -3,7 +3,7 @@ import { Conflict, RetriesExhausted } from "./git.ts"
 import { ARCHIVE_REF_PREFIX } from "git-super/archive-ref"
 import { listRefs, openEvents } from "./git.ts"
 import { publishWithTransientRetry } from "./transient-push.ts"
-import { readEventChain, readEventChains } from "./event-read.ts"
+import { readEventChain, readEventChains, type RecentEventReadOptions } from "./event-read.ts"
 import type { AlsoRef, Appended, Decide, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
 import {
@@ -2639,9 +2639,13 @@ function projectChangeHistories(
 export async function readEventQueueWithChanges(
   store: QueueReadStore,
   queue: string,
+  recent?: RecentEventReadOptions,
 ): Promise<Readonly<{ queue: EventQueue } & ChangeHistories>> {
   const prefixes = [`${queueRefPrefix(queue)}/changes/`, archivedChangesPrefix(queue)]
-  const [queueState, chains] = await Promise.all([readEventQueue(store, queue), readEventChains(prefixes, store)])
+  const [queueState, chains] = await Promise.all([
+    readEventQueue(store, queue),
+    readEventChains(prefixes, store, recent),
+  ])
   return { queue: queueState, ...projectChangeHistories(chains, prefixes, store.repo) }
 }
 
