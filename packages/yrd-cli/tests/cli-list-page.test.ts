@@ -12,9 +12,9 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import { stripAnsi } from "@silvery/ansi"
-import { QUEUE_HEALTH_DOCUMENT, QUEUE_HEALTH_SCHEMA, submit } from "@yrd/queue-core"
+import { QUEUE_HEALTH_DOCUMENT, QUEUE_HEALTH_SCHEMA, openLog, readJournals, submit } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { workdirOf } from "../src/workdir.ts"
@@ -141,6 +141,63 @@ async function queueWithMergedCoincidence(): Promise<string> {
 const ESC = "["
 
 describe("`yrd list` prints the watch's page, once", () => {
+  /**
+   * @level l2 @consumer one-shot queue list @testonly none
+   * Core omit tests miss a CLI caller that requests full detail. Raw-journal
+   * command construction must stay zero through both printed and JSON list paths.
+   */
+  it("lists a command-heavy raw journal without constructing command detail", async () => {
+    const work = await queueWithOneChange()
+    const git = gitIn(work)
+    await git(["config", "yrd.workdir", join(work, "..", "queue")])
+    const workdir = await workdirOf(git, { cwd: work })
+    const log = openLog(join(workdir, "logs"))
+    const head = (await git(["rev-parse", "task/one"])).trim()
+    log.write({ kind: "run", target: "main", base: (await git(["rev-parse", "main"])).trim() })
+    for (let index = 0; index < 32; index++) {
+      log.write({
+        kind: "git",
+        args: ["rev-parse", "HEAD"],
+        cwd: work,
+        exit: 0,
+        evidence: join(workdir, "logs", `${String(index)}.stdout.bin.json`),
+      })
+    }
+    log.write({ kind: "change", branch: "task/one", head, decision: "checked" })
+    const parse = JSON.parse
+    let commands = 0
+    const spy = vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+      const value = parse(text, reviver) as Record<string, unknown> | null
+      if (value !== null && typeof value === "object" && value.kind === "git") {
+        const args = value.args
+        Object.defineProperty(value, "args", {
+          get: () => {
+            commands++
+            return args
+          },
+        })
+      }
+      return value
+    })
+    try {
+      for (const args of [
+        ["queue", "list"],
+        ["queue", "list", "--json"],
+      ]) {
+        const result = await yrd(work, { color: false }, ...args)
+        expect(result.exitCode, result.report).toBe(0)
+        expect(result.stdout, result.report).toContain("task/one")
+        expect(commands).toBe(0)
+      }
+      // Run the eager positive control last: priming its file cache first
+      // would hide a CLI that mistakenly acquired eager detail too.
+      readJournals(join(workdir, "logs"))
+      expect(commands).toBeGreaterThan(0)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it("draws the pills, the column header, the row with its state glyph and word, and the count — plain for a pipe", async () => {
     const work = await queueWithOneChange()
     const plain = await yrd(work, { color: false }, "list")

@@ -14,9 +14,18 @@
  * asking "where does this branch stand" rather than "what has the queue done".
  */
 
-import type { EventChange, Row, WatchRow } from "@yrd/queue-core"
+import type {
+  EventChange,
+  JournalSummary,
+  Row,
+  WatchRow as CoreWatchRow,
+  WatchRowOptions as CoreWatchRowOptions,
+} from "@yrd/queue-core"
 import { stateGlyph, stateWord } from "./watch-format.ts"
-export { watchRows, watchRowKey, type WatchRow, type WatchRowOptions } from "@yrd/queue-core"
+export { watchRows, watchRowKey } from "@yrd/queue-core"
+/** List rendering consumes row facts; detail remains on the eager journal reader. */
+export type WatchRow = CoreWatchRow<JournalSummary>
+export type WatchRowOptions = CoreWatchRowOptions<JournalSummary>
 
 /**
  * The fields `matchesTerm` checks a term against, named for a reader who gets
