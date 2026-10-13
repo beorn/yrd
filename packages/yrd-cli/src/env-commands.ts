@@ -41,6 +41,9 @@ import {
   type GitRunner,
 } from "@yrd/queue-core"
 import { createProcess } from "@yrd/process"
+// 29073: `env close --preserve` composes the ONE worktree preserve (root + every dirty component,
+// built from a temporary index) rather than reimplementing it; bearly owns that implementation.
+import { preserveSlotState, slotNameFromResolvedPath } from "bearly/tools/worktree"
 import { createLocalGitProcess } from "git-super/process"
 import {
   assertNoPrivateStore,
@@ -73,7 +76,18 @@ export type EnvOpenOptions = Readonly<{
   hold?: string
   keep?: boolean
 }>
-export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string; noRehome?: boolean }>
+export type EnvCloseOptions = Readonly<{
+  json?: boolean
+  retain?: string
+  noRehome?: boolean
+  /**
+   * 29073: an abandoned environment whose dirt cannot be committed is snapshotted to the worktree
+   * tool's durable custody before the clean gate, and the close then proceeds. A preserve failure
+   * throws, so a removal is blocked rather than partially discarding bytes. Off by default, so the
+   * existing "a dirty tree is work, not garbage" refusal is unchanged for every current caller.
+   */
+  preserve?: boolean
+}>
 
 /**
  * The close was ACCEPTED, not done: this caller's same-UID CWD census could not
@@ -86,6 +100,16 @@ export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string; noReho
  * `HAB_RUN_REPORT_EXIT = 4` (hab-subcommands/run.ts).
  */
 export const ENV_CLOSE_QUEUED_EXIT = 4
+
+/**
+ * 29073 (@cto ruling 2026-10-13, bead 29101): the one worktree preserve writes
+ * the WORKING-TREE version of each path; a staged version that differs from it
+ * is not kept. Stated in the `--preserve` help and in the close report so the
+ * custody claim is exactly what the bytes are, until bead 29101 makes the
+ * preserve keep both versions.
+ */
+export const PRESERVE_WORKTREE_ONLY_LIMIT =
+  "the preserve keeps the working-tree version of each path; a staged version that differs from it is not kept (bead 29101)"
 
 /**
  * This invocation's same-UID CWD census could not certify the close. It carries
@@ -851,7 +875,25 @@ export async function closeEnvironment(
       { submodule: privatePath, checkout, store, command: verify },
     )
   }
-  await requireClean(treeGit, path)
+  // 29073: preserve FIRST (the one worktree implementation), then skip the clean gate it is standing
+  // in for. The worktree stays dirty by design — the bytes are in the durable preserve refs, and the
+  // removal below is what retires them. A preserve that cannot complete throws (loud) and blocks the
+  // removal, so no path discards uncommitted work silently.
+  const preservedRefs: string[] = []
+  if (options.preserve === true) {
+    const preserved = await preserveSlotState(path, slotNameFromResolvedPath(root, path), root)
+    for (const ref of [preserved.ref, ...preserved.submodules.map((entry) => entry.ref)]) {
+      if (ref !== undefined && ref !== "" && !preservedRefs.includes(ref)) preservedRefs.push(ref)
+    }
+    io.stderr(
+      preserved.preserved
+        ? `yrd: env close preserved ${preserved.reason ?? "dirty"} state of ${path} before removal: ${preserved.ref ?? "(no ref)"} (${(preserved.sha ?? "").slice(0, 12)})${preserved.submodules.length === 0 ? "" : `; submodules: ${preserved.submodules.map((entry) => `${entry.path}@${entry.sha.slice(0, 12)}`).join(", ")}`}\n` +
+            `yrd: ${PRESERVE_WORKTREE_ONLY_LIMIT}\n`
+        : `yrd: env close --preserve found nothing to preserve in ${path}; the close proceeds\n`,
+    )
+  } else {
+    await requireClean(treeGit, path)
+  }
   const admission = await admitEnvironmentClose(path, io, censusSource)
   if (admission.kind === "needs-delegation") {
     if (onIncompleteCensus === "refuse") throw uncertified(path, admission)
@@ -882,7 +924,7 @@ export async function closeEnvironment(
         `environment teardown ${result.result} in preserved environment ${path}: exit ${String(result.exit)}${result.why === undefined ? "" : ` (${result.why})`}\ncommand: ${config.teardown}\n${output}\nlog ${result.log}`,
       )
     }
-    await requireClean(treeGit, path)
+    if (options.preserve !== true) await requireClean(treeGit, path)
   }
   // 27510: closing an environment retires its own branch's preview custody, root first, before removal; a removal that
   // fails afterwards leaves the retirement standing. A detached environment never submitted, so has none.
@@ -902,7 +944,12 @@ export async function closeEnvironment(
     // that cannot tell what this one did. Refuse loudly and preserve instead.
     throw uncertified(path, recheck, "after teardown")
   }
-  if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true) {
+  // 29073 (@cto ruling): with --preserve the no-submodule path takes the SAME git-super worktree
+  // remove as the submodule path, so the verified-ref dirt gate has ONE implementation in ONE
+  // process and yrd never re-derives it. The cost is an empty or absent modules retention and one
+  // proof line for a tree that declares no .gitmodules. WITHOUT --preserve the plain path is
+  // unchanged: a clean no-submodule close never reaches git-super.
+  if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true || options.preserve === true) {
     const retain =
       options.retain === undefined
         ? join(workdir, "retained-modules")
@@ -919,6 +966,7 @@ export async function closeEnvironment(
           "--retain",
           retain,
           ...(options.noRehome === true ? ["--no-rehome"] : []),
+          ...preservedRefs.flatMap((ref) => ["--preserved", ref]),
         ]),
       )
     } catch (error) {
@@ -1008,6 +1056,7 @@ function queueDelegatedClose(
   const chosen: EnvCloseRequestOptions = {
     ...(options.retain === undefined ? {} : { retain: options.retain }),
     ...(options.noRehome === true ? { noRehome: true } : {}),
+    ...(options.preserve === true ? { preserve: true } : {}),
   }
   const request: EnvCloseRequest = {
     name: basename(path),

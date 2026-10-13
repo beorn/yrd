@@ -43,7 +43,7 @@ import {
   yrdQueueRunnerDeclarations,
 } from "@yrd/queue-core"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
-import { closeEnvironment, listEnvironments, openEnvironment } from "./env-commands.ts"
+import { closeEnvironment, listEnvironments, openEnvironment, PRESERVE_WORKTREE_ONLY_LIMIT } from "./env-commands.ts"
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { repositoryHere } from "./declaration.ts"
@@ -1502,6 +1502,10 @@ function buildProgram(
     .option(
       "--retain <directory>",
       "durable GitSuper retention directory; defaults to the workdir retained-modules directory",
+    )
+    .option(
+      "--preserve",
+      `preserve a dirty environment's uncommitted root and component bytes to the worktree tool's durable refs before removal (otherwise a dirty environment is refused); the preserve runs before the teardown hook, so bytes a teardown writes afterwards are not preserved; ${PRESERVE_WORKTREE_ONLY_LIMIT}`,
     )
     .option("--json", "emit stable JSON")
     .action(async (path, options) => setExit(await closeEnvironment(path, options, io)))
