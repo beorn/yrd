@@ -27,6 +27,8 @@ import { requireFrozenGitSuper, withGitConfig } from "./git-super-selection.ts"
 export { chainsUnder, listRefs, openEvents } from "gitomic/events"
 export type { AlsoRef, Appended, Decide, Event, EventInput } from "gitomic/events"
 export type { CommitMeta, GitomicBackend, Oid } from "gitomic"
+export { parseCommit, readRawCommits } from "gitomic"
+export type { ReadRawCommitsOptions } from "gitomic"
 export { Conflict, PublicationRejected, RetriesExhausted } from "gitomic"
 import {
   coreSshCommandFromConfig,
