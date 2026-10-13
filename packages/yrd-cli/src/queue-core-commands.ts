@@ -5745,9 +5745,7 @@ export async function readEventListing(
   const recentWindowExpired =
     recent !== undefined &&
     cache !== undefined &&
-    cache.reading.all.some(
-      (row) => row.endedAt !== undefined && row.endedAt.getTime() < nowMs - 7 * 24 * 60 * 60 * 1000,
-    )
+    cache.reading.all.some((row) => row.endedAt !== undefined && row.endedAt.getTime() < nowMs - DEFAULT_WINDOW_MS)
   const selectedRefs =
     options.branch === undefined
       ? undefined
@@ -5939,7 +5937,7 @@ export async function readEventListing(
           process: createProcess({ cwd: repo, env: recent.env }),
           selection: git.selection,
           env: recent.env,
-          since: nowMs - 7 * 24 * 60 * 60 * 1000,
+          since: nowMs - DEFAULT_WINDOW_MS,
           maxBytes: 64 * 1024 * 1024,
           timeoutMs: 30_000,
         }
@@ -6044,7 +6042,7 @@ export async function readEventListing(
   const listNow =
     options.now instanceof Date ? options.now : options.now !== undefined ? new Date(options.now) : new Date()
   const heads = new Map([...branchRefs].map(([ref, oid]) => [ref.slice("refs/heads/".length), oid]))
-  const since = draftWindow === "all" ? undefined : new Date(listNow.getTime() - 7 * 24 * 60 * 60 * 1000)
+  const since = draftWindow === "all" ? undefined : new Date(listNow.getTime() - DEFAULT_WINDOW_MS)
   const drafts =
     recent !== undefined
       ? undefined
@@ -6111,7 +6109,7 @@ export async function readEventListing(
     subject: defect.error,
   }))
   const directRows: Row[] = directMerges
-    .filter((commit) => options.all === true || listNow.getTime() - commit.at.getTime() <= 7 * 24 * 60 * 60 * 1000)
+    .filter((commit) => options.all === true || listNow.getTime() - commit.at.getTime() <= DEFAULT_WINDOW_MS)
     .map(
       (commit): Row => ({
         at: commit.at,
