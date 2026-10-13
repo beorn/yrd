@@ -1230,13 +1230,20 @@ describe("event submit", () => {
   it("does not apply the admission target guard when no admission command is declared", async () => {
     const w = await world()
     await branchWithCommit(w, "task/no-admission-target-moved", "one.txt")
+    // 29087: with no policy to judge, the captured head is trusted without a
+    // remote re-read, so a target that moved since capture still submits
+    // against the captured head. Advance main past the captured tip first.
+    await w.git(["checkout", "--quiet", "main"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "advance main"])
+    await w.git(["push", "--quiet", "origin", "main"])
     const submitted = await submit(w.git, "origin", {
       branch: "task/no-admission-target-moved",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
-      expectedTargetHead: "a".repeat(40),
+      expectedTargetHead: w.target,
     })
     expect(submitted.admission).toEqual({ kind: "skipped", reason: "target declares no admission command" })
+    expect(submitted.targetHead).toBe(w.target)
   })
 
   it("records one cannot-judge warning and deduplicates an unchanged-head retry", async () => {
