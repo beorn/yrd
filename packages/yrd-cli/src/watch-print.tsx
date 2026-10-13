@@ -34,9 +34,7 @@ export type ListingPrintOptions = Readonly<{
   trailer?: readonly string[]
 }>
 
-/** The page as one React tree, so a test can render it into a terminal and a print can render it to a string. */
-export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; options: ListingPrintOptions }) {
-  const { queues } = snapshot
+function listingPlan(snapshot: WatchSnapshot, options: ListingPrintOptions) {
   const columns = Math.max(40, options.columns)
   // The bands, their order and their rules all come from watch-frame.tsx: a
   // page that spelled them here is how the pane drifted last time.
@@ -49,29 +47,55 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
     fullQueueRefs: true,
   })
   const plan = bandPlan(rows, columns - 2, "bare")
+  return { rows, columns, queue, layout, plan }
+}
+
+/** The same page components, with only this batch's rows mounted. */
+export function ListingPage({
+  snapshot,
+  options,
+  prepared,
+  start = 0,
+  end,
+}: {
+  snapshot: WatchSnapshot
+  options: ListingPrintOptions
+  prepared?: ReturnType<typeof listingPlan>
+  start?: number
+  end?: number
+}) {
+  const { rows, columns, queue, layout, plan } = prepared ?? listingPlan(snapshot, options)
+  const stop = end ?? rows.length
+  const first = start === 0
+  const last = stop === rows.length
   return (
     <NowProvider readAt={snapshot.at} live={false}>
       <Box flexDirection="column" width={columns} minWidth={0}>
-        {/* The pause rides RUNNER's rail; only a page with no run journal says it up here. */}
-        <LoudPause snapshot={snapshot} />
-        {/* The queue's own name, as a stranger spells it — the line a logged round's `updated` stamp sits under. */}
-        <Text wrap="truncate">{queue.label}</Text>
-        <TopLine queues={queues} status={printedStatus(snapshot)} />
-        <QueueLine snapshot={snapshot} columns={columns} />
-        {snapshot.journalAbsent === undefined ? null : (
-          <Text color="$fg-muted" wrap="truncate">
-            {snapshot.journalAbsent}
-          </Text>
-        )}
-        {options.scope === undefined ? null : (
-          <Text color="$fg-muted" wrap="truncate">
-            {options.scope}
-          </Text>
-        )}
+        {first ? (
+          <>
+            {/* The pause rides RUNNER's rail; only a page with no run journal says it up here. */}
+            <LoudPause snapshot={snapshot} />
+            {/* The queue's own name, as a stranger spells it — the line a logged round's `updated` stamp sits under. */}
+            <Text wrap="truncate">{queue.label}</Text>
+            <TopLine queues={snapshot.queues} status={printedStatus(snapshot)} />
+            <QueueLine snapshot={snapshot} columns={columns} />
+            {snapshot.journalAbsent === undefined ? null : (
+              <Text color="$fg-muted" wrap="truncate">
+                {snapshot.journalAbsent}
+              </Text>
+            )}
+            {options.scope === undefined ? null : (
+              <Text color="$fg-muted" wrap="truncate">
+                {options.scope}
+              </Text>
+            )}
+          </>
+        ) : null}
         {/* Drafts, waiting, the runner, done — the one band order (watch-frame.tsx). */}
-        <ListStack snapshot={snapshot}>
-          <ListHeader layout={layout} />
-          {rows.map((item, index) => {
+        <ListStack snapshot={first ? snapshot : { ...snapshot, observation: undefined }}>
+          {first ? <ListHeader layout={layout} /> : null}
+          {rows.slice(start, stop).map((item, offset) => {
+            const index = start + offset
             const separator = separatorBefore(rows, index)
             const key = `${item.row.branch}@${item.row.head}#${item.run?.id ?? item.row.run ?? String(index)}`
             return (
@@ -93,16 +117,20 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
               </Box>
             )
           })}
-          <BandBreakRows brk={plan.after} snapshot={snapshot} layout={layout} />
-          {rows.length === 0 ? <Text color="$fg-muted">nothing in line</Text> : null}
-          {(options.trailer ?? []).map((line) => (
-            <Text key={line} wrap="truncate">
-              {line}
-            </Text>
-          ))}
-          {options.scope === undefined ? (
-            // A draft is a row and no change: the queue line counts the drafts.
-            <Text color="$fg-muted">{`${String(rows.filter((item) => item.row.state !== "draft").length)} change(s) · ${String(rows.filter((item) => item.row.state === "draft").length)} draft(s) · one row each`}</Text>
+          {last ? (
+            <>
+              <BandBreakRows brk={plan.after} snapshot={snapshot} layout={layout} />
+              {rows.length === 0 ? <Text color="$fg-muted">nothing in line</Text> : null}
+              {(options.trailer ?? []).map((line) => (
+                <Text key={line} wrap="truncate">
+                  {line}
+                </Text>
+              ))}
+              {options.scope === undefined ? (
+                // A draft is a row and no change: the queue line counts the drafts.
+                <Text color="$fg-muted">{`${String(rows.filter((item) => item.row.state !== "draft").length)} change(s) · ${String(rows.filter((item) => item.row.state === "draft").length)} draft(s) · one row each`}</Text>
+              ) : null}
+            </>
           ) : null}
         </ListStack>
       </Box>
@@ -112,23 +140,31 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
 
 /** The page as text: ANSI when `color`, plain otherwise; every row present, none scrolled away. */
 export async function printListing(snapshot: WatchSnapshot, options: ListingPrintOptions): Promise<string> {
-  // Tall enough for every row, its separators, the boxes and their borders: nothing is virtualized here.
+  const prepared = listingPlan(snapshot, options)
   const observationLines =
     snapshot.observation === undefined
       ? []
       : [snapshot.observation.message, ...snapshot.observation.notices.map((notice) => notice.text)]
-  const height =
-    snapshot.rows.length * 2 +
-    40 +
-    observationLines
-      .flatMap((text) => text.split("\n"))
-      .reduce((lines, text) => lines + Math.ceil(text.length / Math.max(38, options.columns - 2)) + 1, 0)
-  const text = await renderString(<ListingPage snapshot={snapshot} options={options} />, {
-    height,
-    plain: !options.color,
-    width: Math.max(40, options.columns),
-  })
-  return text.replace(/\s+$/u, "")
+  const extraLines = observationLines
+    .flatMap((text) => text.split("\n"))
+    .reduce((lines, text) => lines + Math.ceil(text.length / Math.max(38, options.columns - 2)) + 1, 0)
+  const parts: string[] = []
+  // The completed bands can span thousands of rows. Keep each tree and frame
+  // bounded, while using the whole page's widths, band plan and date neighbors.
+  const batchRows = 32
+  for (let start = 0; start < Math.max(1, prepared.rows.length); start += batchRows) {
+    const end = Math.min(start + batchRows, prepared.rows.length)
+    const text = await renderString(
+      <ListingPage snapshot={snapshot} options={options} prepared={prepared} start={start} end={end} />,
+      {
+        height: (end - start) * 2 + 40 + (start === 0 ? extraLines : 0),
+        plain: !options.color,
+        width: prepared.columns,
+      },
+    )
+    parts.push(text)
+  }
+  return parts.join("\n").replace(/\s+$/u, "")
 }
 
 /** The top line's status on a print: no reason beside the word, because the LoudPause line above says it in full. */
