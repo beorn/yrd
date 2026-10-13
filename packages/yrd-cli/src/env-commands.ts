@@ -104,16 +104,6 @@ export type EnvCloseOptions = Readonly<{
 export const ENV_CLOSE_QUEUED_EXIT = 4
 
 /**
- * 29073 (@cto ruling 2026-10-13, bead 29101): the one worktree preserve writes
- * the WORKING-TREE version of each path; a staged version that differs from it
- * is not kept. Stated in the `--preserve` help and in the close report so the
- * custody claim is exactly what the bytes are, until bead 29101 makes the
- * preserve keep both versions.
- */
-export const PRESERVE_WORKTREE_ONLY_LIMIT =
-  "the preserve keeps the working-tree version of each path; a staged version that differs from it is not kept (bead 29101)"
-
-/**
  * This invocation's same-UID CWD census could not certify the close. It carries
  * the census receipt, so a queue-round caller can bound its own retry without
  * parsing prose, and its message is the loud refusal this path threw before
@@ -1055,8 +1045,7 @@ export async function closeEnvironment(
     }
     io.stderr(
       receipt.preserved
-        ? `yrd: env close preserved ${receipt.reason ?? "dirty"} state of ${path} before removal: ${receipt.ref ?? "(no ref)"} (${(receipt.sha ?? "").slice(0, 12)})${receipt.submodules.length === 0 ? "" : `; submodules: ${receipt.submodules.map((entry) => `${entry.path}@${entry.sha.slice(0, 12)}`).join(", ")}`}\n` +
-            `yrd: ${PRESERVE_WORKTREE_ONLY_LIMIT}\n`
+        ? `yrd: env close preserved ${receipt.reason ?? "dirty"} state of ${path} before removal: ${receipt.ref ?? "(no ref)"} (${(receipt.sha ?? "").slice(0, 12)})${receipt.submodules.length === 0 ? "" : `; submodules: ${receipt.submodules.map((entry) => `${entry.path}@${entry.sha.slice(0, 12)}`).join(", ")}`}\n`
         : `yrd: env close --preserve found nothing to preserve in ${path}; the close proceeds\n`,
     )
   } else {

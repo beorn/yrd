@@ -666,18 +666,20 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       run.stderr(),
     ).toBe(0)
     expect(run.stderr()).toContain("preserved dirty state")
-    // @cto condition 2 (2026-10-13): the custody claim must be exactly what the bytes are — the
-    // close report names the working-tree-only limit until bead 29101 keeps both versions.
-    expect(run.stderr()).toContain("a staged version that differs from it is not kept")
+    // 29101 landed (bearly bda68df): the preserve now also keeps a divergent staged index,
+    // recoverable at <ref>^2, so the retired working-tree-only claim must NOT reappear here.
+    expect(run.stderr()).not.toContain("a staged version that differs from it is not kept")
     // yrd forwarded the COMPONENT ref too: the close SUCCEEDED with a dirty component, which
     // git super admits only against a preserved ref that resolves in that component's own store.
     expect(run.stderr()).toContain("submodules: vendor/dependency@")
     expect(existsSync(path)).toBe(false)
 
-    // The same limit is stated where a reader lands: the `--preserve` help.
+    // The retired limit must not resurface in the help a reader lands on; the truthful
+    // teardown-after-preserve boundary stays stated there.
     const help = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "close", "--help"], help.io)).toBe(0)
-    expect(help.stdout()).toContain("a staged version that differs from it is not kept")
+    expect(help.stdout()).not.toContain("a staged version that differs from it is not kept")
+    expect(help.stdout()).toContain("bytes a teardown writes afterwards are not preserved")
 
     // The root recovery ref resolves in the root store yrd handed `git super --preserved`, and
     // carries the ROOT dirt's bytes (the component's own custody lives in vendor/bearly's suite).
