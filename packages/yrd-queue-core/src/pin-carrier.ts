@@ -108,7 +108,17 @@ export async function preparePinCarrier(
     }
     const current = (await git(["rev-parse", `${targetHead}:${pin.path}`])).trim()
     if (await isAncestor(child, pin.sha, current)) {
-      throw new Error(`${target.remote}/${target.branch} already holds ${pin.path}@${pin.sha} at or beyond that pin`)
+      // A carrier never moves a component pointer backward, so a pin the root already holds is
+      // refused here by name; an exact repeat and a stale pin need different cures.
+      throw new Error(
+        pin.sha === current
+          ? `${target.remote}/${target.branch} already holds ${pin.path}@${pin.sha} at or beyond that pin: ` +
+              `root main records that exact commit, so the carrier would move the component nowhere; ` +
+              `pin a commit ahead of ${current}, or drop the change`
+          : `${target.remote}/${target.branch} already holds ${pin.path}@${pin.sha} at or beyond that pin: ` +
+              `root main records ${current}, which already contains that pin, so the carrier would move the component backward; ` +
+              `the component change is already carried: drop the change, or pin a commit ahead of ${current}`,
+      )
     }
     subjects.push((await child(["show", "-s", "--format=%s", pin.sha])).trim())
   }
