@@ -597,6 +597,42 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
   })
 
   /**
+   * @failure 29073: `--preserve` on a commit that declares NO submodules (no `.gitmodules`) had no
+   *          verified removal path — the plain `git worktree remove` refuses dirt, and the verified
+   *          ref gate lived only on the git-super path. @cto ruled the no-submodule close takes the
+   *          SAME git-super primitive when `--preserve` is set, so the gate has one home; without
+   *          `--preserve` the plain path is unchanged.
+   * @level   l2 (real CLI, real bare remote, no submodules)
+   * @consumer every seat closing a dirty abandoned environment that records no submodules
+   */
+  it("env close --preserve routes a no-submodule dirty environment through the same verified gate (29073)", async () => {
+    const w = await world(":")
+    expect((await w.git(["ls-tree", "HEAD", "--", ".gitmodules"])).trim()).toBe("")
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+
+    writeFileSync(join(path, "root-dirt.txt"), "root preserved\n")
+    const refused = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io), refused.stderr()).toBe(2)
+    expect(refused.stderr()).toContain("is dirty")
+    expect(existsSync(path)).toBe(true)
+
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+    expect(run.stderr()).toContain("preserved dirty state")
+    expect(run.stderr()).toContain("retained environment removal proof")
+    expect(existsSync(path)).toBe(false)
+    const refs = (await w.git(["for-each-ref", "--format=%(refname)", "refs/heads/wip/"]))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+    expect(refs).toHaveLength(1)
+    expect((await w.git(["show", `${refs[0]}:root-dirt.txt`])).trim()).toBe("root preserved")
+  })
+
+  /**
    * @failure 28120: direct close removed an unrelated process's cwd and ran teardown first.
    * @level l2 (real CLI and native cwd holder in a temporary retained worktree)
    * @consumer callers closing an environment still used by another process
