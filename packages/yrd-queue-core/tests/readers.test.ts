@@ -226,14 +226,12 @@ describe("a run's journal, read back", () => {
         unknownKinds: ["future-kind"],
       })
       expect(summary?.malformed).toEqual([expect.stringContaining("result without a check for task/summary@abc123")])
-      // Positive control for the counter itself: the first read DID construct
-      // command detail, once, in the projection writer — a counter that never
-      // counts would pass the zero below vacuously.
-      expect(constructedCommands).toBeGreaterThan(0)
+      // Neither the first raw summary fold nor its compact writer constructs
+      // command detail. The eager read below proves this counter is live.
+      expect(constructedCommands).toBe(0)
       // That first read rebuilt from raw and persisted the projection
       // (28908): a summary read never constructs command detail again —
-      // the one-time construction belongs to the projection writer, and
-      // every later read is served from the artifact it left behind.
+      // every later summary read is served from the compact artifact.
       constructedCommands = 0
       const reread = readJournals(dir, { now: at, detail: "omit" })
       expect(constructedCommands).toBe(0)
@@ -245,6 +243,7 @@ describe("a run's journal, read back", () => {
       })
       // Positive control: the same public reader's eager path still builds real detail.
       const details = readJournals(dir, { now: at })
+      expect(constructedCommands).toBeGreaterThan(0)
       const detail = details.runs.get(journalKey(change.branch, change.head))?.[0]
       expect(detail?.commands).toHaveLength(32)
       expect(detail?.commands[0]).toMatchObject({ args: ["rev-parse", "HEAD"], cwd: "/w", exit: 0 })
@@ -506,7 +505,7 @@ describe("a run's journal, read back", () => {
     log.finish()
     const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
     const before = fs.readFileSync(artifact, "utf8")
-    expect(JSON.parse(before).schema).toBe(2)
+    expect(JSON.parse(before)).toMatchObject({ schema: 2 })
     expect(before).not.toContain(detail)
     const read = vi.spyOn(fs, "readFileSync")
     try {

@@ -119,8 +119,8 @@ function workdirWith(
 
 describe("readRunnerFacts", () => {
   // AC3 requires a growth witness, not one fixed payload. Both production
-  // consumers must skip discarded bytes while retaining every command fact.
-  it("scales projections with rounds and retained commands, independent of discarded Git bytes", async () => {
+  // summary consumers skip detail bytes; full consumers retain every command fact.
+  it("scales compact projections with rounds and keeps command facts in raw detail", async () => {
     const artifactSizes: number[] = []
     for (const sample of [
       { rounds: 1, commands: 1, discarded: 0 },
@@ -159,23 +159,26 @@ describe("readRunnerFacts", () => {
       artifactSizes.push(artifactBytes)
       const read = vi.spyOn(fs, "readFileSync")
       try {
-        const detail = readJournals(dir, { now: NOW })
+        const summary = readJournals(dir, { now: NOW, detail: "omit" })
         const runner = await readRunnerFacts(workdir, NOW)
-        expect(detail.fallbacks).toBeUndefined()
+        expect(summary.fallbacks).toBeUndefined()
         expect(runner.projectionFallback).toBeUndefined()
+        expect(read.mock.calls.filter(([path]) => paths.has(String(path)))).toHaveLength(0)
+        const detail = readJournals(dir, { now: NOW })
+        expect(detail.fallbacks).toBeUndefined()
         const runs = [...detail.runs.values()].flat()
         expect(runs).toHaveLength(sample.rounds)
         expect(runs.flatMap((run) => run.steps.flatMap((step) => step.commands))).toHaveLength(
           sample.rounds * sample.commands,
         )
-        expect(read.mock.calls.filter(([path]) => paths.has(String(path)))).toHaveLength(0)
+        expect(read.mock.calls.filter(([path]) => paths.has(String(path)))).toHaveLength(sample.rounds)
       } finally {
         read.mockRestore()
       }
     }
     // Source size is metadata, so a larger decimal size can add a few bytes.
     expect(Math.abs(artifactSizes[1]! - artifactSizes[0]!)).toBeLessThan(100)
-    expect(artifactSizes[2]!).toBeGreaterThan(artifactSizes[0]! * 3)
+    expect(artifactSizes[2]!).toBeGreaterThan(artifactSizes[0]! * 2)
   })
 
   // The approved cache contract keeps invalid start dates as input strings:
