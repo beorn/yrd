@@ -244,6 +244,86 @@ describe("event submit", () => {
     expect(history?.state).toMatchObject({ status: "queued", commit: second })
   })
 
+  /** @failure 29087: a history absent at previewRetirement but created and archived during composition must
+   * still be seen cold at publication; a stale absence must never authorize a fresh hot chain beside it.
+   * @level l2 @consumer yrd queue submit
+   */
+  it("re-reads an absent history that went cold during composition instead of forking custody", async () => {
+    const w = await world()
+    const branch = "task/absent-to-cold"
+    const first = await branchWithCommit(w, branch, "one.txt")
+    const location = store(w)
+    const hot = changesRef("main", branch)
+    const cold = `refs/yrd-archive/main/${branch}`
+    const request = { branch, submitter: "@dev/6", target: { branch: "main", remote: "origin" } }
+    const backend = runnerFor(w.git).backend
+    const fetch = backend.fetchRefs
+    const list = backend.listRefs
+    const publishFixture = location.backend.publish
+    if (fetch === undefined || list === undefined || publishFixture === undefined) {
+      throw new Error("absent-to-cold fixture lacks custody reads")
+    }
+    let absentSeen = false
+    let moved = false
+    let priorTip: string | undefined
+    {
+      using watching = vi.spyOn(backend, "fetchRefs").mockImplementation(async (...args) => {
+        const fetched = await fetch(...args)
+        if (Array.isArray(args[1]) && args[1].includes(hot) && args[1].includes(cold) && !fetched.has(hot)) {
+          absentSeen = true
+        }
+        return fetched
+      })
+      using listing = vi.spyOn(backend, "listRefs").mockImplementation(async (...args) => {
+        if (absentSeen && !moved && typeof args[1] === "string" && args[1].startsWith("refs/yrd/")) {
+          moved = true
+          const queueTip = (await events.readEventQueue(location, "main")).tip
+          const chain = await openEvents({ ...location, ref: hot })
+          const at = new Date("2026-09-22T14:00:00.000Z")
+          const prior = await chain.append(
+            [
+              events.changeInput("opened", { queueTip, at, commit: first, by: "@dev/6" }),
+              events.changeInput("merged", { queueTip, at, commit: first }),
+            ],
+            { expect: null },
+          )
+          if (prior.head === null) throw new Error("absent-to-cold fixture chain did not publish")
+          priorTip = prior.head
+          await publishFixture(
+            w.work,
+            [
+              { ref: cold, expect: "0".repeat(40), oid: priorTip },
+              { ref: hot, expect: priorTip, oid: null },
+            ],
+            "origin",
+          )
+        }
+        return list(...args)
+      })
+      await expect(submit(w.git, "origin", request)).rejects.toThrow("already merged")
+      expect(watching).toHaveBeenCalled()
+      expect(listing).toHaveBeenCalled()
+    }
+    expect(absentSeen).toBe(true)
+    expect(moved).toBe(true)
+    expect(await remoteRefs(w)).toContain(cold)
+    expect(await remoteRefs(w)).not.toContain(hot)
+
+    await w.git(["checkout", "--quiet", branch])
+    writeFileSync(join(w.work, "two.txt"), "two\n")
+    await w.git(["add", "two.txt"])
+    await w.git(["commit", "--quiet", "-m", "two"])
+    const second = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    expect(await submit(w.git, "origin", request)).toMatchObject({ head: second, retry: false })
+    const refs = await remoteRefs(w)
+    expect(refs).toContain(hot)
+    expect(refs).not.toContain(cold)
+    const history = (await listChangeHistories(location, "main")).histories.get(branch)
+    expect(history?.events.map((event) => event.type)).toEqual(["opened", "merged", "opened"])
+    expect(history?.state).toMatchObject({ status: "queued", commit: second })
+  })
+
   it("creates the event queue on first submit to an empty remote (26398)", async () => {
     resetQueueFormatCache()
     const w = await world(false)

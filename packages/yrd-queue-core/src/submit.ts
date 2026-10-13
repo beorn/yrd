@@ -1015,9 +1015,14 @@ async function submitEvent(
     const { ops } = operational
     refuseMaintenance(ops.stop, remote, request.target.branch, published)
     // 29087: attempt 0 reuses previewRetirement's chain read of this same
-    // submit; after a rejected CAS the chain is re-read, as the ops are.
+    // submit — but only a PRESENT history, whose movement the transact CAS
+    // fences (decideSubmit refuses an emptied hot chain, and a rejected CAS
+    // re-reads on attempt 1, as the ops are). An absent history fences
+    // nothing: a chain created and archived during composition would be
+    // invisible to the stale absence and a fresh hot chain could land
+    // beside the cold one, so absence is re-read here.
     const selected =
-      attempt === 0 && preRead !== undefined
+      attempt === 0 && preRead !== undefined && preRead.history !== undefined
         ? preRead
         : await readBranchHistory(store, request.target.branch, request.branch)
     const archived = selected.ref === coldRef ? selected.history?.events : undefined
