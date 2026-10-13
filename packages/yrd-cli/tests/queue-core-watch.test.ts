@@ -685,6 +685,100 @@ process.exit(result.exitCode)
     },
   )
 
+  /**
+   * @failure A second change's event refs moving between the watcher's own
+   *          advertisement and its fetch killed the watch with exit 2 (28941).
+   *          The multi-prefix reader refuses to mix an advertisement with a
+   *          later fetch and says "retry the reading", but the listing never
+   *          retried that refusal, so an ordinary queue advance — another
+   *          change landing on the same queue — ended a reviewer's watcher.
+   * @level    l2 (a real remote and a clone under a temporary root;
+   *           `coreQueueCommand` driven directly, no process boundary)
+   * @consumer a seat waiting on `yrd list <branch> --watch` while other changes
+   *           land on the same queue; it re-inventories instead of exiting.
+   */
+  it("re-inventories when another change's ref moves between the advertisement and the fetch", async () => {
+    const w = await world()
+    const branch = "task/watched"
+    await change(w, branch, true)
+    await change(w, "task/unrelated", true)
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const queue = await readEventQueue(store, "main")
+    // The WATCHED change reaches its ending at its advertised tip, so a watch
+    // that survives the unrelated move ends on this round with the ending's code.
+    const ref = changesRef("main", branch)
+    const chain = await openEvents({ ...store, ref, writer: "yrd" })
+    const before = await chain.head()
+    if (before === null) throw new Error("submitted fixture change has no event tip")
+    const commit = (await w.git(["rev-parse", branch])).trim()
+    await chain.append([changeInput("merged", { queueTip: queue.tip, at: new Date(), commit })], { expect: before })
+    const after = await chain.head()
+    if (after === null) throw new Error("merged fixture change has no event tip")
+    const remote = join(dirname(w.work), "remote.git")
+    // The watched change is already at its merged tip on the remote: nothing
+    // about it moves, so a surviving watch ends on its first round.
+
+    // A SECOND change whose ref moves exactly between the reader's advertisement
+    // and its fetch: advertised at the old tip, fetched at the new one.
+    const otherRef = changesRef("main", "task/unrelated")
+    const other = await openEvents({ ...store, ref: otherRef, writer: "yrd" })
+    const otherBefore = await other.head()
+    if (otherBefore === null) throw new Error("second fixture change has no event tip")
+    const otherCommit = (await w.git(["rev-parse", "task/unrelated"])).trim()
+    await other.append([changeInput("merged", { queueTip: queue.tip, at: new Date(), commit: otherCommit })], {
+      expect: otherBefore,
+    })
+    const otherAfter = await other.head()
+    if (otherAfter === null) throw new Error("second merged fixture change has no event tip")
+    // Advertised at the submitted tip; the executable moves it to the merged
+    // tip exactly when the reader fetches.
+    await w.git(["--git-dir", remote, "update-ref", otherRef, otherBefore, otherAfter])
+
+    // The selected Git executable only schedules the real ref update at the
+    // fetch boundary; it fabricates no Git result or event.
+    const marker = join(w.workdir, "moved-on-fetch")
+    const executable = join(w.workdir, "moving-git.ts")
+    writeFileSync(
+      executable,
+      `#!${process.execPath}
+import { existsSync, writeFileSync } from "node:fs"
+const args = process.argv.slice(2)
+if (args.includes("fetch") && args.some((arg) => arg.includes("task/unrelated")) && !existsSync(${JSON.stringify(marker)})) {
+  writeFileSync(${JSON.stringify(marker)}, "moved")
+  const applied = Bun.spawnSync(["git", "--git-dir", ${JSON.stringify(remote)}, "update-ref", ${JSON.stringify(otherRef)}, ${JSON.stringify(otherAfter)}, ${JSON.stringify(otherBefore)}], { stdout: "pipe", stderr: "pipe" })
+  if (applied.exitCode !== 0) throw new Error(new TextDecoder().decode(applied.stderr))
+}
+const result = Bun.spawnSync(["git", ...args], { stdin: "inherit", stdout: "pipe", stderr: "pipe" })
+process.stdout.write(result.stdout)
+process.stderr.write(result.stderr)
+process.exit(result.exitCode)
+`,
+    )
+    chmodSync(executable, 0o755)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const deadline = setTimeout(() => stop.abort(), 5_000)
+    const watched = coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "list", terms: [branch], watch: true, stop: stop.signal, intervalSeconds: 1 },
+      {
+        json: true,
+        workdir: w.workdir,
+        selection: { executable, contract: "native", scope: "default", origin: "fetch-race fixture" },
+      },
+    ).finally(() => clearTimeout(deadline))
+    // The watch survives the unrelated move and reaches ITS change's ending.
+    await expect(watched).resolves.toBe(0)
+    expect(readFileSync(marker, "utf8")).toBe("moved")
+    const rounds = run
+      .stdout()
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { changes: readonly { branch: string; state: string }[] })
+    expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
+  })
+
   // The producer owns its protocol; ordinary Git calls still use the real
   // selected executable. These defects cross run creation and the watch lifecycle.
   it("a malformed observation cannot poison the next watch with a headerless run journal", async () => {

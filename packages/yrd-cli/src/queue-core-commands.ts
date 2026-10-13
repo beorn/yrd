@@ -57,6 +57,7 @@ import {
   eventListRows,
   eventRows,
   enumerateChangeSegments,
+  Conflict,
   isOpen,
   createEventStore,
   createLocalEventStore,
@@ -5880,17 +5881,35 @@ export async function readEventListing(
   }
 
   // 4. Full read
-  const acquired =
-    options.branch === undefined
-      ? await readEventQueueWithChanges(store, config.target.branch)
-      : await Promise.all([
-          readEventQueue(store, config.target.branch),
-          readBranchHistory(store, config.target.branch, options.branch, { invalid: "return" }),
-        ]).then(([queue, selected]) => ({
-          queue,
-          histories: new Map(selected.history === undefined ? [] : [[options.branch as string, selected.history]]),
-          invalid: new Map(selected.invalid === undefined ? [] : [[options.branch as string, selected.invalid]]),
-        }))
+  // Between this listing's own advertisement and its fetch, an ordinary queue
+  // move can land: the multi-prefix reader refuses to mix the two — `Conflict`,
+  // "retry the reading" — rather than return a selection that never existed. A
+  // second change landing on the same queue must not kill a watcher, so the
+  // acquisition is retried until its advertisement and its fetch agree (28941):
+  // a retry takes a fresh inventory and never reuses the refused one.
+  const readingBranch = options.branch
+  const acquire =
+    readingBranch === undefined
+      ? () => readEventQueueWithChanges(store, config.target.branch)
+      : () =>
+          Promise.all([
+            readEventQueue(store, config.target.branch),
+            readBranchHistory(store, config.target.branch, readingBranch, { invalid: "return" }),
+          ]).then(([queue, selected]) => ({
+            queue,
+            histories: new Map(selected.history === undefined ? [] : [[readingBranch, selected.history]]),
+            invalid: new Map(selected.invalid === undefined ? [] : [[readingBranch, selected.invalid]]),
+          }))
+  let acquired: Awaited<ReturnType<typeof acquire>>
+  for (;;) {
+    try {
+      acquired = await acquire()
+      break
+    } catch (error) {
+      if (!movedEventRefs(error)) throw error
+      options.onRetry?.(`${error.message}\n`)
+    }
+  }
   let queue = acquired.queue
   const histories = new Map(acquired.histories)
   const invalid = new Map(acquired.invalid)
@@ -6101,6 +6120,16 @@ class EventListingMoved extends Error {
         : `${ref} moved during event list: read ${read}, observed ${observed ?? "absent"}`,
     )
   }
+}
+
+/**
+ * The multi-prefix reader's own refusal to mix one advertisement with a later
+ * fetch (`event-read.ts`), whose stated cure is a fresh inventory. It is the
+ * one `Conflict` a listing retries instead of reporting: another change moving
+ * on the same queue is ordinary movement, not an ending (28941).
+ */
+function movedEventRefs(error: unknown): error is Conflict {
+  return error instanceof Conflict && error.message.startsWith("event refs moved after the selected inventory")
 }
 
 export function assertEventListingFence(

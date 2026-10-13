@@ -121,6 +121,7 @@ export { DIRECT_MERGE, mergedBy, mergedByRun, trailer, trailers } from "./git.ts
 export { incidentLine, incidentLines, incidentTrailers } from "./incident.ts"
 export type { Incident } from "./incident.ts"
 export {
+  Conflict,
   configValue,
   createEventStore,
   executableFor,
