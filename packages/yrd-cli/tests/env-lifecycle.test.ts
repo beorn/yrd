@@ -572,7 +572,15 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
       run.stderr(),
     ).toBe(0)
     expect(run.stderr()).toContain("preserved dirty state")
+    // @cto condition 2 (2026-10-13): the custody claim must be exactly what the bytes are — the
+    // close report names the working-tree-only limit until bead 29101 keeps both versions.
+    expect(run.stderr()).toContain("a staged version that differs from it is not kept")
     expect(existsSync(path)).toBe(false)
+
+    // The same limit is stated where a reader lands: the `--preserve` help.
+    const help = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", "--help"], help.io)).toBe(0)
+    expect(help.stdout()).toContain("a staged version that differs from it is not kept")
 
     // One preserve ref in the root repository carries the ROOT dirt; the same ref in the component's
     // own store carries the COMPONENT dirt; the root snapshot's gitlink is repointed at that commit.
