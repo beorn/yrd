@@ -14,7 +14,6 @@
     "@yrd/bay": "workspace:*",
     "@yrd/process": "workspace:*",
     "@yrd/queue-core": "workspace:*",
-    "bearly": "workspace:*",
     "git-super": "0.4.0",
     "gitomic": "^0.4.0",
     "loggily": "^0.11.0",
