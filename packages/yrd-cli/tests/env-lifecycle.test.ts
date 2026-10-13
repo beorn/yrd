@@ -542,6 +542,61 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
   })
 
   /**
+   * @failure 29073: a dirty abandoned environment had NO sanctioned preserve-then-remove path -
+   *          `yrd env close` refuses dirt and the destructive git verbs are banned, so an
+   *          environment whose uncommitted bytes forensics judged worthless could not be retired
+   *          at all. `--preserve` composes the ONE existing worktree preserve (bearly's
+   *          preserveSlotState) before the clean gate. That implementation's own test
+   *          (vendor/bearly tests/worktree-preserve.slow.test.ts) proves the live index and
+   *          worktree are untouched; this test proves the flag composes it and that ROOT and
+   *          COMPONENT dirt both land under the existing custody convention.
+   * @level   l2 (real CLI, real bare remote, real materialized submodule)
+   * @consumer every seat closing an abandoned environment whose dirt cannot be committed
+   */
+  it("env close --preserve composes the one worktree preserve for ROOT and COMPONENT dirt (29073)", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+
+    // Dirty root AND dirty component: the class the plain close refuses.
+    writeFileSync(join(path, "root-dirt.txt"), "root preserved\n")
+    writeFileSync(join(path, "vendor/dependency/READY"), "component preserved\n")
+    const refused = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io), refused.stderr()).toBe(2)
+    expect(refused.stderr()).toContain("is dirty")
+    expect(existsSync(path)).toBe(true)
+
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+    expect(run.stderr()).toContain("preserved dirty state")
+    expect(existsSync(path)).toBe(false)
+
+    // One preserve ref in the root repository carries the ROOT dirt; the same ref in the component's
+    // own store carries the COMPONENT dirt; the root snapshot's gitlink is repointed at that commit.
+    const rootRefs = (await w.git(["for-each-ref", "--format=%(refname)", "refs/heads/wip/"]))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+    expect(rootRefs).toHaveLength(1)
+    const rootRef = rootRefs[0]!
+    expect((await w.git(["show", `${rootRef}:root-dirt.txt`])).trim()).toBe("root preserved")
+    const component = join(w.work, "vendor/dependency")
+    const componentRefs = (await gitIn(component)(["for-each-ref", "--format=%(refname)", "refs/heads/wip/"]))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+    expect(componentRefs).toHaveLength(1)
+    const componentRef = componentRefs[0]!
+    expect((await gitIn(component)(["show", `${componentRef}:READY`])).trim()).toBe("component preserved")
+    expect((await w.git(["rev-parse", `${rootRef}:vendor/dependency`])).trim()).toBe(
+      (await gitIn(component)(["rev-parse", componentRef])).trim(),
+    )
+  })
+
+  /**
    * @failure 28120: direct close removed an unrelated process's cwd and ran teardown first.
    * @level l2 (real CLI and native cwd holder in a temporary retained worktree)
    * @consumer callers closing an environment still used by another process

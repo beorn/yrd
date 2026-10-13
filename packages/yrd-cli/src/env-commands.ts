@@ -41,6 +41,9 @@ import {
   type GitRunner,
 } from "@yrd/queue-core"
 import { createProcess } from "@yrd/process"
+// 29073: `env close --preserve` composes the ONE worktree preserve (root + every dirty component,
+// built from a temporary index) rather than reimplementing it; bearly owns that implementation.
+import { preserveSlotState, slotNameFromResolvedPath } from "bearly/tools/worktree"
 import { createLocalGitProcess } from "git-super/process"
 import {
   assertNoPrivateStore,
@@ -73,7 +76,18 @@ export type EnvOpenOptions = Readonly<{
   hold?: string
   keep?: boolean
 }>
-export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string; noRehome?: boolean }>
+export type EnvCloseOptions = Readonly<{
+  json?: boolean
+  retain?: string
+  noRehome?: boolean
+  /**
+   * 29073: an abandoned environment whose dirt cannot be committed is snapshotted to the worktree
+   * tool's durable custody before the clean gate, and the close then proceeds. A preserve failure
+   * throws, so a removal is blocked rather than partially discarding bytes. Off by default, so the
+   * existing "a dirty tree is work, not garbage" refusal is unchanged for every current caller.
+   */
+  preserve?: boolean
+}>
 
 /**
  * The close was ACCEPTED, not done: this caller's same-UID CWD census could not
@@ -851,7 +865,20 @@ export async function closeEnvironment(
       { submodule: privatePath, checkout, store, command: verify },
     )
   }
-  await requireClean(treeGit, path)
+  // 29073: preserve FIRST (the one worktree implementation), then skip the clean gate it is standing
+  // in for. The worktree stays dirty by design — the bytes are in the durable preserve refs, and the
+  // removal below is what retires them. A preserve that cannot complete throws (loud) and blocks the
+  // removal, so no path discards uncommitted work silently.
+  if (options.preserve === true) {
+    const preserved = await preserveSlotState(path, slotNameFromResolvedPath(root, path), root)
+    io.stderr(
+      preserved.preserved
+        ? `yrd: env close preserved ${preserved.reason ?? "dirty"} state of ${path} before removal: ${preserved.ref ?? "(no ref)"} (${(preserved.sha ?? "").slice(0, 12)})${preserved.submodules.length === 0 ? "" : `; submodules: ${preserved.submodules.map((entry) => `${entry.path}@${entry.sha.slice(0, 12)}`).join(", ")}`}\n`
+        : `yrd: env close --preserve found nothing to preserve in ${path}; the close proceeds\n`,
+    )
+  } else {
+    await requireClean(treeGit, path)
+  }
   const admission = await admitEnvironmentClose(path, io, censusSource)
   if (admission.kind === "needs-delegation") {
     if (onIncompleteCensus === "refuse") throw uncertified(path, admission)
@@ -882,7 +909,7 @@ export async function closeEnvironment(
         `environment teardown ${result.result} in preserved environment ${path}: exit ${String(result.exit)}${result.why === undefined ? "" : ` (${result.why})`}\ncommand: ${config.teardown}\n${output}\nlog ${result.log}`,
       )
     }
-    await requireClean(treeGit, path)
+    if (options.preserve !== true) await requireClean(treeGit, path)
   }
   // 27510: closing an environment retires its own branch's preview custody, root first, before removal; a removal that
   // fails afterwards leaves the retirement standing. A detached environment never submitted, so has none.
@@ -1008,6 +1035,7 @@ function queueDelegatedClose(
   const chosen: EnvCloseRequestOptions = {
     ...(options.retain === undefined ? {} : { retain: options.retain }),
     ...(options.noRehome === true ? { noRehome: true } : {}),
+    ...(options.preserve === true ? { preserve: true } : {}),
   }
   const request: EnvCloseRequest = {
     name: basename(path),
