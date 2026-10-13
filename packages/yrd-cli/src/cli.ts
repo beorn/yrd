@@ -1503,6 +1503,10 @@ function buildProgram(
       "--retain <directory>",
       "durable GitSuper retention directory; defaults to the workdir retained-modules directory",
     )
+    .option(
+      "--preserve",
+      "preserve a dirty environment's uncommitted root and component bytes to the worktree tool's durable refs before removal (otherwise a dirty environment is refused)",
+    )
     .option("--json", "emit stable JSON")
     .action(async (path, options) => setExit(await closeEnvironment(path, options, io)))
 
