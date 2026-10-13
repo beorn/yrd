@@ -3596,7 +3596,7 @@ export async function coreQueueCommand(
       // all — the same separation the retired build script named, restored
       // with it.
       if ((options.interactive === true || options.watchSource !== undefined) && options.json !== true) {
-        const first = await round(captured)
+        const first = await round(captured, undefined, "omit")
         if (first.observation.contract === "root-v1" && first.observation.outcome === "invalid") {
           io.stderr(`${first.observation.message}\n`)
           return 2
@@ -3646,7 +3646,7 @@ export async function coreQueueCommand(
             const refreshed = await declaration()
             if (refreshed === undefined) throw new Error(`${targetLabel} no longer carries a .yrd.yml`)
             await sightDrafts(seen)
-            const next = await round(refreshed, asked?.draftWindow)
+            const next = await round(refreshed, asked?.draftWindow, "omit")
             seen = next
             if (next.observation.contract === "root-v1" && next.observation.outcome === "invalid") {
               ending = 2
@@ -3661,14 +3661,31 @@ export async function coreQueueCommand(
           },
           loadDiff: (item) => readDiff(git, config, item),
           loadCommandOutput: (command) => Promise.resolve(readCommandOutput(command)),
-          open: (item) => {
+          open: async (item) => {
+            const summary = journalFor(item, journals)
+            const detailJournals =
+              summary === undefined
+                ? undefined
+                : readJournals(join(workdir, "logs"), {
+                    runIds: [summary.id],
+                    branch: summary.branch,
+                    runTerminal: (id) => terminalJournalRuns.has(id),
+                  })
+            if (detailJournals !== undefined) narrateJournalReading(io, detailJournals, said)
+            const journal = detailJournals === undefined ? undefined : journalFor(item, detailJournals)
+            const journalNote =
+              summary === undefined || journal !== undefined
+                ? undefined
+                : (detailJournals?.absent ??
+                  `${summary.branch}@${summary.head}: journal detail unavailable in selected run ${summary.id}; no matching run facts were read`)
             if (item.row.state === "direct") {
-              return Promise.resolve({
+              return {
                 row: item.row,
                 run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run, item.run?.number),
                 checks: [],
-                ...(journalFor(item, journals) === undefined ? {} : { journal: journalFor(item, journals) }),
-              })
+                ...(journal === undefined ? {} : { journal }),
+                ...(journalNote === undefined ? {} : { note: journalNote }),
+              }
             }
             const selected = eventChanges.get(item.row.branch)
             const defect = eventInvalid.get(item.row.branch)
@@ -3681,16 +3698,19 @@ export async function coreQueueCommand(
               })
             }
             if (selected === undefined) throw new Error(`event change ${item.row.branch} left the selected listing`)
-            return openEventDetail(
+            const detail = await openEventDetail(
               git,
               config,
               item,
               config.target.branch,
               repo,
               selected,
-              journalFor(item, journals),
+              journal,
               workdir,
             )
+            return journalNote === undefined
+              ? detail
+              : { ...detail, note: [detail.note, journalNote].filter((note) => note !== undefined).join("; ") }
           },
           snapshot: snapshotOf(first),
         }
@@ -3732,7 +3752,7 @@ export async function coreQueueCommand(
       let first = true
       let declared = captured
       for (;;) {
-        const one = await round(declared)
+        const one = await round(declared, undefined, "omit")
         // A selector that matches nothing would otherwise wait forever for a
         // change that is not there. It is refused loudly, with what was asked
         // for and where it was looked for.

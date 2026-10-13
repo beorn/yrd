@@ -148,7 +148,7 @@ describe("`yrd list` prints the watch's page, once", () => {
    * rebuilt projection (28908); every list after that — printed and JSON —
    * constructs none, because the artifact is already on disk.
    */
-  it("lists a command-heavy raw journal, constructing command detail only for the one persisting rebuild", async () => {
+  it("lists an unlinked command-heavy journal with full scope while keeping summary rebuilds free of command detail", async () => {
     const work = await queueWithOneChange()
     const git = gitIn(work)
     await git(["config", "yrd.workdir", join(work, "..", "queue")])
@@ -182,17 +182,15 @@ describe("`yrd list` prints the watch's page, once", () => {
       return value
     })
     try {
-      const first = await yrd(work, { color: false }, "queue", "list")
+      const first = await yrd(work, { color: false }, "queue", "list", "--all")
       expect(first.exitCode, first.report).toBe(0)
       expect(first.stdout, first.report).toContain("task/one")
       // The rebuilding list persisted the projection beside the raw journal.
       expect(existsSync(join(workdir, "logs", `${log.id}.projection.json`))).toBe(true)
-      // Positive control for the counter itself: the persisting list DID
-      // construct command detail, once, in the projection writer — a counter
-      // that never counts would pass the zero below vacuously.
-      expect(commands).toBeGreaterThan(0)
+      // Even the one-time persisting rebuild writes summaries, not detail.
+      expect(commands).toBe(0)
       commands = 0
-      const second = await yrd(work, { color: false }, "queue", "list", "--json")
+      const second = await yrd(work, { color: false }, "queue", "list", "--all", "--json")
       expect(second.exitCode, second.report).toBe(0)
       expect(second.stdout, second.report).toContain("task/one")
       expect(commands).toBe(0)
@@ -200,6 +198,7 @@ describe("`yrd list` prints the watch's page, once", () => {
       // would hide a CLI that mistakenly acquired eager detail too. It reads
       // the persisted projection now, so it proves real detail by content.
       const journals = readJournals(join(workdir, "logs"))
+      expect(commands).toBeGreaterThan(0)
       const run = [...journals.runs.values()].flat().find((entry) => entry.branch === "task/one")
       expect(run?.commands).toHaveLength(32)
       expect(run?.commands[0]).toMatchObject({ args: ["rev-parse", "HEAD"], cwd: work, exit: 0 })
@@ -446,8 +445,17 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
     expect(documentOf(positional)["changes"], positional.report).toEqual([])
     // And 22301's own specimen, the other way round: a non-matching state must
     // never answer with the queue it did not select.
-    expect(flagged.stdout, flagged.report).not.toContain("task/one")
-    expect(flagged.stdout, flagged.report).toBe(positional.stdout)
+    const flaggedDocument = documentOf(flagged)
+    const positionalDocument = documentOf(positional)
+    expect(flaggedDocument["scope"]).toContain("0 of 1 change(s) match merged")
+    expect({
+      ...flaggedDocument,
+      asOf: positionalDocument["asOf"],
+      scope: String(flaggedDocument["scope"]).replace(
+        String(flaggedDocument["asOf"]),
+        String(positionalDocument["asOf"]),
+      ),
+    }).toEqual(positionalDocument)
     expect(stripAnsi(flagged.stderr), flagged.report).toBe(stripAnsi(positional.stderr))
   })
 })

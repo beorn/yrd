@@ -374,9 +374,9 @@ describe("event queue observation refusals", () => {
     const read = vi.spyOn(fs, "readFileSync")
     try {
       const listing = capture(w.work)
-      expect(await coreQueueCommand(w.work, listing.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
-        0,
-      )
+      expect(
+        await coreQueueCommand(w.work, listing.io, { command: "list", all: true }, { json: true, workdir: w.workdir }),
+      ).toBe(0)
       const document = JSON.parse(listing.stdout()) as {
         changes: { branch: string; state: string }[]
         journal: { dir: string; unread?: number }
@@ -452,7 +452,9 @@ describe("event queue observation refusals", () => {
       expect(read.mock.calls.filter(([path]) => paths.has(String(path)))).toHaveLength(0)
       const item = rendered.snapshot?.rows.find(({ row }) => row.branch === "task/failure")
       const open = rendered.sources?.[0]?.open ?? rendered.open
-      if (item === undefined || open === undefined) throw new Error("watch did not expose its listed row and detail opener")
+      if (item === undefined || open === undefined) {
+        throw new Error("watch did not expose its listed row and detail opener")
+      }
       const detail = await open(item)
       expect(detail.journal?.id).toBe(item.run?.id ?? item.row.run)
       expect(detail.journal?.steps.length).toBeGreaterThan(0)
@@ -636,7 +638,14 @@ process.exit(result.exitCode)
       const watched = coreQueueCommand(
         w.work,
         run.io,
-        { command: "list", terms: [branch], watch: movement !== "malformed", stop: stop.signal, intervalSeconds: 1 },
+        {
+          command: "list",
+          all: true,
+          terms: [branch],
+          watch: movement !== "malformed",
+          stop: stop.signal,
+          intervalSeconds: 1,
+        },
         {
           json: true,
           workdir: w.workdir,
@@ -1007,7 +1016,7 @@ describe("what a watch says it looked at", () => {
     await change(w, "task/good", true)
     const run = capture(w.work)
 
-    await coreQueueCommand(w.work, run.io, { command: "list" }, { json: true, workdir: w.workdir })
+    await coreQueueCommand(w.work, run.io, { command: "list", all: true }, { json: true, workdir: w.workdir })
 
     const listed = JSON.parse(run.stdout().trim()) as Readonly<{ journal: Readonly<{ dir: string; absent?: string }> }>
     expect(listed.journal.dir).toBe(join(w.workdir, "logs"))
@@ -1031,7 +1040,7 @@ describe("what a watch says it looked at", () => {
     journal.write({ branch: "task/good", code: "gitlink-off-main", decision: "stuck", head, kind: "change" })
 
     const human = capture(w.work)
-    expect(await coreQueueCommand(w.work, human.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    expect(await coreQueueCommand(w.work, human.io, { command: "list", all: true }, { workdir: w.workdir })).toBe(0)
     // Both changes are on the page: the defective one is a ROW, not an omission.
     expect(human.stdout()).toContain("task/good")
     expect(human.stdout()).toContain("task/other")
@@ -1040,7 +1049,7 @@ describe("what a watch says it looked at", () => {
     expect(human.stderr()).toContain("the row was skipped — fix the writer (26230)")
 
     const json = capture(w.work)
-    await coreQueueCommand(w.work, json.io, { command: "list" }, { json: true, workdir: w.workdir })
+    await coreQueueCommand(w.work, json.io, { command: "list", all: true }, { json: true, workdir: w.workdir })
     const listed = JSON.parse(json.stdout().trim()) as Readonly<{
       changes: readonly Readonly<{
         branch: string
@@ -1338,7 +1347,7 @@ describe("the drafts a watch reads (24196)", () => {
         await coreQueueCommand(
           w.work,
           pane.io,
-          { command: "list", watch: true },
+          { command: "list", watch: true, all: true },
           { interactive: true, workdir: w.workdir },
         ),
         pane.stderr(),
@@ -1460,7 +1469,12 @@ describe("the queue line under a selector (24196)", () => {
 
     const page = capture(w.work)
     expect(
-      await coreQueueCommand(w.work, page.io, { command: "list", terms: ["task/one"] }, { workdir: w.workdir }),
+      await coreQueueCommand(
+        w.work,
+        page.io,
+        { command: "list", all: true, terms: ["task/one"] },
+        { workdir: w.workdir },
+      ),
       page.stderr(),
     ).toBe(0)
 
@@ -1552,7 +1566,7 @@ exec '${realGit}' "$@"
     const exit = await coreQueueCommand(
       w.work,
       io,
-      { command: "list", intervalSeconds: 1, terms: ["task/good"], watch: true },
+      { command: "list", all: true, intervalSeconds: 1, terms: ["task/good"], watch: true },
       { selection: { contract: "native", executable, origin: "fixture", scope: "local" }, workdir: w.workdir },
     )
       .catch((error: unknown) => `threw: ${error instanceof Error ? error.message : String(error)}`)
