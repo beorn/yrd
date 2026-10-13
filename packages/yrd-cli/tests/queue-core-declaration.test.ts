@@ -986,7 +986,13 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(current).toEqual([expect.objectContaining({ head, merge, duplicates: proof })])
     const historical = capture(repo)
     expect(
-      await coreQueueCommand(repo, historical.io, { command: "list", terms: [branch] }, { json: true, queue: "main" }),
+      // Unlinked historical journals belong to the explicit full-scope reader.
+      await coreQueueCommand(
+        repo,
+        historical.io,
+        { command: "list", all: true, terms: [branch] },
+        { json: true, queue: "main" },
+      ),
     ).toBe(0)
     const runs = (JSON.parse(historical.stdout()) as { changes: readonly { merge?: string; duplicates: unknown }[] })
       .changes
@@ -1411,7 +1417,12 @@ describe("a queue is the selected origin branch carrying config", () => {
 
     const listed = capture(repo)
     expect(
-      await coreQueueCommand(repo, listed.io, { command: "list", terms: ["direct"] }, { json: true, queue: "main" }),
+      await coreQueueCommand(
+        repo,
+        listed.io,
+        { command: "list", all: true, terms: ["direct"] },
+        { json: true, queue: "main" },
+      ),
     ).toBe(0)
     expect((JSON.parse(listed.stdout()) as { changes: readonly { head: string; state: string }[] }).changes).toEqual([
       expect.objectContaining({ head: direct, state: "direct" }),
@@ -1419,7 +1430,9 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(listed.stdout()).not.toContain(declaration)
 
     const table = capture(repo)
-    expect(await coreQueueCommand(repo, table.io, { command: "list", terms: ["direct"] }, { queue: "main" })).toBe(0)
+    expect(
+      await coreQueueCommand(repo, table.io, { command: "list", all: true, terms: ["direct"] }, { queue: "main" }),
+    ).toBe(0)
     expect(table.stdout()).toContain(direct.slice(0, 12))
     expect(table.stdout()).toMatch(/\bdirect\b/u)
 
@@ -1449,7 +1462,12 @@ describe("a queue is the selected origin branch carrying config", () => {
 
     const accounted = capture(repo)
     expect(
-      await coreQueueCommand(repo, accounted.io, { command: "list", terms: ["direct"] }, { json: true, queue: "main" }),
+      await coreQueueCommand(
+        repo,
+        accounted.io,
+        { command: "list", all: true, terms: ["direct"] },
+        { json: true, queue: "main" },
+      ),
     ).toBe(0)
     expect((JSON.parse(accounted.stdout()) as { changes: readonly unknown[] }).changes).toEqual([])
   }, 15_000)
@@ -2815,9 +2833,11 @@ describe("a queue is the selected origin branch carrying config", () => {
           ),
           run.stderr(),
         ).toBe(0)
-        expect(run.stdout()).toContain("task/topic")
-        expect(run.stdout()).not.toContain("task/default")
-        expect(run.stdout()).not.toContain("task/other")
+        // Scope/journal notices may name retained histories outside the row filter.
+        const rows = (JSON.parse(run.stdout()) as { changes: readonly { branch: string }[] }).changes
+        expect(rows.map((row) => row.branch)).toContain("task/topic")
+        expect(rows.map((row) => row.branch)).not.toContain("task/default")
+        expect(rows.map((row) => row.branch)).not.toContain("task/other")
         if (command[1] === "show") {
           const shown = JSON.parse(run.stdout()) as Readonly<{ changes: readonly Readonly<{ queue: string }>[] }>
           expect(shown.changes[0]?.queue).toBe("release/1.x")
