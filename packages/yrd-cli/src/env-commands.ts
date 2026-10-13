@@ -40,7 +40,12 @@ import {
   type Git,
   type GitRunner,
 } from "@yrd/queue-core"
-import { createProcess } from "@yrd/process"
+import { createProcess, type Process } from "@yrd/process"
+// 29073: `env close --preserve` reaches the ONE worktree preserve (bearly's preserveSlotState, the
+// choke point remove/reset flow through) across the CLI boundary — a subprocess, exactly as yrd
+// reaches git super — never a workspace dependency on bearly. A workspace dependency here stopped
+// the whole queue (the derive's `bun install --lockfile-only` cannot resolve bearly@workspace:* in
+// yrd's own workspace); @chief withdrew that change (c6939f8255f0). Shape @cto, 2026-10-13.
 import { createLocalGitProcess } from "git-super/process"
 import {
   assertNoPrivateStore,
@@ -73,7 +78,18 @@ export type EnvOpenOptions = Readonly<{
   hold?: string
   keep?: boolean
 }>
-export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string; noRehome?: boolean }>
+export type EnvCloseOptions = Readonly<{
+  json?: boolean
+  retain?: string
+  noRehome?: boolean
+  /**
+   * 29073: an abandoned environment whose dirt cannot be committed is snapshotted to the worktree
+   * tool's durable custody before the clean gate, and the close then proceeds. A preserve failure
+   * throws, so a removal is blocked rather than partially discarding bytes. Off by default, so the
+   * existing "a dirty tree is work, not garbage" refusal is unchanged for every current caller.
+   */
+  preserve?: boolean
+}>
 
 /**
  * The close was ACCEPTED, not done: this caller's same-UID CWD census could not
@@ -728,6 +744,171 @@ function entryPresent(target: string, what: string): boolean {
   }
 }
 
+/**
+ * The worktree CLI, resolved through the superproject root yrd already holds.
+ * ONE stated path. env close --preserve refuses BY NAME with it when the file is
+ * absent and never falls through to a plain removal: a preserve that silently
+ * did not run is exactly the data loss the flag exists to prevent (29073, @cto
+ * condition 3).
+ */
+export function worktreePreserveCliPath(root: string): string {
+  return join(root, "tools", "worktree.ts")
+}
+
+export interface WorktreePreserveReceipt {
+  slot: string
+  path: string
+  preserved: boolean
+  reason: string | null
+  ref: string | null
+  sha: string | null
+  submodules: ReadonlyArray<{ path: string; ref: string | null; sha: string }>
+}
+
+/** The receipt schema the worktree preserve CLI promises (bearly tools/worktree.ts). */
+export const WORKTREE_PRESERVE_SCHEMA = "bearly-worktree-preserve/1"
+
+/**
+ * bearly tools/worktree.ts `PRESERVE_NOTHING_EXIT`, mirrored here: the preserve
+ * verb prints a receipt for exactly two endings — exit 0 with `preserved:true`,
+ * and this exit with `preserved:false`. yrd accepts only those combinations and
+ * refuses every other exit as a failure, so a half-finished preserve is never
+ * read as a verdict (29073).
+ */
+const WORKTREE_PRESERVE_NOTHING_EXIT = 3
+
+function receiptRefusal(cli: string, field: string, expected: string): Error {
+  return new Error(
+    `env close --preserve: the worktree preserve CLI ${cli} printed a receipt with an invalid ${field} (${expected}); the environment was NOT removed`,
+  )
+}
+
+/**
+ * Read the preserve receipt by its SCHEMA, not by a cast (29073, @cto must
+ * 2026-10-13). A receipt from another tool or version must fail at this
+ * boundary, by name, with the offending field and the CLI path — never as an
+ * undefined ref handed to `--preserved` or a `submodules` TypeError downstream.
+ */
+export function parseWorktreePreserveReceipt(stdout: string, cli: string): WorktreePreserveReceipt {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(stdout)
+  } catch {
+    throw new Error(
+      `env close --preserve: the worktree preserve CLI ${cli} printed no JSON receipt: ${stdout || "(empty stdout)"}; the environment was NOT removed`,
+    )
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw receiptRefusal(cli, "receipt", "expected a JSON object")
+  }
+  const record = parsed as Record<string, unknown>
+  if (record.schema !== WORKTREE_PRESERVE_SCHEMA) {
+    throw receiptRefusal(
+      cli,
+      "schema",
+      `expected ${JSON.stringify(WORKTREE_PRESERVE_SCHEMA)}, got ${JSON.stringify(record.schema)}`,
+    )
+  }
+  if (typeof record.slot !== "string") throw receiptRefusal(cli, "slot", "expected a string")
+  if (typeof record.path !== "string") throw receiptRefusal(cli, "path", "expected a string")
+  if (typeof record.preserved !== "boolean") throw receiptRefusal(cli, "preserved", "expected a boolean")
+  if (record.reason !== null && typeof record.reason !== "string") {
+    throw receiptRefusal(cli, "reason", "expected a string or null")
+  }
+  if (record.ref !== null && typeof record.ref !== "string") {
+    throw receiptRefusal(cli, "ref", "expected a string or null")
+  }
+  if (record.sha !== null && typeof record.sha !== "string") {
+    throw receiptRefusal(cli, "sha", "expected a string or null")
+  }
+  if (!Array.isArray(record.submodules)) throw receiptRefusal(cli, "submodules", "expected an array")
+  const submodules = record.submodules.map((entry, index) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw receiptRefusal(cli, `submodules[${index}]`, "expected an object")
+    }
+    const component = entry as Record<string, unknown>
+    if (typeof component.path !== "string") throw receiptRefusal(cli, `submodules[${index}].path`, "expected a string")
+    if (component.ref !== null && typeof component.ref !== "string") {
+      throw receiptRefusal(cli, `submodules[${index}].ref`, "expected a string or null")
+    }
+    if (typeof component.sha !== "string") throw receiptRefusal(cli, `submodules[${index}].sha`, "expected a string")
+    return { path: component.path, ref: component.ref, sha: component.sha }
+  })
+  return {
+    slot: record.slot,
+    path: record.path,
+    preserved: record.preserved,
+    reason: record.reason,
+    ref: record.ref,
+    sha: record.sha,
+    submodules,
+  }
+}
+
+/**
+ * Run the ONE worktree preserve across the CLI boundary — a subprocess, never a
+ * workspace dependency on bearly (29073, @cto shape A) — and return its JSON
+ * receipt. The verb prints a receipt for exactly two endings (0/`preserved:true`
+ * and `PRESERVE_NOTHING_EXIT`/`preserved:false`); the receipt is the content
+ * verdict, so yrd reads it and never parses prose, but a receipt that disagrees
+ * with a valid exit — or any other exit — is a failure and refuses the close.
+ */
+async function preserveEnvironmentWorktree(
+  runner: Process,
+  root: string,
+  path: string,
+): Promise<WorktreePreserveReceipt> {
+  const cli = worktreePreserveCliPath(root)
+  if (!existsSync(cli)) {
+    throw new Error(
+      `env close --preserve needs the worktree preserve CLI at ${cli}; it is absent, so the preserve was NOT run and the environment was NOT removed`,
+    )
+  }
+  let result: Awaited<ReturnType<Process["run"]>>
+  try {
+    result = await runner.run({ argv: ["bun", cli, "preserve", path, "--json"], cwd: root })
+  } catch (error) {
+    throw new Error(
+      `env close --preserve could not run the worktree preserve CLI ${cli}: ${error instanceof Error ? error.message : String(error)}; the environment was NOT removed`,
+      { cause: error },
+    )
+  }
+  if (
+    result.signal !== null ||
+    result.timedOut ||
+    result.stalled ||
+    result.sweepFailure !== undefined ||
+    result.escapedDescendant ||
+    (result.outputTruncation?.length ?? 0) > 0
+  ) {
+    throw new Error(
+      `env close --preserve: the worktree preserve CLI ${cli} did not settle cleanly: ${JSON.stringify(result)}; the environment was NOT removed`,
+    )
+  }
+  const receipt = parseWorktreePreserveReceipt(result.stdout, cli)
+  // The receipt is the content verdict, but only two exit/receipt combinations are
+  // honest: exit 0 with preserved:true, and PRESERVE_NOTHING_EXIT with
+  // preserved:false. Any other exit — or a receipt that disagrees with its exit
+  // code — means the preserve did not finish, so refuse by name and remove nothing
+  // rather than hand a half-preserved ref to `--preserved` (29073, @cto must).
+  if (result.exitCode !== 0 && result.exitCode !== WORKTREE_PRESERVE_NOTHING_EXIT) {
+    throw new Error(
+      `env close --preserve: the worktree preserve CLI ${cli} exited ${String(result.exitCode)} (expected 0 with preserved:true, or ${WORKTREE_PRESERVE_NOTHING_EXIT} with preserved:false); the environment was NOT removed`,
+    )
+  }
+  if (result.exitCode === 0 && !receipt.preserved) {
+    throw new Error(
+      `env close --preserve: the worktree preserve CLI ${cli} exited 0 but reported preserved:false; the environment was NOT removed`,
+    )
+  }
+  if (result.exitCode === WORKTREE_PRESERVE_NOTHING_EXIT && receipt.preserved) {
+    throw new Error(
+      `env close --preserve: the worktree preserve CLI ${cli} exited ${WORKTREE_PRESERVE_NOTHING_EXIT} but reported preserved:true; the environment was NOT removed`,
+    )
+  }
+  return receipt
+}
+
 export async function closeEnvironment(
   operand: string,
   options: EnvCloseOptions,
@@ -851,7 +1032,25 @@ export async function closeEnvironment(
       { submodule: privatePath, checkout, store, command: verify },
     )
   }
-  await requireClean(treeGit, path)
+  // 29073: preserve FIRST (the ONE worktree implementation, reached as a subprocess at the CLI
+  // boundary like git super), then skip the clean gate it is standing in for. The worktree stays
+  // dirty by design — the bytes are in the durable preserve refs, and the removal below is what
+  // retires them. A preserve that cannot complete throws (loud) and blocks the removal, so no path
+  // discards uncommitted work silently.
+  const preservedRefs: string[] = []
+  if (options.preserve === true) {
+    const receipt = await preserveEnvironmentWorktree(process, root, path)
+    for (const ref of [receipt.ref, ...receipt.submodules.map((entry) => entry.ref)]) {
+      if (ref !== null && ref !== "" && !preservedRefs.includes(ref)) preservedRefs.push(ref)
+    }
+    io.stderr(
+      receipt.preserved
+        ? `yrd: env close preserved ${receipt.reason ?? "dirty"} state of ${path} before removal: ${receipt.ref ?? "(no ref)"} (${(receipt.sha ?? "").slice(0, 12)})${receipt.submodules.length === 0 ? "" : `; submodules: ${receipt.submodules.map((entry) => `${entry.path}@${entry.sha.slice(0, 12)}`).join(", ")}`}\n`
+        : `yrd: env close --preserve found nothing to preserve in ${path}; the close proceeds\n`,
+    )
+  } else {
+    await requireClean(treeGit, path)
+  }
   const admission = await admitEnvironmentClose(path, io, censusSource)
   if (admission.kind === "needs-delegation") {
     if (onIncompleteCensus === "refuse") throw uncertified(path, admission)
@@ -882,7 +1081,7 @@ export async function closeEnvironment(
         `environment teardown ${result.result} in preserved environment ${path}: exit ${String(result.exit)}${result.why === undefined ? "" : ` (${result.why})`}\ncommand: ${config.teardown}\n${output}\nlog ${result.log}`,
       )
     }
-    await requireClean(treeGit, path)
+    if (options.preserve !== true) await requireClean(treeGit, path)
   }
   // 27510: closing an environment retires its own branch's preview custody, root first, before removal; a removal that
   // fails afterwards leaves the retirement standing. A detached environment never submitted, so has none.
@@ -902,7 +1101,12 @@ export async function closeEnvironment(
     // that cannot tell what this one did. Refuse loudly and preserve instead.
     throw uncertified(path, recheck, "after teardown")
   }
-  if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true) {
+  // 29073 (@cto ruling): with --preserve the no-submodule path takes the SAME git-super worktree
+  // remove as the submodule path, so the verified-ref dirt gate has ONE implementation in ONE
+  // process and yrd never re-derives it. The cost is an empty or absent modules retention and one
+  // proof line for a tree that declares no .gitmodules. WITHOUT --preserve the plain path is
+  // unchanged: a clean no-submodule close never reaches git-super.
+  if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true || options.preserve === true) {
     const retain =
       options.retain === undefined
         ? join(workdir, "retained-modules")
@@ -919,6 +1123,7 @@ export async function closeEnvironment(
           "--retain",
           retain,
           ...(options.noRehome === true ? ["--no-rehome"] : []),
+          ...preservedRefs.flatMap((ref) => ["--preserved", ref]),
         ]),
       )
     } catch (error) {
@@ -1008,6 +1213,7 @@ function queueDelegatedClose(
   const chosen: EnvCloseRequestOptions = {
     ...(options.retain === undefined ? {} : { retain: options.retain }),
     ...(options.noRehome === true ? { noRehome: true } : {}),
+    ...(options.preserve === true ? { preserve: true } : {}),
   }
   const request: EnvCloseRequest = {
     name: basename(path),

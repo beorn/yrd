@@ -542,6 +542,319 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
   })
 
   /**
+   * 29073 (@cto shape A): yrd reaches the worktree preserve across the CLI boundary at
+   * `${root}/tools/worktree.ts` (never a workspace dependency on bearly). This fixture stands in for
+   * that CLI — the real verb and the real preserve are proven in vendor/bearly's own suite (the
+   * `preserve` verb over preserveSlotState) — so these rows prove YRD's half of the contract: it
+   * spawns the CLI, reads the JSON receipt, passes each ref to `git super worktree remove --preserved`,
+   * and admits the dirty store only because the ref resolves in it. Like the real verb, the stub
+   * writes one recovery ref in the ROOT store and one in each dirty component's own store, under the
+   * SAME ref name, and returns them in the receipt.
+   */
+  function installStubWorktreePreserve(
+    root: string,
+    options: { badReceipt?: boolean; badPath?: boolean; exitOverride?: number } = {},
+  ): void {
+    mkdirSync(join(root, "tools"), { recursive: true })
+    const source = STUB_WORKTREE_PRESERVE_CLI.replace("__BAD_RECEIPT__", options.badReceipt === true ? "true" : "false")
+      .replace("__BAD_PATH__", options.badPath === true ? "true" : "false")
+      .replace("__EXIT_OVERRIDE__", options.exitOverride === undefined ? '""' : String(options.exitOverride))
+    writeFileSync(join(root, "tools", "worktree.ts"), source)
+  }
+
+  const STUB_WORKTREE_PRESERVE_CLI = `#!/usr/bin/env bun
+import { spawnSync } from "node:child_process"
+import { existsSync, mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { basename, join } from "node:path"
+
+const argv = process.argv.slice(2)
+const target = argv[1]
+if (argv[0] !== "preserve" || target === undefined) {
+  console.error("stub worktree: usage: preserve <path> [--json]")
+  process.exit(64)
+}
+const git = (cwd, args, env) => {
+  const r = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", ...(env === undefined ? {} : { env }) })
+  if (r.status !== 0) {
+    console.error("stub worktree: git " + args.join(" ") + " failed: " + r.stderr)
+    process.exit(70)
+  }
+  return r.stdout.trim()
+}
+const dirty = (cwd) =>
+  git(cwd, ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=all"]).length > 0
+const snapshot = (cwd) => {
+  const index = join(mkdtempSync(join(tmpdir(), "stub-preserve-")), "index")
+  const env = { ...process.env, GIT_INDEX_FILE: index }
+  const parent = git(cwd, ["rev-parse", "HEAD"])
+  git(cwd, ["read-tree", "HEAD"], env)
+  git(cwd, ["add", "-A"], env)
+  const tree = git(cwd, ["write-tree"], env)
+  return git(cwd, ["commit-tree", tree, "-p", parent, "-m", "stub worktree preserve"], env)
+}
+const bad = __BAD_RECEIPT__
+const badPath = __BAD_PATH__
+// The preserve verb's exit code for the two honest endings: 0 (preserved) or 3
+// (nothing preserved). An override forces an unexpected exit to prove yrd refuses it.
+const exitOverride = __EXIT_OVERRIDE__
+const receipt = (body) => {
+  const out = bad ? { ...body, schema: "stub-worktree-preserve/1" } : { ...body }
+  if (badPath) delete out.path
+  process.stdout.write(JSON.stringify(out) + "\\n")
+}
+const slot = basename(target)
+const ref = "wip/" + slot + "-preserve-stub"
+const components = []
+if (existsSync(join(target, ".gitmodules"))) {
+  for (const line of git(target, ["config", "-f", ".gitmodules", "--list"]).split("\\n")) {
+    const eq = line.indexOf("=")
+    if (eq < 0 || !line.slice(0, eq).endsWith(".path")) continue
+    components.push(line.slice(eq + 1))
+  }
+}
+const submodules = []
+let rootDirty = dirty(target)
+for (const path of components) {
+  const component = join(target, path)
+  if (!existsSync(component) || !dirty(component)) continue
+  const sha = snapshot(component)
+  git(component, ["update-ref", "refs/heads/" + ref, sha])
+  submodules.push({ path, ref, sha })
+  rootDirty = true
+}
+if (!rootDirty) {
+  receipt({ schema: "bearly-worktree-preserve/1", slot, path: target, preserved: false, reason: "clean", ref: null, sha: null, submodules: [] })
+  process.exit(exitOverride === "" ? 3 : Number(exitOverride))
+}
+const sha = snapshot(target)
+git(target, ["update-ref", "refs/heads/" + ref, sha])
+receipt({ schema: "bearly-worktree-preserve/1", slot, path: target, preserved: true, reason: "dirty", ref, sha, submodules })
+process.exit(exitOverride === "" ? 0 : Number(exitOverride))
+`
+
+  /**
+   * @failure 29073: a dirty abandoned environment had NO sanctioned preserve-then-remove path -
+   *          `yrd env close` refuses dirt and the destructive git verbs are banned, so an
+   *          environment whose uncommitted bytes forensics judged worthless could not be retired
+   *          at all. `--preserve` composes the ONE existing worktree preserve (bearly's
+   *          preserveSlotState) before the clean gate. That implementation's own test
+   *          (vendor/bearly tests/worktree-preserve.slow.test.ts) proves the live index and
+   *          worktree are untouched; this test proves the flag composes it and that ROOT and
+   *          COMPONENT dirt both land under the existing custody convention.
+   * @level   l2 (real CLI, real bare remote, real materialized submodule)
+   * @consumer every seat closing an abandoned environment whose dirt cannot be committed
+   */
+  it("env close --preserve composes the one worktree preserve for ROOT and COMPONENT dirt (29073)", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    // yrd resolves the preserve CLI through the superproject root it already holds (one stated path).
+    installStubWorktreePreserve(w.work)
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+
+    // Dirty root AND dirty component: the class the plain close refuses.
+    writeFileSync(join(path, "root-dirt.txt"), "root preserved\n")
+    writeFileSync(join(path, "vendor/dependency/READY"), "component preserved\n")
+    const refused = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io), refused.stderr()).toBe(2)
+    expect(refused.stderr()).toContain("is dirty")
+    expect(existsSync(path)).toBe(true)
+
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+    expect(run.stderr()).toContain("preserved dirty state")
+    // 29101 landed (bearly bda68df): the preserve now also keeps a divergent staged index,
+    // recoverable at <ref>^2, so the retired working-tree-only claim must NOT reappear here.
+    expect(run.stderr()).not.toContain("a staged version that differs from it is not kept")
+    // yrd forwarded the COMPONENT ref too: the close SUCCEEDED with a dirty component, which
+    // git super admits only against a preserved ref that resolves in that component's own store.
+    expect(run.stderr()).toContain("submodules: vendor/dependency@")
+    expect(existsSync(path)).toBe(false)
+
+    // The retired limit must not resurface in the help a reader lands on; the truthful
+    // teardown-after-preserve boundary stays stated there.
+    const help = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", "--help"], help.io)).toBe(0)
+    expect(help.stdout()).not.toContain("a staged version that differs from it is not kept")
+    expect(help.stdout()).toContain("bytes a teardown writes afterwards are not preserved")
+
+    // The root recovery ref resolves in the root store yrd handed `git super --preserved`, and
+    // carries the ROOT dirt's bytes (the component's own custody lives in vendor/bearly's suite).
+    const rootRefs = (await w.git(["for-each-ref", "--format=%(refname)", "refs/heads/wip/"]))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+    expect(rootRefs).toHaveLength(1)
+    const rootRef = rootRefs[0]!
+    expect((await w.git(["show", `${rootRef}:root-dirt.txt`])).trim()).toBe("root preserved")
+  })
+
+  /**
+   * @failure 29073: `--preserve` on a commit that declares NO submodules (no `.gitmodules`) had no
+   *          verified removal path — the plain `git worktree remove` refuses dirt, and the verified
+   *          ref gate lived only on the git-super path. @cto ruled the no-submodule close takes the
+   *          SAME git-super primitive when `--preserve` is set, so the gate has one home; without
+   *          `--preserve` the plain path is unchanged.
+   * @level   l2 (real CLI, real bare remote, no submodules)
+   * @consumer every seat closing a dirty abandoned environment that records no submodules
+   */
+  it("env close --preserve routes a no-submodule dirty environment through the same verified gate (29073)", async () => {
+    const w = await world(":")
+    expect((await w.git(["ls-tree", "HEAD", "--", ".gitmodules"])).trim()).toBe("")
+    installStubWorktreePreserve(w.work)
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+
+    writeFileSync(join(path, "root-dirt.txt"), "root preserved\n")
+    const refused = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io), refused.stderr()).toBe(2)
+    expect(refused.stderr()).toContain("is dirty")
+    expect(existsSync(path)).toBe(true)
+
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+    expect(run.stderr()).toContain("preserved dirty state")
+    expect(run.stderr()).toContain("retained environment removal proof")
+    expect(existsSync(path)).toBe(false)
+    const refs = (await w.git(["for-each-ref", "--format=%(refname)", "refs/heads/wip/"]))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+    expect(refs).toHaveLength(1)
+    expect((await w.git(["show", `${refs[0]}:root-dirt.txt`])).trim()).toBe("root preserved")
+  })
+
+  /**
+   * @failure 29073 (@cto condition 3): the ONE stated preserve CLI path is
+   *          `${superproject-root}/tools/worktree.ts`. When it is absent, `env close --preserve` must
+   *          refuse BY NAME with that path and remove nothing — NEVER fall through to a plain
+   *          removal, which is exactly the silent data loss the flag exists to prevent.
+   * @level   l2 (real CLI, real bare remote, no preserve CLI installed)
+   * @consumer every seat whose superproject has not installed the worktree preserve CLI
+   */
+  it("env close --preserve refuses by name when the preserve CLI is absent, removing nothing (29073)", async () => {
+    const w = await world(":")
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    writeFileSync(join(path, "root-dirt.txt"), "never discarded silently\n")
+
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(2)
+    expect(run.stderr()).toContain(join(w.work, "tools", "worktree.ts"))
+    expect(run.stderr()).toContain("NOT removed")
+    expect(existsSync(path)).toBe(true)
+    expect(existsSync(join(path, "root-dirt.txt"))).toBe(true)
+  })
+
+  /**
+   * @failure 29073 (@cto must 2026-10-13): a receipt from another tool or version must fail AT the
+   *          boundary, by name — never as an undefined ref handed to `--preserved` or a
+   *          `submodules` TypeError downstream. yrd validates the schema literal and each field's
+   *          type where it reads the receipt, naming the offending field and the CLI path.
+   * @level   l2 (real CLI, stub emitting a wrong-schema receipt)
+   * @consumer every seat whose superproject's preserve CLI returns an unexpected receipt
+   */
+  it("env close --preserve refuses a receipt it cannot validate, removing nothing (29073)", async () => {
+    const w = await world(":")
+    installStubWorktreePreserve(w.work, { badReceipt: true })
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    writeFileSync(join(path, "root-dirt.txt"), "must not be discarded\n")
+
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(2)
+    // The refusal names the offending field and the CLI path it read from.
+    expect(run.stderr()).toContain("invalid schema")
+    expect(run.stderr()).toContain("bearly-worktree-preserve/1")
+    expect(run.stderr()).toContain(join(w.work, "tools", "worktree.ts"))
+    expect(existsSync(path)).toBe(true)
+    expect(existsSync(join(path, "root-dirt.txt"))).toBe(true)
+  })
+
+  /**
+   * @failure 29073 (@cto must 2026-10-13): each field of the receipt is validated where it is
+   *          read, the top-level `path` included — the real schema-1 receipt carries it, so a
+   *          receipt missing it must be refused by name, never trusted. (@dev/10's direct probe
+   *          accepted a missing `path` before this row.)
+   * @level   l2 (real CLI, stub emitting a receipt with no `path`)
+   * @consumer every seat whose superproject's preserve CLI returns a receipt without `path`
+   */
+  it("env close --preserve refuses a receipt missing the path field, removing nothing (29073)", async () => {
+    const w = await world(":")
+    installStubWorktreePreserve(w.work, { badPath: true })
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    writeFileSync(join(path, "root-dirt.txt"), "must not be discarded\n")
+
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(2)
+    expect(run.stderr()).toContain("invalid path")
+    expect(run.stderr()).toContain(join(w.work, "tools", "worktree.ts"))
+    expect(run.stderr()).toContain("NOT removed")
+    expect(existsSync(path)).toBe(true)
+    expect(existsSync(join(path, "root-dirt.txt"))).toBe(true)
+  })
+
+  /**
+   * @failure 29073: the preserve verb's "nothing to preserve" ending is a NON-ZERO exit (3) — the
+   *          exact case @cto's boundary contract calls valid, paired with `preserved:false`. yrd
+   *          must accept that combination, not mistake it for a failure, and go on to remove the
+   *          clean environment.
+   * @level   l2 (real CLI, stub emitting the clean receipt with its honest exit 3)
+   * @consumer every seat closing a clean environment with --preserve
+   */
+  it("env close --preserve accepts the clean no-op (exit 3) and removes the environment (29073)", async () => {
+    const w = await world(":")
+    installStubWorktreePreserve(w.work)
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+    expect(run.stderr()).toContain("found nothing to preserve")
+    expect(existsSync(path)).toBe(false)
+    expect(await w.git(["worktree", "list", "--porcelain"])).not.toContain(path)
+  })
+
+  /**
+   * @failure 29073 (@cto must 2026-10-13): acceptance says a failed preserve BLOCKS removal. A
+   *          non-zero exit that is neither the honest clean ending (3) nor a settled success means
+   *          the preserve did not finish, even when a well-formed receipt came with it — yrd must
+   *          refuse by name, naming the exit, and remove nothing.
+   * @level   l2 (real CLI, stub exiting 9 with an otherwise valid receipt)
+   * @consumer every seat whose preserve CLI crashes or is killed mid-preserve
+   */
+  it("env close --preserve refuses a non-zero preserve exit, removing nothing (29073)", async () => {
+    const w = await world(":")
+    installStubWorktreePreserve(w.work, { exitOverride: 9 })
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    writeFileSync(join(path, "root-dirt.txt"), "must not be discarded\n")
+
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(2)
+    expect(run.stderr()).toContain("exited 9")
+    expect(run.stderr()).toContain("NOT removed")
+    expect(existsSync(path)).toBe(true)
+    expect(existsSync(join(path, "root-dirt.txt"))).toBe(true)
+  })
+
+  /**
    * @failure 28120: direct close removed an unrelated process's cwd and ran teardown first.
    * @level l2 (real CLI and native cwd holder in a temporary retained worktree)
    * @consumer callers closing an environment still used by another process

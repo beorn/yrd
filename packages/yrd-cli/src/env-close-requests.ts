@@ -29,7 +29,7 @@ export const ENV_CLOSE_REQUEST_DIRNAME = "env-close-requests"
 /** How many rounds a coverage refusal may be retried before the request is retired. */
 export const MAX_COVERAGE_ATTEMPTS = 3
 
-export type EnvCloseRequestOptions = Readonly<{ retain?: string; noRehome?: boolean }>
+export type EnvCloseRequestOptions = Readonly<{ retain?: string; noRehome?: boolean; preserve?: boolean }>
 
 export type EnvCloseRequest = Readonly<{
   name: string
@@ -226,7 +226,7 @@ function removeFile(file: string): void {
 }
 
 function sameOptions(left: EnvCloseRequestOptions, right: EnvCloseRequestOptions): boolean {
-  return left.retain === right.retain && left.noRehome === right.noRehome
+  return left.retain === right.retain && left.noRehome === right.noRehome && left.preserve === right.preserve
 }
 
 /** Strict, loud validation: a request this process cannot read is named, never guessed at. */
@@ -253,6 +253,9 @@ function parseCloseRequest(parsed: unknown, file: string): StoredCloseRequest {
   if (rawOptions.noRehome !== undefined && typeof rawOptions.noRehome !== "boolean") {
     throw bad("options.noRehome must be a boolean")
   }
+  if (rawOptions.preserve !== undefined && typeof rawOptions.preserve !== "boolean") {
+    throw bad("options.preserve must be a boolean")
+  }
   const attempts = raw.coverageAttempts
   if (attempts !== undefined && (typeof attempts !== "number" || !Number.isSafeInteger(attempts) || attempts < 0)) {
     throw bad("coverageAttempts must be a non-negative safe integer")
@@ -267,6 +270,7 @@ function parseCloseRequest(parsed: unknown, file: string): StoredCloseRequest {
     options: {
       ...(rawOptions.retain === undefined ? {} : { retain: rawOptions.retain }),
       ...(rawOptions.noRehome === undefined ? {} : { noRehome: rawOptions.noRehome }),
+      ...(rawOptions.preserve === undefined ? {} : { preserve: rawOptions.preserve }),
     },
     head: text("head"),
     ...(attempts === undefined ? {} : { coverageAttempts: attempts }),
