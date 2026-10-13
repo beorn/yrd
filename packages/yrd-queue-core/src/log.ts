@@ -104,6 +104,12 @@ export const LOG_KINDS = [
   "change",
   "check",
   "result",
+  // Legacy reader only (28899): nothing writes this kind since the event-only
+  // cutover 884d23eb removed its producer from run.ts; the last retained row
+  // was written 2026-09-24, and 2,504 settle rows remain in retained queue
+  // journals (kept-ahead 1,933, merged 528, raised 43). Delete this entry, the
+  // merged-state branch below, and the renderer case together only once no
+  // retained journal holds a settle row.
   "settle",
   // A diverged gitlink the queue composed itself (24977): the change's head, the
   // component main merged in, and the component and root commits that came out.
@@ -1631,6 +1637,8 @@ function runsIn(
       if (claimed !== undefined) change.incident = claimed
     }
     if (record.kind === "merge" && typeof record.commit === "string") change.merge = record.commit
+    // Legacy reader (28899): validates the 528 retained merged settle rows;
+    // see the kind-list entry above for the census and deletion condition.
     if (record.kind === "settle" && record.state === "merged") {
       const required = ["path", "base", "from", "merged"] as const
       const invalid: string[] = required.filter((key) => {
