@@ -448,6 +448,81 @@ describe("ADR-0016 event fold", () => {
     ])
   })
 
+  /** @failure Invalid landing metadata grants false component retirement proof, or leaks into resubmission.
+   * @level l0 @consumer yrd local component branch retirement
+   */
+  it("folds landing gitlinks, reads old events and clears pins on resubmission", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const pins = [{ path: "vendor/child", target: B }]
+    const landed = evolve(
+      opened,
+      event(
+        "merged",
+        B,
+        [
+          ["Commit", A],
+          ["Gitlinks", JSON.stringify(pins)],
+        ],
+        [A],
+      ),
+    )
+    expect(landed.landedGitlinks).toEqual(pins)
+    expect(evolve(opened, event("merged", B, [["Commit", A]], [A])).landedGitlinks).toBeUndefined()
+    expect(evolve(landed, event("opened", A, [["Commit", B]], [B])).landedGitlinks).toBeUndefined()
+    for (const value of [
+      "broken JSON",
+      "{}",
+      "null",
+      JSON.stringify([{ path: "../child", target: B }]),
+      JSON.stringify([{ path: "child", target: "invalid" }]),
+      JSON.stringify([pins[0], pins[0]]),
+    ]) {
+      expect(() =>
+        evolve(
+          opened,
+          event(
+            "merged",
+            B,
+            [
+              ["Commit", A],
+              ["Gitlinks", value],
+            ],
+            [A],
+          ),
+        ),
+      ).toThrow(/Gitlinks/)
+    }
+    expect(() =>
+      evolve(
+        opened,
+        event(
+          "merged",
+          B,
+          [
+            ["Commit", A],
+            ["Gitlinks", "[]"],
+            ["Gitlinks", "[]"],
+          ],
+          [A],
+        ),
+      ),
+    ).toThrow(/Gitlinks/)
+    expect(() =>
+      evolve(
+        initial,
+        event(
+          "opened",
+          A,
+          [
+            ["Commit", A],
+            ["Gitlinks", "[]"],
+          ],
+          [A],
+        ),
+      ),
+    ).toThrow(/Gitlinks/)
+  })
+
   it("constructs required Yrd trailers and kept commits for a write", () => {
     const at = new Date("2026-09-22T14:00:00.000Z")
     const opened = changeInput("opened", { queueTip: A, at, commit: B, issue: "25040", by: "@dev/2" })

@@ -130,6 +130,8 @@ export {
   listRefs,
   openEvents,
   readRemoteCommit,
+  isAncestor,
+  seamProcess,
   refAt,
   resolveGitSelection,
   type GitSelection,
@@ -217,6 +219,7 @@ export {
   submit,
   issueOf,
   issueCandidatesOf,
+  issueFromBranchName,
   issueBindingsOf,
   normalizeIssueReference,
 } from "./submit.ts"

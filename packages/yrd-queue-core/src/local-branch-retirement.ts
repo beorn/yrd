@@ -15,6 +15,8 @@ export type LocalBranchRetirement = Readonly<{
   issue?: string
   reason: string
   date: string
+  /** Read the same eligibility and protections without writing custody or deleting a ref. */
+  dryRun?: boolean
   log: Pick<QueueRunLog, "write">
   /** Caller-owned holds, leases and live use, including detached rebase/bisect use.
    * Required: missing or unreadable authority must never mean unprotected.
@@ -24,12 +26,19 @@ export type LocalBranchRetirement = Readonly<{
   disposition:
     | Readonly<{ kind: "merged"; base: string; target: string }>
     | Readonly<{ kind: "closed"; target: string; store: QueueLocation; queue: string }>
+    | Readonly<{
+        kind: "landed"
+        /** Observed origin commit retaining this tip; a root gitlink alone is not custody. */
+        target: string
+        proof: { kind: "ancestry" } | { kind: "landing"; event: string; path: string; tip: string }
+      }>
 }>
 
 export type LocalBranchRetirementResult = Readonly<{
-  outcome: "removed" | "kept" | "failed"
+  outcome: "removed" | "kept" | "failed" | "eligible"
   archiveRef: string
   reason: string
+  detail?: string
 }>
 
 /** One policy for local retirement; git-super owns archive/ref mechanics.
@@ -41,16 +50,19 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
   const { repo, git, branch, tip, actor, issue, reason, date, disposition } = input
   const archiveRef = archiveRefFor(branch, actor, date)
   const store = createGitWorktreeStore({ repo, gitProcess: seamProcess(git, repo) })
-  const protection = async (): Promise<string | undefined> => {
+  type Kept = { code: "held" | "moved" | "unreached" | "advanced"; detail: string }
+  const protection = async (): Promise<Kept | undefined> => {
     const reasons = await input.protections()
-    if (reasons.length > 0) return reasons.join("; ")
+    if (reasons.length > 0) return { code: "held", detail: reasons.join("; ") }
     const saw = await refAt(git, `refs/heads/${branch}`)
-    if (saw !== tip) return `branch moved: expected ${tip}, found ${saw ?? "absent"}`
+    if (saw !== tip) return { code: "moved", detail: `branch moved: expected ${tip}, found ${saw ?? "absent"}` }
     for (const row of await store.list()) {
-      if (row.branch === `refs/heads/${branch}`) return `branch is checked out at ${row.path}`
+      if (row.branch === `refs/heads/${branch}`) return { code: "held", detail: `branch is checked out at ${row.path}` }
       if (row.branch === undefined) {
         const operation = worktreeOperationBranch(row.path)
-        if (operation?.branch === branch) return `branch is held by ${operation.operation} at ${row.path}`
+        if (operation?.branch === branch) {
+          return { code: "held", detail: `branch is held by ${operation.operation} at ${row.path}` }
+        }
       }
     }
     return undefined
@@ -78,16 +90,27 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       }
     }
     let kept = await protection()
-    if (kept === undefined && disposition.kind === "merged" && !(await isAncestor(git, tip, disposition.target))) {
-      kept = `tip ${tip} is not merged into ${disposition.target}`
+    if (kept === undefined && disposition.kind !== "closed" && !(await isAncestor(git, tip, disposition.target))) {
+      kept = { code: "unreached", detail: `tip ${tip} is not merged into ${disposition.target}` }
     }
-    if (kept === undefined) {
+    if (
+      kept === undefined &&
+      disposition.kind === "landed" &&
+      disposition.proof.kind === "landing" &&
+      disposition.proof.tip !== tip
+    ) {
+      kept = {
+        code: "advanced",
+        detail: `tip ${tip} differs from landing event ${disposition.proof.event}'s gitlink ${disposition.proof.tip}`,
+      }
+    }
+    if (kept === undefined && !input.dryRun) {
       const custody = ensureArchiveRef(repo, archiveRef, tip)
       if (!custody.ok) throw new Error(custody.reason)
     }
     const alreadyMerged =
       kept === undefined && disposition.kind === "closed" && (await isAncestor(git, tip, disposition.target))
-    if (kept === undefined && disposition.kind === "closed" && !alreadyMerged) {
+    if (kept === undefined && !input.dryRun && disposition.kind === "closed" && !alreadyMerged) {
       await drop(disposition.store, {
         queue: disposition.queue,
         branch,
@@ -99,7 +122,14 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     }
     if (kept === undefined) kept = await protection()
     if (kept !== undefined) {
-      result = { outcome: "kept", archiveRef, reason: kept }
+      result = {
+        outcome: "kept",
+        archiveRef,
+        reason: disposition.kind === "landed" ? kept.code : kept.detail,
+        detail: kept.detail,
+      }
+    } else if (input.dryRun) {
+      result = { outcome: "eligible", archiveRef, reason }
     } else {
       await store.removeArchivedBranch({ branch, tip, archiveRef })
       result = { outcome: "removed", archiveRef, reason }

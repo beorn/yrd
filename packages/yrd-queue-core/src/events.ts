@@ -1,6 +1,7 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
 import { Conflict, RetriesExhausted } from "./git.ts"
 import { ARCHIVE_REF_PREFIX } from "git-super/archive-ref"
+import { readCommitSubmodules, type CommitGitlink } from "git-super/commit-graph"
 import { listRefs, openEvents } from "./git.ts"
 import { publishWithTransientRetry } from "./transient-push.ts"
 import { readEventChain, readEventChains } from "./event-read.ts"
@@ -21,7 +22,7 @@ export { queueRef } from "./refs.ts"
 export { changesRef } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
 import { assertPlainEventQueueConfig } from "./event-config.ts"
-import { createLegacyBackend, gitIn } from "./git.ts"
+import { createLegacyBackend, gitIn, seamProcess } from "./git.ts"
 import type { Git, GitSelection } from "./git.ts"
 import type { QueueConfig } from "./config.ts"
 import { checkTrailer, readCheckTrailer } from "./check.ts"
@@ -80,6 +81,7 @@ export const EVENT_TRAILERS = {
   key: "Key",
   run: "Run",
   floors: "Floors",
+  gitlinks: "Gitlinks",
 } as const
 const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 /** Only the run path that atomically publishes the target may write merged with this producer. */
@@ -158,6 +160,8 @@ export type EventChange = Readonly<{
   commit?: string
   /** The landing commit on target when merged. */
   merge?: string
+  /** Exact component pins from this ending's published root; absent on old merged events. */
+  landedGitlinks?: readonly CommitGitlink[]
   /** The last verified composition, kept by its verifying event. */
   candidate?: string
   issue?: string
@@ -245,7 +249,48 @@ type ChangeInputDetails = Readonly<{
   deferred?: DeferredWrite
   notice?: NoticeWrite
   run?: string
+  landedGitlinks?: readonly CommitGitlink[]
 }>
+
+/** Landing proof is deletion authority, so malformed persisted pins must never become an empty list. */
+function checkedLandedGitlinks(value: unknown): readonly CommitGitlink[] {
+  if (!Array.isArray(value)) throw new TypeError("Gitlinks: must be a JSON array")
+  const seen = new Set<string>()
+  return value.map((entry: unknown) => {
+    if (typeof entry !== "object" || entry === null || !("path" in entry) || !("target" in entry)) {
+      throw new TypeError("Gitlinks: needs path and target on every pin")
+    }
+    const { path, target } = entry
+    if (
+      typeof path !== "string" ||
+      path.includes("\\") ||
+      path.includes("\0") ||
+      path.split("/").some((part) => part === "" || part === "." || part === "..") ||
+      seen.has(path)
+    ) {
+      throw new TypeError("Gitlinks: needs unique root-relative component paths")
+    }
+    if (typeof target !== "string" || !COMMIT_OID.test(target)) {
+      throw new TypeError(`Gitlinks: ${path} needs a full commit oid`)
+    }
+    seen.add(path)
+    return { path, target }
+  })
+}
+
+function readLandedGitlinks(event: EventShape): readonly CommitGitlink[] | undefined {
+  const value = prop(event, EVENT_TRAILERS.gitlinks)
+  if (value === undefined) return undefined
+  if (event.type !== "merged") throw new Error(`event ${event.id}: Gitlinks: belongs on merged`)
+  try {
+    return checkedLandedGitlinks(JSON.parse(value))
+  } catch (cause) {
+    throw new Error(
+      `event ${event.id}: malformed Gitlinks: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    )
+  }
+}
 
 /** The bounded decision evidence; legacy causal trailers stay in changeInput. */
 function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [string, string][] {
@@ -371,6 +416,10 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   if (details.reason !== undefined) props.push([EVENT_TRAILERS.reason, details.reason])
   if (details.warningKind !== undefined) props.push([EVENT_TRAILERS.warningKind, details.warningKind])
   if (details.run !== undefined) props.push([EVENT_TRAILERS.run, details.run])
+  if (details.landedGitlinks !== undefined) {
+    if (type !== "merged") throw new TypeError("Gitlinks: belongs on merged")
+    props.push([EVENT_TRAILERS.gitlinks, JSON.stringify(checkedLandedGitlinks(details.landedGitlinks))])
+  }
   props.push(...evidenceProps(type, details))
   return {
     type,
@@ -616,6 +665,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
     return { ...state, tip: event.id }
   }
   const at = requireCause(event)
+  const landedGitlinks = readLandedGitlinks(event)
   checkedRows(event)
   const recipients = event.props.filter(([key]) => key === EVENT_TRAILERS.recipient)
   if (recipients.length > 1) throw new Error(`event ${event.id} repeats ${EVENT_TRAILERS.recipient}:`)
@@ -648,6 +698,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         diagnostic: _previousDiagnostic,
         admissionWarning: _previousAdmissionWarning,
         run: _previousRun,
+        landedGitlinks: _previousGitlinks,
         ...fresh
       } = next
       return {
@@ -811,6 +862,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         ...next,
         status: "merged",
         merge: kept,
+        landedGitlinks,
         candidate: state.candidate ?? kept,
         ending: { kind: "merged", id: event.id },
         lastNotifiable: { kind: "merged", id: event.id },
@@ -1994,6 +2046,7 @@ type ChangeWrite = Readonly<{
   notice?: NoticeWrite
   run?: string
   writer?: string
+  landedGitlinks?: readonly CommitGitlink[]
   /** #27363: the admitted `admission-warning` kinds; every other event refuses it. */
   warningKind?: "policy-warning" | "reverted-paths"
   /** A target or branch ref moved in the same CAS publish as this event. */
@@ -2097,6 +2150,10 @@ async function publishedMergeDecision(
   if (selectedQueue.opsCutover === undefined && request.opsFences === undefined) {
     throw new Error(`${queueRef(queue)}: published merge lacks legacy pause and override fences before ops-cutover`)
   }
+  const git = gitIn(store.repo, undefined, store.selection)
+  const landedGitlinks = (await readCommitSubmodules(seamProcess(git, store.repo), store.repo, request.commit)).map(
+    ({ path, target }) => ({ path, target }),
+  )
   return appendDecision(
     store,
     queue,
@@ -2106,6 +2163,7 @@ async function publishedMergeDecision(
       type: "merged",
       at: request.at,
       commit: request.commit,
+      landedGitlinks,
       ...(request.reason === undefined ? {} : { reason: request.reason }),
       ...(request.run === undefined ? {} : { run: request.run }),
       writer: QUEUE_RUN_WRITER,
@@ -2157,6 +2215,7 @@ async function appendDecision(
     queueTip,
     at: write.at,
     ...(write.commit === undefined ? {} : { commit: write.commit }),
+    ...(write.landedGitlinks === undefined ? {} : { landedGitlinks: write.landedGitlinks }),
     ...(write.issue === undefined ? {} : { issue: write.issue }),
     ...(write.reason === undefined ? {} : { reason: write.reason }),
     ...(write.title === undefined ? {} : { title: write.title }),
