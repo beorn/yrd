@@ -878,10 +878,12 @@ describe("a queue is the selected origin branch carrying config", () => {
         shown.stderr(),
       ).toBe(0)
       // Observe I/O, so filtering the broad result after reading everything cannot pass.
-      expect(
-        read.mock.calls.map(([path]) => String(path)).filter((path) => paths.has(path)),
-        shown.stdout(),
-      ).toEqual([selected.journal.path])
+      // The one selected journal may be read more than once (the raw rebuild
+      // and the projection write it now persists, 28908); the unrelated
+      // journal must never be touched.
+      const touched = read.mock.calls.map(([path]) => String(path)).filter((path) => paths.has(path))
+      expect(touched.length, shown.stdout()).toBeGreaterThan(0)
+      expect(new Set(touched), shown.stdout()).toEqual(new Set([selected.journal.path]))
     } finally {
       read.mockRestore()
     }
@@ -899,8 +901,20 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).toBe(0)
     const global = JSON.parse(bulk.stdout()) as typeof scoped
     expect(global.changes.map(({ branch }) => branch).sort()).toEqual(journals.map(({ branch }) => branch).sort())
-    expect(global.journal.fallbacks).toMatchObject({ count: journals.length, reasons: [{ count: journals.length }] })
+    // The scoped read above rebuilt the selected journal and persisted its
+    // projection (28908), so the bulk read still names only the unrelated
+    // journal's fallback — and its own rebuild persists that one too, so a
+    // further bulk read names none.
+    expect(global.journal.fallbacks).toMatchObject({ count: 1, reasons: [{ count: 1 }] })
     expect(Buffer.byteLength(shown.stdout())).toBeLessThan(Buffer.byteLength(bulk.stdout()))
+    const again = capture(repo)
+    expect(
+      await coreQueueCommand(repo, again.io, { command: "show", all: true }, { json: true, queue: "main" }),
+      again.stderr(),
+    ).toBe(0)
+    const settled = JSON.parse(again.stdout()) as typeof scoped
+    expect(settled.changes.map(({ branch }) => branch).sort()).toEqual(journals.map(({ branch }) => branch).sort())
+    expect(settled.journal.fallbacks).toBeUndefined()
   }, 15_000)
 
   it("keeps an equal-head duplicate in the current list and both submissions in show", async () => {
