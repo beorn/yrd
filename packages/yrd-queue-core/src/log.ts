@@ -1083,11 +1083,15 @@ function repairableProjection(dir: string, id: string, fallback: JournalProjecti
   } catch {
     // silent-fallback-allow: an unreadable artifact declares no version, so there is nothing newer to protect; the fallback reason below decides repair on its own.
   }
-  const declaresNewer = (value: unknown, writer: number): boolean =>
-    typeof value === "number" && Number.isSafeInteger(value) && value > writer
+  // A PRESENT version field blocks repair unless it orders as this writer's
+  // own or older: newer is a rolling landing's property, and unorderable
+  // (a string, null, a fraction) cannot be told from newer, so it is left
+  // alone too. Only an ABSENT field declares nothing to protect.
+  const blocksRepair = (value: unknown, writer: number): boolean =>
+    value !== undefined && !(typeof value === "number" && Number.isSafeInteger(value) && value <= writer)
   if (
     declared !== undefined &&
-    (declaresNewer(declared.schema, JOURNAL_PROJECTION_SCHEMA) || declaresNewer(declared.fold, JOURNAL_PROJECTION_FOLD))
+    (blocksRepair(declared.schema, JOURNAL_PROJECTION_SCHEMA) || blocksRepair(declared.fold, JOURNAL_PROJECTION_FOLD))
   ) {
     return false
   }

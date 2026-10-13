@@ -644,6 +644,28 @@ describe("a run's journal, read back", () => {
     expect(fs.readFileSync(artifact, "utf8")).toBe(before)
   })
 
+  it("leaves a projection declaring an unorderable fold byte-identical (28908)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-unorderable-fold"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    log.finish()
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    const parsed = JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>
+    // A declared fold this build cannot order ("future-v4") cannot be told
+    // from a newer one, so it is left alone like a newer one; only an absent
+    // version field leaves a partial artifact repairable.
+    const { runnerRecords: _dropped, ...rest } = parsed
+    writeFileSync(artifact, JSON.stringify({ ...rest, fold: "future-v4" }))
+    const before = fs.readFileSync(artifact, "utf8")
+    const journals = readJournals(dir, { now: at })
+    expect(journals.fallbacks).toMatchObject({ count: 1, reasons: [{ reason: "partial", count: 1 }] })
+    expect(journals.fallbacks?.persistFailures).toBeUndefined()
+    expect(journals.runs.get(journalKey("task/one", "abc123"))?.[0]).toMatchObject({ id: log.id, decision: "failed" })
+    expect(fs.readFileSync(artifact, "utf8")).toBe(before)
+  })
+
   it("repairs an older-fold projection so the next read finds it present (28908)", () => {
     const at = new Date("2026-09-03T20:00:00.000Z")
     const dir = join(scratch("projection-older-fold"), "logs")
