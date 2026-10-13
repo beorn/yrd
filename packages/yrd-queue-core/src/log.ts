@@ -1071,27 +1071,43 @@ const failedJournalPersists = new Map<string, string>()
  * is reported and left alone.
  */
 function repairableProjection(dir: string, id: string, fallback: JournalProjectionFallback): boolean {
+  // Declared-version protection takes precedence over shape repair: the
+  // projection reader checks shape before versions, so an artifact a newer
+  // writer left can surface as "partial" merely for missing a field this
+  // build does not know. Whatever its shape, an artifact that DECLARES a
+  // newer schema or fold than this writer's is never overwritten.
+  let declared: { schema: unknown; fold: unknown } | undefined
+  try {
+    const parsed = projectionObject(JSON.parse(readFileSync(join(dir, `${id}.projection.json`), "utf8")))
+    declared = { schema: parsed.schema, fold: parsed.fold }
+  } catch {
+    // No readable declaration: nothing newer to protect.
+  }
+  const declaresNewer = (value: unknown, writer: number): boolean =>
+    typeof value === "number" && Number.isSafeInteger(value) && value > writer
+  if (
+    declared !== undefined &&
+    (declaresNewer(declared.schema, JOURNAL_PROJECTION_SCHEMA) || declaresNewer(declared.fold, JOURNAL_PROJECTION_FOLD))
+  ) {
+    return false
+  }
   switch (fallback.reason) {
     case "missing":
     case "partial":
     case "corrupt":
       return true
     case "incompatible": {
-      try {
-        const parsed = projectionObject(JSON.parse(readFileSync(join(dir, `${id}.projection.json`), "utf8")))
-        const { schema, fold } = parsed
-        if (
-          typeof schema !== "number" ||
-          typeof fold !== "number" ||
-          !Number.isSafeInteger(schema) ||
-          !Number.isSafeInteger(fold)
-        ) {
-          return false
-        }
-        return schema <= JOURNAL_PROJECTION_SCHEMA && fold <= JOURNAL_PROJECTION_FOLD
-      } catch {
-        return false
-      }
+      // Repair only a version this writer can order as its own or older; an
+      // unorderable one (either field unreadable as a safe integer) is
+      // reported and left alone, exactly as a newer one is.
+      const orderable = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value)
+      return (
+        declared !== undefined &&
+        orderable(declared.schema) &&
+        orderable(declared.fold) &&
+        declared.schema <= JOURNAL_PROJECTION_SCHEMA &&
+        declared.fold <= JOURNAL_PROJECTION_FOLD
+      )
     }
     default:
       return false

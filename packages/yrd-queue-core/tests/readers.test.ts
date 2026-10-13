@@ -594,22 +594,54 @@ describe("a run's journal, read back", () => {
     // A zero-byte journal: readable, in the window, and unable to ever yield
     // a projection its own reader would accept.
     writeFileSync(log.path, "")
-    const first = readJournals(dir, { now: at })
-    expect(first.runs.size).toBe(0)
-    expect(first.fallbacks).toMatchObject({
-      count: 1,
-      reasons: [{ reason: "missing", count: 1 }],
-      persistFailures: { count: 1, example: expect.stringContaining("no run header; nothing to persist") },
-    })
-    expect(fs.existsSync(artifact)).toBe(false)
-    // The refusal is memoized per source: a second read names it once more
-    // but spends no second write, and the artifact is still absent.
-    const second = readJournals(dir, { now: at })
-    expect(second.fallbacks).toMatchObject({
-      count: 1,
-      persistFailures: { count: 1, example: expect.stringContaining("no run header; nothing to persist") },
-    })
-    expect(fs.existsSync(artifact)).toBe(false)
+    const read = vi.spyOn(fs, "readFileSync")
+    try {
+      const first = readJournals(dir, { now: at })
+      expect(first.runs.size).toBe(0)
+      expect(first.fallbacks).toMatchObject({
+        count: 1,
+        reasons: [{ reason: "missing", count: 1 }],
+        persistFailures: { count: 1, example: expect.stringContaining("no run header; nothing to persist") },
+      })
+      expect(fs.existsSync(artifact)).toBe(false)
+      // The refusal is memoized per source: a second read names it once more
+      // but spends no second acquisition of the raw journal — the journal
+      // file is not read again, let alone folded or written.
+      const rawReads = (): number => read.mock.calls.filter(([path]) => String(path) === log.path).length
+      const afterFirst = rawReads()
+      expect(afterFirst).toBeGreaterThan(0)
+      const second = readJournals(dir, { now: at })
+      expect(second.fallbacks).toMatchObject({
+        count: 1,
+        persistFailures: { count: 1, example: expect.stringContaining("no run header; nothing to persist") },
+      })
+      expect(fs.existsSync(artifact)).toBe(false)
+      expect(rawReads()).toBe(afterFirst)
+    } finally {
+      read.mockRestore()
+    }
+  })
+
+  it("leaves a newer-fold projection with a missing field byte-identical (28908)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-newer-fold-partial"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    log.finish()
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    const parsed = JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>
+    // A newer writer's artifact (fold 4) missing a field this build requires:
+    // the reader names it "partial" on shape before it ever orders versions,
+    // but the declared fold still owns it — no read may downgrade it.
+    const { runnerRecords: _dropped, ...rest } = parsed
+    writeFileSync(artifact, JSON.stringify({ ...rest, fold: 4 }))
+    const before = fs.readFileSync(artifact, "utf8")
+    const journals = readJournals(dir, { now: at })
+    expect(journals.fallbacks).toMatchObject({ count: 1, reasons: [{ reason: "partial", count: 1 }] })
+    expect(journals.fallbacks?.persistFailures).toBeUndefined()
+    expect(journals.runs.get(journalKey("task/one", "abc123"))?.[0]).toMatchObject({ id: log.id, decision: "failed" })
+    expect(fs.readFileSync(artifact, "utf8")).toBe(before)
   })
 
   it("repairs an older-fold projection so the next read finds it present (28908)", () => {
