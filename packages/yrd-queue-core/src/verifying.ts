@@ -546,9 +546,10 @@ export type SettledComposition = Readonly<{
 export type SettledGitlink = Readonly<{
   path: string
   /**
-   * git-super's plan row `recordedPin`: the pin this root's HEAD already
-   * RECORDS for the component before the merge. NOT the pin it lands, and NOT
-   * a move's `from` -- see `landingPin`.
+   * git-super's plan row `recordedPin`: the gitlink the prospective merge tree
+   * records for the component before component settling (for a `merged` row it
+   * is already the composed child). NOT the pin it lands, and NOT a move's
+   * `from` -- see `landingPin`.
    */
   recordedPin: string
   /** git-super's plan row `mainPin`: the component main this merge read and stood the recorded pin against. */
