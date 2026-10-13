@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `QueueRunOutcome` loses its `checkedWaiting` field and the two readers that consulted it
+  (`sleepAfter` and environment cleanup). The field was hardcoded `0` — a round returns on its
+  first merge, so no checked change can wait behind it — so the sleep test's impossible
+  "checked changes wait" case and the README's pre-migration walk wording go with it (28943).
+
 - The revert guard's S2 reverted-path walk is bounded at the change's divergence base: a branch that
   deletes lines an earlier merged change added, with no target advance on that path since the base,
   is its own deliberate change and no longer raises a reverted-paths warning. A candidate pin that
