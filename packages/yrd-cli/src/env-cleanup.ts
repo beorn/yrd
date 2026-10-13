@@ -186,23 +186,26 @@ async function consumeCloseRequests(
       `${staged} was left by a round that died mid-close; re-evaluated this round`,
     )
   }
-  const files = listCloseRequests(workdir).slice(0, ENVIRONMENT_BATCH)
-  if (files.length === 0) return { closed: 0, handled: new Set() }
-  const inventory = await environmentInventory(registry, worktrees, workdir)
-  let closed = 0
-  const handled = new Set<string>()
-  for (const file of files) {
-    let request: StoredCloseRequest
+  // 28836: ENVIRONMENT_BATCH bounds READABLE requests handled. An unreadable file is named and LEFT STANDING, as
+  // before, but it takes no slot; read through the sorted list until the batch is full or the list ends.
+  const readable: Array<{ file: string; request: StoredCloseRequest }> = []
+  for (const file of listCloseRequests(workdir)) {
+    if (readable.length >= ENVIRONMENT_BATCH) break
     try {
       const standing = readCloseRequest(file)
       if (standing === undefined) continue
-      request = standing
+      readable.push({ file, request: standing })
     } catch (cause) {
       // A file this round cannot read is named and LEFT STANDING: deleting it
       // would destroy the only record of who asked for what.
       journal(file, undefined, file, "unreadable", String(cause))
-      continue
     }
+  }
+  if (readable.length === 0) return { closed: 0, handled: new Set() }
+  const inventory = await environmentInventory(registry, worktrees, workdir)
+  let closed = 0
+  const handled = new Set<string>()
+  for (const { file, request } of readable) {
     handled.add(request.path)
     if (!existsSync(request.path)) {
       journal(file, request, request.path, "already-removed", `${request.path} is gone; the request is satisfied`)
