@@ -1659,6 +1659,22 @@ describe("a queue is the selected origin branch carrying config", () => {
     } finally {
       fs.renameSync(join(child, ".git-unavailable"), join(child, ".git"))
     }
+    // AC5 (29060): like the --local path (28791), the --submodules path must leave a
+    // journal the projection reader can persist. A writer that omits the run header
+    // writes an unreadable journal and a journal-projection warning, and every
+    // reader — this one or an older build — then refuses the whole queue on that
+    // single record. Custody assertions above miss it.
+    const dropLogs = join(await workdirOf(git, { cwd: repo }), "logs")
+    const dropJournals = readdirSync(dropLogs).filter((name) => name.endsWith(".jsonl"))
+    expect(dropJournals.length).toBeGreaterThan(0)
+    const dropRecords = dropJournals.flatMap((name) => readRunLog(dropLogs, name.slice(0, -".jsonl".length)))
+    for (const name of dropJournals) {
+      expect(readRunLog(dropLogs, name.slice(0, -".jsonl".length))[0]?.kind).toBe("run")
+    }
+    expect(dropRecords.filter((row) => row.subject === "journal-projection")).toEqual([])
+    expect(dropRecords).toContainEqual(
+      expect.objectContaining({ kind: "local-branch-retirement", branch: "task/28988-landed", outcome: "removed" }),
+    )
   }, 60_000)
 
   /**
