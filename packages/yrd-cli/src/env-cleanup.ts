@@ -950,7 +950,7 @@ async function cleanupEnvironments(
         }
       }
       // One close per round lets the queue judge a waiting merge before another removal.
-      if (closed > 0 || outcome.checkedWaiting > 0) {
+      if (closed > 0) {
         throw new Error("eligible; yielding to the next queue round before removal")
       }
       const freshHolder = busy(row.path, await census())

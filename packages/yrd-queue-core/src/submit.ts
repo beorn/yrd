@@ -678,7 +678,7 @@ export async function inspectSubmitAtHead(
   head: string,
 ): Promise<SubmitInspection> {
   const admitted = await admitSubmitAtHead(git, remote, request, head)
-  const ended = await withRemoteSeam("previewRetirement", () => endedSubjects(git, admitted.root, remote, request))
+  const { ended } = await withRemoteSeam("previewRetirement", () => endedSubjects(git, admitted.root, remote, request))
   const verifying = await composeSubmit(git, request, admitted, ended)
   const { root, bases: _bases, operational: _operational, ...inspection } = admitted
   return { ...inspection, verifying: await submissionReceipt(git, root, verifying) }
@@ -691,7 +691,14 @@ async function admitSubmitAtHead(
   head: string,
 ): Promise<SubmitAdmission> {
   refuseTarget(request.branch, request.target.branch)
-  const targetHead = await readRemoteCommit(git, request.target.remote, `refs/heads/${request.target.branch}`)
+  // 29087: with no admission policy to judge, a caller-captured target head
+  // needs no remote re-read: the declaration capture read it remotely
+  // seconds ago, and queue rounds re-read the current declaration before
+  // executing anything. With a policy declared, the re-read below is the
+  // stale-declaration guard and stays.
+  const captured = request.admit === undefined ? request.expectedTargetHead : undefined
+  const targetHead =
+    captured ?? (await readRemoteCommit(git, request.target.remote, `refs/heads/${request.target.branch}`))
   if (targetHead === undefined) throw new Error(`${targetName(request.target)} has no advertised target branch`)
   if (
     request.admit !== undefined &&
@@ -851,36 +858,41 @@ async function admitSubmitAtHead(
  * keep the seven-day preview-custody backstop: listing every change chain here shares the 300000 ms git bound. A
  * branch whose history is invalid is never evidence of retirement: it is named and left out.
  */
+type BranchHistoryRead = Awaited<ReturnType<typeof readBranchHistory>>
+
 async function endedSubjects(
   git: Git,
   root: string,
   remote: string,
   request: SubmitRequest,
-): Promise<ReadonlySet<string>> {
+): Promise<Readonly<{ ended: ReadonlySet<string>; selected: BranchHistoryRead | undefined }>> {
   const store = createEventStore(root, remote, selectionFor(git), runnerFor(git).backend)
   const format = await queueFormat(store, request.target.branch)
   // An empty queue has ended no change. One in another format cannot say which have: its retirement is the backstop.
-  if (format === "empty") return new Set()
+  if (format === "empty") return { ended: new Set(), selected: undefined }
   if (format !== "event") {
     console.warn(
       `yrd: preview custody cannot read which changes ended from ${request.target.branch}'s ${format} queue; their anchors retire at the seven-day backstop`,
     )
-    return new Set()
+    return { ended: new Set(), selected: undefined }
   }
   try {
-    const { history } = await readBranchHistory(store, request.target.branch, request.branch)
-    if (history === undefined) return new Set()
+    // 29087: this chain read is the same one submitEvent needs; return it so
+    // the submit fetches the branch's chain once, not twice.
+    const selected = await readBranchHistory(store, request.target.branch, request.branch)
+    const { history } = selected
+    if (history === undefined) return { ended: new Set(), selected }
     const { reason, status } = history.state
     if (status === "merged" || (status === "cancelled" && ["dropped", "withdrawn", "deleted"].includes(reason ?? ""))) {
-      return new Set([request.branch])
+      return { ended: new Set([request.branch]), selected }
     }
-    return new Set()
+    return { ended: new Set(), selected }
   } catch (error) {
     if (error instanceof Conflict) throw error
     console.warn(
       `yrd: preview custody keeps ${request.branch}'s anchors: its change history is unreadable: ${error instanceof Error ? error.message : String(error)}`,
     )
-    return new Set()
+    return { ended: new Set(), selected: undefined }
   }
 }
 
@@ -947,12 +959,14 @@ export async function prepareSubmit(git: Git, remote: string, request: SubmitReq
 
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
   const { branch: _branch, published, ...admitted } = await prepareSubmit(git, remote, request)
-  const ended = await withRemoteSeam("previewRetirement", () => endedSubjects(git, admitted.root, remote, request))
+  const { ended, selected } = await withRemoteSeam("previewRetirement", () =>
+    endedSubjects(git, admitted.root, remote, request),
+  )
   const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted, ended))
   const receipt = await submissionReceipt(git, admitted.root, verifying)
   const { root, bases: _bases, operational, ...inspection } = admitted
   return withRemoteSeam("submitEvent", () =>
-    submitEvent(git, remote, request, root, { ...inspection, verifying: receipt }, operational, published),
+    submitEvent(git, remote, request, root, { ...inspection, verifying: receipt }, operational, published, selected),
   )
 }
 
@@ -964,6 +978,7 @@ async function submitEvent(
   inspected: SubmitInspection,
   admittedOps: SubmitOps,
   published: readonly PublishedGitlink[],
+  preRead: BranchHistoryRead | undefined,
 ): Promise<Submitted> {
   const head = inspected.head
   const store = createEventStore(root, remote, selectionFor(git), runnerFor(git).backend)
@@ -999,7 +1014,17 @@ async function submitEvent(
             )
     const { ops } = operational
     refuseMaintenance(ops.stop, remote, request.target.branch, published)
-    const selected = await readBranchHistory(store, request.target.branch, request.branch)
+    // 29087: attempt 0 reuses previewRetirement's chain read of this same
+    // submit — but only a PRESENT history, whose movement the transact CAS
+    // fences (decideSubmit refuses an emptied hot chain, and a rejected CAS
+    // re-reads on attempt 1, as the ops are). An absent history fences
+    // nothing: a chain created and archived during composition would be
+    // invisible to the stale absence and a fresh hot chain could land
+    // beside the cold one, so absence is re-read here.
+    const selected =
+      attempt === 0 && preRead !== undefined && preRead.history !== undefined
+        ? preRead
+        : await readBranchHistory(store, request.target.branch, request.branch)
     const archived = selected.ref === coldRef ? selected.history?.events : undefined
     const branchAt = (await listRefs(branchRef, store)).get(branchRef) ?? null
     const input = changeInput("opened", {
@@ -1243,6 +1268,51 @@ async function submitEvent(
  * branch rename loses the binding. Conflicting explicit/declared issues refuse.
  * An unbound branch may use a declaration or the reported legacy name fallback.
  */
+export type IssueCandidate = Readonly<
+  { issue: string; source: "binding"; commit: string; trailer?: string } | { issue: string; source: "legacy-branch" }
+>
+
+/** The existing branch-name mapping, shared by submission and explicit issue cleanup. */
+export function issueFromBranchName(branch: string): string | undefined {
+  return /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
+}
+
+/**
+ * Read a branch's unresolved binding candidates in Git's history order.
+ * Callers that can resolve many references in one read use this instead of
+ * invoking a resolver while walking each branch.
+ */
+export async function issueCandidatesOf(
+  git: Git,
+  branch: string,
+  head: string,
+  targetHead: string,
+): Promise<readonly IssueCandidate[]> {
+  let base: string
+  try {
+    const found = await mergeBase(git, head, targetHead)
+    if (found === undefined) throw new Error("no merge base")
+    base = found
+  } catch (cause) {
+    throw new Error(
+      `cannot read issue binding for ${branch} at ${head} against target ${targetHead}: ${String(cause)}`,
+      { cause },
+    )
+  }
+  const candidates: IssueCandidate[] = []
+  for await (const candidate of issueBindingsOf(git, [`${base}..${head}`, `^${targetHead}`], branch)) {
+    candidates.push({
+      issue: candidate.issue,
+      source: "binding",
+      commit: candidate.commit,
+      ...(candidate.trailer === undefined ? {} : { trailer: candidate.trailer }),
+    })
+  }
+  if (candidates.length > 0) return candidates
+  const legacy = issueFromBranchName(branch)
+  return legacy === undefined ? [] : [{ issue: legacy, source: "legacy-branch" }]
+}
+
 export async function issueOf(
   git: Git,
   branch: string,
@@ -1259,20 +1329,12 @@ export async function issueOf(
       `issue for ${branch} must be a nonempty single-line value without surrounding whitespace or control characters`,
     )
   }
-  let base: string
-  try {
-    const found = await mergeBase(git, head, targetHead)
-    if (found === undefined) throw new Error("no merge base")
-    base = found
-  } catch (cause) {
-    throw new Error(
-      `cannot read issue binding for ${branch} at ${head} against target ${targetHead}: ${String(cause)}`,
-      { cause },
-    )
-  }
+  const candidates = await issueCandidatesOf(git, branch, head, targetHead)
   let binding: IssueResolution | undefined
-  for await (const candidate of issueBindingsOf(git, [`${base}..${head}`, `^${targetHead}`], branch, resolveIssue)) {
-    const { issue, commit } = candidate
+  for (const candidate of candidates) {
+    if (candidate.source !== "binding") continue
+    const issue = await canonicalIssue(candidate.issue, branch, resolveIssue)
+    const commit = candidate.commit
     if (binding === undefined) binding = { issue, source: "binding", commit }
     else if (binding.issue !== issue) {
       const trailer = candidate.trailer ?? "Refs/Resolves"
@@ -1294,10 +1356,10 @@ export async function issueOf(
     return binding
   }
   if (declared !== undefined) return { issue: await canonicalIssue(declared, branch, resolveIssue), source: "declared" }
-  const legacy = /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
+  const legacy = candidates.find((candidate) => candidate.source === "legacy-branch")
   return legacy === undefined
     ? undefined
-    : { issue: await canonicalIssue(legacy, branch, resolveIssue), source: "legacy-branch" }
+    : { issue: await canonicalIssue(legacy.issue, branch, resolveIssue), source: "legacy-branch" }
 }
 
 /** Read all explicit bindings through the submit decoder, preserving Git's commit order. */

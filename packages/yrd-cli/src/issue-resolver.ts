@@ -65,7 +65,7 @@ export function issueLookup(
   }
 }
 
-/** Cache identity only; cleanup uses the same lookup without caching closure status. */
+/** Cache canonical identity for submission. */
 export function issueResolver(config: QueueConfig, cwd: string, env?: NodeJS.ProcessEnv): IssueResolver | undefined {
   const lookup = issueLookup(config, cwd, env)
   if (lookup === undefined) return undefined

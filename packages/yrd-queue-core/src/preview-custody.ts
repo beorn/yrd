@@ -216,12 +216,17 @@ async function retireRoots(
   const ended = new Set([...(options.retired ?? [])].map((subject) => encodeQueueComponent(subject)))
   const now = (options.now ?? Date.now)()
   const retired: Array<Readonly<{ name: string; oid: string }>> = []
-  for (const root of await refsUnder(rootGit, clonePrefix)) {
-    if (root.name.startsWith(ownPrefix)) continue
+  const roots = (await refsUnder(rootGit, clonePrefix)).filter((root) => !root.name.startsWith(ownPrefix))
+  const ages = roots.some((root) => !ended.has(root.name.slice(clonePrefix.length).split("/")[0] ?? ""))
+    ? await firstReflogSeconds(rootGit, clonePrefix)
+    : new Map<string, number | string>()
+  if (typeof ages === "string") options.leftover?.(`${ages}; age-dependent anchors in ${clonePrefix} are kept`)
+  for (const root of roots) {
     const subject = root.name.slice(clonePrefix.length).split("/")[0] ?? ""
     let expired = ended.has(subject)
     if (!expired) {
-      const made = await firstReflogSeconds(rootGit, root.name)
+      if (typeof ages === "string") continue
+      const made = ages.get(root.name) ?? 'its oldest reflog entry reads ""'
       if (typeof made === "string") {
         options.leftover?.(`${root.name}'s age is unknown, so it is kept: ${made}`)
         continue
@@ -235,17 +240,27 @@ async function retireRoots(
   return retired
 }
 
-/** When `ref`'s reflog began, in Unix seconds; otherwise why it cannot be told (no reflog, or one that reads oddly). */
-async function firstReflogSeconds(git: Git, ref: string): Promise<number | string> {
+/** Oldest reflog entry per full ref, observed once inside the writer lock; an unreadable batch never means expiry. */
+async function firstReflogSeconds(git: Git, prefix: string): Promise<ReadonlyMap<string, number | string> | string> {
   let entries: string
   try {
-    entries = (await git(["reflog", "show", "--date=unix", "--format=%gd", ref, "--"])).trim()
+    entries = (await git(["reflog", "show", "--date=unix", "--format=%gD", `--glob=${prefix}*`, "--"])).trim()
   } catch (error) {
-    return `reading its reflog failed: ${error instanceof Error ? error.message : String(error)}`
+    return `reading preview reflogs in ${prefix} failed: ${error instanceof Error ? error.message : String(error)}`
   }
-  const oldest = entries.split("\n").at(-1) ?? ""
-  const seconds = /@\{(\d+)\}$/u.exec(oldest)?.[1]
-  return seconds === undefined ? `its oldest reflog entry reads ${JSON.stringify(oldest)}` : Number(seconds)
+  const ages = new Map<string, number | string>()
+  if (entries === "") return ages
+  for (const entry of entries.split("\n")) {
+    const selector = /^(.*)@\{([^}]*)\}$/u.exec(entry)
+    const name = selector?.[1]
+    if (name === undefined || !name.startsWith(prefix)) {
+      return `reading preview reflogs in ${prefix} failed: unrecognized entry ${JSON.stringify(entry)}`
+    }
+    const seconds = selector?.[2] ?? ""
+    // Git visits each ref's entries newest first, possibly interleaved with other refs.
+    ages.set(name, /^\d+$/u.test(seconds) ? Number(seconds) : `its oldest reflog entry reads ${JSON.stringify(entry)}`)
+  }
+  return ages
 }
 
 /** The clone's main worktree, whose checkout paths lead to the common dir's module stores. */
@@ -304,10 +319,17 @@ async function sweepOrphans(
   stores: ReadonlySet<string>,
   leftover: PreviewCustodyOptions["leftover"],
 ): Promise<void> {
+  // Both callers hold the clone writer lock, after their root changes. Share
+  // this observation only for this sweep; a later invocation reads it again.
+  const liveRoots = new Set<string>()
+  for (const root of await refsUnder(rootGit, clonePrefix)) {
+    // Keep refAt's tag peeling and loud errors for unusual root objects.
+    if (root.type === "commit" || (await refAt(rootGit, root.name)) !== undefined) liveRoots.add(root.name)
+  }
   for (const store of stores) {
     const storeGit = gitIn(store)
     for (const ref of await refsUnder(storeGit, clonePrefix)) {
-      if ((await refAt(rootGit, ref.name)) !== undefined) continue
+      if (liveRoots.has(ref.name)) continue
       try {
         await storeGit(["update-ref", "-d", ref.name, ref.oid])
       } catch (error) {
@@ -317,12 +339,17 @@ async function sweepOrphans(
   }
 }
 
-async function refsUnder(git: Git, prefix: string): Promise<readonly Readonly<{ name: string; oid: string }>[]> {
-  const listed = (await git(["for-each-ref", "--format=%(refname) %(objectname)", prefix])).trim()
+async function refsUnder(
+  git: Git,
+  prefix: string,
+): Promise<readonly Readonly<{ name: string; oid: string; type: string }>[]> {
+  const listed = (await git(["for-each-ref", "--format=%(refname) %(objectname) %(objecttype)", prefix])).trim()
   if (listed === "") return []
   return listed.split("\n").map((line) => {
-    const [name, oid] = line.split(" ")
-    if (name === undefined || oid === undefined) throw new Error(`for-each-ref ${prefix} printed ${line}`)
-    return { name, oid }
+    const [name, oid, type] = line.split(" ")
+    if (name === undefined || oid === undefined || type === undefined) {
+      throw new Error(`for-each-ref ${prefix} printed ${line}`)
+    }
+    return { name, oid, type }
   })
 }

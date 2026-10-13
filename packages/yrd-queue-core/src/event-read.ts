@@ -17,6 +17,20 @@ import {
 /** The wave size a complete read pages at, one git process per wave. */
 export const EVENT_READ_LIMIT = 1024
 
+/**
+ * A selected change ref moved between this read's advertisement and its fetch.
+ * It is the ONE conflict a listing re-inventories instead of reporting (28941):
+ * a fresh inventory is its stated cure, and the moved refs ride the error so a
+ * caller names them from the field, never by parsing the message.
+ */
+export class EventRefsMoved extends Conflict {
+  constructor(readonly movedRefs: readonly string[]) {
+    super(`event refs moved after the selected inventory; retry the reading: ${movedRefs.join(", ")}`, {
+      refs: movedRefs,
+    })
+  }
+}
+
 type Chain = Awaited<ReturnType<typeof openEvents>>
 type ChainStore = Omit<Parameters<typeof chainsUnder>[1], "limit" | "complete">
 export type RecentEventReadOptions = Parameters<typeof readEventCommitMetadata>[2] & { since: number }
@@ -167,11 +181,7 @@ export async function readEventChains(
       if (backend.fetchRefs === undefined) throw new TypeError("remote event reading requires a fetch-capable backend")
       const acquired = await backend.fetchRefs(store.repo, [...selected.keys()], store.remote, { absent: "omit" })
       const moved = [...selected].filter(([ref, oid]) => acquired.get(ref) !== oid).map(([ref]) => ref)
-      if (moved.length > 0) {
-        throw new Conflict(`event refs moved after the selected inventory; retry the reading: ${moved.join(", ")}`, {
-          refs: moved,
-        })
-      }
+      if (moved.length > 0) throw new EventRefsMoved(moved)
       acquiredExact = true
     }
     selected = await recentEventRefs(selected, store.repo, recent)
@@ -192,11 +202,7 @@ export async function readEventChains(
       if (backend.fetchRefs === undefined) throw new TypeError("remote event reading requires a fetch-capable backend")
       const acquired = await backend.fetchRefs(repo, [...selected.keys()], remote, { absent: "omit" })
       const moved = [...selected].filter(([ref, oid]) => acquired.get(ref) !== oid).map(([ref]) => ref)
-      if (moved.length > 0) {
-        throw new Conflict(`event refs moved after the selected inventory; retry the reading: ${moved.join(", ")}`, {
-          refs: moved,
-        })
-      }
+      if (moved.length > 0) throw new EventRefsMoved(moved)
       return selected
     },
   }

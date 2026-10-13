@@ -162,7 +162,7 @@ it("names the private-store refusal by class and the real verify route in the sw
     io: { cwd: repo, stdout: () => {}, stderr: () => {} },
     selection: git.selection,
     resolveIssue: undefined,
-    outcome: { run: "sweep-private-class", log, merged: [], target: head, checkedWaiting: 0 } as never,
+    outcome: { run: "sweep-private-class", log, merged: [], target: head } as never,
   })
 
   const kept = cleanupRows(workdir).find((row) => row.result === "kept" && row.path === env)
@@ -204,7 +204,7 @@ it("keeps a standing close request when the refusal's own class arrives on the f
     io: { cwd: repo, stdout: () => {}, stderr: () => {} },
     selection: git.selection,
     resolveIssue: undefined,
-    outcome: { run: "sweep-private-request", log, merged: [], target: head, checkedWaiting: 0 } as never,
+    outcome: { run: "sweep-private-request", log, merged: [], target: head } as never,
   })
 
   const rows = cleanupRows(workdir)

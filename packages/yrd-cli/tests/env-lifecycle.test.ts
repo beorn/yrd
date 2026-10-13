@@ -519,6 +519,29 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
   })
 
   /**
+   * @failure 28991: `yrd env close --retain --json` consumed the `--json` flag as
+   *          the retention directory and resolved it against the caller's cwd, so
+   *          the close wrote a git-super retention tree into a `--json/` directory
+   *          in whatever directory yrd ran in - on Oct 13 00:39 the shared CODE
+   *          projection /hh/dev, which the root-shape guard read as a new root entry.
+   * @level   l2 (real CLI against a real retained worktree)
+   * @consumer every caller whose `--retain` value is not an absolute path
+   */
+  it("refuses a non-absolute --retain instead of resolving it against the caller's cwd (28991)", async () => {
+    const w = await world(":")
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const run = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--retain", "--json"], run.io), run.stderr()).toBe(
+      2,
+    )
+    expect(run.stderr()).toContain("--retain")
+    expect(run.stderr()).toMatch(/\babsolute\b/)
+    expect(existsSync(join(w.work, "--json"))).toBe(false)
+    expect(existsSync(path)).toBe(true)
+    expect(await w.git(["worktree", "list", "--porcelain"])).toContain(path)
+  })
+
+  /**
    * @failure 28120: direct close removed an unrelated process's cwd and ran teardown first.
    * @level l2 (real CLI and native cwd holder in a temporary retained worktree)
    * @consumer callers closing an environment still used by another process

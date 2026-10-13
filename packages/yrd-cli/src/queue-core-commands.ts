@@ -29,6 +29,7 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
+import { readCommitSubmodules } from "git-super/commit-graph"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
 import { issueResolver } from "./issue-resolver.ts"
@@ -49,7 +50,11 @@ import {
   claimWorktrees,
   directMergeLine,
   drop,
-  issueOf,
+  issueFromBranchName,
+  isAncestor,
+  seamProcess,
+  initial,
+  evolve,
   normalizeIssueReference,
   retireLocalBranch,
   pauseLine,
@@ -57,6 +62,7 @@ import {
   eventListRows,
   eventRows,
   enumerateChangeSegments,
+  EventRefsMoved,
   isOpen,
   createEventStore,
   createLocalEventStore,
@@ -406,7 +412,16 @@ export type CoreQueueCommand =
     }>
   | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string; recipient?: string }>
   | Readonly<{ command: "drop"; branch: string; by: string; reason?: string; recipient?: string }>
-  | Readonly<{ command: "drop-issue"; issue: string; by: string; reason?: string; recipient?: string }>
+  | Readonly<{
+      command: "drop-issue"
+      issue: string
+      by: string
+      reason?: string
+      recipient?: string
+      submodules?: boolean
+      dryRun?: boolean
+      apply?: boolean
+    }>
   | Readonly<{
       command: "drop-local"
       branch: string
@@ -859,7 +874,7 @@ export async function coreQueueCommand(
     request.command === "resume" ||
     request.command === "withdraw" ||
     request.command === "drop" ||
-    request.command === "drop-issue" ||
+    (request.command === "drop-issue" && (request.submodules ? request.apply : !request.dryRun)) ||
     request.command === "drop-local" ||
     request.command === "ignore" ||
     request.command === "unignore" ||
@@ -1347,10 +1362,217 @@ export async function coreQueueCommand(
         throw new Error(`${NAMED[request.command]} requires the authoring repository as cwd`)
       }
       const authorGit = gitIn(authorRepo, undefined, selection, { env })
-      const issue =
-        request.issue === undefined
-          ? undefined
-          : normalizeIssueReference(resolveIssue === undefined ? request.issue : await resolveIssue(request.issue))
+      const issueIdentity = (value: string): string => {
+        const normalized = normalizeIssueReference(value)
+        return /^#?(\d+)$/u.exec(normalized)?.[1] ?? issueFromBranchName(normalized) ?? normalized
+      }
+      const mode =
+        "Root issue cleanup applies by default using exact origin custody; --submodules previews because it expands to component repositories."
+      const branchIssue = (branch: string, recordedIssue?: string): string | undefined => {
+        const mapped =
+          io.branchIssue === undefined
+            ? (recordedIssue ?? issueFromBranchName(branch))
+            : io.branchIssue({ branch, recordedIssue })
+        return mapped === undefined ? undefined : issueIdentity(mapped)
+      }
+      if (request.command === "drop-issue" && request.submodules) {
+        const issue = normalizeIssueReference(request.issue)
+        const numeric = issueIdentity(issue)
+        if (io.branchIssue === undefined && !/^\d+$/u.test(numeric)) {
+          throw new Error(`drop --submodules needs a numeric issue or a path ending in <number>-<slug>: ${issue}`)
+        }
+        const eventStore = createEventStore(authorRepo, await remoteUrl(git, config.target.remote), selection)
+        const reading = await readEventQueueWithChanges(eventStore, config.target.branch)
+        const landings: { event: string; path: string; tip: string }[] = []
+        for (const history of reading.histories.values()) {
+          let state = initial
+          for (const event of history.events) {
+            state = evolve(state, event)
+            if (event.type === "merged") {
+              for (const pin of state.landedGitlinks ?? []) {
+                landings.push({ event: event.id, path: pin.path, tip: pin.target })
+              }
+            }
+          }
+        }
+        type Row = {
+          repo: string
+          path: string
+          branch: string
+          head: string
+          reason: string
+          detail?: string
+          archiveRef?: string
+        }
+        const eligible: Row[] = []
+        const removed: Row[] = []
+        const kept: Row[] = []
+        const failed: Row[] = []
+        const inspected: string[] = []
+        const excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[] = []
+        const log = openLog(join(workdir, "logs"))
+        // THE HEADER FIRST, before the walk writes any retirement record. A journal
+        // whose first record is not a run or Git row is one the projection reader
+        // refuses (`invalid record before run header`) and every reader older than
+        // it refuses with it — one record then denies the whole queue its positions
+        // (28791 learned this for the sibling drop path; this path wrote records
+        // with no header at all). The queue row marks the preamble complete so the
+        // journal never reads as a run that died in it (24470).
+        log.write({
+          command: NAMED[request.command],
+          config: config.blob,
+          kind: "run",
+          target: targetLabel,
+        })
+        log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
+        const visit = async (repository: string, path: string, commit: string): Promise<void> => {
+          const childGit = gitIn(repository, undefined, selection, { env })
+          try {
+            // A missing child .git must never let Git walk upward and operate on its parent.
+            if (
+              !existsSync(join(repository, ".git")) ||
+              realpathSync((await childGit(["rev-parse", "--show-toplevel"])).trim()) !== realpathSync(repository)
+            ) {
+              throw new Error(`registered repository ${repository} is not materialized at its named path`)
+            }
+            inspected.push(repository)
+            const heads = await listRefs("refs/heads/", createLocalEventStore(repository, selection))
+            const targetBranch = path === "" ? config.target.branch : "main"
+            const candidates: { branch: string; head: string }[] = []
+            const counts = { repo: repository, target: 0, unrelated: 0, unnumbered: 0 }
+            excluded.push(counts)
+            for (const [ref, head] of heads) {
+              const branch = ref.slice("refs/heads/".length)
+              const bound =
+                io.branchIssue !== undefined || /^(task|exp)\//u.test(branch)
+                  ? branchIssue(branch, path === "" ? reading.histories.get(branch)?.state.issue : undefined)
+                  : undefined
+              if (branch === targetBranch || bound !== numeric) {
+                if (branch === targetBranch) counts.target++
+                else if (bound === undefined) counts.unnumbered++
+                else counts.unrelated++
+              } else candidates.push({ branch, head })
+            }
+            if (candidates.length > 0) {
+              const remote = path === "" ? eventStore.remote : await remoteUrl(childGit, "origin")
+              const target = await readRemoteCommit(childGit, remote, `refs/heads/${targetBranch}`)
+              if (target === undefined) {
+                throw new Error(`registered repository ${repository} has no ${remote}#${targetBranch}`)
+              }
+              let remoteRefs: ReadonlyMap<string, string> | undefined
+              for (const { branch, head } of candidates) {
+                const row = { repo: repository, path, branch, head }
+                const pins = landings.filter((pin) => pin.path === path)
+                const pin = pins.find((candidate) => candidate.tip === head)
+                let custody: string | undefined = (await isAncestor(childGit, head, target)) ? target : undefined
+                let proof: { kind: "ancestry" } | { kind: "landing"; event: string; path: string; tip: string } = {
+                  kind: "ancestry",
+                }
+                if (custody === undefined && pin !== undefined) {
+                  // A root gitlink retains no component object. Observe custody at component origin as well.
+                  remoteRefs ??= await listRefs("refs/", createEventStore(repository, remote, selection))
+                  for (const [ref] of remoteRefs) {
+                    const reached = await readRemoteCommit(childGit, remote, ref)
+                    if (reached !== undefined && (await isAncestor(childGit, head, reached))) {
+                      custody = reached
+                      proof = { kind: "landing", ...pin }
+                      break
+                    }
+                  }
+                }
+                if (custody === undefined) {
+                  kept.push({
+                    ...row,
+                    reason: "unreached",
+                    detail: `tip has no main ancestry or origin-retained exact landing pin in ${repository}`,
+                  })
+                  continue
+                }
+                const result = await retireLocalBranch({
+                  repo: repository,
+                  git: childGit,
+                  branch,
+                  tip: head,
+                  actor: request.by,
+                  issue,
+                  reason: request.reason ?? `landed by ${proof.kind}`,
+                  date: new Date().toISOString().slice(0, 10),
+                  dryRun: !request.apply,
+                  log,
+                  protections: () =>
+                    io.localBranchProtections?.({ repo: repository, branch, tip: head, issue }) ?? Promise.resolve([]),
+                  disposition: { kind: "landed", target: custody, proof },
+                })
+                const output = {
+                  ...row,
+                  reason: result.reason,
+                  ...(result.detail === undefined ? {} : { detail: result.detail }),
+                  archiveRef: result.archiveRef,
+                }
+                if (result.outcome === "eligible") eligible.push(output)
+                else if (result.outcome === "removed") removed.push(output)
+                else if (result.outcome === "failed") {
+                  failed.push({ ...output, reason: "failed", detail: result.reason })
+                } else kept.push(output)
+              }
+            }
+            for (const child of await readCommitSubmodules(seamProcess(childGit, repository), repository, commit)) {
+              await visit(
+                join(repository, child.path),
+                path === "" ? child.path : `${path}/${child.path}`,
+                child.target,
+              )
+            }
+          } catch (error) {
+            // Report the named unreadable repository and exit nonzero after examining the remaining stores.
+            failed.push({
+              repo: repository,
+              path,
+              branch: "",
+              head: commit,
+              reason: "unreadable",
+              detail: String(error),
+            })
+          }
+        }
+        try {
+          await visit(authorRepo, "", (await authorGit(["rev-parse", "HEAD"])).trim())
+        } finally {
+          log.finish()
+        }
+        const report = {
+          issue,
+          repo: authorRepo,
+          apply: request.apply === true,
+          mode,
+          inspected,
+          excluded,
+          eligible,
+          removed,
+          kept,
+          failed,
+        }
+        emit(
+          io,
+          options.json,
+          report,
+          `issue ${issue}: inspected ${inspected.length} repositories in ${authorRepo}; eligible ${eligible.length}, retired ${removed.length}, kept ${kept.length}, failed ${failed.length}\n${mode}` +
+            excluded
+              .map(
+                (row) =>
+                  `\n${row.repo}: excluded ${row.target} target, ${row.unrelated} unrelated, ${row.unnumbered} unnumbered`,
+              )
+              .join("") +
+            [...eligible, ...removed, ...kept, ...failed]
+              .map(
+                (row) =>
+                  `\n${row.repo} ${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`,
+              )
+              .join(""),
+        )
+        return failed.length === 0 ? 0 : 1
+      }
+      const issue = request.issue === undefined ? undefined : normalizeIssueReference(request.issue)
       if (local && (request.branch === config.target.branch || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(request.tip))) {
         throw new Error("drop --local requires a non-target branch and a full expected commit oid")
       }
@@ -1373,69 +1595,124 @@ export async function coreQueueCommand(
         config: config.blob,
       })
       log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
-      const removed: { branch: string; head: string; archiveRef: string }[] = []
-      const kept: { branch: string; head: string; reason: string }[] = []
-      const failed: { branch: string; head: string; reason: string }[] = []
-      const unclassified: { branch: string; head: string; reason: string; cure: string }[] = []
+      type Row = { branch: string; head: string; reason: string; detail?: string; archiveRef?: string }
+      const eligible: Row[] = []
+      const removed: Row[] = []
+      const kept: Row[] = []
+      const failed: Row[] = []
       let excluded = 0
+      const dryRun = !local && request.dryRun === true
       try {
+        // Inventory once. The date and actor occupy exactly two segments; branch names may contain slashes.
+        const archives = local ? new Map<string, string>() : await listRefs("refs/archive/", eventStore)
         for (const [ref, head] of heads) {
           const branch = ref.slice("refs/heads/".length)
           if (branch === config.target.branch || (local && branch !== request.branch)) {
             excluded++
             continue
           }
-          const change = reading.histories.get(branch)?.state
-          let bound: string | undefined
-          try {
-            bound =
-              change?.issue ??
-              (local ? issue : (await issueOf(authorGit, branch, head, target, undefined, resolveIssue))?.issue)
-          } catch (error) {
-            // delete-fallback-allow: an unreadable binding is reported as unclassified and immediately continued, so it only shrinks the branches retired.
-            unclassified.push({
-              branch,
-              head,
-              reason: `issue binding unreadable: ${String(error)}`,
-              cure: `fix the issue trailer, or yrd drop ${branch} --local --tip ${head}`,
-            })
+          const history = reading.histories.get(branch)
+          const change = history?.state
+          const row = { branch, head }
+          const invalid = reading.invalid.get(branch)
+          if (invalid !== undefined) {
+            failed.push({ ...row, reason: "unreadable", detail: `${invalid.ref}@${invalid.tip}: ${invalid.error}` })
             continue
           }
-          if (local && issue !== undefined && bound !== issue) {
-            kept.push({ branch, head, reason: `recorded issue ${bound ?? "absent"} differs from reviewed ${issue}` })
+          if (change?.diagnostic !== undefined) {
+            failed.push({ ...row, reason: "unreadable", detail: change.diagnostic })
             continue
           }
-          if (!local && bound !== issue) {
+          const bound = local ? (change?.issue ?? issue) : branchIssue(branch, change?.issue)
+          if (!local && (bound === undefined || issueIdentity(bound) !== issueIdentity(request.issue))) {
             excluded++
             continue
           }
-          const tip = change?.commit ?? (local ? request.tip : head)
-          if (local && tip !== request.tip) {
+          if (local && issue !== undefined && bound !== undefined && issueIdentity(bound) !== issueIdentity(issue)) {
+            kept.push({ ...row, reason: "mismatch", detail: `recorded issue ${bound} differs from reviewed ${issue}` })
+            continue
+          }
+          if ((local && head !== request.tip) || (change?.commit !== undefined && change.commit !== head)) {
             kept.push({
-              branch,
-              head,
-              reason: `submitted tip ${tip} differs from requested ${request.tip}; advanced work is kept`,
+              ...row,
+              reason: "advanced",
+              detail: `current tip ${head} differs from ${local ? request.tip : change?.commit}`,
             })
             continue
+          }
+          if (!local && change !== undefined && isOpen(change.status)) {
+            kept.push({ ...row, reason: "active", detail: `change is ${change.status}` })
+            continue
+          }
+          let disposition: Parameters<typeof retireLocalBranch>[0]["disposition"]
+          if (local) {
+            disposition = { kind: "closed", store: eventStore, queue: config.target.branch, target }
+          } else {
+            const landing =
+              history === undefined
+                ? undefined
+                : enumerateChangeSegments(history.events, changesRef(config.target.branch, branch), authorRepo).find(
+                    (segment) => segment.head === head && segment.state.status === "merged",
+                  )
+            const archive = [...archives].find(
+              ([archiveRef, tip]) =>
+                tip === head && /^refs\/archive\/[^/]+\/[^/]+\/(.+)$/u.exec(archiveRef)?.[1] === branch,
+            )
+            if (landing !== undefined) {
+              const ending = landing.state.ending
+              if (ending === undefined) {
+                failed.push({
+                  ...row,
+                  reason: "unreadable",
+                  detail: `merged segment ${landing.opened} has no ending event`,
+                })
+                continue
+              }
+              disposition = {
+                kind: "landed",
+                target: head,
+                proof: { kind: "landing", event: ending.id, path: "", tip: head },
+              }
+            } else if (archive !== undefined) {
+              disposition = { kind: "archived", target: head, ref: archive[0] }
+            } else {
+              kept.push({
+                ...row,
+                reason: "unreached",
+                detail: "no exact submitted root tip in merged history or same-branch origin archive",
+              })
+              continue
+            }
           }
           const result = await retireLocalBranch({
             repo: authorRepo,
             git: authorGit,
             branch,
-            tip,
+            tip: head,
             actor: request.by,
-            owner: change?.submitter ?? (await authorGit(["show", "-s", "--format=%an", tip])).trim(),
+            owner: change?.submitter,
             issue: bound,
-            reason: request.reason ?? (local ? "explicit local branch cleanup" : "issue closed or dropped"),
+            reason: request.reason ?? (local ? "explicit local branch cleanup" : disposition.kind),
             date: new Date().toISOString().slice(0, 10),
+            dryRun,
             log,
             protections: () =>
-              io.localBranchProtections?.({ repo: authorRepo, branch, tip, issue: bound }) ?? Promise.resolve([]),
-            disposition: { kind: "closed", store: eventStore, queue: config.target.branch, target },
+              io.localBranchProtections?.({ repo: authorRepo, branch, tip: head, issue: bound }) ?? Promise.resolve([]),
+            disposition,
           })
-          if (result.outcome === "removed") removed.push({ branch, head: tip, archiveRef: result.archiveRef })
-          else if (result.outcome === "failed") failed.push({ branch, head, reason: result.reason })
-          else kept.push({ branch, head, reason: result.reason })
+          const output = {
+            ...row,
+            reason:
+              !local && (result.outcome === "removed" || result.outcome === "eligible")
+                ? disposition.kind
+                : result.reason,
+            detail: result.detail,
+            archiveRef: result.archiveRef,
+          }
+          if (result.outcome === "eligible") eligible.push(output)
+          else if (result.outcome === "removed") removed.push(output)
+          else if (result.outcome === "failed") failed.push({ ...output, reason: "failed", detail: result.reason })
+          else kept.push({ ...output, reason: local ? "held" : result.reason })
         }
       } finally {
         log.finish()
@@ -1444,21 +1721,23 @@ export async function coreQueueCommand(
       const report = {
         ...(local ? { branch: request.branch } : { issue }),
         repo: authorRepo,
+        apply: !dryRun,
+        mode,
         examined: heads.size,
         excluded,
+        eligible,
         removed,
         kept,
         failed,
-        unclassified,
       }
       emit(
         io,
         options.json,
         report,
-        `${scope}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excluded} target or out-of-scope branches; retired ${removed.length}, kept ${kept.length}, failed ${failed.length}, unclassified ${unclassified.length}` +
-          kept.map((row) => `\nkept ${row.branch}: ${row.reason}`).join("") +
-          failed.map((row) => `\nfailed ${row.branch}: ${row.reason}`).join("") +
-          unclassified.map((row) => `\nunclassified ${row.branch}: ${row.reason}; ${row.cure}`).join(""),
+        `${scope}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excluded} target or out-of-scope branches; eligible ${eligible.length}, retired ${removed.length}, kept ${kept.length}, failed ${failed.length}\n${mode}` +
+          [...eligible, ...removed, ...kept, ...failed]
+            .map((row) => `\n${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`)
+            .join(""),
       )
       return failed.length === 0 ? 0 : 1
     }
@@ -3751,8 +4030,39 @@ export async function coreQueueCommand(
       const stopped = (): boolean => request.stop?.aborted === true
       let first = true
       let declared = captured
+      /** Wait out one interval, then re-read the declaration the next tick reads. */
+      const pauseAndRefresh = async (): Promise<YrdCliExitCode | undefined> => {
+        await new Promise((resolve) => {
+          setTimeout(resolve, interval)
+        })
+        if (stopped()) return 0
+        const refreshed = await declaration()
+        if (refreshed === undefined) return noQueueOnTarget(targetLabel)
+        declared = refreshed
+        return undefined
+      }
+      /**
+       * One listing round, taking the ONE failure a watch survives (28941): a
+       * queue too hot for a single reading says the exhaustion and the loop takes
+       * its next tick — a watch is a LOOP and a hot queue must never end one.
+       * Every other failure still ends the watch.
+       */
+      const roundOrSayExhausted = async (): Promise<ListingRound<JournalSummary> | undefined> => {
+        try {
+          return await round(declared, undefined, "omit")
+        } catch (error) {
+          if (!(error instanceof EventListingAcquireExhausted)) throw error
+          io.stderr(`yrd: ${error.message}\n`)
+          return undefined
+        }
+      }
       for (;;) {
-        const one = await round(declared, undefined, "omit")
+        const one = await roundOrSayExhausted()
+        if (one === undefined) {
+          const ended = await pauseAndRefresh()
+          if (ended !== undefined) return ended
+          continue
+        }
         // A selector that matches nothing would otherwise wait forever for a
         // change that is not there. It is refused loudly, with what was asked
         // for and where it was looked for.
@@ -3775,13 +4085,8 @@ export async function coreQueueCommand(
           if (ending !== undefined) return ending
         }
         if (stopped()) return 0
-        await new Promise((resolve) => {
-          setTimeout(resolve, interval)
-        })
-        if (stopped()) return 0
-        const refreshed = await declaration()
-        if (refreshed === undefined) return noQueueOnTarget(targetLabel)
-        declared = refreshed
+        const ended = await pauseAndRefresh()
+        if (ended !== undefined) return ended
         // The drafts are not what a selector waits on: a head that cannot be
         // fetched is said, once, and never ends the watch or changes its code.
         await sightDrafts(one).catch((error: unknown) => {
@@ -4884,11 +5189,10 @@ export const READY_SLEEP_MS = 1000
  * another waited the full interval for no reason — at `--interval 120`, two
  * wasted minutes per merge, on top of the check that judged it.
  *
- * A round that merged, or that left checked changes it did not act on (the
- * queue merges the first checked change and no more), has more to do NOW, and
- * goes again at {@link READY_SLEEP_MS}. Never longer than the interval, so a
- * short interval stays a short interval. A round that held a stopped line did
- * neither, and waits the interval.
+ * A round that merged has more to do NOW: it takes one change per round, so
+ * another may be ready behind it, and it goes again at {@link READY_SLEEP_MS}.
+ * Never longer than the interval, so a short interval stays a short interval.
+ * A round that held a stopped line did neither, and waits the interval.
  */
 /**
  * The line's flow once a round has ended (25669). The round's own reading of the
@@ -4994,7 +5298,7 @@ export async function roundPhase(
 }
 
 export function sleepAfter(outcome: QueueRunOutcome, intervalMs: number): number {
-  const ready = outcome.merged.length > 0 || outcome.checkedWaiting > 0
+  const ready = outcome.merged.length > 0
   return ready ? Math.min(intervalMs, READY_SLEEP_MS) : intervalMs
 }
 
@@ -5942,17 +6246,40 @@ export async function readEventListing(
           timeoutMs: 30_000,
         }
   await using _metadataOwner = metadataRead?.process
-  const acquired =
-    options.branch === undefined
-      ? await readEventQueueWithChanges(store, config.target.branch, metadataRead)
-      : await Promise.all([
-          readEventQueue(store, config.target.branch),
-          readBranchHistory(store, config.target.branch, options.branch, { invalid: "return" }),
-        ]).then(([queue, selected]) => ({
-          queue,
-          histories: new Map(selected.history === undefined ? [] : [[options.branch as string, selected.history]]),
-          invalid: new Map(selected.invalid === undefined ? [] : [[options.branch as string, selected.invalid]]),
-        }))
+  // Between this listing's own advertisement and its fetch, an ordinary queue
+  // move can land: the multi-prefix reader refuses to mix the two — an
+  // `EventRefsMoved` conflict — rather than return a selection that never
+  // existed. A second change landing on the same queue must not kill a watcher,
+  // so the acquisition re-inventories until its advertisement and its fetch
+  // agree (28941): every attempt takes a FRESH inventory and never reuses the
+  // refused one, and a queue still moving after EVENT_LISTING_ACQUIRE_ATTEMPTS
+  // gives up loudly instead of spinning.
+  const readingBranch = options.branch
+  const acquire =
+    readingBranch === undefined
+      ? () => readEventQueueWithChanges(store, config.target.branch, metadataRead)
+      : () =>
+          Promise.all([
+            readEventQueue(store, config.target.branch),
+            readBranchHistory(store, config.target.branch, readingBranch, { invalid: "return" }),
+          ]).then(([queue, selected]) => ({
+            queue,
+            histories: new Map(selected.history === undefined ? [] : [[readingBranch, selected.history]]),
+            invalid: new Map(selected.invalid === undefined ? [] : [[readingBranch, selected.invalid]]),
+          }))
+  let acquired: Awaited<ReturnType<typeof acquire>>
+  for (let attempt = 1; ; attempt++) {
+    try {
+      acquired = await acquire()
+      break
+    } catch (error) {
+      if (!(error instanceof EventRefsMoved)) throw error
+      if (attempt >= EVENT_LISTING_ACQUIRE_ATTEMPTS) throw new EventListingAcquireExhausted(attempt, error.movedRefs)
+      options.onRetry?.(
+        `event refs moved after the selected inventory (retry ${String(attempt)}/${String(EVENT_LISTING_ACQUIRE_ATTEMPTS)}): ${error.movedRefs.join(", ")}\n`,
+      )
+    }
+  }
   let queue = acquired.queue
   const histories = new Map(acquired.histories)
   const invalid = new Map(acquired.invalid)
@@ -6194,6 +6521,26 @@ class EventListingMoved extends Error {
       read === undefined
         ? `${ref} appeared during event list at ${observed}; read the queue again`
         : `${ref} moved during event list: read ${read}, observed ${observed ?? "absent"}`,
+    )
+  }
+}
+
+/**
+ * How many times a listing re-inventories when a selected ref keeps moving
+ * inside EVERY advertisement-to-fetch window. Eight running is the regime where
+ * the queue advances faster than one listing can read it: the retry gives up
+ * loudly rather than spin (28941).
+ */
+const EVENT_LISTING_ACQUIRE_ATTEMPTS = 8
+
+/** A selected ref moved inside every advertisement-to-fetch window, so the re-inventory gave up. */
+class EventListingAcquireExhausted extends Error {
+  constructor(
+    readonly attempts: number,
+    readonly refs: readonly string[],
+  ) {
+    super(
+      `event refs moved after the selected inventory ${String(attempts)} times in a row; giving up: ${refs.join(", ")}`,
     )
   }
 }

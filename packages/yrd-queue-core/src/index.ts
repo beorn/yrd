@@ -118,6 +118,7 @@ export { eventListRows, eventRows } from "./event-table.ts"
 export { transientPush5xxOf } from "./transient-push.ts"
 export { assertPlainEventQueueConfig } from "./event-config.ts"
 export { DIRECT_MERGE, mergedBy, mergedByRun, trailer, trailers } from "./git.ts"
+export { EventRefsMoved } from "./event-read.ts"
 export { incidentLine, incidentLines, incidentTrailers } from "./incident.ts"
 export type { Incident } from "./incident.ts"
 export {
@@ -129,6 +130,8 @@ export {
   listRefs,
   openEvents,
   readRemoteCommit,
+  isAncestor,
+  seamProcess,
   refAt,
   resolveGitSelection,
   type GitSelection,
@@ -215,6 +218,8 @@ export {
   freshnessLine,
   submit,
   issueOf,
+  issueCandidatesOf,
+  issueFromBranchName,
   issueBindingsOf,
   normalizeIssueReference,
 } from "./submit.ts"
@@ -224,6 +229,7 @@ export type {
   AdmissionOutcome,
   MovedGitlink,
   AdmissionVerdict,
+  IssueCandidate,
   IssueResolution,
   IssueResolver,
   Submitted,

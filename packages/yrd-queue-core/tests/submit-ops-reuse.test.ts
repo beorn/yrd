@@ -162,6 +162,8 @@ describe("submit reuses a fenced admission observation", () => {
     expect(calls.seams.submitEvent).toMatchObject({ "ls-remote": 3, push: 1 })
     // 27957: the one fetch is submit's exact hot+cold custody read. A branch with no hot history may have an
     // archived one under refs/yrd-archive/main/, which submit must reopen, and the hot-only listing cannot show it.
+    // 29087: this fixture's branch has no history at previewRetirement, and an absent read fences nothing, so
+    // submitEvent still pays its own custody read; only a present history is threaded between the seams.
     expect(calls.seams.submitEvent?.fetch ?? 0).toBe(1)
     expect(calls.seams.unattributed).toBeUndefined()
     expect(calls.unreadable).toBe(0)
