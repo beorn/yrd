@@ -5628,6 +5628,11 @@ export function runTerminalProbe(
       )
       return false
     }
+    // The run's own pid is judged on the LOCAL /proc. That is sound while this
+    // workdir and its journals are host-local — the same assumption the runner
+    // claim is held to above, where a claim from another host is `unknown`. A
+    // run header carries no host to compare, so under a SHARED workdir this
+    // fallback proves nothing across hosts and must be read as a guess.
     if (pidPresence(pid) === "present") {
       onLeftAlone(
         `run ${id}: source-changed, left alone — ${liveness.why}; its writer PID ${String(pid)} is present, so the round may still be finishing`,
