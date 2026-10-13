@@ -476,6 +476,15 @@ describe("a queue is the selected origin branch carrying config", () => {
     const legacyBatch = issueLookupBatch(legacyConfig, legacyRepo)
     if (legacyBatch === undefined) throw new Error("fixture lost target issue resolver")
     await expect(legacyBatch(["28001", "28003"])).resolves.toBeUndefined()
+
+    const shortCommand = ["sh", "-c", "printf '[]\\n'", "resolver"]
+    const shortRepo = await world(`issueResolver: ${JSON.stringify(shortCommand)}\n`)
+    const shortGit = gitIn(shortRepo)
+    const shortConfig = await readConfig(shortGit, "HEAD", { branch: "main", remote: "origin" })
+    if (shortConfig === undefined) throw new Error("fixture lost target declaration")
+    const shortBatch = issueLookupBatch(shortConfig, shortRepo)
+    if (shortBatch === undefined) throw new Error("fixture lost target issue resolver")
+    await expect(shortBatch(["28001", "28003"])).rejects.toThrow(/returned 0 batch results for 2 issue references/u)
   })
 
   it("refuses an option-shaped raw issue before invoking the target resolver", async () => {

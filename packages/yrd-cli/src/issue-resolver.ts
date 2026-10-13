@@ -93,7 +93,10 @@ export function issueLookupBatch(
     await using process = createProcess({ cwd, env })
     let result: ProcessResult
     try {
-      result = await process.run({ argv, cwd, env, timeoutMs: 10_000 })
+      // One batch read folds the whole issue index: measured 6.5-7.0 s over
+      // five runs on the bead's host, so the bound is twice the slowest run
+      // rounded up, not the single-reference 10 s (28929, @cto should 2).
+      result = await process.run({ argv, cwd, env, timeoutMs: 15_000 })
     } catch (cause) {
       throw new Error(
         `target .yrd.yml issueResolver ${label} could not run for ${raws.length} issue references: ${String(cause)}`,
