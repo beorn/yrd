@@ -620,7 +620,11 @@ describe("the runner's liveness, for the terminality probe", () => {
       { ...f.own, host: hostname(), pid: process.pid },
       `Boot: ${String(identity.boot)}\nPidNamespace: ${String(identity.pidNamespace)}\nStartTick: ${String(identity.tick)}\n`,
     )
-    expect(await readRunnerLiveness(f.git, "main", "origin", await f.remoteTip())).toEqual({ kind: "live" })
+    expect(await readRunnerLiveness(f.git, "main", "origin", await f.remoteTip())).toEqual({
+      kind: "live",
+      pid: process.pid,
+      why: `runner ${hostname()}/${String(process.pid)}: start identity matches a live process`,
+    })
   })
 
   /** @failure A claim whose pid is GONE was read as live, so a finished run's artifact was never repaired. @level l2 */
@@ -629,7 +633,7 @@ describe("the runner's liveness, for the terminality probe", () => {
     const gone = process.pid + 100_000
     await f.replace({ ...f.own, host: hostname(), pid: gone }, `Boot: b\nPidNamespace: n\nStartTick: 7\n`)
     const verdict = await readRunnerLiveness(f.git, "main", "origin", await f.remoteTip())
-    expect(verdict).toEqual({ kind: "dead", why: `runner ${hostname()}/${String(gone)}: PID absent` })
+    expect(verdict).toEqual({ kind: "dead", pid: gone, why: `runner ${hostname()}/${String(gone)}: PID absent` })
   })
 
   /** @failure A RECYCLED pid was read as the runner still finishing, hiding a dead writer forever. @level l2 */
@@ -644,6 +648,7 @@ describe("the runner's liveness, for the terminality probe", () => {
     const verdict = await readRunnerLiveness(f.git, "main", "origin", await f.remoteTip())
     expect(verdict).toEqual({
       kind: "dead",
+      pid: process.pid,
       why: `runner ${hostname()}/${String(process.pid)}: PID reused (start tick differs)`,
     })
   })

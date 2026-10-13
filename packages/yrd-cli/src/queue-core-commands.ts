@@ -5578,13 +5578,23 @@ const terminalJournalRuns = new Set<string>()
  * here, in the CLI, from the runner claim and the live process — and injected
  * as a plain fact. Four verdicts (@cto fbb2f3a7):
  *
- *   - the claim shows a LIVE runner ............... no run may be repaired;
- *   - the claim shows a DEAD runner ............... every run is terminal (and
- *     is remembered for the process, so a dead round costs no further read);
- *   - no claim, and the run's own header pid is gone ... terminal;
- *   - no claim, and the header pid still exists ... UNDECIDED — a RECYCLED pid
+ *   - the claim shows a LIVE runner, and the run's own header names that
+ *     runner's pid ................................. no repair: it may still write;
+ *   - the claim shows a DEAD runner, and the run's own header names that
+ *     runner's pid ................................. terminal, and remembered for
+ *     the process, so a dead round never costs another claim read;
+ *   - otherwise, the run's own header pid is GONE ... terminal;
+ *   - otherwise, the header pid still exists ....... UNDECIDED — a RECYCLED pid
  *     cannot be told from a writer still finishing, so the artifact is left
  *     alone and the reason is REPORTED.
+ *
+ * The claim speaks ONLY for the run its own pid wrote. A round does not have to
+ * run inside the service runner: `yrd merge <branch>` runs a change's checks and
+ * merge in ITS own process (cli.ts), and that is the documented way out of a
+ * STOPPED line — exactly when the service claim reads dead. Reading such a
+ * growing round terminal would rebuild its projection mid-growth, the very
+ * snapshot-over-growth the predicate forbids. So the per-run header pid decides
+ * every run the claim does not name, however the claim reads.
  *
  * A journal that names no pid, or whose header cannot be read, is left alone
  * too: unproven is never read as terminal.
@@ -5596,11 +5606,6 @@ export function runTerminalProbe(
 ): (id: string) => boolean {
   return (id) => {
     if (terminalJournalRuns.has(id)) return true
-    if (liveness.kind === "dead") {
-      terminalJournalRuns.add(id)
-      return true
-    }
-    if (liveness.kind === "live") return false
     const path = join(dir, `${id}.jsonl`)
     let pid: number | undefined
     try {
@@ -5611,13 +5616,21 @@ export function runTerminalProbe(
       )
       return false
     }
+    // The claim proves the writer's death only for the run that writer wrote.
+    if (liveness.kind !== "unknown" && pid === liveness.pid) {
+      if (liveness.kind === "live") return false
+      terminalJournalRuns.add(id)
+      return true
+    }
     if (pid === undefined) {
-      onLeftAlone(`run ${id}: source-changed, left alone — ${liveness.why}; its journal names no pid to judge`)
+      onLeftAlone(
+        `run ${id}: source-changed, left alone — ${liveness.why}; its journal names no pid to judge the writer by`,
+      )
       return false
     }
     if (pidPresence(pid) === "present") {
       onLeftAlone(
-        `run ${id}: source-changed, left alone — ${liveness.why}; PID ${String(pid)} is present, so its writer may still be finishing`,
+        `run ${id}: source-changed, left alone — ${liveness.why}; its writer PID ${String(pid)} is present, so the round may still be finishing`,
       )
       return false
     }

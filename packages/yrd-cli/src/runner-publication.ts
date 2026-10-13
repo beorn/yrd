@@ -200,8 +200,8 @@ export async function readPublishedRunner(
  * licenses nothing.
  */
 export type RunnerLiveness =
-  | { readonly kind: "live" }
-  | { readonly kind: "dead"; readonly why: string }
+  | { readonly kind: "live"; readonly pid: number; readonly why: string }
+  | { readonly kind: "dead"; readonly pid: number; readonly why: string }
   | { readonly kind: "unknown"; readonly why: string }
 
 /**
@@ -233,7 +233,7 @@ export async function readRunnerLiveness(
     // death from a local /proc read would be guessing.
     return { kind: "unknown", why: `${remote} ${ref}: runner ${claim.Runner} is not on this host` }
   }
-  if (pidPresence(pid) === "absent") return { kind: "dead", why: `runner ${claim.Runner}: PID absent` }
+  if (pidPresence(pid) === "absent") return { kind: "dead", pid, why: `runner ${claim.Runner}: PID absent` }
   if (claim.Boot === undefined || claim.PidNamespace === undefined || claim.StartTick === undefined) {
     return { kind: "unknown", why: `runner ${claim.Runner}: claim records no start identity to compare` }
   }
@@ -243,15 +243,15 @@ export async function readRunnerLiveness(
     return { kind: "unknown", why: `runner ${claim.Runner}: death unproven: ${reason.join("; ")}` }
   }
   if (identity.boot !== claim.Boot || identity.pidNamespace !== claim.PidNamespace) {
-    return { kind: "dead", why: `runner ${claim.Runner}: PID reused (boot or PID namespace differs)` }
+    return { kind: "dead", pid, why: `runner ${claim.Runner}: PID reused (boot or PID namespace differs)` }
   }
   if (identity.tick === undefined) {
     return { kind: "unknown", why: `runner ${claim.Runner}: death unproven: start tick unreadable` }
   }
   if (String(identity.tick) !== claim.StartTick) {
-    return { kind: "dead", why: `runner ${claim.Runner}: PID reused (start tick differs)` }
+    return { kind: "dead", pid, why: `runner ${claim.Runner}: PID reused (start tick differs)` }
   }
-  return { kind: "live" }
+  return { kind: "live", pid, why: `runner ${claim.Runner}: start identity matches a live process` }
 }
 
 export class RunnerConflict extends Error {
