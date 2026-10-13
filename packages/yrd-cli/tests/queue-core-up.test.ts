@@ -3746,7 +3746,7 @@ describe("yrd queue up, the service", () => {
 })
 
 describe("yrd queue list, the table", () => {
-  it("a commit the target gained around the queue is a row of its own, in the JSON and on the line (E5)", async () => {
+  it("a direct target commit is named as unchecked by default and is a row in --all JSON and text (E5)", async () => {
     const w = await world()
     // The queue's history starts at its first record, so there is one change
     // before the direct merge: a queue that has judged nothing has no history
@@ -3769,8 +3769,15 @@ describe("yrd queue list, the table", () => {
     const direct = (await w.git(["rev-parse", "HEAD"])).trim()
     const sentence = `main moved around the queue at ${direct.slice(0, 12)} (direct.txt around the queue)`
 
+    const compact = capture(w.work)
+    expect(await coreQueueCommand(w.work, compact.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    expect(compact.stdout()).not.toContain("→ direct")
+    expect(compact.stdout()).toMatch(/direct target commits were not\s+checked; use --all for full scope/u)
+
     const asJson = capture(w.work)
-    expect(await coreQueueCommand(w.work, asJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(
+      await coreQueueCommand(w.work, asJson.io, { command: "list", all: true }, { json: true, workdir: w.workdir }),
+    ).toBe(0)
     const listed = records(asJson)[0] as Readonly<{ changes: readonly Record<string, unknown>[] }>
     expect(listed.changes).toMatchObject([
       { branch: "task/first", state: "queued" },
@@ -3778,7 +3785,7 @@ describe("yrd queue list, the table", () => {
     ])
 
     const asText = capture(w.work)
-    expect(await coreQueueCommand(w.work, asText.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    expect(await coreQueueCommand(w.work, asText.io, { command: "list", all: true }, { workdir: w.workdir })).toBe(0)
     // On the page: its own row — the direct glyph and word in STATUS, TASK
     // leading with the commit's subject then the target branch (ia.md);
     // the sentence is the JSON's `reason`, above.
