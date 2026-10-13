@@ -258,6 +258,12 @@ export type QueueRunLog = Readonly<{
 function persistJournalProjection(path: string, id: string): void {
   const before = journalSource(path, id)
   const records = runLogRecords(readFileSync(path, "utf8"), true)
+  // A writer never produces what its reader rejects: the reader names an
+  // artifact with no run header "partial", and "partial" is repairable, so
+  // persisting one would be rewritten on every read, forever.
+  if (!records.some((record) => record.kind === "run")) {
+    throw new Error(`journal ${path}: no run header; nothing to persist`)
+  }
   const startedAt = runStartedAt(id)
   if (startedAt === undefined) throw new Error(`journal ${path}: run id has no start instant`)
   const runs = runsIn(records, id, startedAt)

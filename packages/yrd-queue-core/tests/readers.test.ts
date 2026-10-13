@@ -585,6 +585,33 @@ describe("a run's journal, read back", () => {
     expect(fs.readFileSync(artifact, "utf8")).toBe(before)
   })
 
+  it("refuses to persist a headerless journal instead of looping its repair (28908)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-headerless"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    // A zero-byte journal: readable, in the window, and unable to ever yield
+    // a projection its own reader would accept.
+    writeFileSync(log.path, "")
+    const first = readJournals(dir, { now: at })
+    expect(first.runs.size).toBe(0)
+    expect(first.fallbacks).toMatchObject({
+      count: 1,
+      reasons: [{ reason: "missing", count: 1 }],
+      persistFailures: { count: 1, example: expect.stringContaining("no run header; nothing to persist") },
+    })
+    expect(fs.existsSync(artifact)).toBe(false)
+    // The refusal is memoized per source: a second read names it once more
+    // but spends no second write, and the artifact is still absent.
+    const second = readJournals(dir, { now: at })
+    expect(second.fallbacks).toMatchObject({
+      count: 1,
+      persistFailures: { count: 1, example: expect.stringContaining("no run header; nothing to persist") },
+    })
+    expect(fs.existsSync(artifact)).toBe(false)
+  })
+
   it("repairs an older-fold projection so the next read finds it present (28908)", () => {
     const at = new Date("2026-09-03T20:00:00.000Z")
     const dir = join(scratch("projection-older-fold"), "logs")
