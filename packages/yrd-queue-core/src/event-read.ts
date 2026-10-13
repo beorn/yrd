@@ -1,11 +1,74 @@
 /** Yrd's one policy for reading Gitomic event chains. */
-import { chainsUnder, Conflict, listRefs, type Event, type GitomicBackend, type Oid, openEvents } from "./git.ts"
+import { parseCommit, readRawCommits, type CommitMeta, type ReadRawCommitsOptions } from "gitomic"
+import type { Process, ProcessResult } from "@yrd/process"
+import {
+  chainsUnder,
+  Conflict,
+  invokeGit,
+  listRefs,
+  type Event,
+  type GitomicBackend,
+  type GitSelection,
+  type Oid,
+  openEvents,
+} from "./git.ts"
 
 /** The wave size a complete read pages at, one git process per wave. */
 export const EVENT_READ_LIMIT = 1024
 
 type Chain = Awaited<ReturnType<typeof openEvents>>
 type ChainStore = Omit<Parameters<typeof chainsUnder>[1], "limit" | "complete">
+
+/** Exact immutable event metadata through the caller's selected Git and captured environment. */
+export async function readEventCommitMetadata(
+  repo: string,
+  ids: readonly Oid[],
+  options: Omit<ReadRawCommitsOptions, "run"> & {
+    process: Pick<Process, "run">
+    selection: GitSelection
+    env: NodeJS.ProcessEnv
+  },
+): Promise<ReadonlyMap<Oid, CommitMeta>> {
+  const bytes = (result: ProcessResult, stream: "stdout" | "stderr"): Buffer => {
+    const output = result.rawOutput?.[stream]
+    if (output === undefined || output.head.length + output.tail.length !== output.totalBytes) {
+      throw new Error(`event metadata in ${repo}: raw Git ${stream} capture is missing or incomplete`)
+    }
+    return Buffer.concat([output.head, output.tail])
+  }
+  const raw = await readRawCommits(repo, ids, {
+    maxBytes: options.maxBytes,
+    timeoutMs: options.timeoutMs,
+    run: async (args, request) => {
+      const input = request?.input
+      if (input !== undefined && typeof input !== "string") {
+        throw new TypeError(`event metadata in ${repo}: raw commit requests require textual Git object ids`)
+      }
+      const invocation = await invokeGit(
+        options.process,
+        { args, cwd: repo, selection: options.selection },
+        { timeoutMs: request?.timeoutMs },
+        options.env,
+        input,
+      )
+      if (
+        invocation.failure !== undefined ||
+        invocation.protocol?.refusal !== undefined ||
+        invocation.result === undefined
+      ) {
+        throw new Error(
+          `event metadata in ${repo}: selected Git invocation failed: ${invocation.failure ?? invocation.protocol?.refusal?.message ?? "missing result"}`,
+        )
+      }
+      return {
+        code: invocation.result.exitCode,
+        stdout: bytes(invocation.result, "stdout"),
+        stderr: bytes(invocation.result, "stderr"),
+      }
+    },
+  })
+  return new Map([...raw].map(([id, buffer]) => [id, parseCommit(id, buffer)]))
+}
 
 /** Read a complete chain from one fixed tip, including events older than one page. */
 export async function readEventChain(chain: Chain, acquiredTip?: Oid): Promise<Event[]> {

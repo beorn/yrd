@@ -25,6 +25,7 @@ import { createScriptedProcess, exitedResult } from "@yrd/process/testing/script
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 import * as gitRunner from "../src/git.ts"
+import { readEventCommitMetadata } from "../src/event-read.ts"
 import { openLog, readRunLog } from "../src/log.ts"
 import { gitSuperExecution, verifyCandidate } from "../src/verifying.ts"
 import { freshWorktree } from "../src/worktree.ts"
@@ -71,6 +72,42 @@ function declareGit(root: string, value: string, file?: string): void {
 }
 
 describe("the git runner", () => {
+  // @failure: event metadata bypasses the configured executable or captured environment.
+  // @level l2; @consumer queue list acquisition; @testonly none
+  it("reads raw event metadata with the selected executable and captured environment", async () => {
+    const root = temporaryRoot("event-metadata")
+    const git = gitIn(root)
+    await git(["init", "--quiet"])
+    await git(["config", "user.name", "fixture"])
+    await git(["config", "user.email", "fixture@yrd.test"])
+    const tree = (await git(["mktree"], "")).trim()
+    const oid = (await git(["commit-tree", tree], "event\n\nEvent: cancelled\nTime: 2026-10-01T12:00:00Z\n")).trim()
+    const executable = join(root, "selected-git")
+    const env = gitRunner.gitEnvironment({ ...process.env, YRD_METADATA_CONTEXT: "captured" })
+    const resolved = await gitRunner.resolveGitSelection(root, { env })
+    symlinkSync(resolved.executable, executable)
+    const selection = { ...resolved, executable, origin: "fixture non-default executable" }
+    await using owner = createProcess({ cwd: root, env })
+    const run = vi.spyOn(owner, "run")
+    const metadata = await readEventCommitMetadata(root, [oid], {
+      process: owner,
+      selection,
+      env,
+      maxBytes: 1024 * 1024,
+      timeoutMs: 30_000,
+    })
+    expect(metadata.get(oid)?.trailers).toEqual([
+      ["Event", "cancelled"],
+      ["Time", "2026-10-01T12:00:00Z"],
+    ])
+    expect(run).toHaveBeenCalled()
+    for (const [request] of run.mock.calls) {
+      expect(request.argv[0]).toBe(executable)
+      expect(request.env?.YRD_METADATA_CONTEXT).toBe("captured")
+      expect(request.captureRawOutput).toBe(true)
+    }
+  })
+
   // @failure: explicit public object selection is lost by descendants or Gitomic; ambient objects leak in.
   // @level l2; @consumer contained submit; @testonly none
   // Native blobs live outside either checkout, so executable/option identity alone cannot pass this row.
