@@ -5963,6 +5963,27 @@ export async function readEventListing(
   // own hot+cold read; restarting the listing reacquires every archived chain.
   for (;;) {
     try {
+      if (recent !== undefined) {
+        // A scoped read omits old histories, but an advertised ref that vanished
+        // before its second inventory must not become an ordinary empty result.
+        const omitted = [...queueRefs].filter(([ref]) => {
+          const branch = ref.startsWith(changePrefix)
+            ? ref.slice(changePrefix.length)
+            : ref.startsWith(coldPrefix)
+              ? ref.slice(coldPrefix.length)
+              : undefined
+          return branch !== undefined && !changes.has(branch) && !invalid.has(branch)
+        })
+        if (omitted.length > 0) {
+          const current = await listRefs("refs/", store)
+          for (const [ref, tip] of omitted) {
+            const branch = ref.startsWith(changePrefix) ? ref.slice(changePrefix.length) : ref.slice(coldPrefix.length)
+            if (!current.has(changesRef(config.target.branch, branch)) && !current.has(`${coldPrefix}${branch}`)) {
+              throw new EventListingMoved(ref, undefined, tip)
+            }
+          }
+        }
+      }
       assertEventListingFence(config.target.branch, queue, changes, queueRefs, invalid, recent === undefined)
       break
     } catch (error) {
