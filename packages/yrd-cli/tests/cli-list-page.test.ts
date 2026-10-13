@@ -187,6 +187,10 @@ describe("`yrd list` prints the watch's page, once", () => {
       expect(first.stdout, first.report).toContain("task/one")
       // The rebuilding list persisted the projection beside the raw journal.
       expect(existsSync(join(workdir, "logs", `${log.id}.projection.json`))).toBe(true)
+      // Positive control for the counter itself: the persisting list DID
+      // construct command detail, once, in the projection writer — a counter
+      // that never counts would pass the zero below vacuously.
+      expect(commands).toBeGreaterThan(0)
       commands = 0
       const second = await yrd(work, { color: false }, "queue", "list", "--json")
       expect(second.exitCode, second.report).toBe(0)
