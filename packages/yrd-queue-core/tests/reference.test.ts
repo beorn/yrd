@@ -625,15 +625,18 @@ describe("freshWorktree", () => {
     expect(mergedGitlink).toMatchObject({ path: "vendor/dep", state: "merged" })
     const composedPin = (await git(["rev-parse", `${verifiedRoot}:vendor/dep`])).trim()
     expect(composedPin).not.toBe(candidatePin)
-    // 26404: the tree records `from` (the two-parent composition). `composition.pin`
-    // is the author's second parent; `to` / `composition.parent` is component main.
-    expect(mergedGitlink?.from).toBe(composedPin)
-    expect(mergedGitlink?.to).toBe(mainPin)
+    // 26404 / 28892: the tree RECORDS the two-parent composition as its pin, so `recordedPin` is that
+    // child and so is `landingPin` (a `merged` row lands the composed child). `composition.pin` is the
+    // author's second parent and `mainPin` / `composition.parent` is component main.
+    expect(mergedGitlink?.recordedPin).toBe(composedPin)
+    expect(mergedGitlink?.landingPin).toBe(composedPin)
+    expect(mergedGitlink?.mainPin).toBe(mainPin)
     expect(mergedGitlink?.composition).toMatchObject({ parent: mainPin, pin: candidatePin })
     expect(verified.verifying.gitlinks.find(({ path }) => path === "vendor/dep/apps/nested")).toMatchObject({
       state: "kept-behind",
-      from: nestedPin,
-      to: nestedMain,
+      recordedPin: nestedPin,
+      mainPin: nestedMain,
+      landingPin: nestedPin,
     })
     // Nested receipts must read the pin in the owning commit, and cannot
     // silently use the enclosing repository when the parent store is absent.
@@ -685,7 +688,10 @@ describe("freshWorktree", () => {
           state: "merged",
           recorded: recordedPin,
           from: recordedPin,
-          to: mainPin,
+          to: recordedPin,
+          recordedPin,
+          mainPin,
+          landingPin: recordedPin,
           composition: { parent: mainPin, pin: candidatePin },
         })
         const parentGit = gitIn(join(repo, "vendor/dep"), undefined, undefined, { env: fixtureEnv })
@@ -695,7 +701,10 @@ describe("freshWorktree", () => {
           state: "kept-behind",
           recorded: recordedNested,
           from: nestedPin,
-          to: nestedMain,
+          to: nestedPin,
+          recordedPin: nestedPin,
+          mainPin: nestedMain,
+          landingPin: nestedPin,
         })
       }
       // A producer disagreement must fail before a misleading receipt escapes.
@@ -708,7 +717,7 @@ describe("freshWorktree", () => {
           verifying: {
             ...result.verifying,
             gitlinks: result.verifying.gitlinks.map((row) =>
-              row.path === "vendor/dep" ? { ...row, from: mainPin } : row,
+              row.path === "vendor/dep" ? { ...row, landingPin: mainPin } : row,
             ),
           },
         }

@@ -545,8 +545,22 @@ export type SettledComposition = Readonly<{
 
 export type SettledGitlink = Readonly<{
   path: string
-  from: string
-  to: string
+  /**
+   * git-super's plan row `recordedPin`: the pin this root's HEAD already
+   * RECORDS for the component before the merge. NOT the pin it lands, and NOT
+   * a move's `from` -- see `landingPin`.
+   */
+  recordedPin: string
+  /** git-super's plan row `mainPin`: the component main this merge read and stood the recorded pin against. */
+  mainPin: string
+  /**
+   * git-super's plan row `landingPin`: the pin this merge WILL RECORD, and the
+   * one the queue publishes. `mainPin` for `raised`, `recordedPin` for
+   * `kept-ahead`, `kept-behind`, `left-off-main` and `as-written`, and the
+   * composed child for `merged`. git-super computes it ONCE; yrd reads the
+   * field and never re-derives it (28892).
+   */
+  landingPin: string
   /**
    * `kept-behind` is a NESTED pin the planner classified and deliberately left
    * alone: behind its own main, recorded inside its parent component's commit,
@@ -645,8 +659,9 @@ export function readSuperMergeResult(value: unknown): SuperMergeResult {
     const entry = row as Record<string, unknown>
     if (
       typeof entry.path !== "string" ||
-      typeof entry.from !== "string" ||
-      typeof entry.to !== "string" ||
+      typeof entry.recordedPin !== "string" ||
+      typeof entry.mainPin !== "string" ||
+      typeof entry.landingPin !== "string" ||
       !new Set(["raised", "kept-ahead", "kept-behind", "as-written", "left-off-main", "merged", "not-run"]).has(
         String(entry.state),
       )

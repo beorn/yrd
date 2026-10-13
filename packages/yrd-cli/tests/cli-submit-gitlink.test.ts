@@ -1055,7 +1055,10 @@ describe("ordinary submit with a local-only component pin", () => {
       state: "kept-ahead",
       recorded: one.unheld,
       from: one.unheld,
-      to: one.held,
+      // 28892: the receipt's `to` is the LANDING pin, not the component main. A kept-ahead pin lands
+      // exactly where it already stands, so `to` equals `from` -- and the main it is ahead of is `mainPin`.
+      to: one.unheld,
+      mainPin: one.held,
     })
     expect(await gitIn(join(w.root, "one.git"))(["for-each-ref", "--format=%(objectname)", pinRef])).toBe("")
     expect(await refs(w.remote)).not.toContain("task/local-only-pin-dry-run")
@@ -1078,7 +1081,8 @@ describe("ordinary submit with a local-only component pin", () => {
       state: "kept-ahead",
       recorded: one.unheld,
       from: one.unheld,
-      to: one.held,
+      to: one.unheld,
+      mainPin: one.held,
     })
   }, 90_000)
 

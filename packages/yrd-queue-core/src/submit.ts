@@ -81,9 +81,15 @@ export type SubmitGitlink = Readonly<
       | { state: "not-run" }
       | {
           state: Exclude<SettledGitlink["state"], "not-run">
+          /**
+           * The move this settle makes, as a real old -> new pair: `from` is the pin the root recorded
+           * (`recordedPin`), `to` the pin this merge lands (`landingPin`). Equal when nothing moves. The plan pair's
+           * two REFERENCE POINTS stay on the row too, under the honest names `recordedPin` and `mainPin`.
+           */
+          from: string
+          to: string
           recorded: string
           authorHead: string
-          landingPin: string
           /** Present when the compose authored the pin and no store holds it yet. */
           custody?: SubmitCustody
         }
@@ -113,16 +119,26 @@ async function submissionReceipt(git: Git, root: string, verifying: Verification
       continue
     }
     const recorded = observed.get(row.path)
-    const expected = row.state === "raised" ? row.to : row.from
+    // THE CANDIDATE TREE RECORDS THE PIN THIS MERGE LANDS. `landingPin` already
+    // equals it for every state -- `mainPin` for a raise, `recordedPin` for the
+    // rest, the composed child for `merged` -- so the check reads the field the
+    // merge decided rather than re-deriving the state rule (@cto 28892).
+    const expected = row.landingPin
     if (recorded !== expected) {
       throw new Error(
         `submission receipt ${row.path} state ${row.state}: producer ${expected}, candidate tree ${recorded ?? "absent"} at ${verifying.candidate}`,
       )
     }
-    const authorHead = row.state === "merged" && row.composition?.pin ? row.composition.pin : row.from
-    const landingPin = row.state === "raised" ? row.to : row.from
+    const authorHead = row.state === "merged" && row.composition?.pin ? row.composition.pin : row.recordedPin
     const custody = await composedChildCustody(git, root, row, recorded, verifying.candidate)
-    gitlinks.push({ ...row, recorded, authorHead, landingPin, ...(custody === undefined ? {} : { custody }) })
+    gitlinks.push({
+      ...row,
+      recorded,
+      authorHead,
+      from: row.recordedPin,
+      to: row.landingPin,
+      ...(custody === undefined ? {} : { custody }),
+    })
   }
   return { ...verifying, gitlinks }
 }
@@ -130,7 +146,7 @@ async function submissionReceipt(git: Git, root: string, verifying: Verification
 /**
  * THE ONE PIN ON A ROW THE QUEUE AUTHORED ITSELF (27747).
  *
- * A `merged` row whose composition did not fast-forward carries, in `from`,
+ * A `merged` row whose composition did not fast-forward carries, as its `recordedPin`,
  * the two-parent child git-super COMPOSED — not a pin any authored tree held.
  * `recorded` is what the candidate tree names, and git-super wrote that child
  * into the submodule store of the tree it was handed, borrowed from the
@@ -167,7 +183,9 @@ async function composedChildCustody(
   recorded: string | undefined,
   candidate: string,
 ): Promise<SubmitCustody | undefined> {
-  if (row.state !== "merged" || row.composition === undefined || row.composition.pin === row.from) return undefined
+  if (row.state !== "merged" || row.composition === undefined || row.composition.pin === row.recordedPin) {
+    return undefined
+  }
   if (recorded === undefined) return undefined
   const common = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
   const store = row.store ?? join(common, "modules", row.path)

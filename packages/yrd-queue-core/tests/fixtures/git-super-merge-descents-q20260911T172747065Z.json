@@ -45,7 +45,11 @@
   "descents": [
     {
       "children": [
-        { "path": "km/apps/maddoc", "state": "equal", "target": "3fff4578a7df24d75df427a186ce1515f160bded" }
+        {
+          "path": "km/apps/maddoc",
+          "state": "equal",
+          "target": "3fff4578a7df24d75df427a186ce1515f160bded"
+        }
       ],
       "parent": "km",
       "parentTarget": "8c866eade268626d022021805500ccc4eda3226d"
@@ -53,37 +57,48 @@
   ],
   "gitlinks": [
     {
-      "from": "8c866eade268626d022021805500ccc4eda3226d",
       "path": "km",
-      "state": "kept-ahead",
-      "to": "e4e01d6281ed5ef3ab01cedbf86e25efa77dbe15"
+      "recordedPin": "8c866eade268626d022021805500ccc4eda3226d",
+      "mainPin": "e4e01d6281ed5ef3ab01cedbf86e25efa77dbe15",
+      "landingPin": "8c866eade268626d022021805500ccc4eda3226d",
+      "state": "kept-ahead"
     },
     {
-      "from": "3b4b3bc191055762a7e03d8cde95d8c3c7710a3d",
       "path": "ag",
-      "state": "raised",
-      "to": "827c223fb253615b0108b2d8c4e2f724c75bd97e"
+      "recordedPin": "3b4b3bc191055762a7e03d8cde95d8c3c7710a3d",
+      "mainPin": "827c223fb253615b0108b2d8c4e2f724c75bd97e",
+      "landingPin": "827c223fb253615b0108b2d8c4e2f724c75bd97e",
+      "state": "raised"
     },
     {
-      "from": "a68b07f8874e913ea0f7c5e0c9c3b113f2b4fc9b",
       "path": "vendor/bearly",
-      "state": "raised",
-      "to": "53de664978cbe2fd3e068a2e46f2912e77ae99b5"
+      "recordedPin": "a68b07f8874e913ea0f7c5e0c9c3b113f2b4fc9b",
+      "mainPin": "53de664978cbe2fd3e068a2e46f2912e77ae99b5",
+      "landingPin": "53de664978cbe2fd3e068a2e46f2912e77ae99b5",
+      "state": "raised"
     },
     {
-      "from": "4a68480c6f15a3877e941f711c1da58173625dbd",
       "path": "vendor/git-super",
-      "state": "raised",
-      "to": "c8795a50104f4ffca01a071c83e4f1d214e0baf5"
+      "recordedPin": "4a68480c6f15a3877e941f711c1da58173625dbd",
+      "mainPin": "c8795a50104f4ffca01a071c83e4f1d214e0baf5",
+      "landingPin": "c8795a50104f4ffca01a071c83e4f1d214e0baf5",
+      "state": "raised"
     },
     {
-      "from": "29f22faa0255895b74ef6860b9e0542cbe757732",
       "path": "vendor/yrd",
-      "state": "raised",
-      "to": "bb347783ecc75bc7e2282fa5d9dee1660b574b93"
+      "recordedPin": "29f22faa0255895b74ef6860b9e0542cbe757732",
+      "mainPin": "bb347783ecc75bc7e2282fa5d9dee1660b574b93",
+      "landingPin": "bb347783ecc75bc7e2282fa5d9dee1660b574b93",
+      "state": "raised"
     }
   ],
   "partial": false,
-  "repositories": [{ "refs": [], "repository": "/hh/var/tmp/bench-24454/merge4", "state": "updated" }],
+  "repositories": [
+    {
+      "refs": [],
+      "repository": "/hh/var/tmp/bench-24454/merge4",
+      "state": "updated"
+    }
+  ],
   "state": "updated"
 }
