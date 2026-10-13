@@ -608,6 +608,94 @@ it("sends one failed notice for a gitlink that cannot compose", async () => {
   expect(readFileSync(noticeLog, "utf8").trim().split("\n")).toHaveLength(1)
 })
 
+/** @failure A carrier whose component pin an unrelated landing turned into a SIBLING of component main is bounced for a manual re-cut instead of landing composed (28360).
+ * @level l3 @consumer every component author, and the reviewer who re-reads a carrier after component main moves
+ * git-super's merge suite composes a diverged gitlink in isolation (merge.test.ts:3333, :3375); no QUEUE round landed one, so nothing proved component main's own commits survive the composition.
+ */
+it("lands a carrier whose pin became a sibling of component main, composing both sides and keeping main's commits (28360)", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const sub = gitIn(join(w.work, "submodule"))
+  // The carrier pins a commit off the OLD component main, and an unrelated landing then moves main on the same file:
+  // two-sided, neither side contains the other, which is exactly the 28278 shape.
+  const pin = await siblingOfSubmodule(w, "carrier")
+  await submitGitlink(w, "task/sibling-pin", pin)
+  const advanced = await advanceSubmodule(w, "unrelated landing")
+  // `advanced` was pushed from the fixture's own component worktree; the queue's checkout needs it before
+  // this test can state the divergence it is about.
+  await sub(["fetch", "--quiet", "origin", "main"])
+  const base = (await sub(["merge-base", pin, advanced])).trim()
+  expect(base).not.toBe(pin)
+  expect(base).not.toBe(advanced)
+
+  const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/sibling-pin"], failed: [], stuck: [] })
+  const target = await remoteTip(w.git, "refs/heads/main")
+  const landed = await gitlinkAt(w, target)
+  // The landed gitlink is a commit NEITHER side had: the two-parent merge the queue composed, no re-cut by hand.
+  expect(landed).not.toBe(pin)
+  expect(landed).not.toBe(advanced)
+  expect(await submoduleMain(w)).toBe(landed)
+  await sub(["fetch", "--quiet", "origin", "main"])
+  const parents = (await sub(["rev-list", "--parents", "-n", "1", landed])).trim().split(/\s+/u).slice(1)
+  expect(new Set(parents)).toEqual(new Set([pin, advanced]))
+  // Component main's own landing is KEPT, and the carrier's work survives beside it.
+  expect((await sub(["show", `${landed}:lib.txt`])).trim()).toBe("unrelated landing")
+  expect((await sub(["show", `${landed}:sibling.txt`])).trim()).toBe("carrier")
+})
+
+/** @failure A carrier whose pin diverged from component main on the SAME file refused without naming the merge the author must run (28360).
+ * @level l3 @consumer the component author who has to re-cut
+ * The 25741 case lands this shape and asserts the failed notice; it never pins the refusal's own words, so a refusal that stopped naming the re-cut would pass.
+ */
+it("refuses a carrier whose pin conflicts with component main inside the component, naming the re-cut (28360)", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  // `offMain` is off the old main and changes lib.txt; main changed lib.txt too, so the component's OWN merge conflicts.
+  const before = await remoteTip(w.git, "refs/heads/main")
+  const refusal = await submitGitlink(w, "task/sibling-conflict", w.offMain).then(
+    () => undefined,
+    (error: unknown) => String(error),
+  )
+
+  expect(refusal).toBeDefined()
+  expect(refusal).toContain("gitlink-compose-refused")
+  expect(refusal).toContain("diverged submodule could not be merged")
+  // The exact merge the author must run, and the remedy that says what to do with it.
+  expect(refusal).toContain("merge-tree --write-tree")
+  expect(refusal).toContain("Merge the submodule's own main into the submodule commit")
+  // Nothing moved: neither the root's gitlink nor the component's main.
+  expect(await remoteTip(w.git, "refs/heads/main")).toBe(before)
+  expect(await submoduleMain(w)).toBe(w.main)
+})
+
+/** @failure A sibling conflict that appears only when main moves under an already-submitted carrier refused quietly, or refused without the re-cut it wants (28360).
+ * @level l3 @consumer the component author whose carrier went stale after submit
+ * 25741 asserts the failed notice for this shape; nothing pinned the refusal's own words, so a silent or wordless refusal would pass.
+ */
+it("refuses the same sibling conflict at land, naming the re-cut, when main moves under a submitted carrier (28360)", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  // The pin is a CHILD of main, so the carrier composes cleanly at submit; main then moves on the same file,
+  // which is what turns it into a conflicted sibling by the time the round runs.
+  const ahead = await aheadOfSubmodule(w, "late-sibling-conflict")
+  const head = await submitGitlink(w, "task/late-sibling-conflict", ahead)
+  const before = await remoteTip(w.git, "refs/heads/main")
+  await advanceSubmodule(w, "unrelated landing")
+
+  const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/late-sibling-conflict"], merged: [] })
+  const status = await readStatus(eventStore(w), "main", "task/late-sibling-conflict")
+  expect(status).toMatchObject({ status: "failed", commit: head })
+  expect(status.reason).toContain("gitlink-compose-refused")
+  expect(status.reason).toContain("diverged submodule could not be merged")
+  expect(status.reason).toContain("merge-tree --write-tree")
+  expect(status.reason).toContain("Merge the submodule's own main into the submodule commit")
+  expect(await remoteTip(w.git, "refs/heads/main")).toBe(before)
+})
+
 /** @failure A green root could become visible before its component main carried the checked pin.
  * @level l3 @consumer queue operator and anyone cloning root main
  * The legacy child-first cases do not exercise the event marker and root CAS.
@@ -1401,6 +1489,23 @@ async function aheadOfSubmodule(w: World, contents: string): Promise<string> {
   await submodule(["push", "--quiet", "origin", `ahead-${contents}`])
   await submodule(["checkout", "--quiet", "main"])
   return (await submodule(["rev-parse", `ahead-${contents}`])).trim()
+}
+
+/**
+ * A commit off the component's OLD main that the NEW main does not carry: the
+ * shape a carrier's pin takes when an unrelated landing moves component main
+ * under it (28360). The pushed branch is what makes it fetchable.
+ */
+async function siblingOfSubmodule(w: World, contents: string): Promise<string> {
+  const submoduleWork = join(w.work, "..", "submodule-work")
+  const submodule = gitIn(submoduleWork)
+  await submodule(["checkout", "--quiet", "-b", `sibling-${contents}`, w.onMain])
+  writeFileSync(join(submoduleWork, "sibling.txt"), `${contents}\n`)
+  await submodule(["add", "sibling.txt"])
+  await submodule(["commit", "--quiet", "-m", `${contents}, off the old main`])
+  await submodule(["push", "--quiet", "origin", `sibling-${contents}`])
+  await submodule(["checkout", "--quiet", "main"])
+  return (await submodule(["rev-parse", `sibling-${contents}`])).trim()
 }
 
 async function submoduleMain(w: World): Promise<string> {

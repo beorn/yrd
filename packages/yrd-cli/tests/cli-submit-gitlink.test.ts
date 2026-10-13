@@ -382,6 +382,63 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     expect(await refs(w.remote)).toBe(before)
   }, 60_000)
 
+  /** @failure A pin the root already holds at or beyond is admitted, so a carrier could move a component pointer backward (28360).
+   * @level l2 the public CLI, real remotes and real submodule stores
+   * @consumer every component author, and anyone reading the root's gitlink after a carrier lands
+   */
+  it("refuses a pin the root already holds at or beyond, naming the cure, and moves no root ref (28360)", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const before = await refs(w.remote)
+    // Root main records exactly `old`, so this pin repeats what is already there.
+    const repeat = await yrd(
+      w.work,
+      "submit",
+      "--gitlink",
+      `${one.path}=${one.old}`,
+      "--issue",
+      "28360",
+      "--submitter",
+      "@dev/3",
+    )
+    expect(repeat.exitCode, repeat.report).toBe(2)
+    expect(repeat.stderr, repeat.report).toContain("already holds")
+    expect(repeat.stderr, repeat.report).toContain(`${one.path}@${one.old}`)
+    expect(repeat.stderr, repeat.report).toContain("root main records that exact commit")
+    expect(repeat.stderr, repeat.report).toContain(`pin a commit ahead of ${one.old}`)
+
+    // Root main then records `held`, which makes the SAME pin a backward move: the refusal must
+    // name the commit to pin instead of leaving the author to guess.
+    const git = gitIn(w.work)
+    const child = gitIn(join(w.work, one.path))
+    await child(["fetch", "--quiet", "origin", "main"])
+    await child(["checkout", "--quiet", one.held])
+    await git(["add", one.path])
+    await git(["commit", "--quiet", "-m", "root main records the component's held commit"])
+    await git(["push", "--quiet", "origin", "main"])
+    const stale = await yrd(
+      w.work,
+      "submit",
+      "--gitlink",
+      `${one.path}=${one.old}`,
+      "--issue",
+      "28360",
+      "--submitter",
+      "@dev/3",
+    )
+    expect(stale.exitCode, stale.report).toBe(2)
+    expect(stale.stderr, stale.report).toContain("already holds")
+    expect(stale.stderr, stale.report).toContain(`root main records ${one.held}`)
+    // The stale cure must not send the author into the exact-repeat case that the same test refuses:
+    // the pin is already carried, so the cure is the same as the repeat's, not "pin <current>".
+    expect(stale.stderr, stale.report).toContain("already contains that pin")
+    expect(stale.stderr, stale.report).toContain("the component change is already carried")
+    expect(stale.stderr, stale.report).toContain(`pin a commit ahead of ${one.held}`)
+    expect(stale.stderr, stale.report).not.toContain("root main records that exact commit")
+    // Neither refusal moved a root ref: the pointer stays where it is.
+    expect(await refs(w.remote)).toBe(before)
+  }, 90_000)
+
   /** @failure A dry run reports a composition whose recorded component pin no
    *          store holds, so the queue later names an object it can never read
    *          (27747). 27510 keeps it: the preview anchors the child in the store
