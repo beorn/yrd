@@ -5010,11 +5010,10 @@ export const READY_SLEEP_MS = 1000
  * another waited the full interval for no reason — at `--interval 120`, two
  * wasted minutes per merge, on top of the check that judged it.
  *
- * A round that merged, or that left checked changes it did not act on (the
- * queue merges the first checked change and no more), has more to do NOW, and
- * goes again at {@link READY_SLEEP_MS}. Never longer than the interval, so a
- * short interval stays a short interval. A round that held a stopped line did
- * neither, and waits the interval.
+ * A round that merged has more to do NOW: it takes one change per round, so
+ * another may be ready behind it, and it goes again at {@link READY_SLEEP_MS}.
+ * Never longer than the interval, so a short interval stays a short interval.
+ * A round that held a stopped line did neither, and waits the interval.
  */
 /**
  * The line's flow once a round has ended (25669). The round's own reading of the
@@ -5120,7 +5119,7 @@ export async function roundPhase(
 }
 
 export function sleepAfter(outcome: QueueRunOutcome, intervalMs: number): number {
-  const ready = outcome.merged.length > 0 || outcome.checkedWaiting > 0
+  const ready = outcome.merged.length > 0
   return ready ? Math.min(intervalMs, READY_SLEEP_MS) : intervalMs
 }
 

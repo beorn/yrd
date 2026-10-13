@@ -700,7 +700,6 @@ export async function eventQueueRun(
     stuck,
     deferred: [...new Set([...deferredChanges, ...deferred])],
     directMerges,
-    checkedWaiting: 0,
     ...(read.line === undefined ? {} : { line: read.line }),
     ...(branches.length === 0 ? {} : { branches: [...branches] }),
     ...(stopped === undefined ? {} : { stopped }),

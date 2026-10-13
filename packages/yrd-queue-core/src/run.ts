@@ -137,14 +137,6 @@ export type QueueRunOutcome = Readonly<{
   /** The commits on the target's first-parent line that the queue did not put there, reported this run (E5). */
   directMerges: readonly string[]
   /**
-   * Checked changes still in line that this run did not act on: it merges the
-   * FIRST checked change and no more (ruling D4), so a line of five leaves
-   * four here. A service reads it to know it has work ready NOW rather than
-   * spending its idle cadence between two ready merges. Zero when the run
-   * ended before it could read the line.
-   */
-  checkedWaiting: number
-  /**
    * The line as this round read it (25669): how many changes wait, the oldest of
    * them by opening, and when the queue last judged a change (the latest merged
    * or failed ending on any chain, read from the chains so a relaunched service
