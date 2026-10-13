@@ -21,6 +21,13 @@ import { ListingPage, printListing } from "../src/watch-print.tsx"
 import type { WatchSnapshot } from "../src/watch-pane.tsx"
 import { journalRun } from "../../../tests/support/journal-run.ts"
 
+// Published ESM exports are read-only. Observe the real renderer through
+// Vitest's module factory instead of reconfiguring its namespace binding.
+vi.mock(import("silvery"), async (importOriginal) => {
+  const original = await importOriginal()
+  return { ...original, renderString: vi.fn(original.renderString) }
+})
+
 /** The service's own health document, believable by the deadline its writer declared: the runner is up. */
 const BEATING = { kind: "beating", state: "healthy" } as const
 
@@ -82,7 +89,8 @@ describe("the printed page's frame", () => {
       height: 240,
       plain: !color,
     })
-    const renderer = vi.spyOn(silvery, "renderString")
+    const renderer = vi.mocked(silvery.renderString)
+    renderer.mockClear()
     try {
       const printed = await printListing(snap, options)
       expect(printed).toBe(complete.replace(/\s+$/u, ""))
@@ -92,7 +100,7 @@ describe("the printed page's frame", () => {
         120,
       )
     } finally {
-      renderer.mockRestore()
+      renderer.mockClear()
     }
   })
 
