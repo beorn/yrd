@@ -305,6 +305,47 @@ describe("event queue observation refusals", () => {
     expect(completedDocument.runner.projectionFallback).toBeUndefined()
   })
 
+  // AC (28918): a source-changed artifact is repaired ONLY once its round's
+  // writer is proven gone, and the proof is made by the CLI and injected into
+  // the reader. The journal header's pid is edited to name no process — the
+  // state every finished run of an exited runner is in — which also makes the
+  // artifact source-changed, so the next read must rebuild and persist it.
+  it("repairs, through the list read, a source-changed journal whose round's writer is gone (28918)", async () => {
+    const w = await world()
+    await change(w, "task/terminal", false)
+    await drain(w)
+    const logs = join(w.workdir, "logs")
+    const run = readdirSync(logs)
+      .filter((name) => name.endsWith(".jsonl"))
+      .sort()
+      .at(-1)!
+      .slice(0, -".jsonl".length)
+    const journalPath = join(logs, `${run}.jsonl`)
+    const artifact = join(logs, `${run}.projection.json`)
+    const lines = readFileSync(journalPath, "utf8").split("\n")
+    const header = JSON.parse(lines[0]!) as Record<string, unknown>
+    lines[0] = JSON.stringify({ ...header, pid: 2_000_000_000 })
+    writeFileSync(journalPath, lines.join("\n"))
+    const before = readFileSync(artifact, "utf8")
+
+    const json = capture(w.work)
+    expect(await coreQueueCommand(w.work, json.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    const listed = JSON.parse(json.stdout()) as {
+      journal: { fallbacks?: { count: number; reasons: readonly { reason: string }[]; persisted?: number } }
+    }
+    expect(listed.journal.fallbacks).toMatchObject({
+      count: 1,
+      reasons: [{ reason: "source-changed", count: 1 }],
+      persisted: 1,
+    })
+    expect(readFileSync(artifact, "utf8")).not.toBe(before)
+
+    // One repair per terminal journal: the next read finds the projection present.
+    const again = capture(w.work)
+    expect(await coreQueueCommand(w.work, again.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect((JSON.parse(again.stdout()) as { journal: { fallbacks?: unknown } }).journal.fallbacks).toBeUndefined()
+  })
+
   // 28799 review finding 1: the raw fallback has NO cutoff. An old round can be
   // the only journal a currently listed change has, so a bound that reached it
   // would drop that change's fact while the page still read complete. The

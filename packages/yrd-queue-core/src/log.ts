@@ -1070,7 +1070,12 @@ const failedJournalPersists = new Map<string, string>()
  * every read and the two would ping-pong. A version that cannot be ordered
  * is reported and left alone.
  */
-function repairableProjection(dir: string, id: string, fallback: JournalProjectionFallback): boolean {
+function repairableProjection(
+  dir: string,
+  id: string,
+  fallback: JournalProjectionFallback,
+  sourceTerminal: () => boolean,
+): boolean {
   // Declared-version protection takes precedence over shape repair: the
   // projection reader checks shape before versions, so an artifact a newer
   // writer left can surface as "partial" merely for missing a field this
@@ -1113,6 +1118,12 @@ function repairableProjection(dir: string, id: string, fallback: JournalProjecti
         declared.fold <= JOURNAL_PROJECTION_FOLD
       )
     }
+    case "source-changed":
+      // A journal that keeps growing must never be snapshotted over mid-growth, so a
+      // source-changed artifact is normally left alone. Only a round whose writer is
+      // proven GONE — its source can no longer move — may be rebuilt from the raw
+      // journal, which then reads present on every later read (28918).
+      return sourceTerminal()
     default:
       return false
   }
@@ -1138,6 +1149,7 @@ function cachedRunsIn(
   id: string,
   startedAt: Date,
   detail: "include" | "omit",
+  sourceTerminal: () => boolean,
 ): Readonly<{
   runs: readonly JournalSummary[]
   fallback?: JournalProjectionFallback
@@ -1161,7 +1173,7 @@ function cachedRunsIn(
     // (28908) — the read that pays is not always the read that rebuilds. The
     // same repair rule governs here as on the rebuild path below.
     const persist =
-      projection.fallback !== undefined && repairableProjection(dir, id, projection.fallback)
+      projection.fallback !== undefined && repairableProjection(dir, id, projection.fallback, sourceTerminal)
         ? attemptJournalPersist(dir, id, projection.source)
         : undefined
     return { runs: hit.runs, fallback: projection.fallback, ...(persist === undefined ? {} : { persist }) }
@@ -1184,7 +1196,7 @@ function cachedRunsIn(
         // every later read is served from the artifact. A failed write
         // changes nothing this read returns; it is counted and named in the
         // read's fallback facts instead of swallowed.
-        if (projection.fallback !== undefined && repairableProjection(dir, id, projection.fallback)) {
+        if (projection.fallback !== undefined && repairableProjection(dir, id, projection.fallback, sourceTerminal)) {
           persist = attemptJournalPersist(dir, id, projection.source)
         }
       }
@@ -1388,6 +1400,14 @@ export type ReadJournalsOptions = Readonly<{
   runIds?: readonly string[]
   /** Keep only this change's facts from a selected round shared with other changes. */
   branch?: string
+  /**
+   * Injected liveness (28918): did the round that wrote this run journal lose its
+   * writer — so the journal can never grow again? Only a round proven terminal may
+   * have a source-changed projection rebuilt from its raw journal. Absent, or any
+   * value other than `true`, means "not proven terminal" and the artifact is left
+   * alone. The core never reads process liveness itself; the CLI injects it.
+   */
+  runTerminal?: (id: string) => boolean
 }>
 
 /**
@@ -1470,7 +1490,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
     if (startedAt === undefined) continue
     let read: ReturnType<typeof cachedRunsIn>
     try {
-      read = cachedRunsIn(dir, id, startedAt, options.detail ?? "include")
+      read = cachedRunsIn(dir, id, startedAt, options.detail ?? "include", () => options.runTerminal?.(id) === true)
     } catch (error) {
       if (options.runIds === undefined) throw error
       if (options.runIds !== undefined && (error as NodeJS.ErrnoException).code === "ENOENT") {
