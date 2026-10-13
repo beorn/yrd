@@ -5439,6 +5439,19 @@ function narrateJournalReading(io: YrdCliIO, journals: Journals<JournalSummary>,
       ({ reason, count, example }) =>
         `the projection was ${reason} for ${String(count)} round(s) — those facts were rebuilt by reading their raw journals (e.g. ${example})`,
     ),
+    // What the rebuild left behind, in the same breath: a persisted projection
+    // never falls back again, and a write failure is named here with its first
+    // error rather than re-deriving "missing" on every later read (28908).
+    ...(journals.fallbacks === undefined ||
+    (journals.fallbacks.persisted === undefined && journals.fallbacks.persistFailures === undefined)
+      ? []
+      : [
+          `rebuilt ${String(journals.fallbacks.count)}, persisted ${String(journals.fallbacks.persisted ?? 0)}${
+            journals.fallbacks.persistFailures === undefined
+              ? ""
+              : `, ${String(journals.fallbacks.persistFailures.count)} write(s) failed: ${journals.fallbacks.persistFailures.example}`
+          }`,
+        ]),
     ...(journals.unread === undefined || journals.unread === 0
       ? []
       : [

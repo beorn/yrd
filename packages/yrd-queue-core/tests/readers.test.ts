@@ -215,7 +215,6 @@ describe("a run's journal, read back", () => {
     try {
       const summaries = readJournals(dir, { now: at, detail: "omit" })
       const summary = summaries.runs.get(journalKey(change.branch, change.head))?.[0]
-      expect(constructedCommands).toBe(0)
       expect(summary).not.toHaveProperty("steps")
       expect(summary).not.toHaveProperty("commands")
       expect(summary).toMatchObject({
@@ -227,10 +226,26 @@ describe("a run's journal, read back", () => {
         unknownKinds: ["future-kind"],
       })
       expect(summary?.malformed).toEqual([expect.stringContaining("result without a check for task/summary@abc123")])
+      // Positive control for the counter itself: the first read DID construct
+      // command detail, once, in the projection writer — a counter that never
+      // counts would pass the zero below vacuously.
+      expect(constructedCommands).toBeGreaterThan(0)
+      // That first read rebuilt from raw and persisted the projection
+      // (28908): a summary read never constructs command detail again —
+      // the one-time construction belongs to the projection writer, and
+      // every later read is served from the artifact it left behind.
+      constructedCommands = 0
+      const reread = readJournals(dir, { now: at, detail: "omit" })
+      expect(constructedCommands).toBe(0)
+      expect(reread.runs.get(journalKey(change.branch, change.head))?.[0]).toMatchObject({
+        ...change,
+        base: "aaa",
+        decision: "failed",
+        reason: "check",
+      })
       // Positive control: the same public reader's eager path still builds real detail.
       const details = readJournals(dir, { now: at })
       const detail = details.runs.get(journalKey(change.branch, change.head))?.[0]
-      expect(constructedCommands).toBeGreaterThan(0)
       expect(detail?.commands).toHaveLength(32)
       expect(detail?.commands[0]).toMatchObject({ args: ["rev-parse", "HEAD"], cwd: "/w", exit: 0 })
       expect(detail?.unknownKinds).toEqual(["future-kind"])
@@ -508,6 +523,168 @@ describe("a run's journal, read back", () => {
     } finally {
       read.mockRestore()
     }
+  })
+
+  it("persists a rebuilt projection so the next read finds it present (28908)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-rebuild-persist"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    expect(fs.existsSync(artifact)).toBe(false)
+    const first = readJournals(dir, { now: at })
+    expect(first.fallbacks?.reasons).toEqual([{ reason: "missing", count: 1, example: expect.any(String) }])
+    expect(first.fallbacks?.persisted).toBe(1)
+    expect(fs.existsSync(artifact)).toBe(true)
+    const second = readJournals(dir, { now: at })
+    expect(second.fallbacks).toBeUndefined()
+    expect(second.runs.get(journalKey("task/one", "abc123"))?.[0]).toMatchObject({ id: log.id, decision: "failed" })
+  })
+
+  it("names a failed projection persist in the fallback facts instead of swallowing it (28908)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-persist-failure"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    fs.chmodSync(dir, 0o500)
+    try {
+      const journals = readJournals(dir, { now: at })
+      // The facts still read raw and complete; only the saving failed, and it is named.
+      expect(journals.runs.get(journalKey("task/one", "abc123"))?.[0]).toMatchObject({ id: log.id, decision: "failed" })
+      expect(journals.fallbacks).toMatchObject({
+        count: 1,
+        reasons: [{ reason: "missing", count: 1 }],
+        persistFailures: { count: 1, example: expect.stringContaining(artifact) },
+      })
+      expect(fs.existsSync(artifact)).toBe(false)
+    } finally {
+      fs.chmodSync(dir, 0o700)
+    }
+  })
+
+  it("leaves a newer-fold projection byte-identical instead of downgrading it (28908)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-newer-fold"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    log.finish()
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    const parsed = JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>
+    // Fold 4 is one newer than this writer's fold: in a rolling landing the
+    // newer process owns this artifact, and no read may rewrite it.
+    writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 4 }))
+    const before = fs.readFileSync(artifact, "utf8")
+    const journals = readJournals(dir, { now: at })
+    expect(journals.fallbacks).toMatchObject({ count: 1, reasons: [{ reason: "incompatible", count: 1 }] })
+    expect(journals.fallbacks?.persistFailures).toBeUndefined()
+    expect(journals.runs.get(journalKey("task/one", "abc123"))?.[0]).toMatchObject({ id: log.id, decision: "failed" })
+    expect(fs.readFileSync(artifact, "utf8")).toBe(before)
+  })
+
+  it("refuses to persist a headerless journal instead of looping its repair (28908)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-headerless"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    // A zero-byte journal: readable, in the window, and unable to ever yield
+    // a projection its own reader would accept.
+    writeFileSync(log.path, "")
+    const read = vi.spyOn(fs, "readFileSync")
+    try {
+      const first = readJournals(dir, { now: at })
+      expect(first.runs.size).toBe(0)
+      expect(first.fallbacks).toMatchObject({
+        count: 1,
+        reasons: [{ reason: "missing", count: 1 }],
+        persistFailures: { count: 1, example: expect.stringContaining("no run header; nothing to persist") },
+      })
+      expect(fs.existsSync(artifact)).toBe(false)
+      // The refusal is memoized per source: a second read names it once more
+      // but spends no second acquisition of the raw journal — the journal
+      // file is not read again, let alone folded or written.
+      const rawReads = (): number => read.mock.calls.filter(([path]) => String(path) === log.path).length
+      const afterFirst = rawReads()
+      expect(afterFirst).toBeGreaterThan(0)
+      const second = readJournals(dir, { now: at })
+      expect(second.fallbacks).toMatchObject({
+        count: 1,
+        persistFailures: { count: 1, example: expect.stringContaining("no run header; nothing to persist") },
+      })
+      expect(fs.existsSync(artifact)).toBe(false)
+      expect(rawReads()).toBe(afterFirst)
+    } finally {
+      read.mockRestore()
+    }
+  })
+
+  it("leaves a newer-fold projection with a missing field byte-identical (28908)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-newer-fold-partial"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    log.finish()
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    const parsed = JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>
+    // A newer writer's artifact (fold 4) missing a field this build requires:
+    // the reader names it "partial" on shape before it ever orders versions,
+    // but the declared fold still owns it — no read may downgrade it.
+    const { runnerRecords: _dropped, ...rest } = parsed
+    writeFileSync(artifact, JSON.stringify({ ...rest, fold: 4 }))
+    const before = fs.readFileSync(artifact, "utf8")
+    const journals = readJournals(dir, { now: at })
+    expect(journals.fallbacks).toMatchObject({ count: 1, reasons: [{ reason: "partial", count: 1 }] })
+    expect(journals.fallbacks?.persistFailures).toBeUndefined()
+    expect(journals.runs.get(journalKey("task/one", "abc123"))?.[0]).toMatchObject({ id: log.id, decision: "failed" })
+    expect(fs.readFileSync(artifact, "utf8")).toBe(before)
+  })
+
+  it("leaves a projection declaring an unorderable fold byte-identical (28908)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-unorderable-fold"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    log.finish()
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    const parsed = JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>
+    // A declared fold this build cannot order ("future-v4") cannot be told
+    // from a newer one, so it is left alone like a newer one; only an absent
+    // version field leaves a partial artifact repairable.
+    const { runnerRecords: _dropped, ...rest } = parsed
+    writeFileSync(artifact, JSON.stringify({ ...rest, fold: "future-v4" }))
+    const before = fs.readFileSync(artifact, "utf8")
+    const journals = readJournals(dir, { now: at })
+    expect(journals.fallbacks).toMatchObject({ count: 1, reasons: [{ reason: "partial", count: 1 }] })
+    expect(journals.fallbacks?.persistFailures).toBeUndefined()
+    expect(journals.runs.get(journalKey("task/one", "abc123"))?.[0]).toMatchObject({ id: log.id, decision: "failed" })
+    expect(fs.readFileSync(artifact, "utf8")).toBe(before)
+  })
+
+  it("repairs an older-fold projection so the next read finds it present (28908)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-older-fold"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    log.finish()
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    const parsed = JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>
+    writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 2 }))
+    const first = readJournals(dir, { now: at })
+    expect(first.fallbacks).toMatchObject({
+      count: 1,
+      reasons: [{ reason: "incompatible", count: 1 }],
+      persisted: 1,
+    })
+    expect((JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>).fold).toBe(3)
+    const second = readJournals(dir, { now: at })
+    expect(second.fallbacks).toBeUndefined()
   })
 
   it.each([

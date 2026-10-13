@@ -9,7 +9,7 @@
  * @consumer the operator at the prompt · `yrd list | grep` · every `--json`
  *           reader (tent's trackerBridge among them)
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
@@ -143,10 +143,12 @@ const ESC = "["
 describe("`yrd list` prints the watch's page, once", () => {
   /**
    * @level l2 @consumer one-shot queue list @testonly none
-   * Core omit tests miss a CLI caller that requests full detail. Raw-journal
-   * command construction must stay zero through both printed and JSON list paths.
+   * Core omit tests miss a CLI caller that requests full detail. The first
+   * list over a raw journal constructs command detail ONCE, to persist the
+   * rebuilt projection (28908); every list after that — printed and JSON —
+   * constructs none, because the artifact is already on disk.
    */
-  it("lists a command-heavy raw journal without constructing command detail", async () => {
+  it("lists a command-heavy raw journal, constructing command detail only for the one persisting rebuild", async () => {
     const work = await queueWithOneChange()
     const git = gitIn(work)
     await git(["config", "yrd.workdir", join(work, "..", "queue")])
@@ -180,19 +182,27 @@ describe("`yrd list` prints the watch's page, once", () => {
       return value
     })
     try {
-      for (const args of [
-        ["queue", "list"],
-        ["queue", "list", "--json"],
-      ]) {
-        const result = await yrd(work, { color: false }, ...args)
-        expect(result.exitCode, result.report).toBe(0)
-        expect(result.stdout, result.report).toContain("task/one")
-        expect(commands).toBe(0)
-      }
-      // Run the eager positive control last: priming its file cache first
-      // would hide a CLI that mistakenly acquired eager detail too.
-      readJournals(join(workdir, "logs"))
+      const first = await yrd(work, { color: false }, "queue", "list")
+      expect(first.exitCode, first.report).toBe(0)
+      expect(first.stdout, first.report).toContain("task/one")
+      // The rebuilding list persisted the projection beside the raw journal.
+      expect(existsSync(join(workdir, "logs", `${log.id}.projection.json`))).toBe(true)
+      // Positive control for the counter itself: the persisting list DID
+      // construct command detail, once, in the projection writer — a counter
+      // that never counts would pass the zero below vacuously.
       expect(commands).toBeGreaterThan(0)
+      commands = 0
+      const second = await yrd(work, { color: false }, "queue", "list", "--json")
+      expect(second.exitCode, second.report).toBe(0)
+      expect(second.stdout, second.report).toContain("task/one")
+      expect(commands).toBe(0)
+      // Run the eager positive control last: priming its file cache first
+      // would hide a CLI that mistakenly acquired eager detail too. It reads
+      // the persisted projection now, so it proves real detail by content.
+      const journals = readJournals(join(workdir, "logs"))
+      const run = [...journals.runs.values()].flat().find((entry) => entry.branch === "task/one")
+      expect(run?.commands).toHaveLength(32)
+      expect(run?.commands[0]).toMatchObject({ args: ["rev-parse", "HEAD"], cwd: work, exit: 0 })
     } finally {
       spy.mockRestore()
     }
