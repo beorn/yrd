@@ -9,7 +9,7 @@
  */
 
 import { homedir } from "node:os"
-import { clocks, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
+import { clocks, type CheckView, type JournalSummary, type Row } from "@yrd/queue-core"
 import { STATE_WORDS, type DisplayState } from "./watch-words.ts"
 
 export {
@@ -109,7 +109,7 @@ export function hasWarning(row: Pick<Row, "diagnostic" | "diagnostics" | "revert
 /** Full recorded warnings, shared by plain output and the selected change detail. */
 export function diagnosticLines(
   row: Pick<Row, "branch" | "head" | "diagnostics" | "diagnostic" | "revertWarning">,
-  journal?: JournalRun,
+  journal?: JournalSummary,
 ): readonly string[] {
   return [
     ...(row.diagnostic === undefined ? [] : [`${row.branch}@${row.head}: ⚠ ${row.diagnostic}`]),

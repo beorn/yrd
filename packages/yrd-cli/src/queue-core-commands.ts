@@ -156,6 +156,7 @@ import {
   type CheckView,
   type Journals,
   type JournalRun,
+  type JournalSummary,
   type Git,
   type IssueResolution,
   type AdmissionOutcome,
@@ -3304,40 +3305,52 @@ export async function coreQueueCommand(
        * the same captured declaration as the queue reading, so the rows and
        * the reading share one tip and no second reading can disagree with it.
        */
-      const round = async (
+      const listingRequest = request
+      type ListingRound<Run extends JournalSummary = JournalRun> = Readonly<{
+        rows: readonly WatchRow[]
+        /** Every row of the reading in the same lens, whatever the selector narrowed `rows` to. */
+        unfiltered: readonly WatchRow[]
+        /** The rows that are changes: every row but the drafts, which the document, the selector and the ending never count. */
+        changes: readonly WatchRow[]
+        observation: GitObservation
+        data: unknown
+        queue: string
+        queues: readonly WatchQueue[]
+        pause?: string
+        journalAbsent?: string
+        /** What was queried and what was left out, when a filter narrowed the rows. */
+        scope?: string
+        /** The newest run journal and its process, for the RUNNER box. */
+        runner: RunnerFacts
+        /** Every decision the rows carry, one per run per change and unfiltered, for the STATS box. */
+        decisions: readonly RunDecision[]
+        /** The queue read the rows came from, so a detail opened later reads the same tip. */
+        eventChanges: ReadonlyMap<string, EventChange>
+        eventInvalid: EventListingResult["invalid"]
+        journals: Journals<Run>
+        /** The stop that stands, as the reading derived it. */
+        stopped: StopFact | null
+        /** The merge-check override table, active and expired entries alike (25296); empty on an event queue. */
+        overrides: readonly OverrideFact[]
+        /** Which drafts the rows list, the heads of the drafts this repository has not read, and how many older ones fold into a count. */
+        drafts?: Readonly<{ window: DraftWindow; unread: readonly string[]; older: number }>
+      }>
+      function round(
+        declared: CapturedDeclaration,
+        draftWindow?: DraftWindow,
+        detail?: "include",
+      ): Promise<ListingRound>
+      function round(
+        declared: CapturedDeclaration,
+        draftWindow: DraftWindow | undefined,
+        detail: "omit",
+      ): Promise<ListingRound<JournalSummary>>
+      async function round(
         declared: CapturedDeclaration,
         draftWindow: DraftWindow = "7d",
-      ): Promise<
-        Readonly<{
-          rows: readonly WatchRow[]
-          /** Every row of the reading in the same lens, whatever the selector narrowed `rows` to. */
-          unfiltered: readonly WatchRow[]
-          /** The rows that are changes: every row but the drafts, which the document, the selector and the ending never count. */
-          changes: readonly WatchRow[]
-          observation: GitObservation
-          data: unknown
-          queue: string
-          queues: readonly WatchQueue[]
-          pause?: string
-          journalAbsent?: string
-          /** What was queried and what was left out, when a filter narrowed the rows. */
-          scope?: string
-          /** The newest run journal and its process, for the RUNNER box. */
-          runner: RunnerFacts
-          /** Every decision the rows carry, one per run per change and unfiltered, for the STATS box. */
-          decisions: readonly RunDecision[]
-          /** The queue read the rows came from, so a detail opened later reads the same tip. */
-          eventChanges: ReadonlyMap<string, EventChange>
-          eventInvalid: EventListingResult["invalid"]
-          journals: Journals
-          /** The stop that stands, as the reading derived it. */
-          stopped: StopFact | null
-          /** The merge-check override table, active and expired entries alike (25296); empty on an event queue. */
-          overrides: readonly OverrideFact[]
-          /** Which drafts the rows list, the heads of the drafts this repository has not read, and how many older ones fold into a count. */
-          drafts?: Readonly<{ window: DraftWindow; unread: readonly string[]; older: number }>
-        }>
-      > => {
+        detail: "include" | "omit" = "include",
+      ): Promise<ListingRound<JournalSummary>> {
+        const request = listingRequest
         // JSON keeps one row per opened segment and per local run. The human
         // table keeps each branch's current segment only.
         const selectedStore = statusEventStore(declared.config.target.remote)
@@ -3351,6 +3364,7 @@ export async function coreQueueCommand(
           all: request.all,
           drafts: request.drafts,
           draftWindow,
+          journalDetail: detail,
           onRetry: (message) => io.stderr(message),
         })
         const { journals, all, drafts, observation } = reading
@@ -3558,7 +3572,7 @@ export async function coreQueueCommand(
       }
 
       if (request.watch !== true) {
-        const one = await round(captured)
+        const one = await round(captured, undefined, "omit")
         if (options.json === true) emit(io, true, one.data, "")
         else io.stdout(`${await page(one)}\n`)
         if (one.observation.contract === "root-v1" && one.observation.outcome === "invalid") return 2
@@ -5369,11 +5383,10 @@ export function endingCode(states: readonly Row["state"][]): YrdCliExitCode | un
 /** The URL a remote NAME stands for, which is what the queue calls itself to a stranger (config.ts). */
 
 /** Preserve the run selected by this row's join, including the collapsed latest lens. */
-function journalFor(item: WatchRow, journals: Journals): JournalRun | undefined {
-  if (item.run !== undefined) return item.run
-  const runId = item.row.run ?? item.row.live?.run
+function journalFor<Run extends JournalSummary>(item: WatchRow, journals: Journals<Run>): Run | undefined {
+  const runId = item.run?.id ?? item.row.run ?? item.row.live?.run
   if (runId === undefined) return undefined
-  const runs = journals.runs.get(journalKey(item.row.branch, item.row.head))
+  const runs = journals.runs.get(journalKey(item.run?.branch ?? item.row.branch, item.run?.head ?? item.row.head))
   if (runs === undefined || runs.length === 0) return undefined
   return runs.find((run) => run.id === runId)
 }
@@ -5384,7 +5397,7 @@ function journalFor(item: WatchRow, journals: Journals): JournalRun | undefined 
  * sees no `live` and no `run` can tell a queue with nothing running from a
  * machine that holds no journal at all.
  */
-function journalFact(journals: Journals): Readonly<{
+function journalFact(journals: Journals<JournalSummary>): Readonly<{
   dir: string
   absent?: string
   malformed?: Journals["malformed"]
@@ -5411,7 +5424,7 @@ function journalFact(journals: Journals): Readonly<{
  * scoped to one invocation, so a watch refreshing every few seconds states a
  * defect once while a NEW one still reaches the reader the round it appears.
  */
-function narrateJournalReading(io: YrdCliIO, journals: Journals, said: Set<string>): void {
+function narrateJournalReading(io: YrdCliIO, journals: Journals<JournalSummary>, said: Set<string>): void {
   // ONE line, with its counts, whatever the window holds: every round of a
   // queue whose projections are absent falls back together, and 3,006 lines of
   // the same sentence is the cost this states instead (@i/10-yrd/28799).
@@ -5493,14 +5506,14 @@ function areRefMapsEqual(
   return true
 }
 
-export type EventListingResult = Readonly<{
+export type EventListingResult<Run extends JournalSummary = JournalRun> = Readonly<{
   format: "event"
   /** One status claim read with the queue refs, outside change authority and observation fences. */
   runnerTip?: string
   all: readonly Row[]
   document: readonly Row[]
   history: ReadonlyMap<string, readonly EventHistoryRow[]>
-  journals: Journals
+  journals: Journals<Run>
   drafts: DraftReading
   pause: PauseRecord | undefined
   overrides: OverrideTable
@@ -5520,7 +5533,7 @@ interface EventListingCache {
   targetOid: string
   branchRefs: ReadonlyMap<string, string>
   lastHeadListingAt: number
-  reading: EventListingResult
+  reading: EventListingResult<JournalSummary>
   draftWindow?: DraftWindow
 }
 
@@ -5531,7 +5544,48 @@ export function clearEventListingCache(): void {
   eventListingCaches.clear()
 }
 
+type EventListingOptions = Readonly<{
+  all?: boolean
+  directHistory?: boolean
+  drafts?: boolean
+  now?: number | Date
+  forceFresh?: boolean
+  draftWindow?: DraftWindow
+  onRetry?: (message: string) => void
+  /** Acquire only this change's hot/cold history and its event-linked journals. */
+  branch?: string
+  /** One-shot list omits command detail; watch and show keep eager detail. */
+  journalDetail?: "include" | "omit"
+}>
+
 /** Read an event queue through Gitomic and project its change chains and draft branch heads. */
+export function readEventListing(
+  git: GitRunner,
+  config: QueueConfig,
+  repo: string,
+  workdir: string,
+  targetOid: string,
+  store: QueueReadStore,
+  options: EventListingOptions & { journalDetail: "omit" },
+): Promise<EventListingResult<JournalSummary>>
+export function readEventListing(
+  git: GitRunner,
+  config: QueueConfig,
+  repo: string,
+  workdir: string,
+  targetOid: string,
+  store: QueueReadStore,
+  options?: EventListingOptions & { journalDetail?: "include" },
+): Promise<EventListingResult>
+export function readEventListing(
+  git: GitRunner,
+  config: QueueConfig,
+  repo: string,
+  workdir: string,
+  targetOid: string,
+  store: QueueReadStore,
+  options: EventListingOptions,
+): Promise<EventListingResult<JournalSummary>>
 export async function readEventListing(
   git: GitRunner,
   config: QueueConfig,
@@ -5539,23 +5593,13 @@ export async function readEventListing(
   workdir: string,
   targetOid: string,
   store: QueueReadStore,
-  options: Readonly<{
-    all?: boolean
-    directHistory?: boolean
-    drafts?: boolean
-    now?: number | Date
-    forceFresh?: boolean
-    draftWindow?: DraftWindow
-    onRetry?: (message: string) => void
-    /** Acquire only this change's hot/cold history and its event-linked journals. */
-    branch?: string
-  }> = {},
-): Promise<EventListingResult> {
+  options: EventListingOptions = {},
+): Promise<EventListingResult<JournalSummary>> {
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
   const runnerRefName = `${queueRefPrefix(config.target.branch)}/runner`
   const changePrefix = `${queuePrefix}changes/`
   const coldPrefix = archivedChangesPrefix(config.target.branch)
-  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#directHistory:${options.directHistory === true}#drafts:${options.drafts === true}#branch:${JSON.stringify(options.branch)}`
+  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#directHistory:${options.directHistory === true}#drafts:${options.drafts === true}#branch:${JSON.stringify(options.branch)}#journalDetail:${options.journalDetail ?? "include"}`
   const cache = eventListingCaches.get(cacheKey)
   const nowMs =
     typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : Date.now()
@@ -5565,8 +5609,9 @@ export async function readEventListing(
     options.branch === undefined
       ? undefined
       : [changesRef(config.target.branch, options.branch), `${coldPrefix}${options.branch}`]
-  const journalsFor = (history: EventListingResult["history"]): Journals => {
-    if (options.branch === undefined) return readJournals(join(workdir, "logs"))
+  const journalsFor = (history: EventListingResult["history"]): Journals<JournalSummary> => {
+    const detail = options.journalDetail ?? "include"
+    if (options.branch === undefined) return readJournals(join(workdir, "logs"), { detail })
     const segments = history.get(options.branch) ?? []
     const ids = segments.flatMap(({ events }) =>
       events.flatMap((event) => {
@@ -5574,7 +5619,7 @@ export async function readEventListing(
         return id === undefined ? [] : [id]
       }),
     )
-    const journals = readJournals(join(workdir, "logs"), { runIds: ids, branch: options.branch })
+    const journals = readJournals(join(workdir, "logs"), { runIds: ids, branch: options.branch, detail })
     const legacy = segments.filter(
       ({ events }) => !events.some((event) => trailer(event, EVENT_TRAILERS.run) !== undefined),
     )
@@ -5893,7 +5938,7 @@ export async function readEventListing(
       `${queueRef(config.target.branch)} moved from ${queue.tip} to ${operational.queue.tip} during listing; retry the read`,
     )
   }
-  const reading: EventListingResult = {
+  const reading: EventListingResult<JournalSummary> = {
     format: "event",
     ...(runnerTip === undefined ? {} : { runnerTip }),
     all,

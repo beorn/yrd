@@ -28,7 +28,8 @@
 
 import React, { memo } from "react"
 import { Box, Pulse, Text, TogglePill } from "silvery"
-import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
+import { clocks, type Row } from "@yrd/queue-core"
+import type { WatchRow } from "./watch-rows.ts"
 import { useNow } from "./watch-clock.ts"
 import { TimeText } from "./watch-primitives.tsx"
 import {

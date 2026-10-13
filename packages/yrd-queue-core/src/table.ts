@@ -1,5 +1,5 @@
 /** Event queue table rows, journal overlays, clocks and commit subjects. */
-import { journalKey, type JournalRun, type Journals, type LogRecord } from "./log.ts"
+import { journalKey, type JournalRun, type JournalSummary, type Journals, type LogRecord } from "./log.ts"
 import { incidentLine, type Incident } from "./incident.ts"
 import { CHANGE_STATUSES, isOpen, type ChangeStatus, type EventChange } from "./events.ts"
 import type { Git } from "./git.ts"
@@ -134,13 +134,13 @@ export type Row<Status extends string = ChangeStatus | "direct" | "invalid"> = R
 }>
 
 /** One line of the watch's list: a change, or a change as ONE run saw it. */
-export type WatchRow = Readonly<{
+export type WatchRow<Run extends JournalSummary = JournalRun> = Readonly<{
   row: Row
   /** The run this line is about; absent when no journal split the change by run. */
-  run?: JournalRun
+  run?: Run
 }>
 
-export type WatchRowOptions = Readonly<{
+export type WatchRowOptions<Run extends JournalSummary = JournalRun> = Readonly<{
   /** Select one current row even when a caller requests the per-run lens. */
   latest?: boolean
   /**
@@ -150,11 +150,11 @@ export type WatchRowOptions = Readonly<{
    */
   perRun?: boolean
   /** What the run journals on this machine say; absent leaves one row per change. */
-  journals?: Journals
+  journals?: Journals<Run>
 }>
 
 /** The same identity for selection and detail: branch, head, retained ending and journal run. */
-export function watchRowKey(row: WatchRow): string {
+export function watchRowKey(row: WatchRow<JournalSummary>): string {
   const change = journalKey(row.row.branch, row.row.head)
   const ending = row.row.ending === undefined ? change : `${change}:ending:${row.row.ending}`
   return row.run === undefined ? ending : `${ending}@${row.run.id}`
@@ -178,7 +178,10 @@ export function watchRowKey(row: WatchRow): string {
  * which counts a DECISION per run and would silently understate retries and
  * lose every superseded run's verdict if it were folded away.
  */
-export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): readonly WatchRow[] {
+export function watchRows<Run extends JournalSummary = JournalRun>(
+  rows: readonly Row[],
+  options: WatchRowOptions<Run> = {},
+): readonly WatchRow<Run>[] {
   const journals = options.journals
   if (options.latest === true || options.perRun !== true || journals === undefined) {
     // The default lens is a status surface too (@cto a04a006b, 24735 finding
@@ -209,7 +212,7 @@ export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): 
  * pin 1 forbids dropping the journal, the kind or the reader's cure, and
  * @cto a04a006b requires the row to carry the cure beside the status marker.
  */
-function skewedRow(current: Row, runs: readonly JournalRun[]): Row {
+function skewedRow(current: Row, runs: readonly JournalSummary[]): Row {
   const skewed = runs.find((run) => (run.unknownKinds?.length ?? 0) > 0)
   if (skewed === undefined) return current
   const newest = runs[0] === skewed
@@ -241,7 +244,7 @@ function skewedRow(current: Row, runs: readonly JournalRun[]): Row {
  * table that quietly understates what the queue recorded, and taking the read
  * down instead cost every seat every read verb for a seven-day window.
  */
-function malformedNext(run: JournalRun | undefined): NextOwner | undefined {
+function malformedNext(run: JournalSummary | undefined): NextOwner | undefined {
   if (run?.malformed === undefined || run.malformed.length === 0) return undefined
   return {
     because: `run journal ${run.id} has a malformed row for this change (${run.malformed.join("; ")}); the row was skipped — fix the writer (26230)`,
@@ -257,7 +260,7 @@ function malformedNext(run: JournalRun | undefined): NextOwner | undefined {
  * fix-the-writer wording. The run is still folded; only this reader's reading
  * of it is partial.
  */
-function skewNext(run: JournalRun | undefined): NextOwner | undefined {
+function skewNext(run: JournalSummary | undefined): NextOwner | undefined {
   const kinds = run?.unknownKinds
   if (run === undefined || kinds === undefined || kinds.length === 0) return undefined
   return {
@@ -274,7 +277,7 @@ function skewNext(run: JournalRun | undefined): NextOwner | undefined {
  * fold is: this reader never understood every record, so the counts it folded
  * may be partial. A trust note, never the repair instruction above.
  */
-function olderSkewNext(run: JournalRun | undefined): NextOwner | undefined {
+function olderSkewNext(run: JournalSummary | undefined): NextOwner | undefined {
   const kinds = run?.unknownKinds
   if (run === undefined || kinds === undefined || kinds.length === 0) return undefined
   return {
@@ -284,7 +287,7 @@ function olderSkewNext(run: JournalRun | undefined): NextOwner | undefined {
 }
 
 /** Join already-recorded run facts; never rederive the change's state. */
-function runRow(current: Row, run: JournalRun, newest: boolean): Row {
+function runRow(current: Row, run: JournalSummary, newest: boolean): Row {
   const check = run.decision === "failed" ? run.checks.findLast((check) => check.result === "fail") : run.checks.at(-1)
   const result =
     run.incident === undefined

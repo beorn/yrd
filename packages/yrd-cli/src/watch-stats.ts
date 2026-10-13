@@ -14,7 +14,8 @@
  * the queue's own machine.
  */
 
-import type { JournalRun, Row, WatchRow } from "@yrd/queue-core"
+import type { JournalRun, Row } from "@yrd/queue-core"
+import type { WatchRow } from "./watch-rows.ts"
 import { STATE_WORDS, runTime } from "./watch-format.ts"
 
 /** One decision a run recorded about a change: the smallest fact STATS counts. */
