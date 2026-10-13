@@ -226,6 +226,10 @@ describe("a run's journal, read back", () => {
         unknownKinds: ["future-kind"],
       })
       expect(summary?.malformed).toEqual([expect.stringContaining("result without a check for task/summary@abc123")])
+      // Positive control for the counter itself: the first read DID construct
+      // command detail, once, in the projection writer — a counter that never
+      // counts would pass the zero below vacuously.
+      expect(constructedCommands).toBeGreaterThan(0)
       // That first read rebuilt from raw and persisted the projection
       // (28908): a summary read never constructs command detail again —
       // the one-time construction belongs to the projection writer, and
@@ -531,10 +535,75 @@ describe("a run's journal, read back", () => {
     expect(fs.existsSync(artifact)).toBe(false)
     const first = readJournals(dir, { now: at })
     expect(first.fallbacks?.reasons).toEqual([{ reason: "missing", count: 1, example: expect.any(String) }])
+    expect(first.fallbacks?.persisted).toBe(1)
     expect(fs.existsSync(artifact)).toBe(true)
     const second = readJournals(dir, { now: at })
     expect(second.fallbacks).toBeUndefined()
     expect(second.runs.get(journalKey("task/one", "abc123"))?.[0]).toMatchObject({ id: log.id, decision: "failed" })
+  })
+
+  it("names a failed projection persist in the fallback facts instead of swallowing it (28908)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-persist-failure"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    fs.chmodSync(dir, 0o500)
+    try {
+      const journals = readJournals(dir, { now: at })
+      // The facts still read raw and complete; only the saving failed, and it is named.
+      expect(journals.runs.get(journalKey("task/one", "abc123"))?.[0]).toMatchObject({ id: log.id, decision: "failed" })
+      expect(journals.fallbacks).toMatchObject({
+        count: 1,
+        reasons: [{ reason: "missing", count: 1 }],
+        persistFailures: { count: 1, example: expect.stringContaining(artifact) },
+      })
+      expect(fs.existsSync(artifact)).toBe(false)
+    } finally {
+      fs.chmodSync(dir, 0o700)
+    }
+  })
+
+  it("leaves a newer-fold projection byte-identical instead of downgrading it (28908)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-newer-fold"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    log.finish()
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    const parsed = JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>
+    // Fold 4 is one newer than this writer's fold: in a rolling landing the
+    // newer process owns this artifact, and no read may rewrite it.
+    writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 4 }))
+    const before = fs.readFileSync(artifact, "utf8")
+    const journals = readJournals(dir, { now: at })
+    expect(journals.fallbacks).toMatchObject({ count: 1, reasons: [{ reason: "incompatible", count: 1 }] })
+    expect(journals.fallbacks?.persistFailures).toBeUndefined()
+    expect(journals.runs.get(journalKey("task/one", "abc123"))?.[0]).toMatchObject({ id: log.id, decision: "failed" })
+    expect(fs.readFileSync(artifact, "utf8")).toBe(before)
+  })
+
+  it("repairs an older-fold projection so the next read finds it present (28908)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-older-fold"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    log.finish()
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    const parsed = JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>
+    writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 2 }))
+    const first = readJournals(dir, { now: at })
+    expect(first.fallbacks).toMatchObject({
+      count: 1,
+      reasons: [{ reason: "incompatible", count: 1 }],
+      persisted: 1,
+    })
+    expect((JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>).fold).toBe(3)
+    const second = readJournals(dir, { now: at })
+    expect(second.fallbacks).toBeUndefined()
   })
 
   it.each([

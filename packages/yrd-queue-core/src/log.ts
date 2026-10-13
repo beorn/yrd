@@ -249,11 +249,6 @@ export type QueueRunLog = Readonly<{
 }>
 
 /**
- * Open the log for one queue run. `render`, when given, receives every record
- * as it is written: the human line is a rendering of the record, and this is
- * the one place a rendering can come from.
- */
-/**
  * The one projection writer: build the disposable cache beside a run journal
  * from its raw records, refusing to persist across a source that changed
  * while it was being read. Used when a run finishes and when a reader had to
@@ -282,6 +277,11 @@ function persistJournalProjection(path: string, id: string): void {
   )
 }
 
+/**
+ * Open the log for one queue run. `render`, when given, receives every record
+ * as it is written: the human line is a rendering of the record, and this is
+ * the one place a rendering can come from.
+ */
 export function openLog(
   directory: string,
   now: () => Date = () => new Date(),
@@ -704,6 +704,14 @@ export type JournalProjectionFallbackSummary = Readonly<{
     /** The first detail seen for this reason: the path and the error, as the per-journal read would have said it. */
     example: string
   }>[]
+  /** Rebuilt projections this read persisted beside their raw journals, so later reads find them present (28908). */
+  persisted?: number
+  /**
+   * Persist attempts that failed, counted, with the FIRST failure's artifact
+   * path and error: a write refusal must be named where the fallback is
+   * reported, never swallowed while every read goes on saying only "missing".
+   */
+  persistFailures?: Readonly<{ count: number; example: string }>
 }>
 
 export type JournalProjectionRead =
@@ -960,6 +968,10 @@ function pruneJournalCache(dir: string, windowed: readonly string[]): void {
   for (const key of journalFileCache.keys()) {
     if (key.startsWith(prefix) && !live.has(key)) journalFileCache.delete(key)
   }
+  const livePaths = new Set(windowed.map((id) => journalPath(dir, id)))
+  for (const key of failedJournalPersists.keys()) {
+    if (key.startsWith(prefix) && !livePaths.has(key.slice(0, key.indexOf("\0")))) failedJournalPersists.delete(key)
+  }
 }
 
 /**
@@ -1011,16 +1023,87 @@ function unreadInWindow(
  * per-journal rest is the same sentence repeated once per round
  * (@i/10-yrd/28799).
  */
-function summariseFallbacks(fallbacks: readonly JournalProjectionFallback[]): JournalProjectionFallbackSummary {
+function summariseFallbacks(
+  fallbacks: readonly JournalProjectionFallback[],
+  persists: readonly JournalPersistOutcome[] = [],
+): JournalProjectionFallbackSummary {
   const byReason = new Map<JournalProjectionFallback["reason"], { count: number; example: string }>()
   for (const fallback of fallbacks) {
     const held = byReason.get(fallback.reason)
     if (held === undefined) byReason.set(fallback.reason, { count: 1, example: fallback.detail })
     else held.count += 1
   }
+  const persisted = persists.filter((persist) => persist.kind === "persisted").length
+  const failures = persists.flatMap((persist) => (persist.kind === "failed" ? [persist.detail] : []))
+  const firstFailure = failures[0]
   return {
     count: fallbacks.length,
     reasons: [...byReason].map(([reason, held]) => ({ reason, count: held.count, example: held.example })),
+    ...(persisted === 0 ? {} : { persisted }),
+    ...(firstFailure === undefined ? {} : { persistFailures: { count: failures.length, example: firstFailure } }),
+  }
+}
+
+/** What one attempt to persist a rebuilt projection did, carried into the read's fallback facts. */
+type JournalPersistOutcome = Readonly<{ kind: "persisted" }> | Readonly<{ kind: "failed"; detail: string }>
+
+/**
+ * Failed persist attempts, one per journal source per process: a logs
+ * directory that refuses writes must not be charged a full raw fold on every
+ * cache hit. The recorded failure still reports on every read that meets it,
+ * and a journal whose source next changes earns a fresh attempt.
+ */
+const failedJournalPersists = new Map<string, string>()
+
+/**
+ * May a read repair this artifact by rewriting it from the raw journal?
+ * A definite defect of THIS artifact — absent, incomplete, or invalid — or
+ * an artifact an older writer than this one left. Never an artifact whose
+ * schema or fold is NEWER than this writer's: in a rolling landing the newer
+ * process owns it, and an older reader rewriting it would downgrade it on
+ * every read and the two would ping-pong. A version that cannot be ordered
+ * is reported and left alone.
+ */
+function repairableProjection(dir: string, id: string, fallback: JournalProjectionFallback): boolean {
+  switch (fallback.reason) {
+    case "missing":
+    case "partial":
+    case "corrupt":
+      return true
+    case "incompatible": {
+      try {
+        const parsed = projectionObject(JSON.parse(readFileSync(join(dir, `${id}.projection.json`), "utf8")))
+        const { schema, fold } = parsed
+        if (
+          typeof schema !== "number" ||
+          typeof fold !== "number" ||
+          !Number.isSafeInteger(schema) ||
+          !Number.isSafeInteger(fold)
+        ) {
+          return false
+        }
+        return schema <= JOURNAL_PROJECTION_SCHEMA && fold <= JOURNAL_PROJECTION_FOLD
+      } catch {
+        return false
+      }
+    }
+    default:
+      return false
+  }
+}
+
+function attemptJournalPersist(dir: string, id: string, source: JournalSource): JournalPersistOutcome {
+  const path = journalPath(dir, id)
+  const key = `${path}\0${JSON.stringify(source)}`
+  const recorded = failedJournalPersists.get(key)
+  if (recorded !== undefined) return { kind: "failed", detail: recorded }
+  try {
+    persistJournalProjection(path, id)
+    return { kind: "persisted" }
+  } catch (error) {
+    const detail = `${path.replace(/\.jsonl$/u, ".projection.json")}: ${String(error)}`
+    failedJournalPersists.set(key, detail)
+    return { kind: "failed", detail }
   }
 }
 
@@ -1029,7 +1112,11 @@ function cachedRunsIn(
   id: string,
   startedAt: Date,
   detail: "include" | "omit",
-): Readonly<{ runs: readonly JournalSummary[]; fallback?: JournalProjectionFallback }> {
+): Readonly<{
+  runs: readonly JournalSummary[]
+  fallback?: JournalProjectionFallback
+  persist?: JournalPersistOutcome
+}> {
   const path = journalPath(dir, id)
   const cacheKey = `${path}\0${detail}`
   const projection = readJournalProjection(dir, id)
@@ -1043,23 +1130,22 @@ function cachedRunsIn(
   }
   const hit = journalFileCache.get(cacheKey)
   if (hit !== undefined && projection.source !== undefined && sameJournalSource(hit.source, projection.source)) {
-    // A cache hit over a still-missing projection: an earlier read in this
-    // process rebuilt from raw, so persist that rebuild now (28908) — the
-    // read that pays is not always the read that rebuilds.
-    if (projection.fallback?.reason === "missing") {
-      try {
-        persistJournalProjection(path, id)
-      } catch {
-        // silent-fallback-allow: a disposable projection-cache write cannot change the queue's outcome; the next read retries, nothing is lost but the saving.
-      }
-    }
-    return { runs: hit.runs, fallback: projection.fallback }
+    // A cache hit over a projection that still cannot be reused: an earlier
+    // read in this process rebuilt from raw, so persist that rebuild now
+    // (28908) — the read that pays is not always the read that rebuilds. The
+    // same repair rule governs here as on the rebuild path below.
+    const persist =
+      projection.fallback !== undefined && repairableProjection(dir, id, projection.fallback)
+        ? attemptJournalPersist(dir, id, projection.source)
+        : undefined
+    return { runs: hit.runs, fallback: projection.fallback, ...(persist === undefined ? {} : { persist }) }
   }
   // Every round whose projection cannot be reused is read RAW. There is no
   // cutoff: an old round can be the ONLY journal a currently listed change has,
   // and a bound that reached it would drop that change's fact while the page
   // still read complete (@i/10-yrd/28799 finding 1).
   const runs = [...runsIn(readRunLog(dir, id), id, startedAt, detail)]
+  let persist: JournalPersistOutcome | undefined
   if (projection.source !== undefined) {
     try {
       if (sameJournalSource(projection.source, journalSource(path, id))) {
@@ -1069,13 +1155,11 @@ function cachedRunsIn(
         // instead of rebuilding (and re-noticing) forever. The writer folds
         // the raw journal itself, so even a summary (omit) read persists the
         // full artifact — the construction is paid once per journal, and
-        // every later read is served from the artifact. A disposable cache
-        // write cannot change the queue's outcome, so a failure here leaves
-        // this read's facts standing and the fallback named once more.
-        try {
-          persistJournalProjection(path, id)
-        } catch {
-          // silent-fallback-allow: a disposable projection-cache write cannot change the queue's outcome; the next read retries, nothing is lost but the saving.
+        // every later read is served from the artifact. A failed write
+        // changes nothing this read returns; it is counted and named in the
+        // read's fallback facts instead of swallowed.
+        if (projection.fallback !== undefined && repairableProjection(dir, id, projection.fallback)) {
+          persist = attemptJournalPersist(dir, id, projection.source)
         }
       }
     } catch (error) {
@@ -1091,7 +1175,7 @@ function cachedRunsIn(
       }
     }
   }
-  return { runs, fallback: projection.fallback }
+  return { runs, fallback: projection.fallback, ...(persist === undefined ? {} : { persist }) }
 }
 
 /**
@@ -1345,6 +1429,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
   const runs = new Map<string, JournalSummary[]>()
   const malformed: { run: string; key: string; message: string }[] = []
   const fallbacks: JournalProjectionFallback[] = []
+  const persists: JournalPersistOutcome[] = []
   const unavailable: string[] = []
   if (left.failure !== undefined) unavailable.push(left.failure)
   if (options.runIds !== undefined) {
@@ -1369,6 +1454,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
       throw new Error(`cannot read run journal ${join(dir, `${id}.jsonl`)}: ${String(error)}`, { cause: error })
     }
     if (read.fallback !== undefined) fallbacks.push(read.fallback)
+    if (read.persist !== undefined) persists.push(read.persist)
     for (const run of read.runs) {
       if (options.branch !== undefined && run.branch !== options.branch) continue
       const key = journalKey(run.branch, run.head)
@@ -1385,7 +1471,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
     dir,
     malformed,
     runs,
-    ...(fallbacks.length === 0 ? {} : { fallbacks: summariseFallbacks(fallbacks) }),
+    ...(fallbacks.length === 0 ? {} : { fallbacks: summariseFallbacks(fallbacks, persists) }),
     ...(unread === 0 ? {} : { unread }),
     ...(unavailable.length === 0 ? {} : { absent: unavailable.join("; ") }),
   }
