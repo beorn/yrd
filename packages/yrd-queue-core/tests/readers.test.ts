@@ -215,7 +215,6 @@ describe("a run's journal, read back", () => {
     try {
       const summaries = readJournals(dir, { now: at, detail: "omit" })
       const summary = summaries.runs.get(journalKey(change.branch, change.head))?.[0]
-      expect(constructedCommands).toBe(0)
       expect(summary).not.toHaveProperty("steps")
       expect(summary).not.toHaveProperty("commands")
       expect(summary).toMatchObject({
@@ -227,10 +226,22 @@ describe("a run's journal, read back", () => {
         unknownKinds: ["future-kind"],
       })
       expect(summary?.malformed).toEqual([expect.stringContaining("result without a check for task/summary@abc123")])
+      // That first read rebuilt from raw and persisted the projection
+      // (28908): a summary read never constructs command detail again —
+      // the one-time construction belongs to the projection writer, and
+      // every later read is served from the artifact it left behind.
+      constructedCommands = 0
+      const reread = readJournals(dir, { now: at, detail: "omit" })
+      expect(constructedCommands).toBe(0)
+      expect(reread.runs.get(journalKey(change.branch, change.head))?.[0]).toMatchObject({
+        ...change,
+        base: "aaa",
+        decision: "failed",
+        reason: "check",
+      })
       // Positive control: the same public reader's eager path still builds real detail.
       const details = readJournals(dir, { now: at })
       const detail = details.runs.get(journalKey(change.branch, change.head))?.[0]
-      expect(constructedCommands).toBeGreaterThan(0)
       expect(detail?.commands).toHaveLength(32)
       expect(detail?.commands[0]).toMatchObject({ args: ["rev-parse", "HEAD"], cwd: "/w", exit: 0 })
       expect(detail?.unknownKinds).toEqual(["future-kind"])
@@ -508,6 +519,22 @@ describe("a run's journal, read back", () => {
     } finally {
       read.mockRestore()
     }
+  })
+
+  it("persists a rebuilt projection so the next read finds it present (28908)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-rebuild-persist"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    expect(fs.existsSync(artifact)).toBe(false)
+    const first = readJournals(dir, { now: at })
+    expect(first.fallbacks?.reasons).toEqual([{ reason: "missing", count: 1, example: expect.any(String) }])
+    expect(fs.existsSync(artifact)).toBe(true)
+    const second = readJournals(dir, { now: at })
+    expect(second.fallbacks).toBeUndefined()
+    expect(second.runs.get(journalKey("task/one", "abc123"))?.[0]).toMatchObject({ id: log.id, decision: "failed" })
   })
 
   it.each([

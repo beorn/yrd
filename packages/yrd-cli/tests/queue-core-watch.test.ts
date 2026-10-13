@@ -233,7 +233,7 @@ describe("event queue observation refusals", () => {
   // AC4: reader-level fallback facts were invisible in the actual list/watch
   // outputs. One real command journey proves JSON facts, human narration and
   // watch deduplication without adding a test-only production surface.
-  it("names raw journal fallback in list JSON and once across watch refreshes", async () => {
+  it("names raw journal fallback in list JSON and never again across watch refreshes", async () => {
     const w = await world()
     // The read is scoped to the rounds this listing names (@i/10-yrd/28799),
     // so the journal that carries the fallback has to be a round of a listed
@@ -263,14 +263,19 @@ describe("event queue observation refusals", () => {
     // of 28799 is that 3,006 of these are the same sentence.
     expect(listed.journal.fallbacks).toMatchObject({ count: 1, reasons: [{ reason: "missing", count: 1 }] })
     expect(listed.journal.fallbacks?.reasons[0]?.example).toContain(`${run}.projection.json`)
-    expect(listed.runner.projectionFallback).toMatchObject({ run, reason: "missing" })
+    // The journal read above already persisted the rebuilt projection
+    // (28908), so the runner header read later in the same command finds it
+    // present; the fallback is named once, in the journal facts.
+    expect(listed.runner.projectionFallback).toBeUndefined()
     expect(json.stderr()).toBe("")
 
+    // The first read rebuilt the facts and persisted the projection (28908),
+    // so every read after it finds the projection present: no notice, in
+    // either format, however often a watch refreshes.
     const human = capture(w.work)
     expect(await coreQueueCommand(w.work, human.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
-    expect(human.stderr()).toContain(
-      `run journals in ${logs}: the projection was missing for 1 round(s) — those facts were rebuilt by reading their raw journals`,
-    )
+    expect(human.stderr()).not.toContain("the projection was missing")
+    expect(fs.existsSync(artifact)).toBe(true)
     const watched = capture(w.work)
     rendered.onWait = async () => {
       if (rendered.load === undefined) throw new Error("watch supplied no refresh loader")
@@ -286,13 +291,7 @@ describe("event queue observation refusals", () => {
           { interactive: true, workdir: w.workdir },
         ),
       ).toBe(0)
-      expect(
-        watched
-          .stderr()
-          .split(
-            `run journals in ${logs}: the projection was missing for 1 round(s) — those facts were rebuilt by reading their raw journals`,
-          ),
-      ).toHaveLength(2)
+      expect(watched.stderr()).not.toContain("the projection was missing")
     } finally {
       rendered.onWait = undefined
     }

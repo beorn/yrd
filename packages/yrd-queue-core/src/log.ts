@@ -253,6 +253,35 @@ export type QueueRunLog = Readonly<{
  * as it is written: the human line is a rendering of the record, and this is
  * the one place a rendering can come from.
  */
+/**
+ * The one projection writer: build the disposable cache beside a run journal
+ * from its raw records, refusing to persist across a source that changed
+ * while it was being read. Used when a run finishes and when a reader had to
+ * rebuild a missing or unusable projection from the raw journal, so the
+ * rebuild happens once rather than on every read (28908).
+ */
+function persistJournalProjection(path: string, id: string): void {
+  const before = journalSource(path, id)
+  const records = runLogRecords(readFileSync(path, "utf8"), true)
+  const startedAt = runStartedAt(id)
+  if (startedAt === undefined) throw new Error(`journal ${path}: run id has no start instant`)
+  const runs = runsIn(records, id, startedAt)
+  const source = journalSource(path, id)
+  if (JSON.stringify(before) !== JSON.stringify(source)) {
+    throw new Error(`journal ${path}: source changed while building its projection`)
+  }
+  atomicWriteFileSync(
+    path.replace(/\.jsonl$/u, ".projection.json"),
+    `${JSON.stringify({
+      schema: JOURNAL_PROJECTION_SCHEMA,
+      fold: JOURNAL_PROJECTION_FOLD,
+      source,
+      runs,
+      runnerRecords: records.filter((record) => record.kind !== "git"),
+    })}\n`,
+  )
+}
+
 export function openLog(
   directory: string,
   now: () => Date = () => new Date(),
@@ -276,25 +305,7 @@ export function openLog(
     write,
     finish() {
       try {
-        const before = journalSource(path, id)
-        const records = runLogRecords(readFileSync(path, "utf8"), true)
-        const startedAt = runStartedAt(id)
-        if (startedAt === undefined) throw new Error(`journal ${path}: run id has no start instant`)
-        const runs = runsIn(records, id, startedAt)
-        const source = journalSource(path, id)
-        if (JSON.stringify(before) !== JSON.stringify(source)) {
-          throw new Error(`journal ${path}: source changed while building its projection`)
-        }
-        atomicWriteFileSync(
-          path.replace(/\.jsonl$/u, ".projection.json"),
-          `${JSON.stringify({
-            schema: JOURNAL_PROJECTION_SCHEMA,
-            fold: JOURNAL_PROJECTION_FOLD,
-            source,
-            runs,
-            runnerRecords: records.filter((record) => record.kind !== "git"),
-          })}\n`,
-        )
+        persistJournalProjection(path, id)
       } catch (error) {
         // A disposable projection cannot change the queue's outcome. If even
         // the raw journal cannot carry the warning, stderr names both failures.
@@ -1032,6 +1043,16 @@ function cachedRunsIn(
   }
   const hit = journalFileCache.get(cacheKey)
   if (hit !== undefined && projection.source !== undefined && sameJournalSource(hit.source, projection.source)) {
+    // A cache hit over a still-missing projection: an earlier read in this
+    // process rebuilt from raw, so persist that rebuild now (28908) — the
+    // read that pays is not always the read that rebuilds.
+    if (projection.fallback?.reason === "missing") {
+      try {
+        persistJournalProjection(path, id)
+      } catch {
+        // silent-fallback-allow: a disposable projection-cache write cannot change the queue's outcome; the next read retries, nothing is lost but the saving.
+      }
+    }
     return { runs: hit.runs, fallback: projection.fallback }
   }
   // Every round whose projection cannot be reused is read RAW. There is no
@@ -1043,6 +1064,19 @@ function cachedRunsIn(
     try {
       if (sameJournalSource(projection.source, journalSource(path, id))) {
         journalFileCache.set(cacheKey, { source: projection.source, runs })
+        // The raw rebuild just paid for these facts: persist them through the
+        // one projection writer so the next read finds the projection present
+        // instead of rebuilding (and re-noticing) forever. The writer folds
+        // the raw journal itself, so even a summary (omit) read persists the
+        // full artifact — the construction is paid once per journal, and
+        // every later read is served from the artifact. A disposable cache
+        // write cannot change the queue's outcome, so a failure here leaves
+        // this read's facts standing and the fallback named once more.
+        try {
+          persistJournalProjection(path, id)
+        } catch {
+          // silent-fallback-allow: a disposable projection-cache write cannot change the queue's outcome; the next read retries, nothing is lost but the saving.
+        }
       }
     } catch (error) {
       // Raw facts were read successfully. Optional process caching must not
