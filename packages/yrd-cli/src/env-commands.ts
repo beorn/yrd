@@ -748,6 +748,16 @@ export async function closeEnvironment(
   const git = gitIn(root, process, selection)
   const workdir = resolve(root, await workdirOf(git))
   const roots = [baysRootOf(root), legacyBaysRoot(root), join(workdir, "environments")]
+  // 28991: a relative `--retain` — a mistyped flag like `--retain --json` is the
+  // observed shape — resolved against the caller's cwd and made git-super write a
+  // whole retention tree, submodule stores included, into `<cwd>/--json`; on Oct 13
+  // 00:39 that cwd was the shared CODE projection /hh/dev. Refuse before any
+  // removal: only an absolute retention directory is ever what the caller meant.
+  if (options.retain !== undefined && !isAbsolute(options.retain)) {
+    throw new Error(
+      `--retain ${options.retain} is not an absolute directory, so it would resolve against the caller's cwd and write a retention tree there; pass an absolute path (e.g. ${join(workdir, "retained-modules")})`,
+    )
+  }
   const requested = resolve(io.cwd ?? globalThis.process.cwd(), operand)
   let path: string
   try {
