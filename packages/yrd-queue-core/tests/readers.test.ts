@@ -213,9 +213,8 @@ describe("a run's journal, read back", () => {
       return parsed
     })
     try {
-      const summary = readJournals(dir, { now: at, detail: "omit" }).runs.get(
-        journalKey(change.branch, change.head),
-      )?.[0]
+      const summaries = readJournals(dir, { now: at, detail: "omit" })
+      const summary = summaries.runs.get(journalKey(change.branch, change.head))?.[0]
       expect(constructedCommands).toBe(0)
       expect(summary).not.toHaveProperty("steps")
       expect(summary).not.toHaveProperty("commands")
@@ -229,12 +228,24 @@ describe("a run's journal, read back", () => {
       })
       expect(summary?.malformed).toEqual([expect.stringContaining("result without a check for task/summary@abc123")])
       // Positive control: the same public reader's eager path still builds real detail.
-      const detail = readJournals(dir, { now: at }).runs.get(journalKey(change.branch, change.head))?.[0]
+      const details = readJournals(dir, { now: at })
+      const detail = details.runs.get(journalKey(change.branch, change.head))?.[0]
       expect(constructedCommands).toBeGreaterThan(0)
       expect(detail?.commands).toHaveLength(32)
       expect(detail?.commands[0]).toMatchObject({ args: ["rev-parse", "HEAD"], cwd: "/w", exit: 0 })
       expect(detail?.unknownKinds).toEqual(["future-kind"])
       expect(detail?.malformed).toEqual(summary?.malformed)
+      // Every non-detail field and the printed row join must match the eager baseline,
+      // including fields a narrow toMatchObject assertion would miss.
+      if (detail === undefined) throw new Error("the full-detail positive control has no journal run")
+      const { steps: _steps, commands: _commands, ...facts } = detail
+      expect(summary).toEqual(facts)
+      for (const perRun of [false, true]) {
+        const rows: readonly Row[] = [{ ...change, state: "failed" }]
+        const joined = watchRows(rows, { journals: summaries, perRun })
+        const baseline = watchRows(rows, { journals: details, perRun })
+        expect(joined.map(({ row }) => row)).toEqual(baseline.map(({ row }) => row))
+      }
     } finally {
       spy.mockRestore()
     }
