@@ -1081,7 +1081,7 @@ function repairableProjection(dir: string, id: string, fallback: JournalProjecti
     const parsed = projectionObject(JSON.parse(readFileSync(join(dir, `${id}.projection.json`), "utf8")))
     declared = { schema: parsed.schema, fold: parsed.fold }
   } catch {
-    // No readable declaration: nothing newer to protect.
+    // silent-fallback-allow: an unreadable artifact declares no version, so there is nothing newer to protect; the fallback reason below decides repair on its own.
   }
   const declaresNewer = (value: unknown, writer: number): boolean =>
     typeof value === "number" && Number.isSafeInteger(value) && value > writer
