@@ -1262,7 +1262,42 @@ describe("a queue is the selected origin branch carrying config", () => {
     ])
   }, 20_000)
 
-  // 25655: migrated endings retain their original times. The default list's
+  // @failure A reopened change reads journals belonging to an older, undisplayed segment.
+  // @level l2; @consumer default queue list and full branch detail
+  it("reads journals for the listed current segment while branch detail retains older runs", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, head, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture declaration absent")
+    const now = new Date()
+    const queueTip = await createQueue(repo, "main", head, now)
+    await git(["commit", "--allow-empty", "-m", "new submission"])
+    const nextHead = (await git(["rev-parse", "HEAD"])).trim()
+    const branch = "task/reopened-journals"
+    const oldRun = "q-20261001T100000000Z-12345678"
+    const currentRun = "q-20261013T100000000Z-87654321"
+    await (
+      await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+    ).append(
+      [
+        changeInput("opened", { queueTip, at: now, commit: head, by: "yrd" }),
+        changeInput("merged", { queueTip, at: now, commit: head, run: oldRun }),
+        changeInput("opened", { queueTip, at: now, commit: nextHead, by: "yrd" }),
+        changeInput("verifying", { queueTip, at: now, commit: nextHead, run: currentRun }),
+      ],
+      { expect: null },
+    )
+    const workdir = await workdirOf(git, { cwd: repo })
+    const recent = await readEventListing(git, config, repo, workdir, head, store, { recent: { env: process.env } })
+    expect(recent.journals.absent).toContain(currentRun)
+    expect(recent.journals.absent).not.toContain(oldRun)
+    const detail = await readEventListing(git, config, repo, workdir, head, store, { branch })
+    expect(detail.journals.absent).toContain(oldRun)
+    expect(detail.journals.absent).toContain(currentRun)
+  })
+
   // @failure A warm recent-history cache keeps an ending visible after its recorded Time leaves the window.
   // @level l2; @consumer queue list/watch using an unchanged event inventory
   it("expires cached endings at the recorded-time window boundary", async () => {

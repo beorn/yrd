@@ -5732,13 +5732,20 @@ export async function readEventListing(
     options.branch === undefined
       ? undefined
       : [changesRef(config.target.branch, options.branch), `${coldPrefix}${options.branch}`]
-  const journalsFor = async (history: EventListingResult["history"]): Promise<Journals<JournalSummary>> => {
+  const journalsFor = async (
+    history: EventListingResult["history"],
+    rows: EventListingResult["all"],
+  ): Promise<Journals<JournalSummary>> => {
     const detail = options.journalDetail ?? "include"
     const dir = join(workdir, "logs")
     const read = (runTerminal?: (id: string) => boolean): Journals<JournalSummary> => {
       const judged = runTerminal === undefined ? {} : { runTerminal }
       if (options.branch === undefined && recent === undefined) return readJournals(dir, { detail, ...judged })
-      const segments = options.branch === undefined ? [...history.values()].flat() : (history.get(options.branch) ?? [])
+      const listed = new Set(rows.map((row) => row.branch))
+      const segments =
+        options.branch === undefined
+          ? [...history].filter(([branch]) => listed.has(branch)).flatMap(([, entries]) => entries.slice(0, 1))
+          : (history.get(options.branch) ?? [])
       const ids = segments.flatMap(({ events }) =>
         events.flatMap((event) => {
           const id = trailer(event, EVENT_TRAILERS.run)
@@ -5864,7 +5871,7 @@ export async function readEventListing(
       ...cache.reading,
       ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
       observation: await observe(cache.queueRefs, cache.branchRefs),
-      journals: await journalsFor(cache.reading.history),
+      journals: await journalsFor(cache.reading.history, cache.reading.all),
     }
   }
 
@@ -5900,7 +5907,7 @@ export async function readEventListing(
       ...cache.reading,
       ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
       observation: await observe(cache.queueRefs, branchRefs),
-      journals: await journalsFor(cache.reading.history),
+      journals: await journalsFor(cache.reading.history, cache.reading.all),
     }
   }
 
@@ -6106,7 +6113,7 @@ export async function readEventListing(
     all,
     document,
     history: titledHistory,
-    journals: await journalsFor(titledHistory),
+    journals: await journalsFor(titledHistory, all),
     drafts,
     pause: operational.stop,
     overrides: operational.overrides,
