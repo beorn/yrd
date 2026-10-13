@@ -199,6 +199,45 @@ describe("pruneRoundOutput (bounded removal through removely)", () => {
     expect(result.removed.map((entry) => entry.path)).toEqual([oldEnv, oldChecks, oldRound, oldCheck])
     for (const path of [oldRound, oldCheck, oldEnv, oldChecks]) expect(existsSync(path)).toBe(false)
   })
+
+  // 28836: the budget counts successful removals, not attempts. An unremovable oldest entry must not fill the
+  // prefix, or every pass re-selects it and the removable directory behind it is never reached.
+  it("passes over an unremovable oldest entry and still removes a younger one in one pass", async () => {
+    const { logs } = tree("stuck-head")
+    const stuck = place(join(logs, round(ago(60))))
+    const removable = place(join(logs, round(ago(50))))
+    chmodSync(stuck, 0o500)
+    try {
+      const result = await pruneRoundOutput({ roots: [logs], now: NOW, limit: 1 })
+      expect(result.removed.map((entry) => entry.path)).toEqual([removable])
+      expect(result.failures.map((failure) => failure.path)).toEqual([stuck])
+      expect(existsSync(removable)).toBe(false)
+      expect(existsSync(stuck)).toBe(true)
+    } finally {
+      chmodSync(stuck, 0o700)
+    }
+  })
+
+  // 28836: when every candidate fails the pass still ends, and the failure row stays bounded to `limit` with the
+  // count of the rest, so a long stuck prefix cannot grow the observation row.
+  it("bounds the failure row to `limit` and counts the rest when every candidate fails", async () => {
+    const { logs } = tree("all-fail")
+    const stuck = [
+      place(join(logs, round(ago(60)))),
+      place(join(logs, round(ago(59)))),
+      place(join(logs, round(ago(58)))),
+    ]
+    chmodSync(logs, 0o500)
+    try {
+      const result = await pruneRoundOutput({ roots: [logs], now: NOW, limit: 2 })
+      expect(result.removed).toEqual([])
+      expect(result.failures.map((failure) => failure.path)).toEqual([stuck[0], stuck[1]])
+      expect(result.failuresOmitted).toBe(1)
+      for (const path of stuck) expect(existsSync(path)).toBe(true)
+    } finally {
+      chmodSync(logs, 0o700)
+    }
+  })
 })
 
 describe("retentionHumanLines (the operator's rendering)", () => {
@@ -208,7 +247,14 @@ describe("retentionHumanLines (the operator's rendering)", () => {
       { path: "/x/logs/q-b", name: "q-b", within: "/x/logs", started: ago(20) },
     ]
     const lines = retentionHumanLines(
-      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], remaining: selected, missing: [] },
+      {
+        windowMs: ROUND_OUTPUT_WINDOW_MS,
+        removed: [],
+        failures: [],
+        failuresOmitted: 0,
+        remaining: selected,
+        missing: [],
+      },
       { roots: ["/x/logs", "/x/checks"], dryRun: true, listed: selected },
     )
     expect(lines[0]).toContain("would remove 2 round-output directories older than 7 days")
@@ -218,7 +264,7 @@ describe("retentionHumanLines (the operator's rendering)", () => {
 
   it("names the roots it searched even when nothing is over the window", () => {
     const lines = retentionHumanLines(
-      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], remaining: [], missing: [] },
+      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], failuresOmitted: 0, remaining: [], missing: [] },
       { roots: ["/x/logs", "/x/checks"], dryRun: false, listed: [] },
     )
     expect(lines[0]).toContain("removed 0 round-output directories older than 7 days")
@@ -279,7 +325,14 @@ describe("an absent optional root is named in the row, never a healthy zero (F2)
   it("names the absent optional root in the observation row the prune writes", () => {
     const missing = "/x/checks"
     const observation = retentionObservation(
-      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], remaining: [], missing: [missing] },
+      {
+        windowMs: ROUND_OUTPUT_WINDOW_MS,
+        removed: [],
+        failures: [],
+        failuresOmitted: 0,
+        remaining: [],
+        missing: [missing],
+      },
       { at: NOW },
     )
     expect(observation.kind).toBe("observation")
@@ -291,7 +344,14 @@ describe("an absent optional root is named in the row, never a healthy zero (F2)
     const { workdir } = tree("absent-only")
     const wrote = appendRetentionObservation(
       workdir,
-      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], remaining: [], missing: ["/x/checks"] },
+      {
+        windowMs: ROUND_OUTPUT_WINDOW_MS,
+        removed: [],
+        failures: [],
+        failuresOmitted: 0,
+        remaining: [],
+        missing: ["/x/checks"],
+      },
       NOW,
     )
     expect(wrote).toBe(false)
@@ -303,7 +363,14 @@ describe("an absent optional root is named in the row, never a healthy zero (F2)
     const removed = [{ path: join(logs, round(ago(30))), name: round(ago(30)), within: logs, started: ago(30) }]
     const wrote = appendRetentionObservation(
       workdir,
-      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed, failures: [], remaining: [], missing: ["/x/checks"] },
+      {
+        windowMs: ROUND_OUTPUT_WINDOW_MS,
+        removed,
+        failures: [],
+        failuresOmitted: 0,
+        remaining: [],
+        missing: ["/x/checks"],
+      },
       NOW,
     )
     expect(wrote).toBe(true)
@@ -317,7 +384,14 @@ describe("an absent optional root is named in the row, never a healthy zero (F2)
 
   it("names an absent optional root in the human rendering", () => {
     const lines = retentionHumanLines(
-      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], remaining: [], missing: ["/x/checks"] },
+      {
+        windowMs: ROUND_OUTPUT_WINDOW_MS,
+        removed: [],
+        failures: [],
+        failuresOmitted: 0,
+        remaining: [],
+        missing: ["/x/checks"],
+      },
       { roots: ["/x/logs", "/x/checks"], dryRun: true, listed: [] },
     )
     expect(lines.join("\n")).toContain("no such optional root (absent, not an error): /x/checks")
@@ -458,6 +532,7 @@ describe("retention.jsonl is bounded (28499, @cto 2026-10-10T23:16Z)", () => {
         windowMs: ROUND_OUTPUT_WINDOW_MS,
         removed: [],
         failures: [],
+        failuresOmitted: 0,
         remaining: [],
         missing: [],
       }),
@@ -471,7 +546,7 @@ describe("retention.jsonl is bounded (28499, @cto 2026-10-10T23:16Z)", () => {
     const removed = [{ path: join(logs, round(ago(30))), name: round(ago(30)), within: logs, started: ago(30) }]
     const wrote = appendRetentionObservation(
       workdir,
-      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed, failures: [], remaining: [], missing: [] },
+      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed, failures: [], failuresOmitted: 0, remaining: [], missing: [] },
       NOW,
     )
     expect(wrote).toBe(true)
