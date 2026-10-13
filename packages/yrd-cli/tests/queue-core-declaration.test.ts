@@ -1569,6 +1569,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       "task/28988-held",
       "task/28988-moved",
       "task/99999-other",
+      "task/no-number",
     ]) {
       await childGit(["branch", branch, landed])
     }
@@ -1594,6 +1595,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       "--json",
     ]
     type Report = {
+      excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[]
       eligible: { repo: string; branch: string; head: string }[]
       removed: { repo: string; branch: string; head: string; archiveRef: string }[]
       kept: { repo: string; branch: string; reason: string }[]
@@ -1614,9 +1616,10 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect.arrayContaining([
           expect.objectContaining({ repo: child, branch: "task/28988-held", reason: "held" }),
           expect.objectContaining({ repo: child, branch: "task/28988-unique", reason: "unreached" }),
-          expect.objectContaining({ repo: child, branch: "task/99999-other", reason: "unrelated" }),
         ]),
       )
+      expect(result.excluded).toContainEqual({ repo: child, target: 1, unrelated: 1, unnumbered: 1 })
+      expect(result.kept.every((row) => row.branch.includes("28988"))).toBe(true)
       expect(await refs(git)).toBe(rootBefore)
       expect(await refs(childGit)).toBe(childBefore)
     }

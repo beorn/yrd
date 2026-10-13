@@ -1397,6 +1397,7 @@ export async function coreQueueCommand(
         const kept: Row[] = []
         const failed: Row[] = []
         const inspected: string[] = []
+        const excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[] = []
         const log = openLog(join(workdir, "logs"))
         const visit = async (repository: string, path: string, commit: string): Promise<void> => {
           const childGit = gitIn(repository, undefined, selection, { env })
@@ -1412,17 +1413,15 @@ export async function coreQueueCommand(
             const heads = await listRefs("refs/heads/", createLocalEventStore(repository, selection))
             const targetBranch = path === "" ? config.target.branch : "main"
             const candidates: { branch: string; head: string }[] = []
+            const counts = { repo: repository, target: 0, unrelated: 0, unnumbered: 0 }
+            excluded.push(counts)
             for (const [ref, head] of heads) {
               const branch = ref.slice("refs/heads/".length)
               const bound = /^(task|exp)\//u.test(branch) ? issueFromBranchName(branch) : undefined
               if (branch === targetBranch || bound !== numeric) {
-                kept.push({
-                  repo: repository,
-                  path,
-                  branch,
-                  head,
-                  reason: branch === targetBranch ? "target" : bound === undefined ? "unclassified" : "unrelated",
-                })
+                if (branch === targetBranch) counts.target++
+                else if (bound === undefined) counts.unnumbered++
+                else counts.unrelated++
               } else candidates.push({ branch, head })
             }
             if (candidates.length > 0) {
@@ -1517,6 +1516,7 @@ export async function coreQueueCommand(
           repo: authorRepo,
           apply: request.apply === true,
           inspected,
+          excluded,
           eligible,
           removed,
           kept,
@@ -1527,6 +1527,12 @@ export async function coreQueueCommand(
           options.json,
           report,
           `issue ${issue}: inspected ${inspected.length} repositories in ${authorRepo}; eligible ${eligible.length}, retired ${removed.length}, kept ${kept.length}, failed ${failed.length}` +
+            excluded
+              .map(
+                (row) =>
+                  `\n${row.repo}: excluded ${row.target} target, ${row.unrelated} unrelated, ${row.unnumbered} unnumbered`,
+              )
+              .join("") +
             [...eligible, ...removed, ...kept, ...failed]
               .map(
                 (row) =>
