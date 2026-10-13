@@ -2523,6 +2523,38 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(again.stderr).toContain("no override stands on 'verify' to clear")
   })
 
+  // 28880: clearing ends a stored decision even after its check leaves the fetched declaration.
+  it("clears a stored override after its check leaves the declaration", async () => {
+    const repo = await world('checks:\n  - verify: {run: "true", on: [merge]}\n')
+    const git = gitIn(repo)
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    const yrd = async (...args: string[]) => {
+      const run = capture(repo)
+      const code = await runYrdProcess(["bun", "yrd", "queue", "override", "--queue", "main", ...args], run.io)
+      return { code, stderr: run.stderr(), stdout: run.stdout() }
+    }
+    const until = new Date(Date.now() + 3_600_000).toISOString()
+    const set = await yrd("--check", "verify", "--off", "--until", until, "--reason", "investigate", "--json")
+    expect(set.code, set.stderr).toBe(0)
+    expect(JSON.parse(set.stdout)).toMatchObject({ kind: "set", overrides: [{ check: "verify" }] })
+
+    writeFileSync(join(repo, ".yrd.yml"), "{}\n")
+    await git(["add", ".yrd.yml"])
+    await git(["commit", "--quiet", "-m", "remove the merge check"])
+    await git(["push", "--quiet", "origin", "main"])
+
+    const cleared = await yrd("--check", "verify", "--clear", "--reason", "check removed")
+    expect(cleared.code, cleared.stderr).toBe(0)
+    expect(cleared.stdout).toContain("check is no longer declared")
+    const listed = await yrd("--list", "--json")
+    expect(listed.code, listed.stderr).toBe(0)
+    expect(JSON.parse(listed.stdout)).toMatchObject({ overrides: [] })
+
+    const off = await yrd("--check", "verify", "--off", "--until", until, "--reason", "still removed")
+    expect(off.code).toBe(1)
+    expect(off.stderr).toContain("no merge check named 'verify' is declared")
+  })
+
   // 25296 (@cto ccd8dfa8, ruling A): the verb pages set, replace and clear; a
   // notifier that fails is said on stderr and journaled, and the override stands.
   it("queue override hands each write to the notify entries that want it, and a failing one never blocks the override", async () => {

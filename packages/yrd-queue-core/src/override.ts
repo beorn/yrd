@@ -106,7 +106,7 @@ export function decideOverride(
 ): OverrideDecision {
   const reason = oneLine(write.reason, "an override needs a --reason")
   const by = oneLine(write.actor.by, "an override needs an actor")
-  if (!declared.includes(write.check)) {
+  if (write.kind === "off" && !declared.includes(write.check)) {
     throw new OverrideRefused(
       `no merge check named '${write.check}' is declared; the declared merge checks are: ` +
         (declared.length === 0 ? "(none)" : declared.join(", ")),

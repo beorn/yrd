@@ -1651,7 +1651,9 @@ export async function coreQueueCommand(
             ...(written.replaced === undefined ? {} : { replaces: written.replaced.record }),
           },
           standing === undefined
-            ? `merge check ${request.check ?? ""} back on for ${targetLabel} (record ${String(written.record.sha).slice(0, 12)})`
+            ? declaredMerge.includes(request.check ?? "")
+              ? `merge check ${request.check ?? ""} back on for ${targetLabel} (record ${String(written.record.sha).slice(0, 12)})`
+              : `merge check ${request.check ?? ""} override cleared for ${targetLabel}; check is no longer declared (record ${String(written.record.sha).slice(0, 12)})`
             : `${overrideLine(standing, now)} on ${targetLabel} (record ${String(written.record.sha).slice(0, 12)})${replaced}`,
         )
         return 0
