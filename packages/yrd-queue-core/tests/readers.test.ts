@@ -173,6 +173,73 @@ describe("event publication refusal history", () => {
 })
 
 describe("a run's journal, read back", () => {
+  /**
+   * @failure a list builds command detail it never displays, retaining a million command objects on a busy queue.
+   * @level l1 @consumer one-shot queue list @testonly none
+   * Existing detail cases prove full command fidelity; this pins the distinct summary acquisition contract.
+   */
+  it("keeps complete summary facts without constructing command detail", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const change = { branch: "task/summary", head: "abc123" }
+    const { dir } = journalDir(
+      [
+        { base: "aaa", kind: "run", queue: "q", target: "main" },
+        ...Array.from({ length: 32 }, (_, index) => ({
+          args: ["rev-parse", "HEAD"],
+          cwd: "/w",
+          evidence: `/w/logs/run/git/${String(index)}.stdout.bin.json`,
+          exit: 0,
+          kind: "git",
+        })),
+        { ...change, kind: "change", decision: "failed", reason: "check" },
+        { ...change, kind: "result", name: "missing", phase: "merge", result: "fail" },
+        { ...change, kind: "future-kind" },
+      ],
+      at,
+    )
+    const parse = JSON.parse
+    let constructedCommands = 0
+    const spy = vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+      const parsed = parse(text, reviver) as Record<string, unknown> | null
+      if (parsed !== null && typeof parsed === "object" && parsed.kind === "git") {
+        const args = parsed.args
+        Object.defineProperty(parsed, "args", {
+          get: () => {
+            constructedCommands += 1
+            return args
+          },
+        })
+      }
+      return parsed
+    })
+    try {
+      const summary = readJournals(dir, { now: at, detail: "omit" }).runs.get(
+        journalKey(change.branch, change.head),
+      )?.[0]
+      expect(constructedCommands).toBe(0)
+      expect(summary).not.toHaveProperty("steps")
+      expect(summary).not.toHaveProperty("commands")
+      expect(summary).toMatchObject({
+        ...change,
+        base: "aaa",
+        decision: "failed",
+        reason: "check",
+        checks: [],
+        unknownKinds: ["future-kind"],
+      })
+      expect(summary?.malformed).toEqual([expect.stringContaining("result without a check for task/summary@abc123")])
+      // Positive control: the same public reader's eager path still builds real detail.
+      const detail = readJournals(dir, { now: at }).runs.get(journalKey(change.branch, change.head))?.[0]
+      expect(constructedCommands).toBeGreaterThan(0)
+      expect(detail?.commands).toHaveLength(32)
+      expect(detail?.commands[0]).toMatchObject({ args: ["rev-parse", "HEAD"], cwd: "/w", exit: 0 })
+      expect(detail?.unknownKinds).toEqual(["future-kind"])
+      expect(detail?.malformed).toEqual(summary?.malformed)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it("names the check running now: a start row this run never ended", () => {
     const at = new Date("2026-09-03T20:00:00.000Z")
     const { dir, run } = journalDir(
