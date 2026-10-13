@@ -1074,7 +1074,7 @@ function repairableProjection(
   dir: string,
   id: string,
   fallback: JournalProjectionFallback,
-  sourceTerminal: boolean,
+  sourceTerminal: () => boolean,
 ): boolean {
   // Declared-version protection takes precedence over shape repair: the
   // projection reader checks shape before versions, so an artifact a newer
@@ -1123,7 +1123,7 @@ function repairableProjection(
       // source-changed artifact is normally left alone. Only a round whose writer is
       // proven GONE — its source can no longer move — may be rebuilt from the raw
       // journal, which then reads present on every later read (28918).
-      return sourceTerminal
+      return sourceTerminal()
     default:
       return false
   }
@@ -1149,7 +1149,7 @@ function cachedRunsIn(
   id: string,
   startedAt: Date,
   detail: "include" | "omit",
-  sourceTerminal: boolean,
+  sourceTerminal: () => boolean,
 ): Readonly<{
   runs: readonly JournalSummary[]
   fallback?: JournalProjectionFallback
@@ -1196,10 +1196,7 @@ function cachedRunsIn(
         // every later read is served from the artifact. A failed write
         // changes nothing this read returns; it is counted and named in the
         // read's fallback facts instead of swallowed.
-        if (
-          projection.fallback !== undefined &&
-          repairableProjection(dir, id, projection.fallback, sourceTerminal)
-        ) {
+        if (projection.fallback !== undefined && repairableProjection(dir, id, projection.fallback, sourceTerminal)) {
           persist = attemptJournalPersist(dir, id, projection.source)
         }
       }
@@ -1493,7 +1490,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
     if (startedAt === undefined) continue
     let read: ReturnType<typeof cachedRunsIn>
     try {
-      read = cachedRunsIn(dir, id, startedAt, options.detail ?? "include", options.runTerminal?.(id) === true)
+      read = cachedRunsIn(dir, id, startedAt, options.detail ?? "include", () => options.runTerminal?.(id) === true)
     } catch (error) {
       if (options.runIds === undefined) throw error
       if (options.runIds !== undefined && (error as NodeJS.ErrnoException).code === "ENOENT") {

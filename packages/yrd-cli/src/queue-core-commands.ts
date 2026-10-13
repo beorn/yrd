@@ -30,7 +30,7 @@ import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import type { ConditionalLogger } from "loggily"
-import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
+import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
 import { issueResolver } from "./issue-resolver.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup } from "./env-cleanup.ts"
@@ -216,9 +216,9 @@ import {
   revertWarningLine,
   timingLine,
 } from "./watch-format.ts"
-import { readRunnerFacts, readRunnerService, type RunnerFacts } from "./watch-runner.ts"
+import { readRunHeader, readRunnerFacts, readRunnerService, type RunnerFacts } from "./watch-runner.ts"
 import { runnerOf } from "./watch-runner-reading.ts"
-import { readPublishedRunner, RunnerPublisher } from "./runner-publication.ts"
+import { readPublishedRunner, readRunnerLiveness, RunnerPublisher, type RunnerLiveness } from "./runner-publication.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import {
   DEFAULT_WINDOW_MS,
@@ -5563,6 +5563,69 @@ export function clearEventListingCache(): void {
   eventListingCaches.clear()
 }
 
+/**
+ * Run ids whose journal is proven terminal in THIS process (28918): a round
+ * whose writer is gone can never grow its journal again, so the terminality
+ * probe answers from here and never charges a dead round another claim read. A
+ * journal whose repair then fails to persist is separately remembered by the
+ * reader's failed-persist memo under its source.
+ */
+const terminalJournalRuns = new Set<string>()
+
+/**
+ * The "may this run's journal be rebuilt from raw" probe handed to the reader
+ * (28918). The reader is forbidden to read liveness itself, so it is judged
+ * here, in the CLI, from the runner claim and the live process — and injected
+ * as a plain fact. Four verdicts (@cto fbb2f3a7):
+ *
+ *   - the claim shows a LIVE runner ............... no run may be repaired;
+ *   - the claim shows a DEAD runner ............... every run is terminal (and
+ *     is remembered for the process, so a dead round costs no further read);
+ *   - no claim, and the run's own header pid is gone ... terminal;
+ *   - no claim, and the header pid still exists ... UNDECIDED — a RECYCLED pid
+ *     cannot be told from a writer still finishing, so the artifact is left
+ *     alone and the reason is REPORTED.
+ *
+ * A journal that names no pid, or whose header cannot be read, is left alone
+ * too: unproven is never read as terminal.
+ */
+export function runTerminalProbe(
+  liveness: RunnerLiveness,
+  dir: string,
+  onLeftAlone: (message: string) => void,
+): (id: string) => boolean {
+  return (id) => {
+    if (terminalJournalRuns.has(id)) return true
+    if (liveness.kind === "dead") {
+      terminalJournalRuns.add(id)
+      return true
+    }
+    if (liveness.kind === "live") return false
+    const path = join(dir, `${id}.jsonl`)
+    let pid: number | undefined
+    try {
+      pid = readRunHeader(path).pid
+    } catch (error) {
+      onLeftAlone(
+        `run ${id}: source-changed, left alone — ${liveness.why}; its header could not be read: ${String(error)}`,
+      )
+      return false
+    }
+    if (pid === undefined) {
+      onLeftAlone(`run ${id}: source-changed, left alone — ${liveness.why}; its journal names no pid to judge`)
+      return false
+    }
+    if (pidPresence(pid) === "present") {
+      onLeftAlone(
+        `run ${id}: source-changed, left alone — ${liveness.why}; PID ${String(pid)} is present, so its writer may still be finishing`,
+      )
+      return false
+    }
+    terminalJournalRuns.add(id)
+    return true
+  }
+}
+
 type EventListingOptions = Readonly<{
   all?: boolean
   directHistory?: boolean
@@ -5628,28 +5691,50 @@ export async function readEventListing(
     options.branch === undefined
       ? undefined
       : [changesRef(config.target.branch, options.branch), `${coldPrefix}${options.branch}`]
-  const journalsFor = (history: EventListingResult["history"]): Journals<JournalSummary> => {
+  const journalsFor = async (history: EventListingResult["history"]): Promise<Journals<JournalSummary>> => {
     const detail = options.journalDetail ?? "include"
-    if (options.branch === undefined) return readJournals(join(workdir, "logs"), { detail })
-    const segments = history.get(options.branch) ?? []
-    const ids = segments.flatMap(({ events }) =>
-      events.flatMap((event) => {
-        const id = trailer(event, EVENT_TRAILERS.run)
-        return id === undefined ? [] : [id]
-      }),
-    )
-    const journals = readJournals(join(workdir, "logs"), { runIds: ids, branch: options.branch, detail })
-    const legacy = segments.filter(
-      ({ events }) => !events.some((event) => trailer(event, EVENT_TRAILERS.run) !== undefined),
-    )
-    if (legacy.length === 0) return journals
-    const missing = legacy
-      .map(
-        ({ row, events }) =>
-          `journal detail unavailable: ${options.branch}@${row.head}, segment ${events[0]?.id ?? "without opening identity"}, has no Run trailer; unlinked journal files were not searched`,
+    const dir = join(workdir, "logs")
+    const read = (runTerminal?: (id: string) => boolean): Journals<JournalSummary> => {
+      const judged = runTerminal === undefined ? {} : { runTerminal }
+      if (options.branch === undefined) return readJournals(dir, { detail, ...judged })
+      const segments = history.get(options.branch) ?? []
+      const ids = segments.flatMap(({ events }) =>
+        events.flatMap((event) => {
+          const id = trailer(event, EVENT_TRAILERS.run)
+          return id === undefined ? [] : [id]
+        }),
       )
-      .join("; ")
-    return { ...journals, absent: [journals.absent, missing].filter((part) => part !== undefined).join("; ") }
+      const journals = readJournals(dir, { runIds: ids, branch: options.branch, detail, ...judged })
+      const legacy = segments.filter(
+        ({ events }) => !events.some((event) => trailer(event, EVENT_TRAILERS.run) !== undefined),
+      )
+      if (legacy.length === 0) return journals
+      const missing = legacy
+        .map(
+          ({ row, events }) =>
+            `journal detail unavailable: ${options.branch}@${row.head}, segment ${events[0]?.id ?? "without opening identity"}, has no Run trailer; unlinked journal files were not searched`,
+        )
+        .join("; ")
+      return { ...journals, absent: [journals.absent, missing].filter((part) => part !== undefined).join("; ") }
+    }
+    // A source-changed artifact is repaired only when its round's writer is
+    // proven gone (28918), and that proof costs a Git read of the runner claim.
+    // The first read runs with the process memo alone — no claim read — so a
+    // healthy queue (nothing source-changed) never pays for the question; the
+    // reader consults the probe ONLY on a source-changed artifact, so whatever
+    // it asks about is exactly what cannot be reused.
+    const asked = new Set<string>()
+    const journals = read((id) => {
+      asked.add(id)
+      return terminalJournalRuns.has(id)
+    })
+    if (asked.size === 0 || [...asked].every((id) => terminalJournalRuns.has(id))) return journals
+    const left: string[] = []
+    const liveness = await readRunnerLiveness(git, config.target.branch, config.target.remote, runnerTip)
+    const judged = read(runTerminalProbe(liveness, dir, (message) => left.push(message)))
+    return left.length === 0
+      ? judged
+      : { ...judged, absent: [judged.absent, ...left].filter((part) => part !== undefined).join("; ") }
   }
 
   const observe = async (qRefs: ReadonlyMap<string, string>, bRefs: ReadonlyMap<string, string>) =>
@@ -5737,7 +5822,7 @@ export async function readEventListing(
       ...cache.reading,
       ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
       observation: await observe(cache.queueRefs, cache.branchRefs),
-      journals: journalsFor(cache.reading.history),
+      journals: await journalsFor(cache.reading.history),
     }
   }
 
@@ -5772,7 +5857,7 @@ export async function readEventListing(
       ...cache.reading,
       ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
       observation: await observe(cache.queueRefs, branchRefs),
-      journals: journalsFor(cache.reading.history),
+      journals: await journalsFor(cache.reading.history),
     }
   }
 
@@ -5963,7 +6048,7 @@ export async function readEventListing(
     all,
     document,
     history: titledHistory,
-    journals: journalsFor(titledHistory),
+    journals: await journalsFor(titledHistory),
     drafts,
     pause: operational.stop,
     overrides: operational.overrides,

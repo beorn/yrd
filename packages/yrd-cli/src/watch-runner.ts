@@ -492,7 +492,7 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
 }
 
 /** What one journal's opening says, before anything is known about liveness. */
-type JournalHead = Readonly<{
+export type JournalHead = Readonly<{
   /** The header's own fields, empty when there is no header to read. */
   fields: Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks" | "effectiveChecks">
   /** Was a `run` record found at all. */
@@ -541,7 +541,7 @@ function lineOf(records: readonly LogRecord[]): RoundLine | undefined {
  * it needs — which is why the header's own `pid` comes back with the fields.
  * Every malformed record below still refuses as loudly as it ever did.
  */
-function readRunHeader(path: string, projected?: readonly LogRecord[]): JournalHead {
+export function readRunHeader(path: string, projected?: readonly LogRecord[]): JournalHead {
   let text: string
   try {
     // Retain the one interpreter, including read-time date handling. Compact

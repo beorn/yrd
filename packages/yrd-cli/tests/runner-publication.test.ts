@@ -11,7 +11,7 @@ import { afterAll, describe, expect, it, vi } from "vitest"
 import { readRemoteCommit, roundHealthDocument, runnerRef, type RunnerClaim } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { processStartIdentity } from "@yrd/process"
-import { readPublishedRunner, RunnerPublisher } from "../src/runner-publication.ts"
+import { readPublishedRunner, readRunnerLiveness, RunnerPublisher } from "../src/runner-publication.ts"
 import { runnerLine } from "../src/watch-runner.ts"
 
 const roots: string[] = []
@@ -603,5 +603,78 @@ describe("runner ref publication", () => {
         )
       },
     )
+  })
+})
+
+/**
+ * 28918: the liveness verdict the projection reader is injected with. Only a
+ * runner PROVEN dead may license a repair; every unproven case must say why.
+ */
+describe("the runner's liveness, for the terminality probe", () => {
+  /** @failure A live runner was called dead, so a mid-run journal could be snapshotted over. @level l2 */
+  it.skipIf(process.platform !== "linux")("reads a claim whose identity matches the live process as live", async () => {
+    const f = await fixture()
+    const identity = processStartIdentity(process.pid)
+    expect(identity.tick).toBeDefined()
+    await f.replace(
+      { ...f.own, host: hostname(), pid: process.pid },
+      `Boot: ${String(identity.boot)}\nPidNamespace: ${String(identity.pidNamespace)}\nStartTick: ${String(identity.tick)}\n`,
+    )
+    expect(await readRunnerLiveness(f.git, "main", "origin", await f.remoteTip())).toEqual({ kind: "live" })
+  })
+
+  /** @failure A claim whose pid is GONE was read as live, so a finished run's artifact was never repaired. @level l2 */
+  it.skipIf(process.platform !== "linux")("reads a claim whose pid is gone as dead", async () => {
+    const f = await fixture()
+    const gone = process.pid + 100_000
+    await f.replace({ ...f.own, host: hostname(), pid: gone }, `Boot: b\nPidNamespace: n\nStartTick: 7\n`)
+    const verdict = await readRunnerLiveness(f.git, "main", "origin", await f.remoteTip())
+    expect(verdict).toEqual({ kind: "dead", why: `runner ${hostname()}/${String(gone)}: PID absent` })
+  })
+
+  /** @failure A RECYCLED pid was read as the runner still finishing, hiding a dead writer forever. @level l2 */
+  it.skipIf(process.platform !== "linux")("reads a recycled pid (same number, different start) as dead", async () => {
+    const f = await fixture()
+    const identity = processStartIdentity(process.pid)
+    expect(identity.tick).toBeDefined()
+    await f.replace(
+      { ...f.own, host: hostname(), pid: process.pid },
+      `Boot: ${String(identity.boot)}\nPidNamespace: ${String(identity.pidNamespace)}\nStartTick: ${String(identity.tick! + 1)}\n`,
+    )
+    const verdict = await readRunnerLiveness(f.git, "main", "origin", await f.remoteTip())
+    expect(verdict).toEqual({
+      kind: "dead",
+      why: `runner ${hostname()}/${String(process.pid)}: PID reused (start tick differs)`,
+    })
+  })
+
+  /** @failure An absent claim was guessed dead, licensing a repair no fact supported. @level l2 */
+  it("reads an absent claim as unknown, never dead", async () => {
+    const f = await fixture()
+    const verdict = await readRunnerLiveness(f.git, "main", "origin", undefined)
+    expect(verdict.kind).toBe("unknown")
+    expect(verdict.kind === "unknown" && verdict.why).toContain(runnerRef("main"))
+  })
+
+  /** @failure Another host's pid was judged from a local /proc read, calling a live remote runner dead. @level l2 */
+  it("reads a claim from another host as unknown", async () => {
+    const f = await fixture()
+    await f.replace({ ...f.own, host: "elsewhere", pid: process.pid })
+    const verdict = await readRunnerLiveness(f.git, "main", "origin", await f.remoteTip())
+    expect(verdict).toEqual({
+      kind: "unknown",
+      why: `origin ${runnerRef("main")}: runner elsewhere/${String(process.pid)} is not on this host`,
+    })
+  })
+
+  /** @failure A claim recording no identity was compared anyway, trusting a bare pid number. @level l2 */
+  it.skipIf(process.platform !== "linux")("reads a claim with no recorded identity as unknown", async () => {
+    const f = await fixture()
+    await f.replace({ ...f.own, host: hostname(), pid: process.pid })
+    const verdict = await readRunnerLiveness(f.git, "main", "origin", await f.remoteTip())
+    expect(verdict).toEqual({
+      kind: "unknown",
+      why: `runner ${hostname()}/${String(process.pid)}: claim records no start identity to compare`,
+    })
   })
 })

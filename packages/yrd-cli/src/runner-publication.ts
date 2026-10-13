@@ -1,4 +1,5 @@
 /** The runner's one remote health claim. Change facts never read this ref. */
+import { hostname } from "node:os"
 import {
   formatRunnerClaim,
   judgeRunnerClaim,
@@ -185,6 +186,72 @@ export async function readPublishedRunner(
       why: `${remote} ${ref} at ${readTip} could not be read: ${error instanceof Error ? error.message : String(error)}`,
     }
   }
+}
+
+/**
+ * Whether the queue's runner — the process that writes the round journals — is
+ * still alive, judged ONLY from the claim this reader already trusts.
+ *
+ * The projection reader (28918) is handed this verdict as a plain fact, because
+ * the core must not import the process package to learn it. "dead" licenses a
+ * repair: a round whose writer is gone can never grow its journal again.
+ * Everything unproven — a claim from another host, a claim that records no start
+ * identity, a start identity this host cannot read — is "unknown", which
+ * licenses nothing.
+ */
+export type RunnerLiveness =
+  | { readonly kind: "live" }
+  | { readonly kind: "dead"; readonly why: string }
+  | { readonly kind: "unknown"; readonly why: string }
+
+/**
+ * Judge the runner claim's liveness with the comparison runner recovery already
+ * makes ({@link RunnerPublisher.inspect}): a pid that is gone, or whose start
+ * identity differs from the claim's, means the runner died — the same number is
+ * a REUSED pid, not the writer.
+ */
+export async function readRunnerLiveness(
+  git: Git,
+  queue: string,
+  remote: string,
+  tip: string | undefined,
+): Promise<RunnerLiveness> {
+  const ref = runnerRef(queue)
+  const published = await readPublishedRunner(git, queue, remote, tip)
+  const claim = published.claim
+  if (claim === undefined) {
+    return { kind: "unknown", why: published.why ?? `${remote} ${ref} carries no claim to judge the runner by` }
+  }
+  const slash = claim.Runner.lastIndexOf("/")
+  const host = slash < 0 ? "" : claim.Runner.slice(0, slash)
+  const pid = Number(claim.Runner.slice(slash + 1))
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return { kind: "unknown", why: `${remote} ${ref}: claim names no judgeable pid (${claim.Runner})` }
+  }
+  if (host !== hostname()) {
+    // A pid number and a start tick mean nothing on another machine: proving
+    // death from a local /proc read would be guessing.
+    return { kind: "unknown", why: `${remote} ${ref}: runner ${claim.Runner} is not on this host` }
+  }
+  if (pidPresence(pid) === "absent") return { kind: "dead", why: `runner ${claim.Runner}: PID absent` }
+  if (claim.Boot === undefined || claim.PidNamespace === undefined || claim.StartTick === undefined) {
+    return { kind: "unknown", why: `runner ${claim.Runner}: claim records no start identity to compare` }
+  }
+  const identity = processStartIdentity(pid)
+  if (identity.unreadable !== undefined && identity.unreadable.length > 0) {
+    const reason = identity.unreadable.map(({ field, path, code }) => `${field} unreadable at ${path} (${code})`)
+    return { kind: "unknown", why: `runner ${claim.Runner}: death unproven: ${reason.join("; ")}` }
+  }
+  if (identity.boot !== claim.Boot || identity.pidNamespace !== claim.PidNamespace) {
+    return { kind: "dead", why: `runner ${claim.Runner}: PID reused (boot or PID namespace differs)` }
+  }
+  if (identity.tick === undefined) {
+    return { kind: "unknown", why: `runner ${claim.Runner}: death unproven: start tick unreadable` }
+  }
+  if (String(identity.tick) !== claim.StartTick) {
+    return { kind: "dead", why: `runner ${claim.Runner}: PID reused (start tick differs)` }
+  }
+  return { kind: "live" }
 }
 
 export class RunnerConflict extends Error {
