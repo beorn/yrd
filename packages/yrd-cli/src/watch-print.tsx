@@ -85,7 +85,7 @@ export function ListingPage({
               </Text>
             )}
             {options.scope === undefined ? null : (
-              <Text color="$fg-muted" wrap="truncate">
+              <Text color="$fg-muted" wrap="wrap">
                 {options.scope}
               </Text>
             )}
@@ -146,6 +146,7 @@ export async function printListing(snapshot: WatchSnapshot, options: ListingPrin
       ? []
       : [snapshot.observation.message, ...snapshot.observation.notices.map((notice) => notice.text)]
   const extraLines = observationLines
+    .concat(options.scope === undefined ? [] : [options.scope])
     .flatMap((text) => text.split("\n"))
     .reduce((lines, text) => lines + Math.ceil(text.length / Math.max(38, options.columns - 2)) + 1, 0)
   const parts: string[] = []

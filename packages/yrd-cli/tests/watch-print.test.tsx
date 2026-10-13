@@ -72,6 +72,17 @@ async function paint(snapshot: WatchSnapshot, columns = 120): Promise<string> {
 }
 
 describe("the printed page's frame", () => {
+  // @failure A truncated source caption hid the acquisition count and omitted global checks.
+  // @consumer a human reading the default scoped queue list at terminal width
+  it.each([40, 120])("prints the complete acquisition scope at %s columns", async (columns) => {
+    const scope =
+      "Source: local. Read 1697 of 7066 retained change histories: every nonterminal change and endings within seven days by recorded ending Time. Global history diagnostics and direct target commits were not checked; use --all for full scope. Draft branches and unlinked journals were not read."
+    const text = await printListing(snapshot(), { columns, color: false, scope })
+    const normalized = text.replace(/\s+/gu, " ")
+    expect(normalized).toContain(scope)
+    expect(text).toContain("CHANGES")
+  })
+
   // The list must print every row with global widths/date boundaries while
   // bounding each renderer's frame. Small-page tests cannot catch an all-row tree.
   it.each([false, true])("bounds each print frame without changing the complete page (color: %s)", async (color) => {
