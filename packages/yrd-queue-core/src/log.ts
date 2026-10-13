@@ -541,7 +541,10 @@ export type JournalRun = Readonly<{
   at: Date
 }>
 
-export type Journals = Readonly<{
+/** Row facts acquired without command detail; omission cannot be mistaken for an empty detail array. */
+export type JournalSummary = Omit<JournalRun, "steps" | "commands">
+
+export type Journals<Run extends JournalSummary = JournalRun> = Readonly<{
   /** The directory that was read. */
   dir: string
   /** Why there is nothing, when there is nothing: a sentence naming what was looked for and where. */
@@ -579,7 +582,7 @@ export type Journals = Readonly<{
    */
   unread?: number
   /** Every run that wrote about a change, newest run first, keyed `<branch>@<head>`. */
-  runs: ReadonlyMap<string, readonly JournalRun[]>
+  runs: ReadonlyMap<string, readonly Run[]>
 }>
 
 /** The key a change's runs are held under: the same `<branch>@<head>` a change ref is named by. */
@@ -645,7 +648,7 @@ function runLogRecords(text: string, projecting = false): readonly LogRecord[] {
   return records
 }
 
-const journalFileCache = new Map<string, { source: JournalSource; runs: readonly JournalRun[] }>()
+const journalFileCache = new Map<string, { source: JournalSource; runs: readonly JournalSummary[] }>()
 
 // Change the fold identity whenever JournalRun or runner interpretation changes.
 // Exact equality is required: an older fold cannot recognize a newer artifact.
@@ -933,7 +936,9 @@ export function readJournalProjection(dir: string, id: string): JournalProjectio
 }
 
 function pruneJournalCache(dir: string, windowed: readonly string[]): void {
-  const live = new Set(windowed.map((id) => journalPath(dir, id)))
+  const live = new Set(
+    windowed.flatMap((id) => ["include", "omit"].map((detail) => `${journalPath(dir, id)}\0${detail}`)),
+  )
   const prefix = dir.endsWith("/") ? dir : `${dir}/`
   for (const key of journalFileCache.keys()) {
     if (key.startsWith(prefix) && !live.has(key)) journalFileCache.delete(key)
@@ -1006,11 +1011,20 @@ function cachedRunsIn(
   dir: string,
   id: string,
   startedAt: Date,
-): Readonly<{ runs: readonly JournalRun[]; fallback?: JournalProjectionFallback }> {
+  detail: "include" | "omit",
+): Readonly<{ runs: readonly JournalSummary[]; fallback?: JournalProjectionFallback }> {
   const path = journalPath(dir, id)
+  const cacheKey = `${path}\0${detail}`
   const projection = readJournalProjection(dir, id)
-  if (projection.kind === "projection") return { runs: projection.runs }
-  const hit = journalFileCache.get(path)
+  if (projection.kind === "projection") {
+    return {
+      runs:
+        detail === "include"
+          ? projection.runs
+          : projection.runs.map(({ steps: _steps, commands: _commands, ...summary }) => summary),
+    }
+  }
+  const hit = journalFileCache.get(cacheKey)
   if (hit !== undefined && projection.source !== undefined && sameJournalSource(hit.source, projection.source)) {
     return { runs: hit.runs, fallback: projection.fallback }
   }
@@ -1018,11 +1032,11 @@ function cachedRunsIn(
   // cutoff: an old round can be the ONLY journal a currently listed change has,
   // and a bound that reached it would drop that change's fact while the page
   // still read complete (@i/10-yrd/28799 finding 1).
-  const runs = [...runsIn(readRunLog(dir, id), id, startedAt)]
+  const runs = [...runsIn(readRunLog(dir, id), id, startedAt, detail)]
   if (projection.source !== undefined) {
     try {
       if (sameJournalSource(projection.source, journalSource(path, id))) {
-        journalFileCache.set(path, { source: projection.source, runs })
+        journalFileCache.set(cacheKey, { source: projection.source, runs })
       }
     } catch (error) {
       // Raw facts were read successfully. Optional process caching must not
@@ -1215,6 +1229,8 @@ export function recentPublicationRejected(
 }
 
 export type ReadJournalsOptions = Readonly<{
+  /** Detail is eager by default; a list explicitly asks for row facts only. */
+  detail?: "include" | "omit"
   now?: Date
   /** How far back the runs read reach; the same seven days `list` windows its ended rows by. */
   sinceMs?: number
@@ -1232,7 +1248,10 @@ export type ReadJournalsOptions = Readonly<{
  * screen. A run whose name is not one of ours is not opened at all, and the
  * count of them is in {@link Journals.absent} when nothing else was found.
  */
-export function readJournals(dir: string, options: ReadJournalsOptions = {}): Journals {
+export function readJournals(dir: string, options: ReadJournalsOptions & { detail: "omit" }): Journals<JournalSummary>
+export function readJournals(dir: string, options?: ReadJournalsOptions & { detail?: "include" }): Journals
+export function readJournals(dir: string, options: ReadJournalsOptions): Journals<JournalSummary>
+export function readJournals(dir: string, options: ReadJournalsOptions = {}): Journals<JournalSummary> {
   const now = options.now ?? new Date()
   const sinceMs = options.sinceMs ?? 7 * 24 * 60 * 60 * 1000
   const selected = new Set(options.runIds ?? [])
@@ -1283,7 +1302,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
   // the whole cost of the fallback (3,006 of them were 971 kB of `--json`,
   // @i/10-yrd/28799). Every round in the window gets it: the summary bounds what
   // a read PRINTS, never which facts it reads (@i/10-yrd/28799 finding 1).
-  const runs = new Map<string, JournalRun[]>()
+  const runs = new Map<string, JournalSummary[]>()
   const malformed: { run: string; key: string; message: string }[] = []
   const fallbacks: JournalProjectionFallback[] = []
   const unavailable: string[] = []
@@ -1300,7 +1319,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
     if (startedAt === undefined) continue
     let read: ReturnType<typeof cachedRunsIn>
     try {
-      read = cachedRunsIn(dir, id, startedAt)
+      read = cachedRunsIn(dir, id, startedAt, options.detail ?? "include")
     } catch (error) {
       if (options.runIds === undefined) throw error
       if (options.runIds !== undefined && (error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -1501,7 +1520,19 @@ function commandOf(record: LogRecord): JournalCommand | undefined {
   }
 }
 
-function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): readonly JournalRun[] {
+function runsIn(records: readonly LogRecord[], id: string, startedAt: Date, detail?: "include"): readonly JournalRun[]
+function runsIn(
+  records: readonly LogRecord[],
+  id: string,
+  startedAt: Date,
+  detail: "include" | "omit",
+): readonly JournalSummary[]
+function runsIn(
+  records: readonly LogRecord[],
+  id: string,
+  startedAt: Date,
+  detail: "include" | "omit" = "include",
+): readonly JournalSummary[] {
   // READER VERSION SKEW (24735, @cto 056e31bf): kinds this build knows are
   // folded; kinds it does not are NAMED, never dropped and never malformed.
   // The fold stays additive, so a writer may add a kind without breaking a
@@ -1677,16 +1708,20 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
     if (standing === -1) change.checks.push(check)
     else change.checks[standing] = check
   }
-  const stepped = stepsIn(records)
+  const stepped = detail === "include" ? stepsIn(records) : undefined
   return [...byChange.values()].map((change) => {
     const running = change.checks.findLast((check) => check.endedAt === undefined)
-    const own = stepped.byChange.get(journalKey(change.branch, change.head)) ?? []
+    const own = stepped?.byChange.get(journalKey(change.branch, change.head)) ?? []
     return {
       at: change.at,
       branch: change.branch,
       checks: change.checks,
-      steps: [...own, ...stepped.round].sort((left, right) => left.order - right.order).map(({ step }) => step),
-      commands: stepped.commands,
+      ...(stepped === undefined
+        ? {}
+        : {
+            steps: [...own, ...stepped.round].sort((left, right) => left.order - right.order).map(({ step }) => step),
+            commands: stepped.commands,
+          }),
       ...(change.decision === undefined ? {} : { decision: change.decision }),
       ...(change.reason === undefined ? {} : { reason: change.reason }),
       ...(change.incident === undefined ? {} : { incident: change.incident }),

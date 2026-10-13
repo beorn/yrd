@@ -169,6 +169,7 @@ export type {
   JournalProjectionFallback,
   JournalProjectionFallbackSummary,
   JournalRun,
+  JournalSummary,
   JournalStep,
   Journals,
   LogRecord,
