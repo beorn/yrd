@@ -1537,6 +1537,227 @@ describe("a queue is the selected origin branch carrying config", () => {
   }, 15_000)
 
   /**
+   * @failure Expanded drop misses submodule refs, mutates during preview, or deletes unlanded/held/moved work.
+   * @level l3
+   * @consumer An author previewing and applying issue cleanup in their own submodule stores
+   */
+  it("drop by issue previews registered submodules without issue lookup and applies exact landed tips", async () => {
+    // A configured resolver that always fails proves this mode never consults issue status.
+    const repo = await world('issueResolver: ["false"]\n')
+    const seed = await world()
+    const git = gitIn(repo)
+    await git([
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "--quiet",
+      join(dirname(seed), "remote.git"),
+      "modules/child",
+    ])
+    await git(["commit", "--quiet", "-am", "register child"])
+    await git(["push", "--quiet", "origin", "main"])
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    const child = join(repo, "modules/child")
+    const childGit = gitIn(child)
+    await childGit(["config", "user.name", "yrd test"])
+    await childGit(["config", "user.email", "yrd@test.invalid"])
+    const landed = (await childGit(["rev-parse", "HEAD"])).trim()
+    for (const branch of [
+      "task/28988-landed",
+      "exp/28988-landed",
+      "task/28988-held",
+      "task/28988-moved",
+      "task/99999-other",
+      "task/no-number",
+    ]) {
+      await childGit(["branch", branch, landed])
+    }
+    await childGit(["checkout", "--quiet", "-b", "task/28988-unique"])
+    writeFileSync(join(child, "unique.txt"), "unpublished\n")
+    await childGit(["add", "unique.txt"])
+    await childGit(["commit", "--quiet", "-m", "unique work"])
+    const unique = (await childGit(["rev-parse", "HEAD"])).trim()
+    await childGit(["checkout", "--quiet", "task/28988-held"])
+    const refs = async (read: typeof git) =>
+      read(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/archive/", "refs/yrd/"])
+    const rootBefore = await refs(git)
+    const childBefore = await refs(childGit)
+    const argv = [
+      "bun",
+      "yrd",
+      "drop",
+      "--issue",
+      "@example/28988-cleanup",
+      "--submodules",
+      "--submitter",
+      "fixture",
+      "--json",
+    ]
+    type Report = {
+      excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[]
+      eligible: { repo: string; branch: string; head: string }[]
+      removed: { repo: string; branch: string; head: string; archiveRef: string }[]
+      kept: { repo: string; branch: string; reason: string }[]
+      failed: { repo: string; reason: string }[]
+    }
+    for (const flags of [[], ["--dry-run"]]) {
+      const preview = capture(repo)
+      expect(await runYrdProcess([...argv, ...flags], preview.io), preview.stderr()).toBe(0)
+      const result = JSON.parse(preview.stdout()) as Report
+      expect(result.eligible.map((row) => row.branch).sort()).toEqual([
+        "exp/28988-landed",
+        "task/28988-landed",
+        "task/28988-moved",
+      ])
+      expect(result.eligible.every((row) => row.repo === child && row.head === landed)).toBe(true)
+      expect(result.removed).toEqual([])
+      expect(result.kept).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ repo: child, branch: "task/28988-held", reason: "held" }),
+          expect.objectContaining({ repo: child, branch: "task/28988-unique", reason: "unreached" }),
+        ]),
+      )
+      expect(result.excluded).toContainEqual({ repo: child, target: 1, unrelated: 1, unnumbered: 1 })
+      expect(result.kept.every((row) => row.branch.includes("28988"))).toBe(true)
+      expect(await refs(git)).toBe(rootBefore)
+      expect(await refs(childGit)).toBe(childBefore)
+    }
+    const apply = capture(repo)
+    let moved = false
+    apply.io.localBranchProtections = async (input) => {
+      if (input.repo === child && input.branch === "task/28988-moved" && !moved) {
+        moved = true
+        await childGit(["update-ref", "refs/heads/task/28988-moved", unique, landed])
+      }
+      return []
+    }
+    expect(await runYrdProcess([...argv, "--apply"], apply.io), apply.stderr()).toBe(0)
+    const result = JSON.parse(apply.stdout()) as Report
+    expect(result.removed.map((row) => row.branch).sort()).toEqual(["exp/28988-landed", "task/28988-landed"])
+    for (const row of result.removed) {
+      expect((await childGit(["rev-parse", row.archiveRef])).trim()).toBe(landed)
+      expect((await childGit(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
+    }
+    expect(result.kept).toContainEqual(
+      expect.objectContaining({ repo: child, branch: "task/28988-moved", reason: "moved" }),
+    )
+    expect((await childGit(["rev-parse", "refs/heads/task/28988-unique"])).trim()).toBe(unique)
+    expect((await childGit(["rev-parse", "refs/heads/task/28988-held"])).trim()).toBe(landed)
+    expect(await refs(git)).toBe(rootBefore)
+    // No component cleanup is misrepresented as a dropped root-queue change.
+    expect((await listChanges(createEventStore(repo, "origin", git.selection), "main")).size).toBe(0)
+    // Missing materialization must name the child, never discover and mutate the root through Git's upward search.
+    fs.renameSync(join(child, ".git"), join(child, ".git-unavailable"))
+    try {
+      const missing = capture(repo)
+      expect(await runYrdProcess(argv, missing.io), missing.stderr()).toBe(1)
+      expect((JSON.parse(missing.stdout()) as Report).failed).toContainEqual(
+        expect.objectContaining({ repo: child, reason: "unreadable" }),
+      )
+      expect(await refs(git)).toBe(rootBefore)
+    } finally {
+      fs.renameSync(join(child, ".git-unavailable"), join(child, ".git"))
+    }
+  }, 60_000)
+
+  /**
+   * @failure Landing evidence disappears after resubmission, or a root pin without component origin custody permits deletion.
+   * @level l3
+   * @consumer The expanded drop command retiring component work beyond origin/main
+   */
+  it("drop by issue uses historical landing pins only with component origin custody", async () => {
+    const repo = await world('issueResolver: ["false"]\n')
+    const seed = await world()
+    const git = gitIn(repo)
+    await git([
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "--quiet",
+      join(dirname(seed), "remote.git"),
+      "child",
+    ])
+    await git(["commit", "--quiet", "-am", "register child"])
+    await git(["push", "--quiet", "origin", "main"])
+    const queueTip = await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    const child = join(repo, "child")
+    const childGit = gitIn(child)
+    await childGit(["config", "user.name", "yrd test"])
+    await childGit(["config", "user.email", "yrd@test.invalid"])
+    const chain = await openEvents({
+      ...createEventStore(repo, "origin", git.selection),
+      ref: changesRef("main", "task/28988-root"),
+      writer: "yrd",
+    })
+    const tips = new Map<string, string>()
+    let eventHead: string | null = null
+    for (const kind of ["recorded", "pin-only", "old-event"]) {
+      const branch = `task/28988-${kind}`
+      await childGit(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(child, `${kind}.txt`), kind)
+      await childGit(["add", `${kind}.txt`])
+      await childGit(["commit", "--quiet", "-m", kind])
+      const tip = (await childGit(["rev-parse", "HEAD"])).trim()
+      tips.set(branch, tip)
+      if (kind !== "pin-only") await childGit(["push", "--quiet", "origin", `${branch}:refs/heads/${kind}`])
+      await git(["add", "child"])
+      await git(["commit", "--quiet", "-m", `root carries ${kind}`])
+      await git(["push", "--quiet", "origin", "main"])
+      const rootTip = (await git(["rev-parse", "HEAD"])).trim()
+      const written = await chain.append(
+        [
+          changeInput("opened", { queueTip, at: new Date(), commit: rootTip, by: "fixture" }),
+          changeInput("merged", {
+            queueTip,
+            at: new Date(),
+            commit: rootTip,
+            ...(kind === "old-event" ? {} : { landedGitlinks: [{ path: "child", target: tip }] }),
+          }),
+        ],
+        { expect: eventHead },
+      )
+      eventHead = written.head
+    }
+    // The latest state has no pins: cleanup must read each historical merged event through the existing fold.
+    await chain.append(
+      [
+        changeInput("opened", {
+          queueTip,
+          at: new Date(),
+          commit: (await git(["rev-parse", "HEAD"])).trim(),
+          by: "fixture",
+        }),
+      ],
+      { expect: eventHead },
+    )
+    await childGit(["checkout", "--quiet", "main"])
+    const argv = ["bun", "yrd", "drop", "--issue", "28988", "--submodules", "--submitter", "fixture", "--json"]
+    const preview = capture(repo)
+    expect(await runYrdProcess(argv, preview.io), preview.stderr()).toBe(0)
+    const report = JSON.parse(preview.stdout()) as {
+      eligible: { branch: string }[]
+      kept: { branch: string; reason: string }[]
+    }
+    expect(report.eligible.map((row) => row.branch)).toEqual(["task/28988-recorded"])
+    expect(report.kept).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ branch: "task/28988-pin-only", reason: "unreached" }),
+        expect.objectContaining({ branch: "task/28988-old-event", reason: "unreached" }),
+      ]),
+    )
+    const apply = capture(repo)
+    expect(await runYrdProcess([...argv, "--apply"], apply.io), apply.stderr()).toBe(0)
+    const removed = (JSON.parse(apply.stdout()) as { removed: { branch: string; archiveRef: string }[] }).removed
+    expect(removed.map((row) => row.branch)).toEqual(["task/28988-recorded"])
+    expect((await childGit(["rev-parse", removed[0]!.archiveRef])).trim()).toBe(tips.get("task/28988-recorded"))
+    for (const branch of ["task/28988-pin-only", "task/28988-old-event"]) {
+      expect((await childGit(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tips.get(branch))
+    }
+  }, 60_000)
+
+  /**
    * @failure Post-close cleanup either misses never-submitted work or removes a submitted branch that advanced.
    * @level l3
    * @consumer The closer running yrd drop --issue after durable issue closure

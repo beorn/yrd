@@ -1247,6 +1247,11 @@ export type IssueCandidate = Readonly<
   { issue: string; source: "binding"; commit: string; trailer?: string } | { issue: string; source: "legacy-branch" }
 >
 
+/** The existing branch-name mapping, shared by submission and explicit issue cleanup. */
+export function issueFromBranchName(branch: string): string | undefined {
+  return /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
+}
+
 /**
  * Read a branch's unresolved binding candidates in Git's history order.
  * Callers that can resolve many references in one read use this instead of
@@ -1279,7 +1284,7 @@ export async function issueCandidatesOf(
     })
   }
   if (candidates.length > 0) return candidates
-  const legacy = /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
+  const legacy = issueFromBranchName(branch)
   return legacy === undefined ? [] : [{ issue: legacy, source: "legacy-branch" }]
 }
 

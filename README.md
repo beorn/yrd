@@ -120,6 +120,10 @@ The target's `.yrd.yml` may declare `issueResolver: [issue-lookup, --json]`. Yrd
 
 When `yrd drop --issue` classifies many branches, it appends every distinct raw binding in one invocation. A batch-aware resolver returns a JSON array with one entry per argument: an object with a nonempty `id` string for a match, or `null` for no match. A resolver that still returns the single-reference object is called once per reference instead.
 
+To include registered submodule stores in your authoring tree, preview with `yrd drop --issue 12345 --submodules --json`, then repeat with `--apply` to retire eligible local branches. `--dry-run` explicitly selects the default preview. This mode selects `task/12345-*` and `exp/12345-*` by branch name and does not run the issue resolver.
+
+A component tip qualifies when it is an ancestor of its origin `main`, or an exact component pin recorded by a root landing event and still reachable from a component origin ref. A root gitlink alone is insufficient. Components currently target `main`; a different default branch is reported as unreadable if `main` is absent. Each report names the repositories inspected, counts target, unrelated and unnumbered branches per repository, and lists only the issue’s branches and failed stores. Missing component stores fail visibly. Apply archives each tip locally before conditional removal and checks branch movement and live holds again. Remote branches and worktrees are preserved.
+
 Yrd compares those IDs and writes the canonical ID in new environment and pin-only binding commits. The candidate's declaration cannot change this rule for its own submission.
 
 A missing issue, failed command, timeout or invalid result refuses and names the raw reference and target command.

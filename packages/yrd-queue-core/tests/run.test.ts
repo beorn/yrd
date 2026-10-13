@@ -642,6 +642,7 @@ it("runs a check-free event change through one atomic merge", async () => {
   })
   const state = await readStatus(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", "task/event-run")
   expect(state).toMatchObject({ status: "merged", commit: head })
+  expect(state.landedGitlinks).toEqual([])
   expect(state.candidate).toBe(await remoteTarget(w))
   expect(state.candidate).not.toBe(head)
   expect(await w.git(["rev-parse", `${state.candidate}^1`])).toMatch(new RegExp(w.target))
@@ -3979,6 +3980,58 @@ it("observes a submitted head on the target, then uses its merged event as the d
   expect((await queueRun(options)).directMerges).toEqual([])
 })
 
+/** @failure Cleanup loses exact component pins when the published root differs from the submitted root.
+ * @level l3 @consumer yrd local component branch retirement
+ */
+it.each(["published", "observed"] as const)(
+  "retains actual %s root gitlinks on its landing event",
+  async (producer) => {
+    const w = await world()
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const queueTip = await createWorldEventQueue(w)
+    const branch = `task/gitlinks-${producer}`
+    const head = await submitCommit(w, branch, "submitted.txt")
+    await w.git(["checkout", "--quiet", branch])
+    // The submitted root has no component; the actual landing commit introduces one.
+    // These pins are tree metadata only: this producer never needs to fetch a child.
+    const pins = [{ path: "vendor/child", target: w.target }]
+    await w.git(["config", "-f", ".gitmodules", "submodule.child.path", pins[0]!.path])
+    await w.git(["config", "-f", ".gitmodules", "submodule.child.url", "https://github.com/yrd-fixture/child.git"])
+    await w.git(["add", ".gitmodules"])
+    await w.git(["update-index", "--add", "--cacheinfo", `160000,${pins[0]!.target},${pins[0]!.path}`])
+    await w.git(["commit", "--quiet", "-m", "actual root landing with component"])
+    const landed = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    let endingId: string | undefined
+    if (producer === "published") {
+      let tip = (await readStatus(store, "main", branch)).tip!
+      for (const type of ["verifying", "checking", "merging"] as const) {
+        tip = await appendChangeEvent(store, "main", branch, tip, { type, at: new Date(), commit: landed })
+      }
+      endingId = await appendPublishedMerge(store, "main", branch, tip, {
+        at: new Date(),
+        commit: landed,
+        targetExpect: w.target,
+        queueTip,
+        opsFences: [],
+      })
+    } else {
+      await w.git(["merge", "--ff-only", landed])
+      await w.git(["push", "--quiet", "origin", "main"])
+      const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
+      expect(outcome.merged).toEqual([branch])
+    }
+    const state = await readStatus(store, "main", branch)
+    expect(state).toMatchObject({ status: "merged", commit: head, merge: landed, landedGitlinks: pins })
+    if (endingId !== undefined) expect(state.ending?.id).toBe(endingId)
+    const ending = (await (await openEvents({ ...store, ref: changesRef("main", branch) })).events()).find(
+      (event) => event.id === state.ending?.id,
+    )
+    expect(ending?.props).toContainEqual(["Gitlinks", JSON.stringify(pins)])
+    expect(await remoteTarget(w)).toBe(landed)
+  },
+)
+
 it("keeps the direct merge commit when an observed submitted head landed by no-ff merge", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
@@ -3998,6 +4051,7 @@ it("keeps the direct merge commit when an observed submitted head landed by no-f
     (event) => event.id === state.ending?.id,
   )
   expect(ending).toMatchObject({ type: "merged", links: [merge] })
+  expect(state.landedGitlinks).toEqual([])
   expect((await readEventQueue(store, "main")).observed[merge]?.branch).toBe("task/observed-no-ff")
   expect((await queueRun(options)).directMerges).toEqual([])
 })

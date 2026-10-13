@@ -237,7 +237,14 @@ function buildProgram(
       .option("--reason <text>", "why the change leaves the line, written on the record")
   const queueEnd = async (
     branch: string | undefined,
-    options: PauseOptions & { issue?: string; local?: boolean; tip?: string },
+    options: PauseOptions & {
+      issue?: string
+      local?: boolean
+      tip?: string
+      submodules?: boolean
+      dryRun?: boolean
+      apply?: boolean
+    },
     command: "withdraw" | "drop",
   ): Promise<void> => {
     if (options.local !== true && (branch === undefined) === (options.issue === undefined)) {
@@ -247,9 +254,19 @@ function buildProgram(
       throw new Error("drop --local needs a branch and --tip <expected-commit>")
     }
     if (options.tip !== undefined && options.local !== true) throw new Error("--tip requires drop --local")
+    if (
+      (options.submodules || options.dryRun || options.apply) &&
+      (command !== "drop" || options.issue === undefined || options.local)
+    ) {
+      throw new Error("--submodules, --dry-run and --apply require drop --issue <id>")
+    }
+    if ((options.dryRun || options.apply) && !options.submodules) {
+      throw new Error("--dry-run and --apply require --submodules")
+    }
+    if (options.dryRun && options.apply) throw new Error("choose --dry-run or --apply")
     let subject:
       | { command: "withdraw" | "drop"; branch: string }
-      | { command: "drop-issue"; issue: string }
+      | { command: "drop-issue"; issue: string; submodules?: boolean; apply?: boolean }
       | { command: "drop-local"; branch: string; tip: string; issue?: string }
     if (command === "drop" && options.local === true && branch !== undefined && options.tip !== undefined) {
       subject = {
@@ -260,7 +277,7 @@ function buildProgram(
       }
     } else if (branch !== undefined) subject = { command, branch }
     else if (command === "drop" && options.issue !== undefined) {
-      subject = { command: "drop-issue", issue: options.issue }
+      subject = { command: "drop-issue", issue: options.issue, submodules: options.submodules, apply: options.apply }
     } else throw new Error("withdraw needs a branch")
     const location = await resolveQueueLocation(cwd(), options.queue, env)
     setExit(
@@ -1307,7 +1324,13 @@ function buildProgram(
       .description("end a change, or archive and retire local branches")
       .option("--local", "archive and retire only the named local branch; requires --tip")
       .option("--tip <commit>", "expected full local commit for --local; an advanced branch is kept")
-      .option("--issue <id>", "retire issue-bound local refs; with --local, carry the reviewed issue identity"),
+      .option("--issue <id>", "retire issue-bound local refs; with --local, carry the reviewed issue identity")
+      .option(
+        "--submodules",
+        "include registered submodule branches using the issue's branch-name mapping; preview by default",
+      )
+      .option("--dry-run", "preview --submodules without archiving or deleting branches")
+      .option("--apply", "apply --submodules cleanup after rechecking exact tips and protections"),
   ).action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
 
   program

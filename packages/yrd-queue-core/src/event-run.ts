@@ -2,6 +2,7 @@
 import { mkdirSync, readFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { dirname, join } from "node:path"
+import { readCommitSubmodules } from "git-super/commit-graph"
 import { Conflict, PublicationRejected, RetriesExhausted, openEvents } from "./git.ts"
 import {
   isTransientPushHold,
@@ -39,7 +40,7 @@ import {
 import { eventRows } from "./event-table.ts"
 import { assertPlainEventQueueRun } from "./event-config.ts"
 import { eventDirectMergeCommits } from "./direct.ts"
-import { createEventStore, selectionFor, listRefs, type Event } from "./git.ts"
+import { createEventStore, selectionFor, listRefs, seamProcess, type Event } from "./git.ts"
 import {
   checkLogPath,
   effectiveCheckTimeoutMs,
@@ -1153,10 +1154,14 @@ export async function eventQueueRun(
     const merge = row?.[0] ?? change.commit
     const selectedTip = change.tip
     try {
+      const landedGitlinks = (await readCommitSubmodules(seamProcess(git, options.repo), options.repo, merge)).map(
+        ({ path, target }) => ({ path, target }),
+      )
       const written = await appendOwnedChange(store, queue, branch, selectedTip, {
         type: "merged",
         at: new Date(),
         commit: merge,
+        landedGitlinks,
         reason: `observed on target at ${merge}`,
         title: `merged ${branch}`,
         run: log.id,
