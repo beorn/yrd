@@ -682,7 +682,7 @@ export async function coreQueueCommand(
   // when the command ends, however it ends. Traced before the first Git below is built, which is when it reads
   // its environment. A dry run pushes nothing and is not counted.
   using traced = submitCalls(request, options.env, io)
-  const env = traced.env
+  const env = { ...(traced.env ?? process.env) }
   if (options.localStatusStore !== undefined) {
     if (request.command !== "list" && request.command !== "show" && request.command !== "ls") {
       throw new Error("the local queue status store is only for list/show/ls")
@@ -3364,6 +3364,7 @@ export async function coreQueueCommand(
         }
         const reading = await readEventListing(git, declared.config, repo, workdir, declared.oid, selectedStore, {
           all: request.all,
+          ...(request.all === true || request.drafts === true ? {} : { recent: { env } }),
           drafts: request.drafts,
           draftWindow,
           journalDetail: detail,
@@ -3411,7 +3412,10 @@ export async function coreQueueCommand(
             ? undefined
             : `${String(documentRows.length)} of ${String(listed.filter((item) => item.row.state !== "draft").length)} change(s) match ${request.terms.join(" or ")}` +
               (documentRows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
-        const baseScope = `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and ${archivedChangesPrefix(config.target.branch)}, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
+        const baseScope =
+          reading.acquisition === undefined
+            ? `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and ${archivedChangesPrefix(config.target.branch)}, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
+            : `Read ${reading.acquisition.read} of ${reading.acquisition.retained} retained change histories: every nonterminal change and endings within seven days by recorded ending Time. Global history diagnostics and direct target commits were not checked; use --all for full scope. Draft branches and unlinked journals were not read.`
         const ignoreScope =
           config.ignore.length === 0
             ? undefined
@@ -5533,7 +5537,8 @@ export type EventListingResult<Run extends JournalSummary = JournalRun> = Readon
   document: readonly Row[]
   history: ReadonlyMap<string, readonly EventHistoryRow[]>
   journals: Journals<Run>
-  drafts: DraftReading
+  drafts: DraftReading | undefined
+  acquisition?: Readonly<{ read: number; retained: number }>
   pause: PauseRecord | undefined
   overrides: OverrideTable
   changes: ReadonlyMap<string, EventChange>
@@ -5646,6 +5651,8 @@ export function runTerminalProbe(
 
 type EventListingOptions = Readonly<{
   all?: boolean
+  /** The list consumer's captured environment for its live/recent history scope. */
+  recent?: Readonly<{ env: NodeJS.ProcessEnv }>
   directHistory?: boolean
   drafts?: boolean
   now?: number | Date
@@ -5659,6 +5666,15 @@ type EventListingOptions = Readonly<{
 }>
 
 /** Read an event queue through Gitomic and project its change chains and draft branch heads. */
+export function readEventListing(
+  git: GitRunner,
+  config: QueueConfig,
+  repo: string,
+  workdir: string,
+  targetOid: string,
+  store: QueueReadStore,
+  options: EventListingOptions & { all: true; journalDetail?: "include" },
+): Promise<EventListingResult & { drafts: DraftReading }>
 export function readEventListing(
   git: GitRunner,
   config: QueueConfig,
@@ -5699,7 +5715,8 @@ export async function readEventListing(
   const runnerRefName = `${queueRefPrefix(config.target.branch)}/runner`
   const changePrefix = `${queuePrefix}changes/`
   const coldPrefix = archivedChangesPrefix(config.target.branch)
-  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#directHistory:${options.directHistory === true}#drafts:${options.drafts === true}#branch:${JSON.stringify(options.branch)}#journalDetail:${options.journalDetail ?? "include"}`
+  const recent = options.all === true || options.branch !== undefined ? undefined : options.recent
+  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#recent:${recent !== undefined}#directHistory:${options.directHistory === true}#drafts:${options.drafts === true}#branch:${JSON.stringify(options.branch)}#journalDetail:${options.journalDetail ?? "include"}`
   const cache = eventListingCaches.get(cacheKey)
   const nowMs =
     typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : Date.now()
@@ -5714,8 +5731,8 @@ export async function readEventListing(
     const dir = join(workdir, "logs")
     const read = (runTerminal?: (id: string) => boolean): Journals<JournalSummary> => {
       const judged = runTerminal === undefined ? {} : { runTerminal }
-      if (options.branch === undefined) return readJournals(dir, { detail, ...judged })
-      const segments = history.get(options.branch) ?? []
+      if (options.branch === undefined && recent === undefined) return readJournals(dir, { detail, ...judged })
+      const segments = options.branch === undefined ? [...history.values()].flat() : (history.get(options.branch) ?? [])
       const ids = segments.flatMap(({ events }) =>
         events.flatMap((event) => {
           const id = trailer(event, EVENT_TRAILERS.run)
@@ -5730,7 +5747,7 @@ export async function readEventListing(
       const missing = legacy
         .map(
           ({ row, events }) =>
-            `journal detail unavailable: ${options.branch}@${row.head}, segment ${events[0]?.id ?? "without opening identity"}, has no Run trailer; unlinked journal files were not searched`,
+            `journal detail unavailable: ${row.branch}@${row.head}, segment ${events[0]?.id ?? "without opening identity"}, has no Run trailer; unlinked journal files were not searched`,
         )
         .join("; ")
       return { ...journals, absent: [journals.absent, missing].filter((part) => part !== undefined).join("; ") }
@@ -5800,7 +5817,7 @@ export async function readEventListing(
 
   const headListingRecent = cache !== undefined && nowMs - cache.lastHeadListingAt < 60_000
 
-  const firstUndatedHead = cache?.reading.drafts.undated[0]?.head
+  const firstUndatedHead = cache?.reading.drafts?.undated[0]?.head
   const undatedDraftsFetched =
     firstUndatedHead !== undefined &&
     (await git(["cat-file", "--batch-check=%(objectname) %(objecttype)"], `${firstUndatedHead}\n`).then(
@@ -5854,7 +5871,7 @@ export async function readEventListing(
     openBranchDeleted ||
     draftWindowChanged
   ) {
-    branchRefs = options.branch === undefined ? await listRefs("refs/heads/", store) : new Map()
+    branchRefs = options.branch === undefined && recent === undefined ? await listRefs("refs/heads/", store) : new Map()
     headListingAt = nowMs
   } else {
     branchRefs = cache.branchRefs
@@ -5880,9 +5897,21 @@ export async function readEventListing(
   }
 
   // 4. Full read
+  const metadataRead =
+    recent === undefined
+      ? undefined
+      : {
+          process: createProcess({ cwd: repo, env: recent.env }),
+          selection: git.selection,
+          env: recent.env,
+          since: nowMs - 7 * 24 * 60 * 60 * 1000,
+          maxBytes: 64 * 1024 * 1024,
+          timeoutMs: 30_000,
+        }
+  await using _metadataOwner = metadataRead?.process
   const acquired =
     options.branch === undefined
-      ? await readEventQueueWithChanges(store, config.target.branch)
+      ? await readEventQueueWithChanges(store, config.target.branch, metadataRead)
       : await Promise.all([
           readEventQueue(store, config.target.branch),
           readBranchHistory(store, config.target.branch, options.branch, { invalid: "return" }),
@@ -5899,7 +5928,7 @@ export async function readEventListing(
   // own hot+cold read; restarting the listing reacquires every archived chain.
   for (;;) {
     try {
-      assertEventListingFence(config.target.branch, queue, changes, queueRefs, invalid)
+      assertEventListingFence(config.target.branch, queue, changes, queueRefs, invalid, recent === undefined)
       break
     } catch (error) {
       if (!(error instanceof EventListingMoved)) throw error
@@ -5951,7 +5980,7 @@ export async function readEventListing(
     }
   }
   const directMerges =
-    options.branch === undefined
+    options.branch === undefined && recent === undefined
       ? await eventDirectMergeCommits(git, config.target.branch, targetOid, queue.declaration, histories, new Set(), {
           allHistory: options.directHistory,
         })
@@ -5961,21 +5990,23 @@ export async function readEventListing(
   const heads = new Map([...branchRefs].map(([ref, oid]) => [ref.slice("refs/heads/".length), oid]))
   const since = draftWindow === "all" ? undefined : new Date(listNow.getTime() - 7 * 24 * 60 * 60 * 1000)
   const drafts =
-    options.branch === undefined
-      ? await readDrafts(
-          git,
-          withoutIgnoredDraftHeads(
-            {
-              heads: new Map([...heads].filter(([branch]) => !invalid.has(branch))),
-              changes: [...changes].flatMap(([branch, change]) =>
-                change.commit === undefined ? [] : [{ change: { branch, head: change.commit } }],
-              ),
-            },
-            config.ignore,
-          ),
-          { targetSha: targetOid, since },
-        )
-      : { dated: [], undated: [], older: 0 }
+    recent !== undefined
+      ? undefined
+      : options.branch === undefined
+        ? await readDrafts(
+            git,
+            withoutIgnoredDraftHeads(
+              {
+                heads: new Map([...heads].filter(([branch]) => !invalid.has(branch))),
+                changes: [...changes].flatMap(([branch, change]) =>
+                  change.commit === undefined ? [] : [{ change: { branch, head: change.commit } }],
+                ),
+              },
+              config.ignore,
+            ),
+            { targetSha: targetOid, since },
+          )
+        : { dated: [], undated: [], older: 0 }
   // Status comes only from the event fold (25041): a change whose branch is gone stays open
   // until a queue round records its ending, so a reader never shows a state no event holds.
   const segmentsByBranch = new Map(
@@ -6005,7 +6036,8 @@ export async function readEventListing(
         ] as const,
     ),
   )
-  const draftsToInclude = draftWindow === "all" ? [...drafts.dated, ...drafts.undated] : drafts.dated
+  const draftsToInclude =
+    drafts === undefined ? [] : draftWindow === "all" ? [...drafts.dated, ...drafts.undated] : drafts.dated
   const selected = eventListRows(segmentStates, draftsToInclude, {
     all: options.all,
     drafts: options.drafts,
@@ -6073,6 +6105,15 @@ export async function readEventListing(
     changes,
     invalid,
     observation,
+    ...(recent === undefined
+      ? {}
+      : {
+          acquisition: {
+            read: histories.size + invalid.size,
+            retained: [...queueRefs.keys()].filter((ref) => ref.startsWith(changePrefix) || ref.startsWith(coldPrefix))
+              .length,
+          },
+        }),
   }
 
   eventListingCaches.set(cacheKey, {
@@ -6109,6 +6150,7 @@ export function assertEventListingFence(
   changes: ReadonlyMap<string, EventChange>,
   advertised: ReadonlyMap<string, string>,
   invalid: ReadonlyMap<string, Readonly<{ ref: string; tip: string }>> = new Map(),
+  complete = true,
 ): void {
   const expected = new Map<string, string>([[queueRef(name), queue.tip]])
   for (const [branch, change] of changes) {
@@ -6127,7 +6169,7 @@ export function assertEventListingFence(
     }
   }
   for (const [ref, tip] of advertised) {
-    if ((ref.startsWith(changePrefix) || ref.startsWith(coldPrefix)) && !expected.has(ref)) {
+    if (complete && (ref.startsWith(changePrefix) || ref.startsWith(coldPrefix)) && !expected.has(ref)) {
       throw new EventListingMoved(ref, undefined, tip)
     }
   }

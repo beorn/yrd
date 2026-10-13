@@ -4,6 +4,7 @@ import type { Process, ProcessResult } from "@yrd/process"
 import {
   chainsUnder,
   Conflict,
+  gitEnvironment,
   invokeGit,
   listRefs,
   type Event,
@@ -80,6 +81,7 @@ export async function readEventCommitMetadata(
     env: NodeJS.ProcessEnv
   },
 ): Promise<ReadonlyMap<Oid, CommitMeta>> {
+  const env = gitEnvironment(options.env)
   const bytes = (result: ProcessResult, stream: "stdout" | "stderr"): Buffer => {
     const output = result.rawOutput?.[stream]
     if (output === undefined || output.head.length + output.tail.length !== output.totalBytes) {
@@ -99,7 +101,7 @@ export async function readEventCommitMetadata(
         options.process,
         { args, cwd: repo, selection: options.selection },
         { timeoutMs: request?.timeoutMs },
-        options.env,
+        env,
         input,
       )
       if (

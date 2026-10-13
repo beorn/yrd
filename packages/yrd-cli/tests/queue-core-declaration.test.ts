@@ -1273,7 +1273,11 @@ describe("a queue is the selected origin branch carrying config", () => {
     const list = async () => {
       const output = capture(repo)
       expect(await coreQueueCommand(repo, output.io, { command: "list" }, { json: true, queue: "main" })).toBe(0)
-      return (JSON.parse(output.stdout()) as { changes: readonly { branch: string }[] }).changes
+      const result = JSON.parse(output.stdout()) as { changes: readonly { branch: string }[]; scope: string }
+      expect(result.scope).toContain("Read 0 of 1 retained change histories")
+      expect(result.scope).toContain("recorded ending Time")
+      expect(result.scope).toContain("Global history diagnostics and direct target commits were not checked")
+      return result.changes
     }
     expect((await list()).some((row) => row.branch === branch)).toBe(false)
     const shown = capture(repo)
@@ -1283,6 +1287,13 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).toBe(0)
     expect((JSON.parse(shown.stdout()) as { changes: readonly { branch: string; state: string }[] }).changes).toEqual([
       expect.objectContaining({ branch, state: "merged" }),
+    ])
+    const complete = capture(repo)
+    expect(
+      await coreQueueCommand(repo, complete.io, { command: "list", all: true }, { json: true, queue: "main" }),
+    ).toBe(0)
+    expect((JSON.parse(complete.stdout()) as { changes: readonly { branch: string }[] }).changes).toEqual([
+      expect.objectContaining({ branch }),
     ])
     expect((await list()).some((row) => row.branch === branch)).toBe(false)
   }, 15_000)
