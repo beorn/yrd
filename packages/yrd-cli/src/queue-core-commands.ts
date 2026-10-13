@@ -1411,6 +1411,20 @@ export async function coreQueueCommand(
         const inspected: string[] = []
         const excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[] = []
         const log = openLog(join(workdir, "logs"))
+        // THE HEADER FIRST, before the walk writes any retirement record. A journal
+        // whose first record is not a run or Git row is one the projection reader
+        // refuses (`invalid record before run header`) and every reader older than
+        // it refuses with it — one record then denies the whole queue its positions
+        // (28791 learned this for the sibling drop path; this path wrote records
+        // with no header at all). The queue row marks the preamble complete so the
+        // journal never reads as a run that died in it (24470).
+        log.write({
+          command: NAMED[request.command],
+          config: config.blob,
+          kind: "run",
+          target: targetLabel,
+        })
+        log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
         const visit = async (repository: string, path: string, commit: string): Promise<void> => {
           const childGit = gitIn(repository, undefined, selection, { env })
           try {
