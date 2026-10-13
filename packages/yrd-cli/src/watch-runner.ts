@@ -449,7 +449,7 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
   // no `.pid` file exists. Reading liveness from that absence would call a run
   // three seconds old dead. The worktree pid still answers for journals written
   // before 24470, and for a run past its preamble it is the same process.
-  const projection = readJournalProjection(journalDir, id)
+  const projection = readJournalProjection(journalDir, id, { detail: "omit" })
   const read = readRunHeader(path, projection.kind === "projection" ? projection.runnerRecords : undefined)
   const pidPath = join(workdir, "worktrees", id, RUN_PID)
   const claimed = existsSync(pidPath) ? readPid(pidPath) : undefined

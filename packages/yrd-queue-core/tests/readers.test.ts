@@ -478,12 +478,13 @@ describe("a run's journal, read back", () => {
     expect(steps?.[2]?.commands).toEqual([{ args: ["push", "origin"], cwd: "/w", failure: "spawn" }])
   })
 
-  it("reads a completed projection without opening raw Git rows and preserves command and date facts", () => {
+  it("reads compact summaries without raw Git rows and hydrates complete detail without rewriting the artifact", () => {
     // AC2/3: existing cache tests warm the process-local cache first, so they
     // cannot catch a fresh reader parsing every completed raw journal.
     const at = new Date("2026-09-03T20:00:00.000Z")
     const dir = join(scratch("completed-projection"), "logs")
     const log = openLog(dir, () => at)
+    const detail = `detail-only-${"x".repeat(100_000)}`
     log.write({ kind: "run", base: "aaa", target: "main", queue: "q" })
     log.write({
       kind: "step",
@@ -495,7 +496,7 @@ describe("a run's journal, read back", () => {
     })
     log.write({
       kind: "git",
-      args: ["merge", "task/one"],
+      args: ["merge", "task/one", detail],
       cwd: "/w",
       evidence: "/w/git/1.stdout.bin.json",
       exit: 1,
@@ -503,23 +504,34 @@ describe("a run's journal, read back", () => {
     })
     log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed", reason: "compose" })
     log.finish()
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    const before = fs.readFileSync(artifact, "utf8")
+    expect(JSON.parse(before).schema).toBe(2)
+    expect(before).not.toContain(detail)
     const read = vi.spyOn(fs, "readFileSync")
     try {
-      const journals = readJournals(dir, { now: at })
+      const summary = readJournals(dir, { now: at, detail: "omit" })
       expect(read.mock.calls.filter(([path]) => String(path) === log.path)).toHaveLength(0)
+      const compact = summary.runs.get(journalKey("task/one", "abc123"))?.[0]
+      expect(compact).toMatchObject({ id: log.id, decision: "failed", startedAt: at, at })
+      expect(compact).not.toHaveProperty("steps")
+      expect(compact).not.toHaveProperty("commands")
+      const journals = readJournals(dir, { now: at })
+      expect(read.mock.calls.filter(([path]) => String(path) === log.path)).toHaveLength(1)
       expect(journals.fallbacks).toBeUndefined()
       const run = journals.runs.get(journalKey("task/one", "abc123"))?.[0]
       expect(run).toMatchObject({ id: log.id, decision: "failed", startedAt: at, at })
       expect(run?.steps[0]?.startedAt).toEqual(at)
       expect(run?.steps[0]?.commands).toEqual([
         {
-          args: ["merge", "task/one"],
+          args: ["merge", "task/one", detail],
           cwd: "/w",
           exit: 1,
           stdout: "/w/git/1.stdout.bin",
           stderr: "/w/git/1.stderr.bin",
         },
       ])
+      expect(fs.readFileSync(artifact, "utf8")).toBe(before)
     } finally {
       read.mockRestore()
     }
@@ -782,7 +794,7 @@ describe("a run's journal, read back", () => {
         writeFileSync(artifact, JSON.stringify({ ...parsed, schema: 0 }))
         break
       case "new-schema":
-        writeFileSync(artifact, JSON.stringify({ ...parsed, schema: 2 }))
+        writeFileSync(artifact, JSON.stringify({ ...parsed, schema: 3 }))
         break
       case "new-fold":
         writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 4 }))

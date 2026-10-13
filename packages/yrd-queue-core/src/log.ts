@@ -266,7 +266,7 @@ function persistJournalProjection(path: string, id: string): void {
   }
   const startedAt = runStartedAt(id)
   if (startedAt === undefined) throw new Error(`journal ${path}: run id has no start instant`)
-  const runs = runsIn(records, id, startedAt)
+  const runs = runsIn(records, id, startedAt, "omit")
   const source = journalSource(path, id)
   if (JSON.stringify(before) !== JSON.stringify(source)) {
     throw new Error(`journal ${path}: source changed while building its projection`)
@@ -675,7 +675,7 @@ const journalFileCache = new Map<string, { source: JournalSource; runs: readonly
 
 // Change the fold identity whenever JournalRun or runner interpretation changes.
 // Exact equality is required: an older fold cannot recognize a newer artifact.
-const JOURNAL_PROJECTION_SCHEMA = 1
+const JOURNAL_PROJECTION_SCHEMA = 2
 const JOURNAL_PROJECTION_FOLD = 3
 
 type JournalSource = Readonly<{
@@ -720,11 +720,11 @@ export type JournalProjectionFallbackSummary = Readonly<{
   persistFailures?: Readonly<{ count: number; example: string }>
 }>
 
-export type JournalProjectionRead =
+export type JournalProjectionRead<Run extends JournalSummary = JournalRun> =
   | Readonly<{
       kind: "projection"
       source: JournalSource
-      runs: readonly JournalRun[]
+      runs: readonly Run[]
       runnerRecords: readonly LogRecord[]
     }>
   | Readonly<{ kind: "raw"; source?: JournalSource; fallback: JournalProjectionFallback }>
@@ -780,22 +780,6 @@ function projectionRecord(value: unknown): value is LogRecord {
   return typeof record.kind === "string" && typeof record.run === "string" && typeof record.at === "string"
 }
 
-function projectionCommands(value: unknown): readonly JournalCommand[] {
-  if (!Array.isArray(value)) throw new Error("expected commands array")
-  return value.map((entry) => {
-    const command = projectionObject(entry)
-    if (
-      !projectionStrings(command.args) ||
-      typeof command.cwd !== "string" ||
-      (command.exit !== undefined && typeof command.exit !== "number") ||
-      ["stdout", "stderr", "failure"].some((key) => command[key] !== undefined && typeof command[key] !== "string")
-    ) {
-      throw new Error("invalid command facts")
-    }
-    return command as JournalCommand
-  })
-}
-
 function projectionCheck(value: unknown): JournalCheck {
   const check = projectionObject(value)
   if (
@@ -815,14 +799,15 @@ function projectionCheck(value: unknown): JournalCheck {
   } as JournalCheck
 }
 
-function projectionRun(value: unknown, source: JournalSource): JournalRun {
+function projectionSummary(value: unknown, source: JournalSource): JournalSummary {
   const run = projectionObject(value)
   if (
     run.id !== source.run ||
     typeof run.branch !== "string" ||
     typeof run.head !== "string" ||
     !Array.isArray(run.checks) ||
-    !Array.isArray(run.steps) ||
+    run.steps !== undefined ||
+    run.commands !== undefined ||
     ["base", "merge", "reason"].some((key) => run[key] !== undefined && typeof run[key] !== "string") ||
     (run.number !== undefined && (!Number.isSafeInteger(run.number) || Number(run.number) < 1)) ||
     (run.decision !== undefined && (typeof run.decision !== "string" || !TERMINAL_DECISIONS.has(run.decision))) ||
@@ -852,29 +837,6 @@ function projectionRun(value: unknown, source: JournalSource): JournalRun {
   }
   const startedAt = projectionDate(run.startedAt)
   if (startedAt.getTime() !== runStartedAt(source.run)?.getTime()) throw new Error("run start does not match its id")
-  const steps = run.steps.map((entry) => {
-    const step = projectionObject(entry)
-    if (
-      typeof step.name !== "string" ||
-      typeof step.phase !== "string" ||
-      (step.ms !== undefined && typeof step.ms !== "number") ||
-      ["threw", "unended"].some((key) => step[key] !== undefined && step[key] !== true) ||
-      (step.parts !== undefined &&
-        (!Array.isArray(step.parts) ||
-          step.parts.some((part) => {
-            const fact = projectionObject(part)
-            return typeof fact.name !== "string" || typeof fact.ms !== "number"
-          })))
-    ) {
-      throw new Error("invalid step facts")
-    }
-    return {
-      ...step,
-      startedAt: projectionDate(step.startedAt),
-      ...(step.endedAt === undefined ? {} : { endedAt: projectionDate(step.endedAt) }),
-      commands: projectionCommands(step.commands),
-    } as JournalStep
-  })
   return {
     ...run,
     id: source.run,
@@ -882,19 +844,36 @@ function projectionRun(value: unknown, source: JournalSource): JournalRun {
     head: run.head,
     startedAt,
     at: projectionDate(run.at),
-    steps,
     checks: run.checks.map(projectionCheck),
-    commands: projectionCommands(run.commands),
     ...(run.running === undefined ? {} : { running: projectionCheck(run.running) }),
-  } as JournalRun
+  } as JournalSummary
 }
 
 /** Shared acquisition for detail and runner readers. Invalid cache bytes never replace raw truth. */
-export function readJournalProjection(dir: string, id: string): JournalProjectionRead {
+export function readJournalProjection(
+  dir: string,
+  id: string,
+  options: Readonly<{ detail: "omit" }>,
+): JournalProjectionRead<JournalSummary>
+export function readJournalProjection(
+  dir: string,
+  id: string,
+  options?: Readonly<{ detail?: "include" }>,
+): JournalProjectionRead
+export function readJournalProjection(
+  dir: string,
+  id: string,
+  options: Readonly<{ detail?: "include" | "omit" }>,
+): JournalProjectionRead<JournalSummary>
+export function readJournalProjection(
+  dir: string,
+  id: string,
+  options: Readonly<{ detail?: "include" | "omit" }> = {},
+): JournalProjectionRead<JournalSummary> {
   const path = journalPath(dir, id)
   const artifact = path.replace(/\.jsonl$/u, ".projection.json")
   let source: JournalSource | undefined
-  const raw = (reason: JournalProjectionFallback["reason"], detail: string): JournalProjectionRead => ({
+  const raw = (reason: JournalProjectionFallback["reason"], detail: string): JournalProjectionRead<JournalSummary> => ({
     kind: "raw",
     ...(source === undefined ? {} : { source }),
     fallback: { run: id, reason, detail },
@@ -944,7 +923,18 @@ export function readJournalProjection(dir: string, id: string): JournalProjectio
       return raw("partial", `${artifact}: no run header`)
     }
     const capturedSource = source
-    const runs = parsed.runs.map((run) => projectionRun(run, capturedSource))
+    let runs: readonly JournalSummary[] = parsed.runs.map((run) => projectionSummary(run, capturedSource))
+    if (options.detail !== "omit") {
+      const startedAt = runStartedAt(id)
+      if (startedAt === undefined) return raw("partial", `${path}: no recognized run start identity`)
+      try {
+        // The compact artifact owns summary facts; complete command and step
+        // detail stays in the canonical raw fold. Never fabricate empty arrays.
+        runs = runsIn(readRunLog(dir, id), id, startedAt)
+      } catch (error) {
+        return raw("unreadable", `${path}: full journal detail could not be read: ${String(error)}`)
+      }
+    }
     let after: JournalSource
     try {
       after = journalSource(path, id)
@@ -1157,14 +1147,9 @@ function cachedRunsIn(
 }> {
   const path = journalPath(dir, id)
   const cacheKey = `${path}\0${detail}`
-  const projection = readJournalProjection(dir, id)
+  const projection = readJournalProjection(dir, id, { detail })
   if (projection.kind === "projection") {
-    return {
-      runs:
-        detail === "include"
-          ? projection.runs
-          : projection.runs.map(({ steps: _steps, commands: _commands, ...summary }) => summary),
-    }
+    return { runs: projection.runs }
   }
   const hit = journalFileCache.get(cacheKey)
   if (hit !== undefined && projection.source !== undefined && sameJournalSource(hit.source, projection.source)) {
@@ -1192,8 +1177,8 @@ function cachedRunsIn(
         // one projection writer so the next read finds the projection present
         // instead of rebuilding (and re-noticing) forever. The writer folds
         // the raw journal itself, so even a summary (omit) read persists the
-        // full artifact — the construction is paid once per journal, and
-        // every later read is served from the artifact. A failed write
+        // compact summary artifact — every later summary read is served
+        // from it, while full detail remains in the raw journal. A failed write
         // changes nothing this read returns; it is counted and named in the
         // read's fallback facts instead of swallowed.
         if (projection.fallback !== undefined && repairableProjection(dir, id, projection.fallback, sourceTerminal)) {
