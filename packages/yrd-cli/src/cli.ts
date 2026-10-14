@@ -27,7 +27,7 @@
  * real change: one submit opened two changes, 2026-09-03.
  */
 
-import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
+import { Command as CliCommand, CommanderError, Option, int } from "@silvery/commander"
 import { join } from "node:path"
 import { drainOutput } from "loggily"
 import {
@@ -1476,7 +1476,12 @@ function buildProgram(
     )
     .option("--bay <name>", "name the environment")
     .option("--issue <ref>", "bind the branch to this issue with a Refs commit before setup")
-    .option("--hold <reason>", "lock the worktree with this reason; git worktree unlock <path> clears it")
+    .addOption(
+      new Option(
+        "--hold [reason]",
+        "lock the worktree; omitted reason uses manual; git worktree unlock <path> clears it",
+      ).preset("manual"),
+    )
     .option("--keep", "record this environment as standing so a merge of its branch does not close it")
     .option("--json", "emit stable JSON")
     .action(async (commit, options) =>
