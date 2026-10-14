@@ -2032,7 +2032,7 @@ describe("yrd queue up, the service", () => {
     const w = await world()
     await redeclare(
       w,
-      "checks:\n  - hold:\n      on: [submit]\n      run: sleep 35\n      timeoutMs: 1800000\n      long:\n        timeoutMs: 5400000\n",
+      "checks:\n  - hold:\n      on: [submit]\n      run: sleep 5\n      timeoutMs: 1800000\n      long:\n        timeoutMs: 5400000\n",
     )
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
@@ -2051,6 +2051,12 @@ describe("yrd queue up, the service", () => {
     const run = capture(w.work)
     const stalls = monitorEventLoopDelay({ resolution: 20 })
     stalls.enable()
+    // The Beat cadence has a thirty second floor (`runnerBeatMs = Math.max(30_000, heartbeat.intervalMs)`), so a
+    // real check must outlive it for the remote ref to move while the check is active. Only Date is faked: the
+    // service's own timer still ticks every 100 ms, the check still runs for real, and the stall instrument, which
+    // reads hrtime, stays real.
+    vi.useFakeTimers({ toFake: ["Date"] })
+    const startedAt = Date.now()
     const service = coreQueueCommand(
       w.work,
       run.io,
@@ -2072,6 +2078,8 @@ describe("yrd queue up, the service", () => {
       )
       const before = await readRemoteCommit(w.git, "origin", runnerRef("main"))
       expect(before).toBeDefined()
+      // Past the beat floor the next 100 ms tick publishes a fresh claim: SET, not slept.
+      vi.setSystemTime(startedAt + 31_000)
       await vi.waitFor(
         async () => {
           const tip = await readRemoteCommit(w.git, "origin", runnerRef("main"))
@@ -2093,7 +2101,7 @@ describe("yrd queue up, the service", () => {
             [
               {
                 name: "hold",
-                run: "sleep 35",
+                run: "sleep 5",
                 on: ["submit"],
                 timeoutMs: 30 * 60_000,
                 long: { timeoutMs: 90 * 60_000 },
@@ -2107,7 +2115,7 @@ describe("yrd queue up, the service", () => {
             [
               {
                 name: "hold",
-                run: "sleep 35",
+                run: "sleep 5",
                 on: ["submit"],
                 timeoutMs: 30 * 60_000,
                 long: { timeoutMs: 90 * 60_000 },
@@ -2142,6 +2150,7 @@ describe("yrd queue up, the service", () => {
       stop.abort()
       await service
       stalls.disable()
+      vi.useRealTimers()
     }
   }, 60_000)
 
