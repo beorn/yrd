@@ -870,7 +870,8 @@ describe("yrd env open prepares the retained environment", () => {
     const path = join(w.work, ".bays", "hold-options")
     const listed = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io)).toBe(0)
-    expect(JSON.parse(listed.stdout()).environments).toContainEqual(expect.objectContaining({ path, hold: reason }))
+    const heldRows = JSON.parse(listed.stdout()) as { environments: { path: string; hold: string | null }[] }
+    expect(heldRows.environments).toContainEqual(expect.objectContaining({ path, hold: reason }))
     if (json) expect(JSON.parse(opened.stdout())).toMatchObject({ path })
   })
 
