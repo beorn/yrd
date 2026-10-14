@@ -1311,14 +1311,23 @@ describe("yrd queue up, the service", () => {
       { bay: "21122-merge", closes: true, linkedRoot: false },
       { bay: "21122-personal", closes: false, linkedRoot: false },
       { bay: "21122-merge", closes: true, linkedRoot: true },
-      { bay: "21122-merge", closes: false, linkedRoot: false, fresh: true },
+      // AC1: an exact merged job is terminal even inside the ordinary opening grace.
+      { bay: "21122-merge", closes: true, linkedRoot: false, fresh: true },
+      { bay: "21122-merge", closes: false, linkedRoot: false, fresh: true, advanced: true },
       { bay: "21122-merge", closes: false, linkedRoot: true, liveUse: true },
       { bay: "21122-merge", closes: false, linkedRoot: false, failingReader: true },
       { bay: "21122-merge", closes: false, linkedRoot: false, invalidReader: true },
-    ].map((row) => ({ fresh: false, liveUse: false, failingReader: false, invalidReader: false, ...row })),
+    ].map((row) => ({
+      fresh: false,
+      advanced: false,
+      liveUse: false,
+      failingReader: false,
+      invalidReader: false,
+      ...row,
+    })),
   )(
-    "a merge closes only its original environment ($bay, linked root $linkedRoot, fresh $fresh, live use $liveUse, failed reader $failingReader, invalid reader $invalidReader)",
-    async ({ bay, closes, linkedRoot, fresh, liveUse, failingReader, invalidReader }) => {
+    "a merge closes only its original environment ($bay, linked root $linkedRoot, fresh $fresh, advanced $advanced, live use $liveUse, failed reader $failingReader, invalid reader $invalidReader)",
+    async ({ bay, closes, linkedRoot, fresh, advanced, liveUse, failingReader, invalidReader }) => {
       const w = await world()
       if (linkedRoot) {
         const physical = join(dirname(w.work), "physical-bays")
@@ -1355,6 +1364,8 @@ describe("yrd queue up, the service", () => {
       if (!fresh) await ageOpening(environment.path)
       // Same live checkout in all cases; the environment's opening differs.
       await gitIn(environment.path)(["checkout", "--quiet", "task/21122-merge"])
+      // AC3: a new local commit is still active work although the submitted head lands.
+      if (advanced) await gitIn(environment.path)(["commit", "--quiet", "--allow-empty", "-m", "next unsubmitted work"])
       expect(existsSync(environment.path)).toBe(true)
       const census = vi
         .spyOn(removely, "inspectProcessCwds")
@@ -1396,7 +1407,6 @@ describe("yrd queue up, the service", () => {
         if (failingReader) {
           expect(run.stderr()).toContain("live environment-use reader unavailable: Error: declaration read failed")
         }
-        if (fresh) expect(run.stderr()).toContain("fresh: opened")
         const filed = allCleanupRows(workdir).filter((row) => row.result === "filed" && row.path === environment.path)
         expect(filed, JSON.stringify(allCleanupRows(workdir))).toHaveLength(closes ? 1 : 0)
         const closed = allCleanupRows(workdir).find((row) => row.result === "closed" && typeof row.request === "object")
@@ -1472,11 +1482,6 @@ describe("yrd queue up, the service", () => {
       await w.git(["add", `${leaf}.txt`])
       await w.git(["commit", "--quiet", "-m", "bound change whose env must close on merge"])
       await w.git(["checkout", "--quiet", "main"])
-      await submit(w.git, "origin", {
-        branch,
-        submitter: "@dev/13",
-        target: { branch: "main", remote: "origin" },
-      })
       const opened = capture(w.work)
       expect(await runYrdProcess(["bun", "yrd", "env", "open", ...open, "--json"], opened.io), opened.stderr()).toBe(0)
       const openedEnvironment = JSON.parse(opened.stdout()) as { path: string }
@@ -1487,6 +1492,12 @@ describe("yrd queue up, the service", () => {
         unlinkSync(join(gitDir, "yrd-open.json"))
       }
       await gitIn(environment.path)(["checkout", "--quiet", branch])
+      // Opening with --issue can add a binding commit; submit that exact job head.
+      await submit(w.git, "origin", {
+        branch,
+        submitter: "@dev/13",
+        target: { branch: "main", remote: "origin" },
+      })
       expect(existsSync(environment.path)).toBe(true)
       const census = vi
         .spyOn(removely, "inspectProcessCwds")

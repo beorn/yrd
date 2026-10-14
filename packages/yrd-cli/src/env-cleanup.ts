@@ -446,7 +446,8 @@ async function fileMergedCloseRequests(
     selection: GitSelection
     env?: NodeJS.ProcessEnv
     record: (path: string, result: string, why: string) => void
-    automaticKeep: (path: string, opening: EnvOpenRecordRead) => string | undefined
+    automaticKeep: (path: string, opening: EnvOpenRecordRead, terminal?: boolean) => string | undefined
+    mergedHead: (branch: string) => Promise<string>
   }>,
 ): Promise<void> {
   if (input.merged.length === 0) return
@@ -461,11 +462,16 @@ async function fileMergedCloseRequests(
       continue
     }
     try {
+      const head = await input.mergedHead(row.branch)
+      if (row.head !== head) {
+        input.record(row.path, "kept", `merged ${row.branch}@${head}; environment advanced to ${row.head}`)
+        continue
+      }
       const gitDir = (
         await gitIn(row.path, undefined, input.selection, { env: input.env })(["rev-parse", "--absolute-git-dir"])
       ).trim()
       const opening = readEnvOpenRecord(gitDir)
-      const keep = input.automaticKeep(row.path, opening) ?? mergedCloseKeepReason(opening)
+      const keep = input.automaticKeep(row.path, opening, true) ?? mergedCloseKeepReason(opening)
       if (keep !== undefined) {
         input.record(row.path, "kept", keep)
         continue
@@ -721,7 +727,7 @@ async function cleanupEnvironments(
       liveUseFailure = `live environment-use reader unavailable: ${String(cause)}`
     }
   }
-  const automaticKeep = (path: string, opening: EnvOpenRecordRead): string | undefined => {
+  const automaticKeep = (path: string, opening: EnvOpenRecordRead, terminal = false): string | undefined => {
     if (liveUseFailure !== undefined) return liveUseFailure
     if (liveUses.length > 0) {
       const environment = realpathSync(path)
@@ -731,12 +737,22 @@ async function cleanupEnvironments(
       })
       if (use !== undefined) return `live use: ${use.reason} (${use.path})`
     }
-    if (opening.status === "recorded") {
+    // An exact terminal job can close immediately; an unfinished opening keeps its grace.
+    if (!terminal && opening.status === "recorded") {
       const openedAt = Date.parse(opening.record.at)
       if (!Number.isFinite(openedAt)) return `opening timestamp unproven: ${JSON.stringify(opening.record.at)}`
       if (Date.now() - openedAt < FRESH_ENVIRONMENT_GRACE_MS) return `fresh: opened ${opening.record.at}`
     }
     return undefined
+  }
+  const store = { repo, remote: config.target.remote, selection: git.selection, backend: git.backend }
+  const historyCache = new Map<string, ReturnType<typeof readBranchHistory>>()
+  const historyOf = (branch: string): ReturnType<typeof readBranchHistory> => {
+    const cached = historyCache.get(branch)
+    if (cached !== undefined) return cached
+    const pending = readBranchHistory(store, config.target.branch, branch)
+    historyCache.set(branch, pending)
+    return pending
   }
   // File before census so a round that cannot certify still leaves the request
   // for the next consume.
@@ -750,6 +766,13 @@ async function cleanupEnvironments(
     env: input.env,
     record,
     automaticKeep,
+    mergedHead: async (branch) => {
+      const { history } = await historyOf(branch)
+      if (history?.state.status !== "merged" || history.state.commit === undefined) {
+        throw new Error(`${store.remote}#${config.target.branch}: ${branch} has no exact merged submission head`)
+      }
+      return history.state.commit
+    },
   })
   let snapshot: ProcessCwdProjection
   try {
@@ -766,15 +789,6 @@ async function cleanupEnvironments(
   // batch, because this round is the context whose census reads every pid.
   const requests = await consumeCloseRequests({ workdir, registry, worktrees: registryGit, io, outcome })
   closed += requests.closed
-  const store = { repo, remote: config.target.remote, selection: git.selection, backend: git.backend }
-  const historyCache = new Map<string, ReturnType<typeof readBranchHistory>>()
-  const historyOf = (branch: string): ReturnType<typeof readBranchHistory> => {
-    const cached = historyCache.get(branch)
-    if (cached !== undefined) return cached
-    const pending = readBranchHistory(store, config.target.branch, branch)
-    historyCache.set(branch, pending)
-    return pending
-  }
   const lookup = issueLookup(config, repo, input.env)
   const statuses = new Map<string, Promise<ResolvedIssue>>()
   let lookups = 0
