@@ -474,7 +474,7 @@ export type DraftWindow = "7d" | "all"
  * under it, which is the only scope either was ever true of.
  */
 export function ListHeader({ layout }: { layout: ListLayout }) {
-  const label = (text: string): React.ReactNode => (
+  const label = (text: string): React.ReactElement<React.ComponentProps<typeof Text>> => (
     <Text bold wrap="truncate">
       {text}
     </Text>
@@ -884,6 +884,17 @@ export function RunnerRow({
 }
 
 /** The seven cells in their one geometry, consumed by header, rows and the runner alike. */
+function fixedTextCell(
+  child: React.ReactElement<React.ComponentProps<typeof Text>> | null | undefined,
+  width: number,
+): React.ReactElement {
+  // Supplementary runner lines still need their empty WHO column spacer.
+  if (child == null) {
+    return <Box width={width} flexShrink={0} />
+  }
+  return React.cloneElement(child, { width, flexShrink: 0 })
+}
+
 function Cells({
   layout,
   children,
@@ -892,9 +903,9 @@ function Cells({
   children: Readonly<{
     time?: React.ReactNode
     task: React.ReactNode
-    agent: React.ReactNode
-    q?: React.ReactNode
-    run?: React.ReactNode
+    agent: React.ReactElement<React.ComponentProps<typeof Text>> | null
+    q?: React.ReactElement<React.ComponentProps<typeof Text>> | null
+    run?: React.ReactElement<React.ComponentProps<typeof Text>> | null
     queueRun?: React.ReactNode
     status: React.ReactNode
     ageRun: React.ReactNode
@@ -907,16 +918,8 @@ function Cells({
       </Box>
       {layout.isSeparateColumns ? (
         <>
-          {(layout.qWidth ?? 0) === 0 || children.q == null ? null : (
-            <Box width={layout.qWidth ?? 0} flexShrink={0}>
-              {children.q}
-            </Box>
-          )}
-          {children.run == null ? null : (
-            <Box width={layout.runWidth ?? 0} flexShrink={0}>
-              {children.run}
-            </Box>
-          )}
+          {(layout.qWidth ?? 0) === 0 || children.q == null ? null : fixedTextCell(children.q, layout.qWidth ?? 0)}
+          {children.run == null ? null : fixedTextCell(children.run, layout.runWidth ?? 0)}
         </>
       ) : children.queueRun == null ? null : (
         <Box width={layout.queueRunWidth} flexShrink={0}>
@@ -929,11 +932,7 @@ function Cells({
       <Box width={layout.statusWidth} flexShrink={0} flexDirection="row">
         {children.status}
       </Box>
-      {layout.agentWidth === 0 ? null : (
-        <Box width={layout.agentWidth} flexShrink={0}>
-          {children.agent}
-        </Box>
-      )}
+      {layout.agentWidth === 0 ? null : fixedTextCell(children.agent, layout.agentWidth)}
       <Box width={layout.ageRunWidth} flexShrink={0} justifyContent="flex-end">
         {children.ageRun}
       </Box>
