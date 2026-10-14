@@ -28,6 +28,7 @@ import { createEventStore, previewCloneKey, previewSubjectPrefix } from "@yrd/qu
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
+import * as publicCli from "../src/index.ts"
 import { admitEnvironmentClose, environmentCwdHolder } from "../src/env-close-holders.ts"
 import {
   closeRequestFile,
@@ -321,6 +322,75 @@ it.each(["released", "held", "advanced", "failed"] as const)(
             .map((line) => JSON.parse(line) as { kind: string }),
         )
       expect(records.some((row) => row.kind === "local-branch-retirement")).toBe(false)
+    }
+  },
+  60_000,
+)
+
+/** @failure An external native release cannot retry merged refs without leaking private context,
+ * or reuses a stale/disposed handle and retires a newly bound checkout.
+ * @level l3 @consumer hosts composing successful native reset/remove with @yrd/cli
+ * Native close alone cannot prove the public handle's release identity, named result or single-use contract.
+ */
+it.each(["released", "unreleased", "rebound", "reused", "disposed", "unreadable", "none"] as const)(
+  "public author release preserves exact native identity: %s",
+  async (mode) => {
+    const w = await world(":")
+    await birthEventQueue(w.work, "main", { localStore: false })
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", `public-release-${mode}`, "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const author = (JSON.parse(opened.stdout()) as { path: string }).path
+    const authorGit = gitIn(author)
+    const branch = `task/public-release-${mode}`
+    await authorGit(["commit", "--quiet", "--allow-empty", "-m", "author work\n\nRefs: @example/29340-public-release"])
+    const head = (await authorGit(["rev-parse", "HEAD"])).trim()
+    if (mode !== "none") {
+      const submitted = capture(author)
+      expect(await runYrdProcess(["bun", "yrd", "submit", "--json"], submitted.io), submitted.stderr()).toBe(0)
+      const landed = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], landed.io),
+        landed.stderr(),
+      ).toBe(0)
+      expect(JSON.parse(landed.stdout())).toMatchObject({ merged: [branch] })
+    }
+    const output = capture(w.work)
+    if (mode === "unreadable") await w.git(["remote", "set-url", "origin", join(dirname(w.work), "missing-remote.git")])
+    const prepared = await publicCli.prepareAuthorRelease(author, output.io)
+    if (mode === "none" || mode === "unreadable") {
+      expect(prepared).toMatchObject({ kind: mode, reason: expect.any(String) })
+      if (prepared.kind === "unreadable") expect(prepared.reads.length).toBeGreaterThan(0)
+      expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
+      expect((await w.git(["for-each-ref", "refs/archive/"])).trim()).toBe("")
+      return
+    }
+    expect(prepared.kind).toBe("eligible")
+    if (prepared.kind !== "eligible") throw new Error(JSON.stringify(prepared))
+    using handle = prepared.handle
+    if (mode === "disposed") {
+      handle[Symbol.dispose]()
+      await expect(handle.retireAfterRelease()).rejects.toMatchObject({ name: "AuthorReleaseDisposed" })
+    } else {
+      let expectedHead = head
+      if (mode === "reused") {
+        await authorGit(["commit", "--quiet", "--allow-empty", "-m", "new unsubmitted work"])
+        expectedHead = (await authorGit(["rev-parse", "HEAD"])).trim()
+      }
+      if (mode === "rebound") await authorGit(["checkout", "--quiet", "--detach", "main"])
+      else if (mode !== "unreleased") await w.git(["worktree", "remove", author])
+      await handle.retireAfterRelease()
+      await expect(handle.retireAfterRelease()).rejects.toMatchObject({ name: "AuthorReleaseAlreadyUsed" })
+      const retired = mode === "released" || mode === "rebound"
+      expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe(
+        retired ? "" : expectedHead,
+      )
+      const archives = (await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")
+      if (retired) expect(archives).toContain(head)
+      else expect(archives).not.toContain(head)
+      if (mode === "unreleased") expect(output.stderr()).toContain("still bound")
     }
   },
   60_000,
