@@ -35,6 +35,12 @@ import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartId
 import { issueResolver } from "./issue-resolver.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup } from "./env-cleanup.ts"
+import {
+  captureMergedComponentAuthors,
+  createLandedBranchRetirement,
+  retireMergedComponentAuthors,
+  retireMergedRootAuthor,
+} from "./branch-retirement.ts"
 import { sweepRoundOutputInRound } from "./log-retention.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
 import { runAdmission } from "./admission.ts"
@@ -51,7 +57,6 @@ import {
   directMergeLine,
   drop,
   issueFromBranchName,
-  isAncestor,
   seamProcess,
   initial,
   evolve,
@@ -931,7 +936,6 @@ export async function coreQueueCommand(
       outcome = await queueRun({
         ...baseOptions,
         afterRun: async (outcome) => {
-          await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue })
           // A merged bay must close before its branch is judged for retirement.
           // Append to this round's journal while queueRun still owns its finish.
           const retirementLog: Parameters<typeof retireLocalBranch>[0]["log"] = {
@@ -943,31 +947,64 @@ export async function coreQueueCommand(
               return row
             },
           }
+          const authorGit = gitIn(authorRepo, undefined, selection, { env })
+          const componentAuthors: Awaited<ReturnType<typeof captureMergedComponentAuthors>>[number][] = []
           if (outcome.merged.length > 0) {
-            const authorGit = gitIn(authorRepo, undefined, selection, { env })
             try {
-              // One fetch makes the published target available in the author store.
+              // Capture native identities before cleanup can destroy their checkout metadata.
               await authorGit(["fetch", "--no-tags", await remoteUrl(git, config.target.remote), outcome.target])
+              for (const branch of outcome.merged) {
+                const change = await readStatus(eventStore, config.target.branch, branch)
+                componentAuthors.push(
+                  ...(await captureMergedComponentAuthors({
+                    repo: authorRepo,
+                    git: authorGit,
+                    selection,
+                    env,
+                    branch,
+                    change,
+                    base: outcome.base,
+                    target: outcome.target,
+                    log: retirementLog,
+                  })),
+                )
+              }
+            } catch (error) {
+              retirementLog.write({
+                kind: "warning",
+                scope: "local-branch-retirement",
+                reason: `component capture kept: ${String(error)}`,
+              })
+            }
+          }
+          await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue })
+          await retireMergedComponentAuthors({
+            authors: componentAuthors,
+            selection,
+            env,
+            actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
+            io,
+            log: retirementLog,
+            store: eventStore,
+            queue: config.target.branch,
+          })
+          if (outcome.merged.length > 0) {
+            try {
               for (const branch of outcome.merged) {
                 try {
                   const change = await readStatus(eventStore, config.target.branch, branch)
-                  const tip = change.commit
-                  if (tip === undefined) throw new Error(`merged change ${branch} has no kept head`)
-                  await retireLocalBranch({
+                  await retireMergedRootAuthor({
                     repo: authorRepo,
                     git: authorGit,
                     actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
                     branch,
-                    tip,
-                    owner: change.submitter,
-                    issue: change.issue,
-                    reason: "merged",
-                    date: new Date().toISOString().slice(0, 10),
+                    change,
+                    base: outcome.base,
+                    target: outcome.target,
+                    io,
                     log: retirementLog,
-                    protections: () =>
-                      io.localBranchProtections?.({ repo: authorRepo, branch, tip, issue: change.issue }) ??
-                      Promise.resolve([]),
-                    disposition: { kind: "merged", base: outcome.base, target: outcome.target },
+                    store: eventStore,
+                    queue: config.target.branch,
                   })
                 } catch (error) {
                   retirementLog.write({
@@ -1080,6 +1117,11 @@ export async function coreQueueCommand(
       `yrd: REVERTED PATHS: ${revert.reason}; the compose put a target advance back (coverage ${revert.coverage}, ` +
         `${String(revert.count)} path(s)); recorded as admission-warning ${revert.event}\n`,
     )
+  }
+  const echoComponentAuthors = (published: Awaited<ReturnType<typeof prepareSubmit>>["published"]): void => {
+    for (const row of published) {
+      if (row.authorUnavailable !== undefined) io.stderr(`yrd: ${row.authorUnavailable}\n`)
+    }
   }
   const notifyAdmissionWarning = async (submitted: Submitted, submitter: string): Promise<void> => {
     const warning = submitted.admissionWarning
@@ -1473,49 +1515,28 @@ export async function coreQueueCommand(
               if (target === undefined) {
                 throw new Error(`registered repository ${repository} has no ${remote}#${targetBranch}`)
               }
-              let remoteRefs: ReadonlyMap<string, string> | undefined
+              const retire = createLandedBranchRetirement({
+                repo: repository,
+                git: childGit,
+                selection,
+                remote,
+                target,
+              })
               for (const { branch, head } of candidates) {
                 const row = { repo: repository, path, branch, head }
-                const pins = landings.filter((pin) => pin.path === path)
-                const pin = pins.find((candidate) => candidate.tip === head)
-                let custody: string | undefined = (await isAncestor(childGit, head, target)) ? target : undefined
-                let proof: { kind: "ancestry" } | { kind: "landing"; event: string; path: string; tip: string } = {
-                  kind: "ancestry",
-                }
-                if (custody === undefined && pin !== undefined) {
-                  // A root gitlink retains no component object. Observe custody at component origin as well.
-                  remoteRefs ??= await listRefs("refs/", createEventStore(repository, remote, selection))
-                  for (const [ref] of remoteRefs) {
-                    const reached = await readRemoteCommit(childGit, remote, ref)
-                    if (reached !== undefined && (await isAncestor(childGit, head, reached))) {
-                      custody = reached
-                      proof = { kind: "landing", ...pin }
-                      break
-                    }
-                  }
-                }
-                if (custody === undefined) {
-                  kept.push({
-                    ...row,
-                    reason: "unreached",
-                    detail: `tip has no main ancestry or origin-retained exact landing pin in ${repository}`,
-                  })
-                  continue
-                }
-                const result = await retireLocalBranch({
-                  repo: repository,
-                  git: childGit,
+                const result = await retire({
+                  path,
+                  landings,
                   branch,
                   tip: head,
                   actor: request.by,
                   issue,
-                  reason: request.reason ?? `landed by ${proof.kind}`,
+                  reason: request.reason,
                   date: new Date().toISOString().slice(0, 10),
                   dryRun: !request.apply,
                   log,
                   protections: () =>
                     io.localBranchProtections?.({ repo: repository, branch, tip: head, issue }) ?? Promise.resolve([]),
-                  disposition: { kind: "landed", target: custody, proof },
                 })
                 const output = {
                   ...row,
@@ -2173,6 +2194,7 @@ export async function coreQueueCommand(
         echoStop(acceptedUnder)
         echoAdmission(submitted.admission)
         echoRevertWarning(submitted)
+        echoComponentAuthors(submitted.published)
         return 0
       }
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
@@ -2207,6 +2229,7 @@ export async function coreQueueCommand(
             published.map((row) => `\n${row.state} ${row.path}@${row.sha} at ${row.remote} ${row.ref}`).join(""),
         )
         echoStop(stop)
+        echoComponentAuthors(published)
         if (admission.kind === "warn" || admission.kind === "cannot-judge") {
           io.stderr(`preparation admission ${admission.kind}: ${admission.reason}\n`)
         }
@@ -2255,6 +2278,7 @@ export async function coreQueueCommand(
       echoStop(acceptedUnder)
       echoAdmission(submitted.admission)
       echoRevertWarning(submitted)
+      echoComponentAuthors(submitted.published)
       return 0
     }
     case "run": {

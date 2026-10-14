@@ -69,6 +69,7 @@ import {
 } from "./env-close-requests.ts"
 import type { ProcessCensus } from "removely"
 import { formatUnknownNotifyEventWarning, formatUnknownTopLevelKeyWarning } from "./version.ts"
+import { prepareAuthorRelease } from "./branch-retirement.ts"
 
 export type EnvOpenOptions = Readonly<{
   bay?: string
@@ -1066,6 +1067,11 @@ export async function closeEnvironment(
       unknownNotifyEvents: (unknown) => warnUnknownNotifyEvents(path, "env close", unknown, io),
     },
   )
+  const retirement = await prepareAuthorRelease(path, io)
+  if (retirement.kind === "unreadable") {
+    io.stderr(`yrd: ${retirement.reason}; read ${retirement.reads.join("; ")}; close continues\n`)
+  }
+  using retirementHandle = retirement.kind === "eligible" ? retirement.handle : undefined
   if (config?.teardown !== undefined) {
     const artifacts = join(workdir, "logs", "environments", basename(path), runId())
     const result = await runCheck({
@@ -1181,6 +1187,7 @@ export async function closeEnvironment(
     // to the repository that owns the worktree registry.
     await worktreeWithoutSubmodules(treeGit, git, commit, ["remove", path])
   }
+  if (retirementHandle !== undefined) await retirementHandle.retireAfterRelease()
   io.stdout(options.json === true ? `${JSON.stringify({ closed: path })}\n` : `closed environment ${path}\n`)
   return 0
 }

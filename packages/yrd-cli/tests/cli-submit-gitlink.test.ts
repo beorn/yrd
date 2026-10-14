@@ -16,6 +16,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
+import { createLocalEventStore, freshWorktree, readRunLog, readStatus } from "@yrd/queue-core"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -162,6 +163,96 @@ const refs = async (remote: string): Promise<string> =>
 
 const remoteHead = async (remote: string, branch: string): Promise<string> =>
   (await gitIn(remote)(["rev-parse", `refs/heads/${branch}`])).trim()
+
+/**
+ * @failure A native root landing leaves a topic author behind, deletes an unrelated equal-tip ref,
+ *          or retires a component target/default branch after its checkout detaches.
+ * @level l3
+ * @consumer automatic archive-first component retirement after ordinary submit
+ * Existing pin-only carriers have no attached author ref; manual component drop does not exercise the landing call.
+ */
+it.each(["topic", "main", "default", "new-default"] as const)(
+  "preserves protected component refs or retires the actual topic after native landing (%s)",
+  async (mode) => {
+    const w = await world()
+    const git = gitIn(w.work)
+    // Run from another native checkout: its same component path is not the author store.
+    const queueClient = join(w.root, "queue-client")
+    await freshWorktree(git, w.work, w.base, queueClient, { selection: git.selection })
+    const rootBranch = "task/root-delivery"
+    const authorBranch = mode === "main" ? "main" : mode === "default" ? "release/stable" : "topic/component-author"
+    const child = join(w.work, "vendor/one")
+    const childGit = gitIn(child)
+    await git(["checkout", "--quiet", "-b", rootBranch])
+    await identity(child)
+    await childGit(["fetch", "--quiet", "origin", "main"])
+    if (mode === "main") {
+      await childGit(["checkout", "--quiet", "main"])
+      await childGit(["merge", "--ff-only", "FETCH_HEAD"])
+    } else {
+      await childGit(["checkout", "--quiet", "-b", authorBranch, "FETCH_HEAD"])
+    }
+    writeFileSync(join(child, "one.txt"), "authored component\n")
+    await childGit(["commit", "--quiet", "-am", "component work"])
+    const tip = (await childGit(["rev-parse", "HEAD"])).trim()
+    const componentRemote = gitIn(join(w.root, "one.git"))
+    if (mode === "default") {
+      await childGit(["push", "--quiet", "origin", authorBranch])
+      await componentRemote(["symbolic-ref", "HEAD", `refs/heads/${authorBranch}`])
+    }
+    await childGit(["branch", "unrelated/same-tip", tip])
+    const untouched = gitIn(join(w.work, "vendor/two"))
+    await untouched(["fetch", "--quiet", "--no-recurse-submodules", child, tip])
+    const untouchedTip = mode === "main" ? (await untouched(["rev-parse", "refs/heads/main"])).trim() : tip
+    if (mode !== "main") await untouched(["branch", authorBranch, untouchedTip])
+    await git(["add", "vendor/one"])
+    await git(["commit", "--quiet", "-m", "deliver component\n\nRefs: 25804"])
+    const submitted = await yrd(w.work, "submit", "--submitter", "fixture", "--json")
+    expect(submitted.exitCode, submitted.report).toBe(0)
+    const state = await readStatus(
+      { ...createLocalEventStore(w.work, git.selection, git.backend), remote: "origin" },
+      "main",
+      rootBranch,
+    )
+    if (mode === "main" || mode === "default") {
+      expect(state.componentAuthors ?? []).toEqual([])
+      expect(submitted.stderr).toContain("protected component")
+    } else {
+      expect(state.componentAuthors).toEqual([{ path: "vendor/one", branch: authorBranch, tip }])
+    }
+    // Already-recorded author metadata must remain safe when the remote default changes after submit.
+    if (mode === "new-default") {
+      // Give the retirement caller real main custody, so an unrelated ancestry hold cannot hide the defect.
+      await childGit(["push", "--quiet", "origin", `${tip}:refs/heads/main`])
+      await childGit(["push", "--quiet", "origin", authorBranch])
+      await componentRemote(["symbolic-ref", "HEAD", `refs/heads/${authorBranch}`])
+    }
+    // Submit observes attached authorship. Detaching afterwards releases this ref without destroying its store.
+    await childGit(["checkout", "--quiet", "--detach", tip])
+    const landed = await yrd(queueClient, "queue", "run", "--queue", "main", "--json")
+    expect(landed.exitCode, landed.report).toBe(0)
+    const outcome = JSON.parse(landed.stdout) as { log: string; run: string; merged: string[] }
+    expect(outcome.merged).toEqual([rootBranch])
+    expect((await childGit(["for-each-ref", "--format=%(objectname)", `refs/heads/${authorBranch}`])).trim()).toBe(
+      mode === "topic" ? "" : tip,
+    )
+    expect((await childGit(["rev-parse", "refs/heads/unrelated/same-tip"])).trim()).toBe(tip)
+    expect((await untouched(["rev-parse", `refs/heads/${authorBranch}`])).trim()).toBe(untouchedTip)
+    const records = readRunLog(join(outcome.log, ".."), outcome.run)
+    const retirement = records.find(
+      (row) => row.kind === "local-branch-retirement" && row.branch === authorBranch && row.head === tip,
+    )
+    if (mode === "topic") {
+      expect(retirement).toMatchObject({ outcome: "removed", branch: authorBranch, head: tip })
+      if (typeof retirement?.archive !== "string") throw new Error("component retirement omitted archive custody")
+      expect((await childGit(["rev-parse", retirement.archive])).trim()).toBe(tip)
+    } else {
+      expect(await childGit(["for-each-ref", "--format=%(refname)", "refs/archive/"])).toBe("")
+      if (mode === "new-default") expect(landed.stderr).toContain("protected component")
+    }
+  },
+  60_000,
+)
 
 async function assertCarrier(
   w: World,
@@ -893,6 +984,13 @@ describe("ordinary submit with a local-only component pin", () => {
       published: readonly { path: string; sha: string; state: string }[]
     }
     expect(receipt.head).toBe(head)
+    // @failure Detached authorship disappears from the CLI result or leaks outside its stderr boundary.
+    // @level l2 @consumer submit --prepare callers reading structured publication and diagnostics
+    // The attached-author landing case cannot exercise unavailable attribution.
+    expect(receipt.published).toContainEqual(
+      expect.objectContaining({ path: one.path, authorUnavailable: expect.stringContaining("detached HEAD") }),
+    )
+    expect(ran.stderr).toContain(`component author unavailable for ${one.path}@${one.unheld}`)
     expect(receipt.published).toContainEqual(
       expect.objectContaining({ path: one.path, sha: one.unheld, state: "published" }),
     )

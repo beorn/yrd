@@ -262,7 +262,7 @@ export type {
 export { dispatchNotifications, notifyOutsideRound, notifyRetiredRoot, overrideNotice } from "./with-notify.ts"
 export type { OutsideRound, OverrideNotice, RetiredRootNotice } from "./with-notify.ts"
 
-export { remoteUrl } from "./remote.ts"
+export { remoteHead, remoteUrl } from "./remote.ts"
 
 export {
   absentHealthDocument,
