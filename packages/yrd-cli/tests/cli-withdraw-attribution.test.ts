@@ -22,6 +22,9 @@ import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import { workdirOf } from "../src/workdir.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
+// Standalone CI imports removely as native ESM; spies need a mutable facade over its real exports.
+vi.mock("removely", async (original) => ({ ...(await original<typeof import("removely")>()) }))
+
 const roots: string[] = []
 
 afterAll(() => {
