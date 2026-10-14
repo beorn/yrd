@@ -842,6 +842,88 @@ process.exit(result.exitCode)
     expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
   })
 
+  it("local drop retires a landed branch without acquiring a moving unrelated change", async () => {
+    // Local retirement owns one branch. The watch race fixture makes its
+    // unrelated inventory move real; an exact read need not acquire it at all.
+    const w = await world()
+    const branch = "task/landed-local-drop"
+    const tip = (await w.git(["rev-parse", "main"])).trim()
+    await w.git(["branch", branch, tip])
+    await change(w, "task/unrelated", true)
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const queue = await readEventQueue(store, "main")
+    const ref = changesRef("main", "task/unrelated")
+    const chain = await openEvents({ ...store, ref, writer: "yrd" })
+    const before = await chain.head()
+    if (before === null) throw new Error("unrelated submitted fixture has no event tip")
+    const otherTip = (await w.git(["rev-parse", "task/unrelated"])).trim()
+    await chain.append([changeInput("merged", { queueTip: queue.tip, at: new Date(), commit: otherTip })], {
+      expect: before,
+    })
+    const after = await chain.head()
+    if (after === null) throw new Error("unrelated merged fixture has no event tip")
+    const remote = join(dirname(w.work), "remote.git")
+    await w.git(["--git-dir", remote, "update-ref", ref, before, after])
+    const moving = movingOnFetchGit(w, { remote, ref, from: before, to: after, names: "task/unrelated" })
+    const run = capture(w.work)
+    await expect(
+      coreQueueCommand(
+        w.work,
+        run.io,
+        { command: "drop-local", branch, tip, by: "@dev/4" },
+        {
+          json: true,
+          workdir: w.workdir,
+          selection: {
+            executable: moving.executable,
+            contract: "native",
+            scope: "default",
+            origin: "local-drop unrelated-ref race fixture",
+          },
+        },
+      ),
+    ).resolves.toBe(0)
+    const result = JSON.parse(run.stdout())
+    expect(result).toMatchObject({ removed: [{ branch, head: tip }], kept: [], failed: [] })
+    expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe("")
+    expect((await w.git(["rev-parse", result.removed[0].archiveRef])).trim()).toBe(tip)
+    expect((await w.git(["rev-parse", "task/unrelated"])).trim()).toBe(otherTip)
+    expect(moving.moved()).toBe(0)
+  })
+
+  it("local drop keeps its own branch when the expected tip moves after inventory", async () => {
+    const w = await world()
+    const branch = "task/moving-local-drop"
+    const tip = (await w.git(["rev-parse", "main"])).trim()
+    await w.git(["branch", branch, tip])
+    await change(w, "task/new-work", true)
+    const next = (await w.git(["rev-parse", "task/new-work"])).trim()
+    const run = capture(w.work)
+    let moved = false
+    run.io.localBranchProtections = async () => {
+      if (!moved) {
+        await w.git(["update-ref", `refs/heads/${branch}`, next, tip])
+        moved = true
+      }
+      return []
+    }
+    await expect(
+      coreQueueCommand(
+        w.work,
+        run.io,
+        { command: "drop-local", branch, tip, by: "@dev/4" },
+        { json: true, workdir: w.workdir },
+      ),
+    ).resolves.toBe(0)
+    expect(moved).toBe(true)
+    expect(JSON.parse(run.stdout())).toMatchObject({
+      removed: [],
+      kept: [{ branch, head: tip, detail: `branch moved: expected ${tip}, found ${next}` }],
+      failed: [],
+    })
+    expect((await w.git(["rev-parse", branch])).trim()).toBe(next)
+  })
+
   /**
    * @failure A selected ref that moves inside EVERY advertisement-to-fetch
    *          window is a re-inventory that can never agree; an unbounded loop
