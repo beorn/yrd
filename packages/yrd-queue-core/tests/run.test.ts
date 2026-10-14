@@ -436,6 +436,11 @@ it("local retirement keeps protected tips and preserves custody before removing 
   expect(await refAt(origin, localOnly.archiveRef)).toBeUndefined()
   expect(await refAt(origin, queueRef("main"))).toBe(queueBefore)
   const rows = readRunLog(dirname(log.path), log.id)
+  expect(rows.find((row) => row.kind === "local-branch-retirement" && row.actor === "@dev/9")).toMatchObject({
+    outcome: "removed",
+    archive: merged.archiveRef,
+    detail: `already retired: ${merged.archiveRef} holds ${w.target}; this run deleted no ref`,
+  })
   expect(rows.filter((row) => row.kind === "local-branch-retirement").map((row) => row.outcome)).toEqual([
     "kept",
     "kept",

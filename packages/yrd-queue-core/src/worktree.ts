@@ -634,13 +634,12 @@ export function nameAbandonedTree(path: string, why: string): void {
  */
 async function removeWorktree(git: Git, path: string, repo: string, options: FreshWorktree): Promise<void> {
   const checkout = resolve(repo)
-  const objects = runnerFor(git).objects
-  const at = async (cwd: string): Promise<Git> => {
-    const selection =
-      options.selection ?? (await resolveGitSelection(cwd, { process: options.process, env: options.env }))
+  const at = (cwd: string): Git => {
+    const inherited = runnerFor(git)
+    const selection = options.selection ?? inherited.selection
     return gitIn(cwd, options.process, selection, {
       ...(options.env === undefined ? {} : { env: options.env }),
-      ...(objects === undefined ? {} : { objects }),
+      ...(inherited.objects === undefined ? {} : { objects: inherited.objects }),
       ...options.gitOptions,
     })
   }
