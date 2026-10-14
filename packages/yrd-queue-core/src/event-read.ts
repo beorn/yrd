@@ -34,6 +34,28 @@ export class EventRefsMoved extends Conflict {
   }
 }
 
+/** How many fresh inventories the multi-prefix reader takes before it gives up (29386). */
+const EVENT_REFS_ACQUIRE_ATTEMPTS = 8
+
+/**
+ * The selected refs moved inside EVERY advertisement-to-fetch window, so the fresh re-inventory gave
+ * up (28941's listing cure, moved down to the one reader both the listing and the run call — 29386).
+ * It extends Error, NOT Conflict, on purpose: a Conflict-retrying caller cannot re-run the exhaustion
+ * and nest a loop. The attempts and the last moved refs ride the error.
+ */
+export class EventRefsAcquireExhausted extends Error {
+  override readonly name = "EventRefsAcquireExhausted"
+
+  constructor(
+    readonly attempts: number,
+    readonly refs: readonly string[],
+  ) {
+    super(
+      `event refs moved after the selected inventory ${String(attempts)} times in a row; giving up: ${refs.join(", ")}`,
+    )
+  }
+}
+
 type Chain = Awaited<ReturnType<typeof openEvents>>
 type ChainStore = Omit<Parameters<typeof chainsUnder>[1], "limit" | "complete">
 export type RecentEventReadOptions = Parameters<typeof readEventCommitMetadata>[2] & { since: number }
@@ -158,6 +180,28 @@ export async function readEventChains(
   recent?: RecentEventReadOptions,
 ): Promise<ReadonlyMap<string, Event[]>> {
   if (typeof prefix === "string") return chainsUnder(prefix, { ...store, limit: EVENT_READ_LIMIT, complete: true })
+  // The multi-prefix reader is the ONE place two inventories can disagree: between this read's
+  // advertisement and its fetch an ordinary queue move lands, and mixing the two would return a
+  // selection that never existed. A fresh inventory is the stated cure (28941), so the whole
+  // advertise/select/fetch/walk re-runs on that typed conflict, bounded; a queue still moving after
+  // the bound gives up in a typed exhaustion instead of spinning. The CLI listing and the queue
+  // run's listChangeHistories both call this one reader, so the policy lives here once (29386).
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await readMultiPrefixInventory(prefix, store, recent)
+    } catch (error) {
+      if (!(error instanceof EventRefsMoved)) throw error
+      if (attempt >= EVENT_REFS_ACQUIRE_ATTEMPTS) throw new EventRefsAcquireExhausted(attempt, error.movedRefs)
+    }
+  }
+}
+
+/** One fresh inventory for a multi-prefix read; its advertise, select, fetch and walk never reuse a refusal. */
+async function readMultiPrefixInventory(
+  prefix: readonly string[],
+  store: ChainStore,
+  recent?: RecentEventReadOptions,
+): Promise<ReadonlyMap<string, Event[]>> {
   // One advertisement is the selection boundary. Listing hot and cold separately can miss a chain that
   // atomically moves between them. Fetch only selected event refs, never all advertised branch objects.
   const backend = store.backend

@@ -67,7 +67,7 @@ import {
   eventListRows,
   eventRows,
   enumerateChangeSegments,
-  EventRefsMoved,
+  EventRefsAcquireExhausted,
   isOpen,
   createEventStore,
   createLocalEventStore,
@@ -907,7 +907,7 @@ export async function coreQueueCommand(
   type ReadFailedRound = Readonly<{
     kind: "read-failed"
     ref: string
-    error: QueueAuthorityUnreadable | EventRefsMoved
+    error: QueueAuthorityUnreadable | EventRefsAcquireExhausted
   }>
   type RetryExhaustedRound = Readonly<{ kind: "retry-exhausted"; error: QueueRunEventRetryExhausted }>
   type LegacyOverrideRound = Readonly<{ kind: "legacy-override-present"; error: LegacyOverridePresent }>
@@ -1058,7 +1058,7 @@ export async function coreQueueCommand(
       // A refused inventory has blamed no change (29381, ADR-0015). Reuse
       // the service's read-failure lifecycle; a stable queue key counts races
       // even when a different subset of change refs moves on the next attempt.
-      if (error instanceof EventRefsMoved && request.command === "up") {
+      if (error instanceof EventRefsAcquireExhausted && request.command === "up") {
         io.stderr(`yrd: ${error.message}; the service retries at its next interval\n`)
         return { kind: "read-failed", ref: queueRef(config.target.branch), error }
       }
@@ -3528,7 +3528,7 @@ export async function coreQueueCommand(
               continue
             }
             const message =
-              ran.error instanceof EventRefsMoved
+              ran.error instanceof EventRefsAcquireExhausted
                 ? ran.error.message
                 : ran.error.readError instanceof Error
                   ? ran.error.readError.message
@@ -4118,7 +4118,7 @@ export async function coreQueueCommand(
         try {
           return await round(declared, undefined, "omit")
         } catch (error) {
-          if (!(error instanceof EventListingAcquireExhausted)) throw error
+          if (!(error instanceof EventRefsAcquireExhausted)) throw error
           io.stderr(`yrd: ${error.message}\n`)
           return undefined
         }
@@ -6313,14 +6313,10 @@ export async function readEventListing(
           timeoutMs: 30_000,
         }
   await using _metadataOwner = metadataRead?.process
-  // Between this listing's own advertisement and its fetch, an ordinary queue
-  // move can land: the multi-prefix reader refuses to mix the two — an
-  // `EventRefsMoved` conflict — rather than return a selection that never
-  // existed. A second change landing on the same queue must not kill a watcher,
-  // so the acquisition re-inventories until its advertisement and its fetch
-  // agree (28941): every attempt takes a FRESH inventory and never reuses the
-  // refused one, and a queue still moving after EVENT_LISTING_ACQUIRE_ATTEMPTS
-  // gives up loudly instead of spinning.
+  // The multi-prefix reader takes a FRESH inventory itself when a selected ref moved between its
+  // advertisement and its fetch, bounded, and throws a typed exhaustion when a hot queue will not
+  // settle (29386, moved down from this listing). This listing takes whatever that one reader
+  // returns; only the fence loop below still retries, and only per-branch fences.
   const readingBranch = options.branch
   const acquire =
     readingBranch === undefined
@@ -6334,19 +6330,7 @@ export async function readEventListing(
             histories: new Map(selected.history === undefined ? [] : [[readingBranch, selected.history]]),
             invalid: new Map(selected.invalid === undefined ? [] : [[readingBranch, selected.invalid]]),
           }))
-  let acquired: Awaited<ReturnType<typeof acquire>>
-  for (let attempt = 1; ; attempt++) {
-    try {
-      acquired = await acquire()
-      break
-    } catch (error) {
-      if (!(error instanceof EventRefsMoved)) throw error
-      if (attempt >= EVENT_LISTING_ACQUIRE_ATTEMPTS) throw new EventListingAcquireExhausted(attempt, error.movedRefs)
-      options.onRetry?.(
-        `event refs moved after the selected inventory (retry ${String(attempt)}/${String(EVENT_LISTING_ACQUIRE_ATTEMPTS)}): ${error.movedRefs.join(", ")}\n`,
-      )
-    }
-  }
+  const acquired = await acquire()
   let queue = acquired.queue
   const histories = new Map(acquired.histories)
   const invalid = new Map(acquired.invalid)
@@ -6611,26 +6595,6 @@ class EventListingMoved extends Error {
       read === undefined
         ? `${ref} appeared during event list at ${observed}; read the queue again`
         : `${ref} moved during event list: read ${read}, observed ${observed ?? "absent"}`,
-    )
-  }
-}
-
-/**
- * How many times a listing re-inventories when a selected ref keeps moving
- * inside EVERY advertisement-to-fetch window. Eight running is the regime where
- * the queue advances faster than one listing can read it: the retry gives up
- * loudly rather than spin (28941).
- */
-const EVENT_LISTING_ACQUIRE_ATTEMPTS = 8
-
-/** A selected ref moved inside every advertisement-to-fetch window, so the re-inventory gave up. */
-class EventListingAcquireExhausted extends Error {
-  constructor(
-    readonly attempts: number,
-    readonly refs: readonly string[],
-  ) {
-    super(
-      `event refs moved after the selected inventory ${String(attempts)} times in a row; giving up: ${refs.join(", ")}`,
     )
   }
 }
