@@ -1923,6 +1923,86 @@ describe("a queue is the selected origin branch carrying config", () => {
     )
   })
 
+  /**
+   * @failure `yrd drop --issue` silently excludes a named branch it cannot bind (no yrd
+   *   submission and a trailing segment that cannot match by name) and only counts it, so
+   *   the caller reading the exit code believes its named row was handled (29291).
+   * @level l3
+   * @consumer The closer running yrd drop --issue after durable issue closure
+   */
+  it("drop by issue names a caller-named branch it excludes because it has no submission binding (29291)", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    // No yrd submission, and the trailing segment `dev12-26133-sweep-tests` cannot match by name
+    // (`issueFromBranchName` anchors digits at the start of the last path segment), so the branch is
+    // excluded — and its `Refs:` trailer is never read.
+    await git(["checkout", "--quiet", "-b", "task/dev12-26133-sweep-tests", "main"])
+    writeFileSync(join(repo, "unbound.txt"), "unbound\n")
+    await git(["add", "unbound.txt"])
+    await git([
+      "commit",
+      "--quiet",
+      "-m",
+      "unbound work\n\nRefs: @i/22-harness-waist/26133-agents-md-is-the-one-instruction-file",
+    ])
+    await git(["checkout", "--quiet", "main"])
+    const output = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "drop", "--issue", "26133", "--dry-run", "--submitter", "fixture", "--json"],
+        output.io,
+      ),
+      output.stderr(),
+    ).toBe(0)
+    const report = JSON.parse(output.stdout()) as { excluded: unknown }
+    // The excluded branch must be NAMED with a reason, not folded into a bare count.
+    expect(report.excluded).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ branch: "task/dev12-26133-sweep-tests", reason: expect.any(String) }),
+      ]),
+    )
+  })
+
+  /**
+   * @failure A run that retires or previews some branches and excludes others reports a plain
+   *   success (`eligible N, kept M, failed 0`, exit 0), so a caller whose fallback is "if every
+   *   branch was excluded, do something else" takes the wrong path precisely on a partial match (29291).
+   * @level l3
+   * @consumer The closer running yrd drop --issue after durable issue closure
+   */
+  it("drop by issue never reports a partial match as a plain success (29291)", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    // One branch the issue reaches by name, archived so the preview lists it as eligible...
+    await git(["checkout", "--quiet", "-b", "task/26133-archived", "main"])
+    writeFileSync(join(repo, "archived.txt"), "archived\n")
+    await git(["add", "archived.txt"])
+    await git(["commit", "--quiet", "-m", "archived work"])
+    const archivedTip = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["push", "--quiet", "origin", `${archivedTip}:refs/archive/2026-10-12/fixture/task/26133-archived`])
+    // ...and one it cannot bind at all.
+    await git(["checkout", "--quiet", "-b", "task/dev12-26133-sweep-tests", "main"])
+    writeFileSync(join(repo, "unbound.txt"), "unbound\n")
+    await git(["add", "unbound.txt"])
+    await git(["commit", "--quiet", "-m", "unbound work"])
+    await git(["checkout", "--quiet", "main"])
+    const output = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "drop", "--issue", "26133", "--dry-run", "--submitter", "fixture", "--json"],
+        output.io,
+      ),
+      output.stderr(),
+    ).toBe(0)
+    const report = JSON.parse(output.stdout()) as { eligible: unknown[]; excluded: unknown; partial?: boolean }
+    expect(report.eligible.length).toBeGreaterThan(0)
+    // A partial match is called out, and its excluded branches are named — not a plain success.
+    expect(report.partial).toBe(true)
+    expect(JSON.stringify(report)).toContain("task/dev12-26133-sweep-tests")
+  })
+
   /** @failure Root cleanup accepts custody for another branch or tip, ignores an active reopening,
    * or invokes the external issue resolver. Existing component cases prove only gitlink custody.
    * @level l3 @consumer A closer previewing and applying exact root branch cleanup
