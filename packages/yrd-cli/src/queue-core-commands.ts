@@ -6433,13 +6433,17 @@ export async function readEventListing(
         [
           branch,
           segments
-            .map((segment, index): EventHistoryRow => {
+            .map((segment): EventHistoryRow => {
               const projected = eventRows(new Map([[branch, segment.state]]))[0]
               if (projected === undefined) {
                 throw new Error(`event change ${branch} lost opened segment ${segment.opened}`)
               }
-              const { position: _position, ...historical } = projected
-              return { row: index === segments.length - 1 ? projected : historical, events: segment.events }
+              // `position` is a place in the merge line, and this fold saw ONE branch:
+              // its in-line set has a single member, so any position here is a constant
+              // 1 that names no line. The whole-queue fold injects the real position
+              // back exactly where the reading folded the whole queue (29342).
+              const { position: _position, ...row } = projected
+              return { row, events: segment.events }
             })
             .reverse(),
         ] as const,
@@ -6486,10 +6490,29 @@ export async function readEventListing(
       ...row,
       ...(row.state === "invalid" || titles.get(row.head) === undefined ? {} : { subject: titles.get(row.head) }),
     }))
+  // `position` is "1-based place in line ... absent otherwise" (queue-core table.ts),
+  // so only a fold of every changed branch can name one. `queue list` reads that fold;
+  // a scoped `show <branch>` reads one branch and therefore states no position, while
+  // `show --all` reads the whole queue and takes the same positions list reports (29342).
+  const linePositions =
+    options.branch === undefined
+      ? new Map(
+          [...selected.table, ...selected.document].flatMap((row) =>
+            row.position === undefined ? [] : [[row.branch, row.position] as const],
+          ),
+        )
+      : new Map<string, number>()
   const titledHistory = new Map(
     [...historyRows].map(
       ([branch, entries]) =>
-        [branch, entries.map(({ row, events }) => ({ row: titled([row])[0] as Row, events }))] as const,
+        [
+          branch,
+          entries.map(({ row, events }, index) => {
+            const titledRow = titled([row])[0] as Row
+            const position = index === 0 ? linePositions.get(branch) : undefined
+            return { row: position === undefined ? titledRow : { ...titledRow, position }, events }
+          }),
+        ] as const,
     ),
   )
   const all = titled([...selected.table, ...invalidRows, ...directRows])
