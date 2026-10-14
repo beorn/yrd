@@ -39,6 +39,7 @@ import {
   readChangeEvents,
   readBranchHistory,
   readEventOps,
+  readEventOpsWithRefs,
   readEventQueue,
   readEventQueueWithChanges,
   readStatus,
@@ -2071,8 +2072,21 @@ describe("the queue-format boundary", () => {
       ],
       { expect: queueTip },
     )
-    const stop = (await readEventOps(location, gitIn(store.repo), "lab", head)).stop
+    const knownQueue = await readEventQueue(location, "lab")
+    const stop = (await readEventOps(location, gitIn(store.repo), "lab", head, { knownQueue })).stop
     expect(stop).toMatchObject({ sha: cutover.events[0]?.id, change: { branch, head } })
+    // Reusing queue ops must not freeze the stuck-stop conclusion when only its change advances.
+    const change = await openEvents({ ...store, ref: changesRef("lab", branch) })
+    const stuckTip = await change.head()
+    if (stuckTip === null) throw new Error("fixture stuck change is absent")
+    await appendChangeEvent(location, "lab", branch, stuckTip, {
+      type: "cancelled",
+      at: new Date(),
+      commit: head,
+      by: "@dev/2",
+      reason: "dropped",
+    })
+    expect((await readEventOps(location, gitIn(store.repo), "lab", head, { knownQueue })).stop).toBeUndefined()
     await writeQueueEvent(location, "lab", {
       type: "resumed",
       by: "@chief",
@@ -2905,7 +2919,83 @@ describe("the queue-format boundary", () => {
     await expect(listChangeHistories(first.location, "other", { knownQueue: queue })).rejects.toThrow(
       /validated queue.*same location/,
     )
+    // Ops reuse has the same identity contract; fresh-ops tests never pass a projection.
+    for (const [location, name, knownQueue] of [
+      [second.location, "lab", queue],
+      [{ ...first.location, remote: "elsewhere" }, "lab", queue],
+      [{ ...first.location, backend: { ...first.location.backend } }, "lab", queue],
+      [first.location, "other", queue],
+      [first.location, "lab", { ...queue }],
+    ] as const) {
+      await expect(readEventOps(location, gitIn(first.store.repo), name, commit, { knownQueue })).rejects.toThrow(
+        /validated queue.*same location/,
+      )
+    }
     expect(await listChangeHistories(first.location, "lab")).toEqual({ histories: new Map(), invalid: new Map() })
+  })
+
+  /** @failure A listing decodes the same queue history twice; reuse must still acquire fresh authority.
+   * @level l1 @consumer yrd list's final operational reading (28925 AC2/AC3)
+   * Existing fresh-ops tests do not exercise reuse or count queue-history decoding.
+   */
+  it("reuses a stable queue decode and reads the newly acquired tip after an advance", async () => {
+    const { store, location } = remoteMemStore("yrd-ops-reuse")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const head = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", head, new Date("2026-09-22T14:00:00.000Z"))
+    await seedOpsCutover(location, "lab")
+    const histories = vi.spyOn(location.backend, "readHistory")
+    const knownQueue = await readEventQueue(location, "lab")
+    const reused = await readEventOps(location, gitIn(store.repo), "lab", head, { knownQueue })
+    expect(reused).toMatchObject({ queue: { tip: knownQueue.tip }, overrides: { entries: [] } })
+    expect(histories).toHaveBeenCalledTimes(1)
+    await readEventOps(location, gitIn(store.repo), "lab", head)
+    expect(histories).toHaveBeenCalledTimes(2)
+    const local = { ...store, selection: location.selection }
+    const localQueue = await readEventQueue(local, "lab")
+    histories.mockClear()
+    expect((await readEventOps(local, gitIn(store.repo), "lab", head, { knownQueue: localQueue })).queue.tip).toBe(
+      localQueue.tip,
+    )
+    expect(histories).not.toHaveBeenCalled()
+    const current = await writeQueueEvent(location, "lab", {
+      type: "paused",
+      by: "@chief",
+      reason: "new maintenance",
+      cause: "maintenance",
+      at: new Date("2026-09-22T14:01:00.000Z"),
+    })
+    expect(current).not.toBe(knownQueue.tip)
+    const advanced = await readEventOps(location, gitIn(store.repo), "lab", head, { knownQueue })
+    expect(advanced).toMatchObject({
+      queue: { tip: current },
+      stop: { cause: "maintenance", reason: "new maintenance" },
+    })
+    histories.mockRestore()
+  })
+
+  /** @failure Reuse trusts an earlier leased ref inventory or falls back after final acquisition fails.
+   * @level l1 @consumer yrd list's final operational reading (28925 AC3)
+   * Submit's existing legacy-ref tests use fresh ops rather than a known projection.
+   */
+  it("revalidates legacy absence and acquisition failures even with reused ops and listed refs", async () => {
+    const { store, location } = remoteMemStore("yrd-ops-reuse-fence")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const head = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", head, new Date("2026-09-22T14:00:00.000Z"))
+    await seedOpsCutover(location, "lab")
+    const knownQueue = await readEventQueue(location, "lab")
+    const listed = { refs: await listRefs("refs/", location) }
+    const legacy = await openEvents({ ...store, ref: pauseRef("lab") })
+    await legacy.append([input("paused")], { expect: null })
+    await expect(
+      readEventOpsWithRefs(location, gitIn(store.repo), "lab", head, listed, { knownQueue }),
+    ).rejects.toThrow(/retired legacy pause ref refs\/yrd\/lab\/pause/)
+    const fetch = vi.spyOn(location.backend, "fetchRefs").mockRejectedValue(new Error("final acquisition failed"))
+    await expect(
+      readEventOpsWithRefs(location, gitIn(store.repo), "lab", head, listed, { knownQueue }),
+    ).rejects.toThrow(/could not fetch queue.*final acquisition failed/)
+    fetch.mockRestore()
   })
 
   it("reads the queue and change histories together with the same projection", async () => {
