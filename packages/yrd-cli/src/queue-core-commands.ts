@@ -2030,6 +2030,70 @@ export async function coreQueueCommand(
             )
             .join("\n"),
         )
+        const retired = taken.withdrawn.filter((one) => one.remoteRemoved).map((one) => one.branch)
+        if (retired.length > 0) {
+          let log: ReturnType<typeof openLog> | undefined
+          try {
+            log = openLog(join(workdir, "logs"))
+            log.write({ kind: "run", command: "withdraw", config: config.blob, target: targetLabel })
+            log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
+            const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
+            const authorGit = gitIn(authorRepo, undefined, selection, { env })
+            const target = await readRemoteCommit(authorGit, config.target.remote, `refs/heads/${config.target.branch}`)
+            if (target === undefined) throw new Error(`${targetLabel}: published main custody is missing`)
+            await cleanupEnvironments({
+              repo,
+              git,
+              config,
+              workdir,
+              outcome: { run: log.id, log: log.path, merged: [], target },
+              withdrawn: retired,
+              io,
+              env,
+              selection,
+              resolveIssue,
+            })
+            for (const branch of retired) {
+              if ((await refAt(authorGit, `refs/heads/${branch}`)) === undefined) {
+                log.write({ kind: "observation", scope: "local-branch-retirement", branch, result: "already-absent" })
+                continue
+              }
+              const change = await readStatus(eventStore, config.target.branch, branch)
+              const result = await retireMergedRootAuthor({
+                repo: authorRepo,
+                git: authorGit,
+                actor: request.by,
+                branch,
+                change,
+                base: target,
+                target,
+                io,
+                log,
+                store: eventStore,
+                queue: config.target.branch,
+              })
+              if (result.outcome !== "removed") {
+                io.stderr(
+                  `yrd: ${branch}: withdrawn local author ${result.outcome}: ${result.detail ?? result.reason}\n`,
+                )
+              }
+            }
+          } catch (cause) {
+            io.stderr(
+              `yrd: ${taken.branch}: withdrawal completed; environment retirement incomplete: ${String(cause)}\n`,
+            )
+            return 0
+          } finally {
+            try {
+              log?.finish()
+            } catch (cause) {
+              io.stderr(
+                `yrd: ${taken.branch}: withdrawal completed; retirement journal could not finish: ${String(cause)}\n`,
+              )
+              return 0
+            }
+          }
+        }
         return 0
       } catch (error) {
         if (error instanceof NothingToWithdraw) {

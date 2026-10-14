@@ -48,8 +48,27 @@ export async function retireMergedRootAuthor(
 ): Promise<LocalBranchRetirementResult> {
   const { change, branch, git, repo, log } = input
   const tip = change.commit
-  if (change.status !== "merged" || tip === undefined || change.tip === undefined) {
-    throw new Error(`${branch}: root retirement requires an exact merged submission and event tip`)
+  const withdrawn = change.status === "cancelled" && change.reason === "withdrawn"
+  if ((!withdrawn && change.status !== "merged") || tip === undefined || change.tip === undefined) {
+    throw new Error(`${branch}: root retirement requires an exact merged or withdrawn submission and event tip`)
+  }
+  let disposition: LocalBranchRetirement["disposition"] =
+    change.componentAuthors === undefined
+      ? { kind: "merged", base: input.base, target: input.target }
+      : { kind: "landed", target: input.target, proof: { kind: "ancestry" } }
+  if (withdrawn) {
+    if (await isAncestor(git, tip, input.target)) {
+      disposition = { kind: "landed", target: input.target, proof: { kind: "ancestry" } }
+    } else {
+      const archives = await listRefs("refs/archive/", input.store)
+      const archive = [...archives].find(
+        ([ref, head]) => head === tip && /^refs\/archive\/[^/]+\/[^/]+\/(.+)$/u.exec(ref)?.[1] === branch,
+      )
+      if (archive === undefined || (await readRemoteCommit(git, input.store.remote, archive[0])) !== tip) {
+        throw new Error(`${branch}@${tip}: withdrawn author has no exact same-branch origin archive; local ref kept`)
+      }
+      disposition = { kind: "archived", target: tip, ref: archive[0] }
+    }
   }
   return retireLocalBranch({
     repo,
@@ -59,22 +78,30 @@ export async function retireMergedRootAuthor(
     actor: input.actor,
     owner: change.submitter,
     issue: change.issue,
-    reason: "merged",
+    reason: withdrawn ? "withdrawn" : "merged",
     date: new Date().toISOString().slice(0, 10),
     log,
     protections: async () => {
       const current = await readStatus(input.store, input.queue, branch)
-      if (current.status !== "merged" || current.commit !== tip || current.tip !== change.tip) {
-        throw new Error(`${branch}: merged history changed or reopened before root retirement`)
+      if (
+        current.status !== change.status ||
+        current.reason !== change.reason ||
+        current.commit !== tip ||
+        current.tip !== change.tip
+      ) {
+        throw new Error(`${branch}: terminal history changed or reopened before root retirement`)
+      }
+      if (
+        disposition.kind === "archived" &&
+        (await readRemoteCommit(git, input.store.remote, disposition.ref)) !== tip
+      ) {
+        throw new Error(`${branch}@${tip}: origin archive custody changed before root retirement`)
       }
       return (await input.io.localBranchProtections?.({ repo, branch, tip, issue: change.issue })) ?? []
     },
     // Attributed submissions have a separate proven component judgment; the old root-only
     // warning remains correct only for submissions that recorded no component authors.
-    disposition:
-      change.componentAuthors === undefined
-        ? { kind: "merged", base: input.base, target: input.target }
-        : { kind: "landed", target: input.target, proof: { kind: "ancestry" } },
+    disposition,
   })
 }
 
@@ -171,10 +198,14 @@ async function captureAuthorRelease(
   input.reads.push(`merged event history: ${url}#${queue} branch ${branch}`)
   const store = createEventStore(input.repo, url, input.selection)
   const { history } = await readBranchHistory(store, queue, branch)
-  if (history === undefined || history.state.status !== "merged") {
+  if (
+    history === undefined ||
+    (history.state.status !== "merged" &&
+      !(history.state.status === "cancelled" && history.state.reason === "withdrawn"))
+  ) {
     return {
       kind: "none",
-      reason: `${url}#${queue}: ${branch} has ${history?.state.status ?? "no submitted"} history; no merged author ref to retire`,
+      reason: `${url}#${queue}: ${branch} has ${history?.state.status ?? "no submitted"} history; no merged or withdrawn author ref to retire`,
     }
   }
   const change = history.state
@@ -204,14 +235,17 @@ async function captureAuthorRelease(
     })
     log.write({ kind: "queue", queue: `${store.remote}#${queue}` })
     let base = tip
-    if (change.componentAuthors?.length) {
+    if (change.status === "merged" && change.componentAuthors?.length) {
       if (change.merge === undefined) throw new Error(`${branch}: merged history has no component landing commit`)
       const parent = await refAt(input.git, `${change.merge}^1`)
       if (parent === undefined) throw new Error(`${branch}: landing ${change.merge} has no readable parent`)
       base = parent
     }
     const captured = { ...input, branch, change, base, target, store, queue, log }
-    const authors = await captureMergedComponentAuthors(captured)
+    const authors = change.status === "merged" ? await captureMergedComponentAuthors(captured) : []
+    if (change.status !== "merged" && change.componentAuthors?.length) {
+      input.io.stderr(`yrd: ${branch}: withdrawn component authors kept; no merged component landing was proved\n`)
+    }
     let used = false
     let disposed = false
     return {

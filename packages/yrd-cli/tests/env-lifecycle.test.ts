@@ -261,8 +261,8 @@ async function world(setup: string, teardown?: string): Promise<World> {
 }
 
 /** @failure A merged branch kept while checked out receives no retirement retry after native close releases it.
- * @level l3 @consumer yrd env close after a young author environment survives its landing round
- * Existing native merge tests close only aged environments; primitive retry coverage invokes retirement manually.
+ * @level l3 @consumer yrd env close after a standing author environment survives its landing round
+ * Exact young jobs now close at landing (29367); a standing environment preserves the later native-release probe.
  */
 it.each(["released", "held", "advanced", "failed"] as const)(
   "retries a held merged author branch after native close: %s",
@@ -271,7 +271,7 @@ it.each(["released", "held", "advanced", "failed"] as const)(
     await birthEventQueue(w.work, "main", { localStore: false })
     const opened = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "release-retirement", "--json"], opened.io),
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "release-retirement", "--keep", "--json"], opened.io),
       opened.stderr(),
     ).toBe(0)
     const author = (JSON.parse(opened.stdout()) as { path: string }).path
@@ -480,7 +480,10 @@ it.each(["released", "unreleased", "rebound", "reused", "disposed", "unreadable"
     await birthEventQueue(w.work, "main", { localStore: false })
     const opened = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", `public-release-${mode}`, "--json"], opened.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", "--bay", `public-release-${mode}`, "--keep", "--json"],
+        opened.io,
+      ),
       opened.stderr(),
     ).toBe(0)
     const author = (JSON.parse(opened.stdout()) as { path: string }).path

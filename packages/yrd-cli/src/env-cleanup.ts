@@ -113,7 +113,7 @@ async function consumeCloseRequests(
     registry: string
     worktrees: Git
     io: YrdCliIO
-    outcome: QueueRunOutcome
+    outcome: Pick<QueueRunOutcome, "run" | "log">
   }>,
 ): Promise<Readonly<{ closed: number; handled: ReadonlySet<string> }>> {
   const { workdir, registry, worktrees, io, outcome } = input
@@ -368,8 +368,8 @@ async function consumeCloseRequests(
 }
 
 /**
- * CTO A / 21122: MERGED is the only event filer. A bound environment whose
- * branch this round merged gets the same durable close request the incomplete-
+ * CTO A / 21122 / 29367: merged and explicitly withdrawn exact jobs use the event filer. A bound environment whose
+ * branch ended in this invocation gets the same durable close request the incomplete-
  * census path writes. Filing is intent, never a census fact. Held rows and
  * missing HEADs are named; a write this process cannot make is `file-failed`.
  * DROPPED / issue-ended do not file here; they widen the sweep.
@@ -437,34 +437,34 @@ function namedPrivateCheckout(checkout: string, store: string | undefined): stri
   return parts.join("; ")
 }
 
-async function fileMergedCloseRequests(
+async function fileTerminalCloseRequests(
   input: Readonly<{
     workdir: string
     rows: readonly { path: string; branch?: string; head?: string; hold: string | null }[]
-    merged: readonly string[]
+    terminal: readonly string[]
     branchRoots: readonly string[]
     selection: GitSelection
     env?: NodeJS.ProcessEnv
     record: (path: string, result: string, why: string) => void
     automaticKeep: (path: string, opening: EnvOpenRecordRead, terminal?: boolean) => string | undefined
-    mergedHead: (branch: string) => Promise<string>
+    terminalHead: (branch: string) => Promise<string>
   }>,
 ): Promise<void> {
-  if (input.merged.length === 0) return
-  const merged = new Set(input.merged)
+  if (input.terminal.length === 0) return
+  const terminal = new Set(input.terminal)
   const uid = typeof globalThis.process.getuid === "function" ? globalThis.process.getuid() : -1
   const requester = requesterOf(input.env ?? globalThis.process.env)
   for (const row of input.rows) {
-    if (row.branch === undefined || !merged.has(row.branch)) continue
+    if (row.branch === undefined || !terminal.has(row.branch)) continue
     if (row.hold !== null) continue
     if (row.head === undefined) {
-      input.record(row.path, "file-failed", `merged ${row.branch} but registered environment has no HEAD`)
+      input.record(row.path, "file-failed", `terminal ${row.branch} but registered environment has no HEAD`)
       continue
     }
     try {
-      const head = await input.mergedHead(row.branch)
+      const head = await input.terminalHead(row.branch)
       if (row.head !== head) {
-        input.record(row.path, "kept", `merged ${row.branch}@${head}; environment advanced to ${row.head}`)
+        input.record(row.path, "kept", `terminal ${row.branch}@${head}; environment advanced to ${row.head}`)
         continue
       }
       const gitDir = (
@@ -486,7 +486,7 @@ async function fileMergedCloseRequests(
             .join("/")}`,
       )
       if (!openedForBranch) {
-        input.record(row.path, "kept", `merged ${row.branch}; environment was not opened for that branch`)
+        input.record(row.path, "kept", `terminal ${row.branch}; environment was not opened for that branch`)
         continue
       }
       const provenance = await environmentProvenance(
@@ -495,7 +495,7 @@ async function fileMergedCloseRequests(
         row.branch,
       )
       if (provenance.branches.length !== 1 || provenance.branches[0] !== row.branch) {
-        input.record(row.path, "kept", `merged ${row.branch}; environment spans ${provenance.branches.join(", ")}`)
+        input.record(row.path, "kept", `terminal ${row.branch}; environment spans ${provenance.branches.join(", ")}`)
         continue
       }
       const { file, alreadyStood } = writeCloseRequest(input.workdir, {
@@ -511,7 +511,7 @@ async function fileMergedCloseRequests(
       input.record(
         row.path,
         "filed",
-        `${alreadyStood ? "close request already stood" : "close request"} ${file} after merge of ${row.branch}`,
+        `${alreadyStood ? "close request already stood" : "close request"} ${file} after terminal ending of ${row.branch}`,
       )
     } catch (cause) {
       input.record(row.path, "file-failed", String(cause))
@@ -598,7 +598,8 @@ async function cleanupEnvironments(
     git: GitRunner
     config: QueueConfig
     workdir: string
-    outcome: QueueRunOutcome
+    outcome: Pick<QueueRunOutcome, "run" | "log" | "merged" | "target">
+    withdrawn?: readonly string[]
     io: YrdCliIO
     env?: NodeJS.ProcessEnv
     selection: GitSelection
@@ -757,22 +758,27 @@ async function cleanupEnvironments(
   }
   // File before census so a round that cannot certify still leaves the request
   // for the next consume.
-  await fileMergedCloseRequests({
+  await fileTerminalCloseRequests({
     workdir,
     rows: inventory.rows,
-    merged: outcome.merged,
+    terminal: [...outcome.merged, ...(input.withdrawn ?? [])],
     // The third inventory root holds detached exact-commit environments.
     branchRoots: inventory.roots.slice(0, 2),
     selection: input.selection,
     env: input.env,
     record,
     automaticKeep,
-    mergedHead: async (branch) => {
+    terminalHead: async (branch) => {
       const { history } = await historyOf(branch)
-      if (history?.state.status !== "merged" || history.state.commit === undefined) {
-        throw new Error(`${store.remote}#${config.target.branch}: ${branch} has no exact merged submission head`)
+      const state = history?.state
+      const withdrawn =
+        input.withdrawn?.includes(branch) === true && state?.status === "cancelled" && state.reason === "withdrawn"
+      if ((state?.status !== "merged" && !withdrawn) || state?.commit === undefined) {
+        throw new Error(
+          `${store.remote}#${config.target.branch}: ${branch} has no exact merged or withdrawn submission head`,
+        )
       }
-      return history.state.commit
+      return state.commit
     },
   })
   let snapshot: ProcessCwdProjection
