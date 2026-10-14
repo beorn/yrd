@@ -950,6 +950,13 @@ describe("ordinary submit with a local-only component pin", () => {
       published: readonly { path: string; sha: string; state: string }[]
     }
     expect(receipt.head).toBe(head)
+    // @failure Detached authorship disappears from the CLI result or leaks outside its stderr boundary.
+    // @level l2 @consumer submit --prepare callers reading structured publication and diagnostics
+    // The attached-author landing case cannot exercise unavailable attribution.
+    expect(receipt.published).toContainEqual(
+      expect.objectContaining({ path: one.path, authorUnavailable: expect.stringContaining("detached HEAD") }),
+    )
+    expect(ran.stderr).toContain(`component author unavailable for ${one.path}@${one.unheld}`)
     expect(receipt.published).toContainEqual(
       expect.objectContaining({ path: one.path, sha: one.unheld, state: "published" }),
     )

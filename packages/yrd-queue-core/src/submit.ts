@@ -304,6 +304,8 @@ export type PublishedGitlink = Readonly<{
   state: "published" | "retained"
   /** Submit-time attached author; unavailable metadata never makes a pin publication fail. */
   author?: Pick<ComponentAuthor, "branch" | "tip">
+  /** Named observation failure; the CLI renders it on its diagnostic stream. */
+  authorUnavailable?: string
 }>
 
 /** git-super's retention namespace: one ref per object, named by it, create-only, never advanced. */
@@ -316,17 +318,20 @@ const ZERO_SHA = /^0+$/u
 
 /** One branch-authored component pin, with its local object reader and exact comparison bases. */
 export type MovedGitlink = Readonly<
-  Omit<PublishedGitlink, "state" | "author"> & { checkout: string; child: Git; bases: readonly string[] }
+  Omit<PublishedGitlink, "state" | "author" | "authorUnavailable"> & {
+    checkout: string
+    child: Git
+    bases: readonly string[]
+  }
 >
 
 /** Observe actual checkout authorship, never infer it from equal-tip refs or the root branch name. */
-async function componentAuthor(pin: MovedGitlink): Promise<PublishedGitlink["author"]> {
-  const unavailable = (reason: string): undefined => {
-    console.warn(
-      `yrd: component author unavailable for ${pin.path}@${pin.sha} in ${pin.checkout}: ${reason}; submit continues without author attribution`,
-    )
-    return undefined
-  }
+async function componentAuthor(
+  pin: MovedGitlink,
+): Promise<{ author: NonNullable<PublishedGitlink["author"]> } | { authorUnavailable: string }> {
+  const unavailable = (reason: string) => ({
+    authorUnavailable: `component author unavailable for ${pin.path}@${pin.sha} in ${pin.checkout}: ${reason}; submit continues without author attribution`,
+  })
   try {
     const process = seamProcess(pin.child, pin.checkout)
     const args = ["symbolic-ref", "--quiet", "HEAD"]
@@ -360,7 +365,7 @@ async function componentAuthor(pin: MovedGitlink): Promise<PublishedGitlink["aut
         `HEAD symref changed or became unreadable during capture: exit ${fresh.code}; ${fresh.failure ?? fresh.stderr}`,
       )
     }
-    return { branch, tip }
+    return { author: { branch, tip } }
   } catch (cause) {
     return unavailable(`author observation failed: ${cause instanceof Error ? cause.message : String(cause)}`)
   }
@@ -468,7 +473,7 @@ export async function publishMovedGitlinks(
   const published: PublishedGitlink[] = []
   // Discover every eligible nested pin before the first remote write.
   const pins = await collectMovedGitlinks(git, root, from, to, prefix)
-  const authors = new Map<MovedGitlink, PublishedGitlink["author"]>()
+  const authors = new Map<MovedGitlink, Awaited<ReturnType<typeof componentAuthor>>>()
   for (const pin of pins) authors.set(pin, await componentAuthor(pin))
   const checkouts = new Map<string, MovedGitlink[]>()
   for (const pin of pins) {
@@ -530,7 +535,7 @@ export async function publishMovedGitlinks(
           remote: pin.remote,
           ref: pin.ref,
           state: receipt.state === "updated" ? "published" : "retained",
-          ...(authors.get(pin) === undefined ? {} : { author: authors.get(pin) }),
+          ...authors.get(pin),
         })
       } else if (receipt?.detail?.code === "destination-changed") {
         failures.push(

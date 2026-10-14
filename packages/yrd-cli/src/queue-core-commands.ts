@@ -35,7 +35,11 @@ import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartId
 import { issueResolver } from "./issue-resolver.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup } from "./env-cleanup.ts"
-import { createLandedBranchRetirement } from "./branch-retirement.ts"
+import {
+  captureMergedComponentAuthors,
+  createLandedBranchRetirement,
+  retireMergedComponentAuthors,
+} from "./branch-retirement.ts"
 import { sweepRoundOutputInRound } from "./log-retention.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
 import { runAdmission } from "./admission.ts"
@@ -927,7 +931,6 @@ export async function coreQueueCommand(
       outcome = await queueRun({
         ...baseOptions,
         afterRun: async (outcome) => {
-          await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue })
           // A merged bay must close before its branch is judged for retirement.
           // Append to this round's journal while queueRun still owns its finish.
           const retirementLog: Parameters<typeof retireLocalBranch>[0]["log"] = {
@@ -939,11 +942,49 @@ export async function coreQueueCommand(
               return row
             },
           }
+          const authorGit = gitIn(authorRepo, undefined, selection, { env })
+          const componentAuthors: Awaited<ReturnType<typeof captureMergedComponentAuthors>>[number][] = []
           if (outcome.merged.length > 0) {
-            const authorGit = gitIn(authorRepo, undefined, selection, { env })
             try {
-              // One fetch makes the published target available in the author store.
+              // Capture native identities before cleanup can destroy their checkout metadata.
               await authorGit(["fetch", "--no-tags", await remoteUrl(git, config.target.remote), outcome.target])
+              for (const branch of outcome.merged) {
+                const change = await readStatus(eventStore, config.target.branch, branch)
+                componentAuthors.push(
+                  ...(await captureMergedComponentAuthors({
+                    repo: authorRepo,
+                    git: authorGit,
+                    selection,
+                    env,
+                    branch,
+                    change,
+                    base: outcome.base,
+                    target: outcome.target,
+                    log: retirementLog,
+                  })),
+                )
+              }
+            } catch (error) {
+              retirementLog.write({
+                kind: "warning",
+                scope: "local-branch-retirement",
+                reason: `component capture kept: ${String(error)}`,
+              })
+            }
+          }
+          await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue })
+          await retireMergedComponentAuthors({
+            authors: componentAuthors,
+            selection,
+            env,
+            actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
+            io,
+            log: retirementLog,
+            store: eventStore,
+            queue: config.target.branch,
+          })
+          if (outcome.merged.length > 0) {
+            try {
               for (const branch of outcome.merged) {
                 try {
                   const change = await readStatus(eventStore, config.target.branch, branch)
@@ -1069,6 +1110,11 @@ export async function coreQueueCommand(
       `yrd: REVERTED PATHS: ${revert.reason}; the compose put a target advance back (coverage ${revert.coverage}, ` +
         `${String(revert.count)} path(s)); recorded as admission-warning ${revert.event}\n`,
     )
+  }
+  const echoComponentAuthors = (published: Awaited<ReturnType<typeof prepareSubmit>>["published"]): void => {
+    for (const row of published) {
+      if (row.authorUnavailable !== undefined) io.stderr(`yrd: ${row.authorUnavailable}\n`)
+    }
   }
   const notifyAdmissionWarning = async (submitted: Submitted, submitter: string): Promise<void> => {
     const warning = submitted.admissionWarning
@@ -2141,6 +2187,7 @@ export async function coreQueueCommand(
         echoStop(acceptedUnder)
         echoAdmission(submitted.admission)
         echoRevertWarning(submitted)
+        echoComponentAuthors(submitted.published)
         return 0
       }
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
@@ -2175,6 +2222,7 @@ export async function coreQueueCommand(
             published.map((row) => `\n${row.state} ${row.path}@${row.sha} at ${row.remote} ${row.ref}`).join(""),
         )
         echoStop(stop)
+        echoComponentAuthors(published)
         if (admission.kind === "warn" || admission.kind === "cannot-judge") {
           io.stderr(`preparation admission ${admission.kind}: ${admission.reason}\n`)
         }
@@ -2223,6 +2271,7 @@ export async function coreQueueCommand(
       echoStop(acceptedUnder)
       echoAdmission(submitted.admission)
       echoRevertWarning(submitted)
+      echoComponentAuthors(submitted.published)
       return 0
     }
     case "run": {
