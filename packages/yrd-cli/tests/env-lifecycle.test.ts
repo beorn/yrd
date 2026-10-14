@@ -836,11 +836,19 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
    */
   function installStubWorktreePreserve(
     root: string,
-    options: { badReceipt?: boolean; badPath?: boolean; exitOverride?: number } = {},
+    options: {
+      badReceipt?: boolean
+      badPath?: boolean
+      exitOverride?: number
+      stderr?: string
+      noReceipt?: boolean
+    } = {},
   ): void {
     mkdirSync(join(root, "tools"), { recursive: true })
     const source = STUB_WORKTREE_PRESERVE_CLI.replace("__BAD_RECEIPT__", options.badReceipt === true ? "true" : "false")
       .replace("__BAD_PATH__", options.badPath === true ? "true" : "false")
+      .replace("__STDERR__", JSON.stringify(options.stderr ?? ""))
+      .replace("__NO_RECEIPT__", options.noReceipt === true ? "true" : "false")
       .replace("__EXIT_OVERRIDE__", options.exitOverride === undefined ? '""' : String(options.exitOverride))
     writeFileSync(join(root, "tools", "worktree.ts"), source)
   }
@@ -881,6 +889,8 @@ const badPath = __BAD_PATH__
 // The preserve verb's exit code for the two honest endings: 0 (preserved) or 3
 // (nothing preserved). An override forces an unexpected exit to prove yrd refuses it.
 const exitOverride = __EXIT_OVERRIDE__
+process.stderr.write(__STDERR__)
+if (__NO_RECEIPT__) process.exit(exitOverride === "" ? 1 : Number(exitOverride))
 const receipt = (body) => {
   const out = bad ? { ...body, schema: "stub-worktree-preserve/1" } : { ...body }
   if (badPath) delete out.path
@@ -1036,6 +1046,37 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     expect(existsSync(join(path, "root-dirt.txt"))).toBe(true)
   })
 
+  /** @failure 29383: a child exiting without a receipt loses its exit and actual stderr cause.
+   * @level l2 @consumer seats diagnosing a refused env close --preserve
+   * Existing receipt rows cover validation/removal, but never a no-stdout child or bounded stderr.
+   */
+  it.each(["short", "bounded"] as const)(
+    "env close --preserve reports a child failure with %s stderr (29383)",
+    async (mode) => {
+      const w = await world(":")
+      const cause = "km/apps/maddoc: ENOENT; preserve and resolve it before removal"
+      const stderr = mode === "short" ? cause : `discarded earlier output\r\n${"noise".repeat(1200)}\r\n${cause}\r\n`
+      installStubWorktreePreserve(w.work, { noReceipt: true, exitOverride: 7, stderr })
+      const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+      writeFileSync(join(path, "root-dirt.txt"), "must remain intact\n")
+
+      const run = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+        run.stderr(),
+      ).toBe(2)
+      expect(run.stderr()).toContain("exited 7")
+      expect(run.stderr()).toContain(cause)
+      expect(run.stderr()).toContain("NOT removed")
+      if (mode === "bounded") {
+        expect(run.stderr()).not.toContain("discarded earlier output")
+        expect(run.stderr().length).toBeLessThan(6000)
+      }
+      expect(existsSync(path)).toBe(true)
+      expect(readFileSync(join(path, "root-dirt.txt"), "utf8")).toBe("must remain intact\n")
+    },
+  )
+
   /**
    * @failure 29073 (@cto must 2026-10-13): a receipt from another tool or version must fail AT the
    *          boundary, by name — never as an undefined ref handed to `--preserved` or a
@@ -1046,7 +1087,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
    */
   it("env close --preserve refuses a receipt it cannot validate, removing nothing (29073)", async () => {
     const w = await world(":")
-    installStubWorktreePreserve(w.work, { badReceipt: true })
+    installStubWorktreePreserve(w.work, { badReceipt: true, stderr: "schema producer diagnostic" })
     const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
     writeFileSync(join(path, "root-dirt.txt"), "must not be discarded\n")
 
@@ -1057,6 +1098,8 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     ).toBe(2)
     // The refusal names the offending field and the CLI path it read from.
     expect(run.stderr()).toContain("invalid schema")
+    expect(run.stderr()).toContain("exited 0")
+    expect(run.stderr()).toContain("schema producer diagnostic")
     expect(run.stderr()).toContain("bearly-worktree-preserve/1")
     expect(run.stderr()).toContain(join(w.work, "tools", "worktree.ts"))
     expect(existsSync(path)).toBe(true)
@@ -1073,7 +1116,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
    */
   it("env close --preserve refuses a receipt missing the path field, removing nothing (29073)", async () => {
     const w = await world(":")
-    installStubWorktreePreserve(w.work, { badPath: true })
+    installStubWorktreePreserve(w.work, { badPath: true, stderr: "path producer diagnostic" })
     const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
     writeFileSync(join(path, "root-dirt.txt"), "must not be discarded\n")
 
@@ -1083,6 +1126,8 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       run.stderr(),
     ).toBe(2)
     expect(run.stderr()).toContain("invalid path")
+    expect(run.stderr()).toContain("exited 0")
+    expect(run.stderr()).toContain("path producer diagnostic")
     expect(run.stderr()).toContain(join(w.work, "tools", "worktree.ts"))
     expect(run.stderr()).toContain("NOT removed")
     expect(existsSync(path)).toBe(true)
@@ -1122,7 +1167,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
    */
   it("env close --preserve refuses a non-zero preserve exit, removing nothing (29073)", async () => {
     const w = await world(":")
-    installStubWorktreePreserve(w.work, { exitOverride: 9 })
+    installStubWorktreePreserve(w.work, { exitOverride: 9, stderr: "preserve could not finish" })
     const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
     writeFileSync(join(path, "root-dirt.txt"), "must not be discarded\n")
 
@@ -1132,6 +1177,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       run.stderr(),
     ).toBe(2)
     expect(run.stderr()).toContain("exited 9")
+    expect(run.stderr()).toContain("preserve could not finish")
     expect(run.stderr()).toContain("NOT removed")
     expect(existsSync(path)).toBe(true)
     expect(existsSync(join(path, "root-dirt.txt"))).toBe(true)
