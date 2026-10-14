@@ -382,6 +382,7 @@ it.each(["snapshot", "shared"] as const)(
     const primaryComponent = join(w.work, "vendor/dependency")
     if (mode === "shared") {
       // A native linked component uses the surviving primary's ref store, not a copied snapshot.
+      // raw-delete-allow: this isolated fixture replaces its own clean component clone before authoring
       rmSync(component, { recursive: true })
       await gitIn(primaryComponent)(["worktree", "add", "--quiet", "-b", componentBranch, component, "HEAD"])
     } else {
