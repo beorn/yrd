@@ -1030,6 +1030,18 @@ const queueLocations = new WeakMap<
   Readonly<{ repo: string; remote: string | undefined; queue: string; backend?: GitomicBackend }>
 >()
 
+function assertQueueLocation(store: QueueReadStore, queue: string, knownQueue: EventQueue): void {
+  const location = queueLocations.get(knownQueue)
+  if (
+    location?.repo !== store.repo ||
+    location.remote !== store.remote ||
+    location.queue !== queue ||
+    location.backend !== store.backend
+  ) {
+    throw new Error(`validated queue must come from the same location: ${store.remote}#${queue} in ${store.repo}`)
+  }
+}
+
 /** The first event declares a queue and keeps the commit carrying .yrd.yml. */
 export async function createEventQueue(
   store: QueueLocation,
@@ -1122,10 +1134,13 @@ export async function readEventOpsWithRefs(
   queue: string,
   _targetSha: string,
   listed?: Readonly<{ refs: ReadonlyMap<string, Oid> }>,
+  options: Readonly<{ knownQueue?: EventQueue }> = {},
 ): Promise<Readonly<{ ops: EventOps; listedQueueTip: string | null }>> {
+  const knownQueue = options.knownQueue
+  if (knownQueue !== undefined) assertQueueLocation(store, queue, knownQueue)
   let acquiredRefs: ReadonlyMap<string, Oid> | undefined
   let projected: EventQueue
-  if (store.remote !== undefined && listed === undefined) {
+  if (store.remote !== undefined && (listed === undefined || knownQueue !== undefined)) {
     const ref = queueRef(queue)
     const fenceRef = pauseRef(queue)
     const where = `${store.remote}#${queue} in ${store.repo}`
@@ -1146,7 +1161,14 @@ export async function readEventOpsWithRefs(
     if (tip === undefined) {
       throw new Error(`${where}: required queue ref ${ref} is missing; admission refused. Check the queue declaration`)
     }
-    projected = eventQueueFromHistory(store, queue, await readEventChain(await openEvents({ ...store, ref }), tip))
+    projected =
+      knownQueue?.tip === tip
+        ? knownQueue
+        : eventQueueFromHistory(store, queue, await readEventChain(await openEvents({ ...store, ref }), tip))
+  } else if (knownQueue !== undefined && store.remote === undefined) {
+    const chain = await openEvents({ ...store, ref: queueRef(queue) })
+    projected = (await chain.head()) === knownQueue.tip ? knownQueue : await readEventQueue(store, queue)
+    acquiredRefs = await listRefs(queueRefPrefix(queue), store)
   } else {
     projected = await readEventQueue(store, queue)
   }
@@ -1189,8 +1211,9 @@ export async function readEventOps(
   git: Git,
   queue: string,
   targetSha: string,
+  options: Readonly<{ knownQueue?: EventQueue }> = {},
 ): Promise<EventOps> {
-  return (await readEventOpsWithRefs(store, git, queue, targetSha)).ops
+  return (await readEventOpsWithRefs(store, git, queue, targetSha, undefined, options)).ops
 }
 
 /** The event equivalent of the legacy stuck-stop derivation. */
@@ -2720,15 +2743,7 @@ export async function listChangeHistories(
     }
     await readEventQueue(store, queue)
   } else {
-    const location = queueLocations.get(options.knownQueue)
-    if (
-      location?.repo !== store.repo ||
-      location.remote !== store.remote ||
-      location.queue !== queue ||
-      location.backend !== store.backend
-    ) {
-      throw new Error(`validated queue must come from the same location: ${store.remote}#${queue} in ${store.repo}`)
-    }
+    assertQueueLocation(store, queue, options.knownQueue)
   }
   const prefixes = [`${queueRefPrefix(queue)}/changes/`, archivedChangesPrefix(queue)]
   const chains = await readEventChains(prefixes, store)

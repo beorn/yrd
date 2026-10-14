@@ -6467,7 +6467,7 @@ export async function readEventListing(
   const all = titled([...selected.table, ...invalidRows, ...directRows])
   const document = titled([...selected.document, ...invalidRows, ...directRows])
   const observation = await observe(queueRefs, branchRefs)
-  const operational = await readEventOps(store, git, config.target.branch, targetOid)
+  const operational = await readEventOps(store, git, config.target.branch, targetOid, { knownQueue: queue })
   if (operational.queue.tip !== queue.tip) {
     throw new Error(
       `${queueRef(config.target.branch)} moved from ${queue.tip} to ${operational.queue.tip} during listing; retry the read`,

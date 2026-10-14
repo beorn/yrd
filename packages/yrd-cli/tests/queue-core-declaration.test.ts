@@ -48,6 +48,8 @@ import {
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
   watchRows,
+  writeQueueEvent,
+  pauseRef,
 } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
@@ -1261,6 +1263,58 @@ describe("a queue is the selected origin branch carrying config", () => {
       }),
     ])
   }, 20_000)
+
+  /** @failure Final ops reuse decodes twice or masks a queue move after the listing's earlier fences.
+   * @level l2 @consumer actual queue list reading (28925 AC2/AC3)
+   * The earlier pure fence test never reaches final acquisition or the listing retry error.
+   */
+  it("decodes a stable listed queue once and retains the exact final moved-tip error", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, head, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture declaration absent")
+    await createQueue(repo, "main", head, new Date())
+    const tip = (await readEventQueue(store, "main")).tip
+    const workdir = await workdirOf(git, { cwd: repo })
+    const history = vi.spyOn(store.backend, "readHistory")
+    await readEventListing(git, config, repo, workdir, head, store, { forceFresh: true })
+    expect(history).toHaveBeenCalledTimes(1)
+    history.mockRestore()
+    const fetch = store.backend.fetchRefs
+    if (fetch === undefined) throw new Error("fixture backend lacks remote acquisition")
+    let moved: string | undefined
+    using acquisition = vi.spyOn(store.backend, "fetchRefs").mockImplementation(async (...args) => {
+      const refs = args[1]
+      if (
+        moved === undefined &&
+        Array.isArray(refs) &&
+        refs.includes(queueRef("main")) &&
+        refs.includes(pauseRef("main"))
+      ) {
+        moved = await writeQueueEvent(store, "main", {
+          type: "paused",
+          by: "yrd",
+          reason: "late operator pause",
+          at: new Date(),
+        })
+      }
+      return fetch(...args)
+    })
+    let failure: unknown
+    try {
+      await readEventListing(git, config, repo, workdir, head, store, { forceFresh: true })
+    } catch (error) {
+      failure = error
+    }
+    expect(moved).not.toBeUndefined()
+    expect(moved).not.toBe(tip)
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toBe(
+      `${queueRef("main")} moved from ${tip} to ${moved} during listing; retry the read`,
+    )
+  })
 
   // @failure A reopened change reads journals belonging to an older, undisplayed segment.
   // @level l2; @consumer default queue list and full branch detail
