@@ -1269,6 +1269,28 @@ describe("yrd queue up, the service", () => {
     const stop = new AbortController()
     const run = capture(w.work)
     try {
+      // Withdrawal files only its own terminal intent; only the service sweeps
+      // the unrelated, old, merged environment bound to the closed issue.
+      const branch = "task/withdraw-no-environment"
+      await w.git(["checkout", "--quiet", "-b", branch, "main"])
+      await w.git(["commit", "--quiet", "--allow-empty", "-m", "withdraw this distinct change"])
+      await w.git(["checkout", "--quiet", "main"])
+      await submit(w.git, "origin", {
+        branch,
+        submitter: "@dev/4",
+        target: { branch: "main", remote: "origin" },
+      })
+      const withdrawn = capture(w.work)
+      expect(
+        await coreQueueCommand(
+          w.work,
+          withdrawn.io,
+          { command: "withdraw", branch, by: "@dev/4" },
+          { json: true, workdir },
+        ),
+        withdrawn.stderr(),
+      ).toBe(0)
+      expect(existsSync(closedIssue), withdrawn.stderr()).toBe(true)
       expect(
         await coreQueueCommand(
           w.work,

@@ -12,12 +12,14 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
-import { createEventStore, readStatus, submit } from "@yrd/queue-core"
+import { createEventStore, readStatus, submit, writeQueueEvent } from "@yrd/queue-core"
 import * as removely from "removely"
 import { archiveRefFor } from "git-super/archive-ref"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { coreQueueCommand } from "../src/queue-core-commands.ts"
+import { workdirOf } from "../src/workdir.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -34,6 +36,29 @@ afterEach(() => {
 })
 
 type Ran = Readonly<{ exitCode: YrdCliExitCode; stdout: string; stderr: string; report: string }>
+
+/** One service round: unlike a manual queue run, the service respects the pause. */
+async function serviceRound(cwd: string): Promise<void> {
+  const stop = new AbortController()
+  let stderr = ""
+  const code = await coreQueueCommand(
+    cwd,
+    {
+      color: false,
+      cwd,
+      stdout() {},
+      stderr(text) {
+        stderr += text
+      },
+    },
+    { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+    {
+      json: true,
+      workdir: await workdirOf(gitIn(cwd), { cwd }),
+    },
+  )
+  expect(code, stderr).toBe(0)
+}
 
 /** The CLI as the shell runs it: argv in, exit code and both streams out. */
 async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
@@ -118,22 +143,28 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     const opened = await yrd(work, "env", "open", "--bay", "reopened", "--json")
     expect(opened.exitCode, opened.report).toBe(0)
     const environment = JSON.parse(opened.stdout) as { path: string }
-    let reopened = false
-    const census = vi.spyOn(removely, "inspectProcessCwds").mockImplementation(async () => {
-      if (!reopened) {
-        reopened = true
-        await submit(git, "origin", {
-          branch,
-          submitter: "@dev/submitter",
-          target: { branch: "main", remote: "origin" },
-        })
-      }
-      return { complete: true, unreadable: [], mechanism: "proc", rows: [] }
+    const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue({
+      complete: true,
+      unreadable: [],
+      mechanism: "proc",
+      rows: [],
     })
     try {
       const ran = await yrd(work, "withdraw", branch, "--submitter", "@dev/actor", "--json")
       expect(ran.exitCode, ran.report).toBe(0)
-      expect(reopened).toBe(true)
+      expect(existsSync(environment.path), ran.report).toBe(true)
+      await submit(git, "origin", {
+        branch,
+        submitter: "@dev/submitter",
+        target: { branch: "main", remote: "origin" },
+      })
+      await writeQueueEvent(createEventStore(work, "origin", git.selection, git.backend), "main", {
+        type: "paused",
+        at: new Date(),
+        by: "@chief",
+        reason: "inspect reopened job",
+      })
+      await serviceRound(work)
       const current = await readStatus(createEventStore(work, "origin", git.selection, git.backend), "main", branch)
       expect(current, ran.report).toMatchObject({ status: "queued", commit: head })
       expect(existsSync(environment.path), ran.report).toBe(true)
@@ -144,11 +175,14 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
   })
 
   it("names `--submitter` as the actor while `--notify` names another seat", async () => {
-    const work = await queueWithChanges("task/one", "task/on-main", "task/archive-collision")
+    // AC2: recovery must preserve the original change name, including shell quotes.
+    // The former generic git/head assertions accepted a newly named change instead.
+    const branch = "task/one'quoted"
+    const work = await queueWithChanges(branch, "task/on-main", "task/archive-collision")
     const git = gitIn(work)
-    const head = (await git(["rev-parse", "refs/heads/task/one"])).trim()
+    const head = (await git(["rev-parse", `refs/heads/${branch}`])).trim()
     // AC2: the public ending must release its exact job, not only its remote ref.
-    const opened = await yrd(work, "env", "open", "--bay", "one", "--json")
+    const opened = await yrd(work, "env", "open", "--bay", "one'quoted", "--json")
     expect(opened.exitCode, opened.report).toBe(0)
     const environment = JSON.parse(opened.stdout) as { path: string }
     expect(existsSync(environment.path)).toBe(true)
@@ -157,7 +191,7 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     const ran = await yrd(
       work,
       "withdraw",
-      "task/one",
+      branch,
       "--submitter",
       "@dev/actor",
       "--notify",
@@ -168,7 +202,7 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     )
     expect(ran.exitCode, ran.report).toBe(0)
 
-    const record = await cancelledRecord(work, "task/one")
+    const record = await cancelledRecord(work, branch)
     expect(record.by, ran.report).toBe("@dev/actor")
     expect(record.by, ran.report).not.toBe("@dev/notified")
     // AC2: ending attribution alone missed the branch and unique work left behind.
@@ -177,15 +211,22 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     expect(archives, ran.report).toHaveLength(1)
     const [archivedHead, archiveRef] = archives[0]!.split(/\s+/u)
     expect(archivedHead).toBe(head)
-    expect((await git(["ls-remote", "origin", "refs/heads/task/one"])).trim()).toBe("")
+    expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
     const receipt = JSON.parse(ran.stdout) as {
       withdrawn: readonly { archive?: string; recovery?: string; remoteRemoved: boolean }[]
     }
     expect(receipt.withdrawn[0]?.archive).toBe(archiveRef)
-    expect(receipt.withdrawn[0]?.recovery).toContain("git")
-    expect(receipt.withdrawn[0]?.recovery).toContain(head)
-    expect(existsSync(environment.path), ran.report).toBe(false)
-    expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/task/one"])).trim()).toBe("")
+    expect(receipt.withdrawn[0]?.recovery).toBe(`git branch 'task/one'\\''quoted' ${head}`)
+    expect(existsSync(environment.path), ran.report).toBe(true)
+    await writeQueueEvent(createEventStore(work, "origin", git.selection, git.backend), "main", {
+      type: "paused",
+      at: new Date(),
+      by: "@chief",
+      reason: "consume only terminal requests",
+    })
+    await serviceRound(work)
+    expect(existsSync(environment.path)).toBe(false)
+    expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).trim()).toBe("")
 
     // Published-main custody needs no extra archive ref.
     await git(["merge", "--quiet", "--ff-only", "task/on-main"])

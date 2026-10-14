@@ -822,6 +822,9 @@ async function cleanupEnvironments(
       }
     },
   })
+  // Withdrawal records only its exact terminal intent. The queue service is
+  // the sole consumer; an interactive withdrawal must not sweep other jobs.
+  if (input.withdrawn !== undefined) return
   let snapshot: ProcessCwdProjection
   try {
     snapshot = await census()

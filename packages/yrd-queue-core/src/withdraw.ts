@@ -113,8 +113,8 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
         throw new Error(`archive ${archive} did not read back as ${head}; found ${observed ?? "absent"}`)
       }
       // The local protected archive also keeps this object after environment closure.
-      // A generated name and full oid need no shell quoting of an arbitrary branch.
-      recovery = `git branch withdrawn-${head.slice(0, 12)} ${head}`
+      // Reusing the original name preserves the change and its issue binding on submit.
+      recovery = `git branch '${request.branch.replaceAll("'", "'\\''")}' ${head}`
     }
     await publish(
       root,
