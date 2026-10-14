@@ -887,7 +887,17 @@ async function preserveEnvironmentWorktree(
       `env close --preserve: the worktree preserve CLI ${cli} did not settle cleanly: ${JSON.stringify(result)}; the environment was NOT removed`,
     )
   }
-  const receipt = parseWorktreePreserveReceipt(result.stdout, cli)
+  const stderrTail = result.stderr.trimEnd().split(/\r?\n/u).slice(-20).join("\n").slice(-4096) || "(empty stderr)"
+  const stderrContext = `stderr tail (last 20 lines, max 4096 characters): ${stderrTail}`
+  let receipt: WorktreePreserveReceipt
+  try {
+    receipt = parseWorktreePreserveReceipt(result.stdout, cli)
+  } catch (error) {
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}; preserve CLI exited ${String(result.exitCode)}; ${stderrContext}`,
+      { cause: error },
+    )
+  }
   // The receipt is the content verdict, but only two exit/receipt combinations are
   // honest: exit 0 with preserved:true, and PRESERVE_NOTHING_EXIT with
   // preserved:false. Any other exit — or a receipt that disagrees with its exit
@@ -895,17 +905,17 @@ async function preserveEnvironmentWorktree(
   // rather than hand a half-preserved ref to `--preserved` (29073, @cto must).
   if (result.exitCode !== 0 && result.exitCode !== WORKTREE_PRESERVE_NOTHING_EXIT) {
     throw new Error(
-      `env close --preserve: the worktree preserve CLI ${cli} exited ${String(result.exitCode)} (expected 0 with preserved:true, or ${WORKTREE_PRESERVE_NOTHING_EXIT} with preserved:false); the environment was NOT removed`,
+      `env close --preserve: the worktree preserve CLI ${cli} exited ${String(result.exitCode)} (expected 0 with preserved:true, or ${WORKTREE_PRESERVE_NOTHING_EXIT} with preserved:false); ${stderrContext}; the environment was NOT removed`,
     )
   }
   if (result.exitCode === 0 && !receipt.preserved) {
     throw new Error(
-      `env close --preserve: the worktree preserve CLI ${cli} exited 0 but reported preserved:false; the environment was NOT removed`,
+      `env close --preserve: the worktree preserve CLI ${cli} exited 0 but reported preserved:false; ${stderrContext}; the environment was NOT removed`,
     )
   }
   if (result.exitCode === WORKTREE_PRESERVE_NOTHING_EXIT && receipt.preserved) {
     throw new Error(
-      `env close --preserve: the worktree preserve CLI ${cli} exited ${WORKTREE_PRESERVE_NOTHING_EXIT} but reported preserved:true; the environment was NOT removed`,
+      `env close --preserve: the worktree preserve CLI ${cli} exited ${WORKTREE_PRESERVE_NOTHING_EXIT} but reported preserved:true; ${stderrContext}; the environment was NOT removed`,
     )
   }
   return receipt

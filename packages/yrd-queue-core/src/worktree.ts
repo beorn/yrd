@@ -116,6 +116,7 @@ export async function freshWorktree(
   options: FreshWorktree = {},
 ): Promise<Worktree> {
   const plumbing = options.plumbing
+  const objects = runnerFor(git).objects
   // Query the selected commit, not the reference checkout's working tree.
   // An invalid commit makes ls-tree fail; only empty output means absence.
   const modules = await git(["ls-tree", commit, "--", ".gitmodules"])
@@ -133,6 +134,7 @@ export async function freshWorktree(
       const gitAt = (cwd: string): Git =>
         gitIn(cwd, options.process, selection, {
           ...(options.env === undefined ? {} : { env: options.env }),
+          ...(objects === undefined ? {} : { objects }),
           ...options.gitOptions,
         })
       await populateReferenceStores({
@@ -161,7 +163,6 @@ export async function freshWorktree(
     }
     let output: string
     try {
-      const objects = runnerFor(git).objects
       output = await git([
         "super",
         "--json",
@@ -556,6 +557,7 @@ export async function prepareWorktree(
   path: string,
   options: PrepareWorktree,
 ): Promise<PreparedWorktree> {
+  const objects = runnerFor(git).objects
   const worktree = await freshWorktree(git, repo, commit, path, {
     ...(options.populateReference === undefined ? {} : { populateReference: options.populateReference }),
     ...(options.env === undefined ? {} : { env: options.env }),
@@ -567,6 +569,7 @@ export async function prepareWorktree(
   try {
     const tree = await checkedTree(worktree.path, options.targetSha, options.process, options.selection, {
       ...(options.env === undefined ? {} : { env: options.env }),
+      ...(objects === undefined ? {} : { objects }),
       ...options.gitOptions,
     })
     const prepared: PreparedWorktree = { ...worktree, tree }
@@ -631,11 +634,12 @@ export function nameAbandonedTree(path: string, why: string): void {
  */
 async function removeWorktree(git: Git, path: string, repo: string, options: FreshWorktree): Promise<void> {
   const checkout = resolve(repo)
-  const at = async (cwd: string): Promise<Git> => {
-    const selection =
-      options.selection ?? (await resolveGitSelection(cwd, { process: options.process, env: options.env }))
+  const at = (cwd: string): Git => {
+    const inherited = runnerFor(git)
+    const selection = options.selection ?? inherited.selection
     return gitIn(cwd, options.process, selection, {
       ...(options.env === undefined ? {} : { env: options.env }),
+      ...(inherited.objects === undefined ? {} : { objects: inherited.objects }),
       ...options.gitOptions,
     })
   }

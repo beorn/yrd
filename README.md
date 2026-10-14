@@ -67,7 +67,7 @@ yrd queue stats [--since 3h|<time>|<sha>] [--by submitter|branch] merged, failed
 yrd queue show <branch>                                           that branch's change segments, newest first, each with its events and ending
 yrd queue show --all --json                                       every branch's change segments in one document, grouped by branch name
 yrd check <name...>                                               run the named checks here, now, in a fresh checkout of HEAD
-yrd env open ([commit] | --bay <name> | --issue <ref>) [--hold <reason>]  retain a commit detached, or open/adopt a task branch; print path
+yrd env open ([commit] | --bay <name> | --issue <ref>) [--hold [reason]]  retain a commit detached, or open/adopt a task branch; print path
 yrd env list                                                      list this repository's retained environments
 yrd env close <path> [--retain <directory>]                       run teardown and remove a clean, unlocked environment; retain submodule stores
 ```
@@ -100,7 +100,7 @@ With a commit operand, `yrd env open` requires a full commit object ID already p
 
 Without a commit, `--bay <name>` opens or adopts exactly `task/<name>`. `--issue <ref>` defaults to `task/<final segment>` so a child issue's branch does not nest below its parent's branch. If `task/<full issue ref>` already exists locally or on origin, `--issue` adopts that older name and its work instead. The full issue ref remains in the `Refs:` binding. Two issues with the same final segment cannot share a bound branch: the refusal names both issues and offers `--bay <name> --issue <ref>`. An occupied branch refuses and names its holder.
 
-**Holding a Yrd worktree.** Add `--hold <reason>` to either `env open` form. Yrd locks the Git worktree before issue binding or setup, so a later failure leaves it locked.
+**Holding a Yrd worktree.** Add `--hold [reason]` to either `env open` form. An omitted reason uses `manual`, so `--hold --json` keeps JSON output enabled. Yrd locks the Git worktree before issue binding or setup, so a later failure leaves it locked.
 
 `env list --json` reports the reason as `hold`, or `null` when unlocked; the human list shows a nonempty reason. The reason is free text, not proof of ownership or expiry. `null` means only unlocked.
 

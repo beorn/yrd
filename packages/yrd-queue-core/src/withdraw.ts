@@ -49,8 +49,10 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
   const history = await readEventChain(chain)
   const state = project(history, ref, root)
   if (!isOpen(state.status)) {
+    // 29387: withdraw ends an OPEN change; an ended one is retired, with its branch, by `yrd drop --reason`.
     throw new NothingToWithdraw(
-      `${request.branch} on ${queue}: already ended ${state.status} at ${state.ending?.id ?? tip}`,
+      `${request.branch} on ${queue}: already ended ${state.status} at ${state.ending?.id ?? tip}; ` +
+        `retire it with: yrd drop ${request.branch} --reason <why>`,
     )
   }
   if (state.status === "merging") {

@@ -846,6 +846,35 @@ describe("yrd env open prepares the retained environment", () => {
     expect(run.stderr()).toContain(bay)
   })
 
+  /** @failure 29385: a required hold reason consumed --json, recording the flag as custody text.
+   * @level l2 @consumer callers combining a manual environment hold with structured output
+   * Existing explicit-hold and plain-open rows do not exercise an omitted hold reason.
+   */
+  it.each([
+    { label: "bare hold", args: ["--hold"], reason: "manual", json: false },
+    { label: "hold followed by JSON", args: ["--hold", "--json"], reason: "manual", json: true },
+    {
+      label: "explicit reason and JSON",
+      args: ["--hold", "until review", "--json"],
+      reason: "until review",
+      json: true,
+    },
+  ])("supports a hold without consuming following flags: $label", async ({ args, reason, json }) => {
+    const w = await world(":")
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "hold-options", ...args], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+
+    const path = join(w.work, ".bays", "hold-options")
+    const listed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io)).toBe(0)
+    const heldRows = JSON.parse(listed.stdout()) as { environments: { path: string; hold: string | null }[] }
+    expect(heldRows.environments).toContainEqual(expect.objectContaining({ path, hold: reason }))
+    if (json) expect(JSON.parse(opened.stdout())).toMatchObject({ path })
+  })
+
   /** @failure 25957: a retained environment could not state that it must outlive idleness.
    * @level l2 @consumer seats holding an environment across sessions
    */

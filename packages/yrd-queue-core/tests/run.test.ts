@@ -365,6 +365,25 @@ it("local retirement keeps protected tips and preserves custody before removing 
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
   expect(await refAt(w.git, merged.archiveRef)).toBe(w.target)
 
+  // Native release and queue cleanup can observe the same completed retirement.
+  expect(await retireLocalBranch({ ...input, actor: "@dev/9", date: "2026-10-15" })).toMatchObject({
+    outcome: "removed",
+    archiveRef: merged.archiveRef,
+    detail: `already retired: ${merged.archiveRef} holds ${w.target}; this run deleted no ref`,
+  })
+  expect(await refAt(w.git, merged.archiveRef)).toBe(w.target)
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
+  expect(await retireLocalBranch({ ...input, branch: "task/absent-without-custody" })).toMatchObject({
+    outcome: "kept",
+  })
+  protections = ["held after release"]
+  expect(await retireLocalBranch(input)).toMatchObject({ outcome: "kept", reason: "held after release" })
+  protections = []
+  protectionReads = 0
+  expect(
+    await retireLocalBranch({ ...input, protections: async () => (++protectionReads === 1 ? [] : ["late lease"]) }),
+  ).toMatchObject({ outcome: "kept", reason: "late lease" })
+
   const head = await submitCommit(w, branch, "one.txt")
   expect(await retireLocalBranch(input)).toMatchObject({ outcome: "kept", reason: expect.stringContaining("moved") })
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(head)
@@ -417,10 +436,19 @@ it("local retirement keeps protected tips and preserves custody before removing 
   expect(await refAt(origin, localOnly.archiveRef)).toBeUndefined()
   expect(await refAt(origin, queueRef("main"))).toBe(queueBefore)
   const rows = readRunLog(dirname(log.path), log.id)
+  expect(rows.find((row) => row.kind === "local-branch-retirement" && row.actor === "@dev/9")).toMatchObject({
+    outcome: "removed",
+    archive: merged.archiveRef,
+    detail: `already retired: ${merged.archiveRef} holds ${w.target}; this run deleted no ref`,
+  })
   expect(rows.filter((row) => row.kind === "local-branch-retirement").map((row) => row.outcome)).toEqual([
     "kept",
     "kept",
     "removed",
+    "removed",
+    "kept",
+    "kept",
+    "kept",
     "kept",
     "failed",
     "removed",

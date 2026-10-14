@@ -2343,6 +2343,7 @@ describe("a queue is the selected origin branch carrying config", () => {
   it.each(["bay", "pool"])("retires after merged %s cleanup in the same native CLI round", async (kind) => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
+    await git(["config", "yrd.workdir", join(dirname(repo), "retirement-state")])
     await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
     const branch = "task/merge-retirement"
     let author: string
@@ -2384,7 +2385,21 @@ describe("a queue is the selected origin branch carrying config", () => {
     )
     const records = readRunLog(dirname(outcome.log), outcome.run)
     const retirement = records.find((row) => row.kind === "local-branch-retirement" && row.branch === branch)
-    expect(retirement).toMatchObject({ outcome: kind === "pool" ? "kept" : "removed", branch, head })
+    if (kind === "bay") {
+      const archive = retirement?.archive
+      if (typeof archive !== "string") throw new Error("retirement journal omitted its archive ref")
+      expect((await git(["rev-parse", archive])).trim()).toBe(head)
+    }
+    const releaseRows = readdirSync(dirname(outcome.log))
+      .filter((name) => name.endsWith(".jsonl") && name !== `${outcome.run}.jsonl`)
+      .flatMap((name) => readRunLog(dirname(outcome.log), name.slice(0, -6)))
+    expect(
+      retirement,
+      JSON.stringify({
+        release: releaseRows.filter((row) => row.kind === "local-branch-retirement" && row.branch === branch),
+        queue: records.filter((row) => row.kind === "local-branch-retirement" && row.branch === branch),
+      }),
+    ).toMatchObject({ outcome: kind === "pool" ? "kept" : "removed", branch, head })
     if (kind === "bay") {
       const archive = retirement!.archive
       if (typeof archive !== "string") throw new Error("retirement journal omitted its archive ref")
