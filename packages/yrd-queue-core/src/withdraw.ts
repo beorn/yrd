@@ -1,8 +1,18 @@
-/** End an open event change while leaving its branch available for a later submit. */
+/** End an open event change, then retire its remote branch without delaying the ending. */
+import { archiveRefFor, ensureArchiveRef } from "git-super/archive-ref"
 import { deleteCandidateRefsForShas } from "./candidate-refs.ts"
 import { changeInput, changesRef, decide, isOpen, project, queueFormat, queueRef, readEventQueue } from "./events.ts"
 import { readEventChain } from "./event-read.ts"
-import { createEventStore, gitIn, openEvents, selectionFor, type Git } from "./git.ts"
+import {
+  createEventStore,
+  gitIn,
+  isAncestor,
+  listRefs,
+  openEvents,
+  readRemoteCommit,
+  selectionFor,
+  type Git,
+} from "./git.ts"
 
 export type WithdrawRequest = Readonly<{
   branch: string
@@ -12,7 +22,15 @@ export type WithdrawRequest = Readonly<{
   recipient?: string
 }>
 
-export type WithdrawnChange = Readonly<{ branch: string; head: string; record: string }>
+export type WithdrawnChange = Readonly<{
+  branch: string
+  head: string
+  record: string
+  remoteRemoved: boolean
+  archive?: string
+  recovery?: string
+  retirementError?: string
+}>
 export type Withdrawn = Readonly<{ branch: string; queue: string; withdrawn: readonly WithdrawnChange[] }>
 export class NothingToWithdraw extends Error {}
 
@@ -65,6 +83,57 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
   })
   const record = result.events.findLast((event) => event.type === "cancelled")?.id
   if (record === undefined) throw new Error(`${ref} in ${root}: withdrawal published no cancelled event`)
-  await deleteCandidateRefsForShas(gitIn(root, undefined, selectionFor(git)), root, remote, [head])
-  return { branch: request.branch, queue, withdrawn: [{ branch: request.branch, head, record }] }
+  let archive: string | undefined
+  let recovery: string | undefined
+  let retirementError: string | undefined
+  let remoteRemoved = false
+  try {
+    const publish = store.backend.publish
+    if (publish === undefined) throw new Error("Gitomic backend lacks publish for withdrawal retirement")
+    const target = await readRemoteCommit(git, remote, `refs/heads/${queue}`)
+    if (target === undefined) throw new Error(`published main ${remote}#${queue} is missing`)
+    if (!(await isAncestor(git, head, target))) {
+      archive = archiveRefFor(request.branch, request.by, new Date().toISOString().slice(0, 10))
+      const custody = ensureArchiveRef(root, archive, head)
+      if (!custody.ok) throw new Error(custody.reason)
+      const previous = (await listRefs(archive, store)).get(archive)
+      if (previous !== undefined && previous !== head) {
+        throw new Error(`archive ${archive} holds ${previous}, not ${head}; it is never overwritten`)
+      }
+      await publish(
+        root,
+        [
+          { ref, expect: record, oid: record },
+          { ref: archive, expect: previous ?? "0".repeat(head.length), oid: head },
+        ],
+        remote,
+      )
+      const observed = (await listRefs(archive, store)).get(archive)
+      if (observed !== head) {
+        throw new Error(`archive ${archive} did not read back as ${head}; found ${observed ?? "absent"}`)
+      }
+      // The local protected archive also keeps this object after environment closure.
+      // A generated name and full oid need no shell quoting of an arbitrary branch.
+      recovery = `git branch withdrawn-${head.slice(0, 12)} ${head}`
+    }
+    await publish(
+      root,
+      [
+        { ref, expect: record, oid: record },
+        { ref: branchRef, expect: head, oid: null },
+      ],
+      remote,
+    )
+    const observed = await readRemoteCommit(git, remote, branchRef)
+    if (observed !== undefined) throw new Error(`remote branch removal did not read back absent; found ${observed}`)
+    remoteRemoved = true
+    await deleteCandidateRefsForShas(gitIn(root, undefined, selectionFor(git)), root, remote, [head])
+  } catch (cause) {
+    retirementError = `${root} at ${remote}#${queue}, ${branchRef}@${head}: withdrawal completed; retirement incomplete: ${String(cause)}`
+  }
+  return {
+    branch: request.branch,
+    queue,
+    withdrawn: [{ branch: request.branch, head, record, remoteRemoved, archive, recovery, retirementError }],
+  }
 }

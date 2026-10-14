@@ -13,6 +13,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, afterEach, describe, expect, it } from "vitest"
 import { submit } from "@yrd/queue-core"
+import { archiveRefFor } from "git-super/archive-ref"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import { runYrdProcess } from "../src/cli.ts"
@@ -87,7 +88,10 @@ async function queueWithChanges(...branches: readonly string[]): Promise<string>
 }
 
 /** The `By:` and `Recipient:` the cancelled record carries, read back through `yrd queue show`. */
-async function cancelledRecord(work: string, branch: string): Promise<Readonly<{ by?: string; recipient?: string }>> {
+async function cancelledRecord(
+  work: string,
+  branch: string,
+): Promise<Readonly<{ by?: string; recipient?: string; reason?: string }>> {
   const shown = await yrd(work, "queue", "show", branch, "--json")
   expect(shown.exitCode, shown.report).toBe(0)
   const parsed = JSON.parse(shown.stdout) as {
@@ -99,12 +103,14 @@ async function cancelledRecord(work: string, branch: string): Promise<Readonly<{
   const change = parsed.changes.find((row) => row.branch === branch)
   const cancelled = change?.events.findLast((event) => event.type === "cancelled")
   const prop = (key: string): string | undefined => cancelled?.props.find(([name]) => name === key)?.[1]
-  return { by: prop("By"), recipient: prop("Recipient") }
+  return { by: prop("By"), recipient: prop("Recipient"), reason: prop("Reason") }
 }
 
 describe("`yrd withdraw` records the actor, not the notified seat (27262)", () => {
   it("names `--submitter` as the actor while `--notify` names another seat", async () => {
-    const work = await queueWithChanges("task/one")
+    const work = await queueWithChanges("task/one", "task/on-main", "task/archive-collision")
+    const git = gitIn(work)
+    const head = (await git(["rev-parse", "refs/heads/task/one"])).trim()
 
     const ran = await yrd(
       work,
@@ -123,6 +129,44 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     const record = await cancelledRecord(work, "task/one")
     expect(record.by, ran.report).toBe("@dev/actor")
     expect(record.by, ran.report).not.toBe("@dev/notified")
+    // AC2: ending attribution alone missed the branch and unique work left behind.
+    expect(record.reason, ran.report).toBe("withdrawn")
+    const archives = (await git(["ls-remote", "origin", "refs/archive/*"])).trim().split("\n").filter(Boolean)
+    expect(archives, ran.report).toHaveLength(1)
+    const [archivedHead, archiveRef] = archives[0]!.split(/\s+/u)
+    expect(archivedHead).toBe(head)
+    expect((await git(["ls-remote", "origin", "refs/heads/task/one"])).trim()).toBe("")
+    const receipt = JSON.parse(ran.stdout) as {
+      withdrawn: readonly { archive?: string; recovery?: string; remoteRemoved: boolean }[]
+    }
+    expect(receipt.withdrawn[0]?.archive).toBe(archiveRef)
+    expect(receipt.withdrawn[0]?.recovery).toContain("git")
+    expect(receipt.withdrawn[0]?.recovery).toContain(head)
+
+    // Published-main custody needs no extra archive ref.
+    await git(["merge", "--quiet", "--ff-only", "task/on-main"])
+    await git(["push", "--quiet", "origin", "main"])
+    const onMain = await yrd(work, "withdraw", "task/on-main", "--submitter", "@dev/actor", "--json")
+    expect(onMain.exitCode, onMain.report).toBe(0)
+    expect((JSON.parse(onMain.stdout) as typeof receipt).withdrawn[0]?.archive).toBeUndefined()
+    expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim().split("\n")).toHaveLength(1)
+    expect((await git(["ls-remote", "origin", "refs/heads/task/on-main"])).trim()).toBe("")
+
+    // A custody collision keeps the branch while the explicit withdrawal still succeeds.
+    const collisionHead = (await git(["rev-parse", "refs/heads/task/archive-collision"])).trim()
+    const collisionArchive = archiveRefFor(
+      "task/archive-collision",
+      "@dev/actor",
+      new Date().toISOString().slice(0, 10),
+    )
+    await git(["push", "--quiet", "origin", `main:${collisionArchive}`])
+    const collision = await yrd(work, "withdraw", "task/archive-collision", "--submitter", "@dev/actor", "--json")
+    expect(collision.exitCode, collision.report).toBe(0)
+    expect((await cancelledRecord(work, "task/archive-collision")).reason).toBe("withdrawn")
+    expect((await git(["ls-remote", "origin", "refs/heads/task/archive-collision"])).trim()).toContain(collisionHead)
+    expect(collision.stderr).toContain(collisionArchive)
+    expect(collision.stderr).toContain(collisionHead)
+    expect((JSON.parse(collision.stdout) as typeof receipt).withdrawn[0]?.remoteRemoved).toBe(false)
   })
 
   // @cto 5753a5ce: the separate fact is the optional `Recipient:` trailer, a

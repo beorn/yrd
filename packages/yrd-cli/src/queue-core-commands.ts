@@ -1981,6 +1981,9 @@ export async function coreQueueCommand(
           ...(request.reason === undefined ? {} : { reason: request.reason }),
           ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
         })
+        for (const one of taken.withdrawn) {
+          if (one.retirementError !== undefined) io.stderr(`yrd: ${one.retirementError}\n`)
+        }
         emit(
           io,
           options.json,
@@ -1989,7 +1992,9 @@ export async function coreQueueCommand(
             .map(
               (one) =>
                 `withdrew ${changeName({ branch: one.branch, head: one.head })} from ${taken.queue}` +
-                ` (record ${one.record.slice(0, 12)}); yrd submit re-opens it`,
+                ` (record ${one.record.slice(0, 12)}); remote branch ${one.remoteRemoved ? "removed" : "not proven removed"}` +
+                (one.archive === undefined ? "" : `; archive ${one.archive}`) +
+                (one.recovery === undefined ? "" : `; recover locally: ${one.recovery}`),
             )
             .join("\n"),
         )
