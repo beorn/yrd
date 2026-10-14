@@ -1960,6 +1960,31 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(manualReport.removed).toEqual([expect.objectContaining({ branch: "task/manual-only" })])
     expect((await git(["ls-remote", "origin", manualReport.removed[0]!.archiveRef])).split("\t")[0]).toBe(manualHead)
     expect((await git(["rev-parse", "refs/heads/task/28791-advanced"])).trim()).toBe(advanced)
+    // Accepted29301: local expected=head, but the recorded change has an older head.
+    // Existing assertions only check the reason token, so they miss identical SHAs in the detail.
+    await git(["push", "--quiet", "origin", advanced + ":refs/heads/main"])
+    await git(["fetch", "--quiet", "origin", "main"])
+    await git(["merge-base", "--is-ancestor", advanced, "origin/main"])
+    const local = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "drop", "task/28791-advanced", "--local", "--tip", advanced, "--submitter", "fixture", "--json"],
+        local.io,
+      ),
+      local.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(local.stdout())).toMatchObject({
+      removed: [],
+      kept: [
+        {
+          branch: "task/28791-advanced",
+          head: advanced,
+          reason: "advanced",
+          detail: "current tip " + advanced + " differs from recorded change tip " + saved.get("task/28791-advanced"),
+        },
+      ],
+    })
+    expect((await git(["rev-parse", "refs/heads/task/28791-advanced"])).trim()).toBe(advanced)
     // AC5: the command's journal must remain readable by the existing projection reader.
     // Custody assertions alone miss a writer that omits the required run header.
     const logs = join(await workdirOf(git, { cwd: repo }), "logs")
