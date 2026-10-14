@@ -365,6 +365,19 @@ it("local retirement keeps protected tips and preserves custody before removing 
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
   expect(await refAt(w.git, merged.archiveRef)).toBe(w.target)
 
+  // Native release and queue cleanup can observe the same completed retirement.
+  expect(await retireLocalBranch(input)).toMatchObject({ outcome: "removed", archiveRef: merged.archiveRef })
+  expect(await refAt(w.git, merged.archiveRef)).toBe(w.target)
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
+  expect(await retireLocalBranch({ ...input, date: "2026-10-15" })).toMatchObject({ outcome: "kept" })
+  protections = ["held after release"]
+  expect(await retireLocalBranch(input)).toMatchObject({ outcome: "kept", reason: "held after release" })
+  protections = []
+  protectionReads = 0
+  expect(
+    await retireLocalBranch({ ...input, protections: async () => (++protectionReads === 1 ? [] : ["late lease"]) }),
+  ).toMatchObject({ outcome: "kept", reason: "late lease" })
+
   const head = await submitCommit(w, branch, "one.txt")
   expect(await retireLocalBranch(input)).toMatchObject({ outcome: "kept", reason: expect.stringContaining("moved") })
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(head)
@@ -421,6 +434,10 @@ it("local retirement keeps protected tips and preserves custody before removing 
     "kept",
     "kept",
     "removed",
+    "removed",
+    "kept",
+    "kept",
+    "kept",
     "kept",
     "failed",
     "removed",
