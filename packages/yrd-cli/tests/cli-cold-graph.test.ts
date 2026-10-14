@@ -15,6 +15,7 @@
  * excluded (that is the point — the pane is one). What stays in the cold path
  * on purpose is named in COLD_PATH_KEEPS so a future move shows up as a
  * diff, not a surprise.
+ * @source-grep the yrd watch cold-start contract (operator 2026-09-05): the command modules' import graph is read from source so one value import of a .tsx/react/silvery module cannot silently add ~670 modules and ~95 ms to every `yrd list`/submit/check/env cold start
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"

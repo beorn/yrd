@@ -1,5 +1,6 @@
 /**
  * @reach fs-walk vendor/yrd/packages/*\/src/** vendor/yrd/packages/*\/scripts/**
+ * @source-grep the yrd-queue-core gitomic boundary, two sides: src/** is read to inventory every raw ref-command site (ls-remote/for-each-ref/update-ref/fetch/push) so each non-queue site (candidate-refs, check-refs, mirror, pin-carrier, preview custody, gitlink retention) is an explicitly permitted raw-ref call while every queue ref read/write stays inside the Gitomic boundary, and to pin that gitomic is imported only through the configured git seam (yrd-queue-core/git.ts)
  */
 import { execFileSync } from "node:child_process"
 import { readFileSync, readdirSync } from "node:fs"
