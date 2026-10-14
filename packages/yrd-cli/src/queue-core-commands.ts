@@ -1653,7 +1653,10 @@ export async function coreQueueCommand(
             kept.push({
               ...row,
               reason: "advanced",
-              detail: `current tip ${head} differs from ${local ? request.tip : change?.commit}`,
+              detail:
+                local && head !== request.tip
+                  ? `current tip ${head} differs from requested tip ${request.tip}`
+                  : `current tip ${head} differs from recorded change tip ${change?.commit}`,
             })
             continue
           }
