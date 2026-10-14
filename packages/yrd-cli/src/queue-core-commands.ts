@@ -4293,7 +4293,16 @@ export async function coreQueueCommand(
           }
         } finally {
           try {
-            if (prepared !== undefined) await discardWorktree(prepared)
+            if (prepared !== undefined) {
+              try {
+                await discardWorktree(prepared)
+              } catch (error: unknown) {
+                // Cleanup retains its refused tree; it cannot replace the check's own verdict.
+                io.stderr(
+                  `yrd: check worktree ${prepared.path} was not removed: ${error instanceof Error ? error.message : String(error)}; inspect the retained worktree before retrying cleanup\n`,
+                )
+              }
+            }
           } finally {
             // 28661 C4: this used to be `rmSync(worktrees, { recursive: true })`, which walked straight past
             // the private-store refusal `discardWorktree` just reported and deleted the kept checkout anyway.

@@ -17,7 +17,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import { readJournals, type Git, type LogRecord } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
@@ -428,6 +428,7 @@ describe("yrd check uses the protected program without publishing", () => {
       )
       await w.git(["add", "break-refs.sh"])
       await w.git(["commit", "--quiet", "-m", "a check that breaks the ref store after it passes"])
+      using scaffoldWarning = vi.spyOn(console, "warn").mockImplementation(() => {})
       let stderr = ""
       const exit = await coreQueueCommand(
         w.work,
@@ -439,6 +440,12 @@ describe("yrd check uses the protected program without publishing", () => {
       expect(stderr).toMatch(
         /yrd: check refs were not swept; refs\/yrd-check\/\* may remain until the next yrd check: /u,
       )
+      const retained = /yrd: check worktree (.+) was not removed: /u.exec(stderr)?.[1]
+      if (retained === undefined) throw new Error(`check omitted its retained worktree: ${stderr}`)
+      expect(existsSync(retained)).toBe(true)
+      expect(stderr).toContain("fatal: unexpected line")
+      expect(scaffoldWarning).toHaveBeenCalledTimes(1)
+      expect(scaffoldWarning).toHaveBeenCalledWith(expect.stringContaining(`yrd: kept worktree ${retained}:`))
     })
 
     it("cleans up temporary refs on setup/execution error", async () => {
