@@ -16,6 +16,7 @@ import {
   refAt,
   registeredWorktrees,
   retireLocalBranch,
+  remoteHead,
   remoteUrl,
   type Git,
   type GitSelection,
@@ -420,6 +421,13 @@ export async function retireMergedComponentAuthors(
     try {
       const repo = await activeAuthorCheckout(author, input.selection, input.env)
       const git = gitIn(repo, undefined, input.selection, { env: input.env })
+      // One fresh default-branch read per action. Unreadable authority is caught below before custody changes.
+      let defaultBranch: string
+      try {
+        defaultBranch = await remoteHead(git, author.remote)
+      } catch (cause) {
+        throw new Error(`protected component default unreadable in ${repo} from ${author.remote}: ${String(cause)}`)
+      }
       const target = await readRemoteCommit(git, author.remote, "refs/heads/main")
       if (target === undefined) throw new Error(`${repo} has no ${author.remote}#main`)
       const retire = createLandedBranchRetirement({
@@ -441,6 +449,9 @@ export async function retireMergedComponentAuthors(
         date: new Date().toISOString().slice(0, 10),
         log: input.log,
         protections: async () => {
+          if (author.branch === "main" || author.branch === defaultBranch) {
+            return [`protected component target/default branch ${author.branch} in ${repo} from ${author.remote}`]
+          }
           await activeAuthorCheckout(author, input.selection, input.env)
           const state = await readStatus(input.store, input.queue, author.rootBranch)
           if (state.status !== "merged" || state.commit !== author.rootTip || state.tip !== author.rootEventTip) {

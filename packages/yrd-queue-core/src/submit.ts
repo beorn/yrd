@@ -48,7 +48,7 @@ import {
   type Git,
 } from "./git.ts"
 import { type PauseRecord } from "./pause.ts"
-import { remoteUrl } from "./remote.ts"
+import { remoteHead, remoteUrl } from "./remote.ts"
 import {
   changeInput,
   changesRef,
@@ -354,6 +354,9 @@ async function componentAuthor(
     }
     const branch = ref.slice("refs/heads/".length)
     assertBranch(branch)
+    if (branch === "main") return unavailable("protected component target branch main")
+    const defaultBranch = await remoteHead(pin.child, pin.remote)
+    if (branch === defaultBranch) return unavailable(`protected component default branch ${defaultBranch}`)
     const head = await refAt(pin.child, "HEAD")
     const tip = await refAt(pin.child, ref)
     if (head !== pin.sha || tip !== pin.sha) {
