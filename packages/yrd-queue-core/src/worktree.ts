@@ -636,6 +636,14 @@ async function removeWorktree(git: Git, path: string, repo: string, options: Fre
   const checkout = resolve(repo)
   const at = (cwd: string): Git => {
     const inherited = runnerFor(git)
+    if (
+      options.process === undefined &&
+      options.env === undefined &&
+      options.selection === undefined &&
+      options.gitOptions === undefined
+    ) {
+      return inherited.at(cwd)
+    }
     const selection = options.selection ?? inherited.selection
     return gitIn(cwd, options.process, selection, {
       ...(options.env === undefined ? {} : { env: options.env }),

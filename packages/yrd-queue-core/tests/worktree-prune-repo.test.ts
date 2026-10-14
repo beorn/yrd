@@ -13,7 +13,8 @@
  */
 
 import { describe, expect, it, vi } from "vitest"
-import type { Git } from "../src/git.ts"
+import { createScriptedProcess } from "@yrd/process/testing/scripted-process"
+import { gitIn, type GitRunner } from "../src/git.ts"
 import { freshWorktree } from "../src/worktree.ts"
 
 const store = vi.hoisted(() => ({ calls: [] as Array<Readonly<{ repo: string }>> }))
@@ -29,12 +30,13 @@ const CHECKOUT = "/fixture/reference-checkout"
 const COMMIT = "d7273ea86df701a590e5b480e7bb1eab2b6145a9"
 
 /** Answers what materializing a fresh worktree asks; removal itself never reaches Git. */
-function recorder(): Git {
-  return async (args) => {
-    if (args[0] === "ls-tree") return ""
-    if (args.includes("--git-common-dir")) return `${CHECKOUT}/.git\n`
-    return ""
-  }
+function recorder(): GitRunner {
+  return gitIn(
+    CHECKOUT,
+    createScriptedProcess(),
+    { executable: "/fixture/git", contract: "native", scope: "default", origin: "fixture recorder" },
+    { env: {} },
+  )
 }
 
 describe("removeWorktree names a CHECKOUT, not a git dir, as git-super's repo (27392)", () => {
