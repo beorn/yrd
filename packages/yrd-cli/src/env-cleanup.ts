@@ -254,6 +254,7 @@ async function consumeCloseRequests(
     // Stage before the close so two consumers cannot both act on one request and
     // a crash mid-close leaves the row in a named place.
     const staged = stageCloseRequest(file)
+    const ending = request.ending
     let exit: YrdCliExitCode
     let output = ""
     try {
@@ -271,10 +272,9 @@ async function consumeCloseRequests(
         // The round IS the capable context: an incomplete census here must
         // never file a second request (that is a close nobody asked for).
         "refuse",
-        request.ending === undefined
+        ending === undefined
           ? undefined
           : async () => {
-              const ending = request.ending!
               const store = createEventStore(registry, ending.remote, selectionFor(worktrees))
               const current = (await readBranchHistory(store, ending.queue, ending.branch)).history?.state
               if (
