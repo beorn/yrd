@@ -11,8 +11,9 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, afterEach, describe, expect, it } from "vitest"
-import { submit } from "@yrd/queue-core"
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
+import { createEventStore, readStatus, submit } from "@yrd/queue-core"
+import * as removely from "removely"
 import { archiveRefFor } from "git-super/archive-ref"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
@@ -107,6 +108,41 @@ async function cancelledRecord(
 }
 
 describe("`yrd withdraw` records the actor, not the notified seat (27262)", () => {
+  // AC3: a reopened change must keep its job even when HEAD is unchanged. The existing
+  // advanced-head controls cannot catch a re-submit between filing and consuming the close request.
+  it("keeps a withdrawn job reopened at the same head before its close request is consumed", async () => {
+    const branch = "task/reopened"
+    const work = await queueWithChanges(branch)
+    const git = gitIn(work)
+    const head = (await git(["rev-parse", `refs/heads/${branch}`])).trim()
+    const opened = await yrd(work, "env", "open", "--bay", "reopened", "--json")
+    expect(opened.exitCode, opened.report).toBe(0)
+    const environment = JSON.parse(opened.stdout) as { path: string }
+    let reopened = false
+    const census = vi.spyOn(removely, "inspectProcessCwds").mockImplementation(async () => {
+      if (!reopened) {
+        reopened = true
+        await submit(git, "origin", {
+          branch,
+          submitter: "@dev/submitter",
+          target: { branch: "main", remote: "origin" },
+        })
+      }
+      return { complete: true, unreadable: [], mechanism: "proc", rows: [] }
+    })
+    try {
+      const ran = await yrd(work, "withdraw", branch, "--submitter", "@dev/actor", "--json")
+      expect(ran.exitCode, ran.report).toBe(0)
+      expect(reopened).toBe(true)
+      const current = await readStatus(createEventStore(work, "origin", git.selection, git.backend), "main", branch)
+      expect(current, ran.report).toMatchObject({ status: "queued", commit: head })
+      expect(existsSync(environment.path), ran.report).toBe(true)
+      expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
+    } finally {
+      census.mockRestore()
+    }
+  })
+
   it("names `--submitter` as the actor while `--notify` names another seat", async () => {
     const work = await queueWithChanges("task/one", "task/on-main", "task/archive-collision")
     const git = gitIn(work)
