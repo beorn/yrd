@@ -69,6 +69,7 @@ import {
 } from "./env-close-requests.ts"
 import type { ProcessCensus } from "removely"
 import { formatUnknownNotifyEventWarning, formatUnknownTopLevelKeyWarning } from "./version.ts"
+import { captureReleasedAuthor, retireReleasedAuthor } from "./branch-retirement.ts"
 
 export type EnvOpenOptions = Readonly<{
   bay?: string
@@ -1066,6 +1067,28 @@ export async function closeEnvironment(
       unknownNotifyEvents: (unknown) => warnUnknownNotifyEvents(path, "env close", unknown, io),
     },
   )
+  let retirement: Awaited<ReturnType<typeof captureReleasedAuthor>>
+  try {
+    retirement = await captureReleasedAuthor({
+      repo: root,
+      git,
+      selection,
+      branch: registered.branch?.replace(/^refs\/heads\//u, ""),
+      tip: commit,
+      config,
+      workdir,
+      io,
+    })
+  } catch (cause) {
+    io.stderr(
+      `yrd: environment ${path}: branch retirement capture failed; refs kept, close continues: ${String(cause)}\n`,
+    )
+  }
+  using _retirementLog = {
+    [Symbol.dispose]() {
+      retirement?.log.finish()
+    },
+  }
   if (config?.teardown !== undefined) {
     const artifacts = join(workdir, "logs", "environments", basename(path), runId())
     const result = await runCheck({
@@ -1181,6 +1204,7 @@ export async function closeEnvironment(
     // to the repository that owns the worktree registry.
     await worktreeWithoutSubmodules(treeGit, git, commit, ["remove", path])
   }
+  if (retirement !== undefined) await retireReleasedAuthor(retirement)
   io.stdout(options.json === true ? `${JSON.stringify({ closed: path })}\n` : `closed environment ${path}\n`)
   return 0
 }

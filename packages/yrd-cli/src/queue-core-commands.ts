@@ -39,6 +39,7 @@ import {
   captureMergedComponentAuthors,
   createLandedBranchRetirement,
   retireMergedComponentAuthors,
+  retireMergedRootAuthor,
 } from "./branch-retirement.ts"
 import { sweepRoundOutputInRound } from "./log-retention.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
@@ -988,23 +989,18 @@ export async function coreQueueCommand(
               for (const branch of outcome.merged) {
                 try {
                   const change = await readStatus(eventStore, config.target.branch, branch)
-                  const tip = change.commit
-                  if (tip === undefined) throw new Error(`merged change ${branch} has no kept head`)
-                  await retireLocalBranch({
+                  await retireMergedRootAuthor({
                     repo: authorRepo,
                     git: authorGit,
                     actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
                     branch,
-                    tip,
-                    owner: change.submitter,
-                    issue: change.issue,
-                    reason: "merged",
-                    date: new Date().toISOString().slice(0, 10),
+                    change,
+                    base: outcome.base,
+                    target: outcome.target,
+                    io,
                     log: retirementLog,
-                    protections: () =>
-                      io.localBranchProtections?.({ repo: authorRepo, branch, tip, issue: change.issue }) ??
-                      Promise.resolve([]),
-                    disposition: { kind: "merged", base: outcome.base, target: outcome.target },
+                    store: eventStore,
+                    queue: config.target.branch,
                   })
                 } catch (error) {
                   retirementLog.write({

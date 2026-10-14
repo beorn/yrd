@@ -7,19 +7,154 @@ import {
   gitIn,
   isAncestor,
   listRefs,
+  openLog,
+  readBranchHistory,
   readRemoteCommit,
   readStatus,
   refAt,
   registeredWorktrees,
   retireLocalBranch,
+  remoteUrl,
   type Git,
   type GitSelection,
   type LocalBranchRetirement,
   type LocalBranchRetirementResult,
   type EventChange,
   type QueueLocation,
+  type QueueConfig,
 } from "@yrd/queue-core"
 import type { YrdCliIO } from "./types.ts"
+import { originHead } from "./queue-location.ts"
+
+/** Both landing and successful native release use the same root retirement caller. */
+export async function retireMergedRootAuthor(
+  input: Readonly<{
+    repo: string
+    git: Git
+    branch: string
+    change: EventChange
+    base: string
+    target: string
+    actor: string
+    io: YrdCliIO
+    log: LocalBranchRetirement["log"]
+    store: QueueLocation
+    queue: string
+  }>,
+): Promise<void> {
+  const { change, branch, git, repo, log } = input
+  const tip = change.commit
+  if (change.status !== "merged" || tip === undefined || change.tip === undefined) {
+    throw new Error(`${branch}: root retirement requires an exact merged submission and event tip`)
+  }
+  await retireLocalBranch({
+    repo,
+    git,
+    branch,
+    tip,
+    actor: input.actor,
+    owner: change.submitter,
+    issue: change.issue,
+    reason: "merged",
+    date: new Date().toISOString().slice(0, 10),
+    log,
+    protections: async () => {
+      const current = await readStatus(input.store, input.queue, branch)
+      if (current.status !== "merged" || current.commit !== tip || current.tip !== change.tip) {
+        throw new Error(`${branch}: merged history changed or reopened before root retirement`)
+      }
+      return (await input.io.localBranchProtections?.({ repo, branch, tip, issue: change.issue })) ?? []
+    },
+    // Attributed submissions have a separate proven component judgment; the old root-only
+    // warning remains correct only for submissions that recorded no component authors.
+    disposition:
+      change.componentAuthors === undefined
+        ? { kind: "merged", base: input.base, target: input.target }
+        : { kind: "landed", target: input.target, proof: { kind: "ancestry" } },
+  })
+}
+
+/** Observe only the exact released branch, never an issue-wide or history-wide retry sweep. */
+export async function captureReleasedAuthor(
+  input: Readonly<{
+    repo: string
+    git: Git
+    selection: GitSelection
+    branch?: string
+    tip: string
+    config?: QueueConfig
+    workdir: string
+    io: YrdCliIO
+  }>,
+) {
+  const { branch, tip } = input
+  if (branch === undefined || branch === "") return undefined
+  const remote = input.config?.target.remote ?? "origin"
+  const configuredQueue = input.config?.target.branch
+  const queue =
+    configuredQueue === undefined || configuredQueue === "HEAD" ? await originHead(input.git, remote) : configuredQueue
+  const store = createEventStore(input.repo, await remoteUrl(input.git, remote), input.selection)
+  const { history } = await readBranchHistory(store, queue, branch)
+  // An unsubmitted or still-open environment has no merged ref eligible for this retry.
+  if (history === undefined || history.state.status !== "merged") return undefined
+  const change = history.state
+  if (change.commit !== tip || (await refAt(input.git, `refs/heads/${branch}`)) !== tip) {
+    throw new Error(`${branch}@${tip}: released checkout no longer matches its merged submission and local ref`)
+  }
+  const target = await readRemoteCommit(input.git, store.remote, `refs/heads/${queue}`)
+  if (target === undefined) throw new Error(`${branch}: ${store.remote}#${queue} is missing; branch kept`)
+  const log = openLog(join(input.workdir, "logs"))
+  log.write({ kind: "run", command: "env close", config: input.config?.blob, target: `${store.remote}#${queue}` })
+  log.write({ kind: "queue", queue: `${store.remote}#${queue}` })
+  try {
+    let base = tip
+    if (change.componentAuthors?.length) {
+      if (change.merge === undefined) throw new Error(`${branch}: merged history has no component landing commit`)
+      const parent = await refAt(input.git, `${change.merge}^1`)
+      if (parent === undefined) throw new Error(`${branch}: landing ${change.merge} has no readable parent`)
+      base = parent
+    }
+    const authors = await captureMergedComponentAuthors({
+      repo: input.repo,
+      git: input.git,
+      selection: input.selection,
+      branch,
+      change,
+      base,
+      target,
+      log,
+    })
+    return { ...input, branch, change, base, target, store, queue, authors, log }
+  } catch (cause) {
+    log.write({
+      kind: "warning",
+      branch,
+      scope: "local-branch-retirement",
+      reason: `release capture kept: ${String(cause)}`,
+    })
+    log.finish()
+    throw cause
+  }
+}
+
+/** Called only after the native lifecycle has actually released its captured checkout. */
+export async function retireReleasedAuthor(
+  captured: NonNullable<Awaited<ReturnType<typeof captureReleasedAuthor>>>,
+): Promise<void> {
+  const actor = globalThis.process.env.YRD_DEFAULT_SUBMITTER?.trim() || "yrd"
+  try {
+    await retireMergedComponentAuthors({ ...captured, actor })
+    await retireMergedRootAuthor({ ...captured, actor })
+  } catch (cause) {
+    captured.log.write({
+      kind: "warning",
+      branch: captured.branch,
+      scope: "local-branch-retirement",
+      reason: `release retry kept: ${String(cause)}`,
+    })
+    captured.io.stderr(`yrd: closed environment; branch ${captured.branch} kept: ${String(cause)}\n`)
+  }
+}
 
 type AuthorStore = Readonly<{
   path: string

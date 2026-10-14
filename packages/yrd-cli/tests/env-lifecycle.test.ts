@@ -259,36 +259,72 @@ async function world(setup: string, teardown?: string): Promise<World> {
  * @level l3 @consumer yrd env close after a young author environment survives its landing round
  * Existing native merge tests close only aged environments; primitive retry coverage invokes retirement manually.
  */
-it("retries a held merged author branch after successful native environment close", async () => {
-  const w = await world(":")
-  await birthEventQueue(w.work, "main", { localStore: false })
-  const opened = capture(w.work)
-  expect(
-    await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "release-retirement", "--json"], opened.io),
-    opened.stderr(),
-  ).toBe(0)
-  const author = (JSON.parse(opened.stdout()) as { path: string }).path
-  const authorGit = gitIn(author)
-  const branch = "task/release-retirement"
-  await authorGit(["commit", "--quiet", "--allow-empty", "-m", "author work\n\nRefs: @example/29340-release"])
-  const head = (await authorGit(["rev-parse", "HEAD"])).trim()
-  const submitted = capture(author)
-  expect(await runYrdProcess(["bun", "yrd", "submit", "--json"], submitted.io), submitted.stderr()).toBe(0)
-  const landed = capture(w.work)
-  expect(
-    await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], landed.io),
-    landed.stderr(),
-  ).toBe(0)
-  expect(JSON.parse(landed.stdout())).toMatchObject({ merged: [branch] })
-  expect(existsSync(author)).toBe(true)
-  expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
-  const closed = capture(w.work)
-  expect(await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io), closed.stderr()).toBe(0)
-  expect(existsSync(author)).toBe(false)
-  expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe("")
-  const archives = (await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")
-  expect(archives).toContain(head)
-}, 60_000)
+it.each(["released", "held", "advanced", "failed"] as const)(
+  "retries a held merged author branch after native close: %s",
+  async (mode) => {
+    const w = await world(":")
+    await birthEventQueue(w.work, "main", { localStore: false })
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "release-retirement", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const author = (JSON.parse(opened.stdout()) as { path: string }).path
+    const authorGit = gitIn(author)
+    const branch = "task/release-retirement"
+    await authorGit(["commit", "--quiet", "--allow-empty", "-m", "author work\n\nRefs: @example/29340-release"])
+    const head = (await authorGit(["rev-parse", "HEAD"])).trim()
+    const submitted = capture(author)
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--json"], submitted.io), submitted.stderr()).toBe(0)
+    const landed = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], landed.io),
+      landed.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(landed.stdout())).toMatchObject({ merged: [branch] })
+    expect(existsSync(author)).toBe(true)
+    expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
+    const journals = dirname((JSON.parse(landed.stdout()) as { log: string }).log)
+    const beforeClose = new Set(readdirSync(journals))
+    let expectedHead = head
+    if (mode === "advanced") {
+      await authorGit(["commit", "--quiet", "--allow-empty", "-m", "new unsubmitted author work"])
+      expectedHead = (await authorGit(["rev-parse", "HEAD"])).trim()
+    }
+    const closed = capture(w.work)
+    if (mode === "held") closed.io.localBranchProtections = async () => ["fixture external hold"]
+    if (mode === "failed") {
+      // Release admission succeeds before capture, then loses certification before removal.
+      const observed = await realProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+      const permitted = { ...observed, rows: [], coverage: { ...observed.coverage, complete: true, unreadable: [] } }
+      processCensus
+        .mockResolvedValueOnce(permitted)
+        .mockResolvedValueOnce({ ...permitted, coverage: { ...permitted.coverage, complete: false } })
+    }
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io), closed.stderr()).toBe(
+      mode === "failed" ? 2 : 0,
+    )
+    expect(existsSync(author)).toBe(mode === "failed")
+    expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe(
+      mode === "released" ? "" : expectedHead,
+    )
+    const archives = (await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")
+    if (mode === "released") expect(archives).toContain(head)
+    else expect(archives).not.toContain(head)
+    if (mode === "failed") {
+      const records = readdirSync(journals)
+        .filter((file) => file.endsWith(".jsonl") && !beforeClose.has(file))
+        .flatMap((file) =>
+          readFileSync(join(journals, file), "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line) as { kind: string }),
+        )
+      expect(records.some((row) => row.kind === "local-branch-retirement")).toBe(false)
+    }
+  },
+  60_000,
+)
 
 async function addMaterializedDependency(w: World): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-env-submodule-"))
