@@ -366,10 +366,16 @@ it("local retirement keeps protected tips and preserves custody before removing 
   expect(await refAt(w.git, merged.archiveRef)).toBe(w.target)
 
   // Native release and queue cleanup can observe the same completed retirement.
-  expect(await retireLocalBranch(input)).toMatchObject({ outcome: "removed", archiveRef: merged.archiveRef })
+  expect(await retireLocalBranch({ ...input, actor: "@dev/9", date: "2026-10-15" })).toMatchObject({
+    outcome: "removed",
+    archiveRef: merged.archiveRef,
+    detail: `already retired: ${merged.archiveRef} holds ${w.target}; this run deleted no ref`,
+  })
   expect(await refAt(w.git, merged.archiveRef)).toBe(w.target)
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
-  expect(await retireLocalBranch({ ...input, date: "2026-10-15" })).toMatchObject({ outcome: "kept" })
+  expect(await retireLocalBranch({ ...input, branch: "task/absent-without-custody" })).toMatchObject({
+    outcome: "kept",
+  })
   protections = ["held after release"]
   expect(await retireLocalBranch(input)).toMatchObject({ outcome: "kept", reason: "held after release" })
   protections = []
