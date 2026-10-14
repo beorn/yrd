@@ -883,7 +883,7 @@ process.exit(result.exitCode)
         },
       ),
     ).resolves.toBe(0)
-    const result = JSON.parse(run.stdout())
+    const result = JSON.parse(run.stdout()) as { removed: { archiveRef: string }[] }
     expect(result).toMatchObject({ removed: [{ branch, head: tip }], kept: [], failed: [] })
     expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe("")
     expect((await w.git(["rev-parse", result.removed[0].archiveRef])).trim()).toBe(tip)
