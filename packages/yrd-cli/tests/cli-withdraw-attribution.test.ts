@@ -8,7 +8,7 @@
  *           cancelled record (`yrd queue show`, bead close, the /yrd skill)
  * @testonly none
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, afterEach, describe, expect, it } from "vitest"
@@ -111,6 +111,12 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     const work = await queueWithChanges("task/one", "task/on-main", "task/archive-collision")
     const git = gitIn(work)
     const head = (await git(["rev-parse", "refs/heads/task/one"])).trim()
+    // AC2: the public ending must release its exact job, not only its remote ref.
+    const opened = await yrd(work, "env", "open", "--bay", "one", "--json")
+    expect(opened.exitCode, opened.report).toBe(0)
+    const environment = JSON.parse(opened.stdout) as { path: string }
+    expect(existsSync(environment.path)).toBe(true)
+    expect((await gitIn(environment.path)(["rev-parse", "HEAD"])).trim()).toBe(head)
 
     const ran = await yrd(
       work,
@@ -142,6 +148,8 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     expect(receipt.withdrawn[0]?.archive).toBe(archiveRef)
     expect(receipt.withdrawn[0]?.recovery).toContain("git")
     expect(receipt.withdrawn[0]?.recovery).toContain(head)
+    expect(existsSync(environment.path), ran.report).toBe(false)
+    expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/task/one"])).trim()).toBe("")
 
     // Published-main custody needs no extra archive ref.
     await git(["merge", "--quiet", "--ff-only", "task/on-main"])

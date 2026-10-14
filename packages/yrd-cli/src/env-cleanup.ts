@@ -520,12 +520,13 @@ async function fileMergedCloseRequests(
 }
 
 /**
- * Automatic merged-close filing and the sweep share one protection predicate:
- * external live uses (realpath equal to or inside the environment) and a 24-hour
- * opening-time grace. Read external uses once per round before filing; failure
- * keeps automatic candidates with a named reason. Explicit close intent keeps
- * its own lifecycle. Held/standing, busy, dirty, unmerged and open-issue checks
- * still determine eligibility after protection expires.
+ * Automatic merged-close filing and the sweep share external live-use
+ * protection (realpath equal to or inside the environment). Only the sweep
+ * applies the 24-hour opening grace; an exact merged job can close immediately.
+ * Read external uses once per round before filing; failure keeps automatic
+ * candidates with a named reason. Explicit close intent keeps its own lifecycle.
+ * Held/standing, busy, dirty and custody checks still protect terminal jobs;
+ * the general sweep also requires ended issues and merged work.
  * Regressions in tests/queue-core-up.test.ts:
  * - a declared seat cwd survives cleanup without a process holder
  * - a newly opened environment survives cleanup inside the grace window and becomes eligible after it
