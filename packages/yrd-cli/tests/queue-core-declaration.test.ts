@@ -1955,23 +1955,28 @@ describe("a queue is the selected origin branch carrying config", () => {
       ),
       output.stderr(),
     ).toBe(0)
-    const report = JSON.parse(output.stdout()) as { excluded: unknown }
-    // The excluded branch must be NAMED with a reason, not folded into a bare count.
-    expect(report.excluded).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ branch: "task/dev12-26133-sweep-tests", reason: expect.any(String) }),
-      ]),
-    )
+    const report = JSON.parse(output.stdout()) as {
+      excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[]
+      unnumbered: { branch: string; head: string }[]
+    }
+    // The command cannot classify this branch, so it must be NAMED with its head, not folded into the count.
+    expect(report.excluded).toEqual([
+      expect.objectContaining({ repo: expect.any(String), target: 1, unrelated: 0, unnumbered: 1 }),
+    ])
+    expect(report.unnumbered).toEqual([
+      expect.objectContaining({ branch: "task/dev12-26133-sweep-tests", head: expect.any(String) }),
+    ])
   })
 
   /**
-   * @failure A run that retires or previews some branches and excludes others reports a plain
-   *   success (`eligible N, kept M, failed 0`, exit 0), so a caller whose fallback is "if every
-   *   branch was excluded, do something else" takes the wrong path precisely on a partial match (29291).
+   * @failure A run that retires or previews some branches and cannot classify others reports a
+   *   bare success (`eligible N, kept M, failed 0`, exit 0) with only a count, so a caller whose
+   *   fallback is "if every branch was excluded, do something else" takes the wrong path precisely
+   *   on a partial match (29291).
    * @level l3
    * @consumer The closer running yrd drop --issue after durable issue closure
    */
-  it("drop by issue never reports a partial match as a plain success (29291)", async () => {
+  it("drop by issue names the unnumbered branch in a partial match and keeps exit 0 (29291)", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
     await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
@@ -1996,11 +2001,25 @@ describe("a queue is the selected origin branch carrying config", () => {
       ),
       output.stderr(),
     ).toBe(0)
-    const report = JSON.parse(output.stdout()) as { eligible: unknown[]; excluded: unknown; partial?: boolean }
+    const report = JSON.parse(output.stdout()) as {
+      eligible: unknown[]
+      unnumbered: { branch: string; head: string }[]
+    }
     expect(report.eligible.length).toBeGreaterThan(0)
-    // A partial match is called out, and its excluded branches are named — not a plain success.
-    expect(report.partial).toBe(true)
-    expect(JSON.stringify(report)).toContain("task/dev12-26133-sweep-tests")
+    // The unnumbered branch is named; there is no partial flag and the exit stays 0.
+    expect(report.unnumbered).toEqual([
+      expect.objectContaining({ branch: "task/dev12-26133-sweep-tests", head: expect.any(String) }),
+    ])
+    expect(report).not.toHaveProperty("partial")
+    // The human summary names it and says so rather than reporting a bare success.
+    const human = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "drop", "--issue", "26133", "--dry-run", "--submitter", "fixture"], human.io),
+      human.stderr(),
+    ).toBe(0)
+    expect(human.stdout()).toContain("task/dev12-26133-sweep-tests")
+    expect(human.stdout()).toContain("unnumbered")
+    expect(human.stdout()).toContain("(named below)")
   })
 
   /** @failure Root cleanup accepts custody for another branch or tip, ignores an active reopening,

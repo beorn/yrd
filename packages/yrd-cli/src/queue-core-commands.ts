@@ -1410,6 +1410,7 @@ export async function coreQueueCommand(
         const failed: Row[] = []
         const inspected: string[] = []
         const excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[] = []
+        const unnumbered: { repo: string; branch: string; head: string }[] = []
         const log = openLog(join(workdir, "logs"))
         // THE HEADER FIRST, before the walk writes any retirement record. A journal
         // whose first record is not a run or Git row is one the projection reader
@@ -1449,8 +1450,10 @@ export async function coreQueueCommand(
                   : undefined
               if (branch === targetBranch || bound !== numeric) {
                 if (branch === targetBranch) counts.target++
-                else if (bound === undefined) counts.unnumbered++
-                else counts.unrelated++
+                else if (bound === undefined) {
+                  counts.unnumbered++
+                  unnumbered.push({ repo: repository, branch, head })
+                } else counts.unrelated++
               } else candidates.push({ branch, head })
             }
             if (candidates.length > 0) {
@@ -1547,6 +1550,7 @@ export async function coreQueueCommand(
           mode,
           inspected,
           excluded,
+          unnumbered,
           eligible,
           removed,
           kept,
@@ -1560,9 +1564,10 @@ export async function coreQueueCommand(
             excluded
               .map(
                 (row) =>
-                  `\n${row.repo}: excluded ${row.target} target, ${row.unrelated} unrelated, ${row.unnumbered} unnumbered`,
+                  `\n${row.repo}: excluded ${row.target} target, ${row.unrelated} unrelated, ${row.unnumbered} unnumbered${row.unnumbered > 0 ? " (named below)" : ""}`,
               )
               .join("") +
+            unnumbered.map((row) => `\n${row.repo} ${row.branch}: unnumbered (${row.head.slice(0, 12)})`).join("") +
             [...eligible, ...removed, ...kept, ...failed]
               .map(
                 (row) =>
@@ -1600,7 +1605,9 @@ export async function coreQueueCommand(
       const removed: Row[] = []
       const kept: Row[] = []
       const failed: Row[] = []
-      let excluded = 0
+      let excludedTarget = 0
+      let excludedUnrelated = 0
+      const unnumbered: { branch: string; head: string }[] = []
       const dryRun = !local && request.dryRun === true
       try {
         // Inventory once. The date and actor occupy exactly two segments; branch names may contain slashes.
@@ -1608,7 +1615,7 @@ export async function coreQueueCommand(
         for (const [ref, head] of heads) {
           const branch = ref.slice("refs/heads/".length)
           if (branch === config.target.branch || (local && branch !== request.branch)) {
-            excluded++
+            excludedTarget++
             continue
           }
           const history = reading.histories.get(branch)
@@ -1625,7 +1632,8 @@ export async function coreQueueCommand(
           }
           const bound = local ? (change?.issue ?? issue) : branchIssue(branch, change?.issue)
           if (!local && (bound === undefined || issueIdentity(bound) !== issueIdentity(request.issue))) {
-            excluded++
+            if (bound === undefined) unnumbered.push({ branch, head })
+            else excludedUnrelated++
             continue
           }
           if (local && issue !== undefined && bound !== undefined && issueIdentity(bound) !== issueIdentity(issue)) {
@@ -1718,6 +1726,9 @@ export async function coreQueueCommand(
         log.finish()
       }
       const scope = local ? `branch ${request.branch}` : `issue ${issue}`
+      const excluded = local
+        ? excludedTarget
+        : [{ repo: authorRepo, target: excludedTarget, unrelated: excludedUnrelated, unnumbered: unnumbered.length }]
       const report = {
         ...(local ? { branch: request.branch } : { issue }),
         repo: authorRepo,
@@ -1725,6 +1736,7 @@ export async function coreQueueCommand(
         mode,
         examined: heads.size,
         excluded,
+        ...(local ? {} : { unnumbered }),
         eligible,
         removed,
         kept,
@@ -1734,7 +1746,11 @@ export async function coreQueueCommand(
         io,
         options.json,
         report,
-        `${scope}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excluded} target or out-of-scope branches; eligible ${eligible.length}, retired ${removed.length}, kept ${kept.length}, failed ${failed.length}\n${mode}` +
+        (local
+          ? `${scope}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excludedTarget} target or out-of-scope branches; `
+          : `${scope}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excludedTarget} target, ${excludedUnrelated} unrelated${unnumbered.length > 0 ? `, ${unnumbered.length} unnumbered (named below)` : ""}; `) +
+          `eligible ${eligible.length}, retired ${removed.length}, kept ${kept.length}, failed ${failed.length}\n${mode}` +
+          unnumbered.map((row) => `\n${row.branch}: unnumbered (${row.head.slice(0, 12)})`).join("") +
           [...eligible, ...removed, ...kept, ...failed]
             .map((row) => `\n${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`)
             .join(""),
