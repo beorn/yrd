@@ -16,7 +16,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
-import { createLocalEventStore, readRunLog, readStatus } from "@yrd/queue-core"
+import { createLocalEventStore, freshWorktree, readRunLog, readStatus } from "@yrd/queue-core"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -173,6 +173,9 @@ const remoteHead = async (remote: string, branch: string): Promise<string> =>
 it("retires the actual component author after native landing without guessing equal-tip refs", async () => {
   const w = await world()
   const git = gitIn(w.work)
+  // Run from another native checkout: its same component path is not the author store.
+  const queueClient = join(w.root, "queue-client")
+  await freshWorktree(git, w.work, w.base, queueClient, { selection: git.selection })
   const rootBranch = "task/root-delivery"
   const authorBranch = "topic/component-author"
   const child = join(w.work, "vendor/one")
@@ -186,7 +189,8 @@ it("retires the actual component author after native landing without guessing eq
   const tip = (await childGit(["rev-parse", "HEAD"])).trim()
   await childGit(["branch", "unrelated/same-tip", tip])
   const untouched = gitIn(join(w.work, "vendor/two"))
-  const untouchedTip = (await untouched(["rev-parse", "HEAD"])).trim()
+  await untouched(["fetch", "--quiet", "--no-recurse-submodules", child, tip])
+  const untouchedTip = tip
   await untouched(["branch", authorBranch, untouchedTip])
   await git(["add", "vendor/one"])
   await git(["commit", "--quiet", "-m", "deliver component\n\nRefs: 25804"])
@@ -200,7 +204,7 @@ it("retires the actual component author after native landing without guessing eq
   expect(state.componentAuthors).toEqual([{ path: "vendor/one", branch: authorBranch, tip }])
   // Submit observes attached authorship. Detaching afterwards releases this ref without destroying its store.
   await childGit(["checkout", "--quiet", "--detach", tip])
-  const landed = await yrd(w.work, "queue", "run", "--queue", "main", "--json")
+  const landed = await yrd(queueClient, "queue", "run", "--queue", "main", "--json")
   expect(landed.exitCode, landed.report).toBe(0)
   const outcome = JSON.parse(landed.stdout) as { log: string; run: string; merged: string[] }
   expect(outcome.merged).toEqual([rootBranch])

@@ -35,6 +35,7 @@ import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartId
 import { issueResolver } from "./issue-resolver.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup } from "./env-cleanup.ts"
+import { createLandedBranchRetirement } from "./branch-retirement.ts"
 import { sweepRoundOutputInRound } from "./log-retention.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
 import { runAdmission } from "./admission.ts"
@@ -51,7 +52,6 @@ import {
   directMergeLine,
   drop,
   issueFromBranchName,
-  isAncestor,
   seamProcess,
   initial,
   evolve,
@@ -1462,49 +1462,28 @@ export async function coreQueueCommand(
               if (target === undefined) {
                 throw new Error(`registered repository ${repository} has no ${remote}#${targetBranch}`)
               }
-              let remoteRefs: ReadonlyMap<string, string> | undefined
+              const retire = createLandedBranchRetirement({
+                repo: repository,
+                git: childGit,
+                selection,
+                remote,
+                target,
+              })
               for (const { branch, head } of candidates) {
                 const row = { repo: repository, path, branch, head }
-                const pins = landings.filter((pin) => pin.path === path)
-                const pin = pins.find((candidate) => candidate.tip === head)
-                let custody: string | undefined = (await isAncestor(childGit, head, target)) ? target : undefined
-                let proof: { kind: "ancestry" } | { kind: "landing"; event: string; path: string; tip: string } = {
-                  kind: "ancestry",
-                }
-                if (custody === undefined && pin !== undefined) {
-                  // A root gitlink retains no component object. Observe custody at component origin as well.
-                  remoteRefs ??= await listRefs("refs/", createEventStore(repository, remote, selection))
-                  for (const [ref] of remoteRefs) {
-                    const reached = await readRemoteCommit(childGit, remote, ref)
-                    if (reached !== undefined && (await isAncestor(childGit, head, reached))) {
-                      custody = reached
-                      proof = { kind: "landing", ...pin }
-                      break
-                    }
-                  }
-                }
-                if (custody === undefined) {
-                  kept.push({
-                    ...row,
-                    reason: "unreached",
-                    detail: `tip has no main ancestry or origin-retained exact landing pin in ${repository}`,
-                  })
-                  continue
-                }
-                const result = await retireLocalBranch({
-                  repo: repository,
-                  git: childGit,
+                const result = await retire({
+                  path,
+                  landings,
                   branch,
                   tip: head,
                   actor: request.by,
                   issue,
-                  reason: request.reason ?? `landed by ${proof.kind}`,
+                  reason: request.reason,
                   date: new Date().toISOString().slice(0, 10),
                   dryRun: !request.apply,
                   log,
                   protections: () =>
                     io.localBranchProtections?.({ repo: repository, branch, tip: head, issue }) ?? Promise.resolve([]),
-                  disposition: { kind: "landed", target: custody, proof },
                 })
                 const output = {
                   ...row,
