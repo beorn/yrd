@@ -225,6 +225,7 @@ async function captureAuthorRelease(
             throw error
           }
           used = true
+          let attempted = false
           try {
             const current = (await registeredWorktrees(input.git)).find((row) => resolve(row.path) === input.checkout)
             if (current !== undefined) {
@@ -251,19 +252,23 @@ async function captureAuthorRelease(
               throw new Error(`${store.remote}#${queue}: queue custody became unreadable after release`)
             }
             const actor = globalThis.process.env.YRD_DEFAULT_SUBMITTER?.trim() || "yrd"
+            attempted = true
             await retireMergedComponentAuthors({ ...captured, authors, actor })
             const root = await retireMergedRootAuthor({ ...captured, target: freshTarget, actor })
             if (root.outcome !== "removed") {
-              input.io.stderr(`yrd: ${branch}@${tip} kept after release: ${root.detail ?? root.reason}\n`)
+              input.io.stderr(
+                `yrd: ${branch}@${tip} ${root.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept after release"}: ${root.detail ?? root.reason}\n`,
+              )
             }
           } catch (cause) {
-            input.io.stderr(`yrd: released-author retirement kept ${branch}@${tip}: ${String(cause)}\n`)
+            const outcome = attempted ? "retirement incomplete; inspect ref and archive" : "kept before retirement"
+            input.io.stderr(`yrd: ${branch}@${tip} ${outcome}: ${String(cause)}\n`)
             try {
               log.write({
                 kind: "warning",
                 branch,
                 scope: "local-branch-retirement",
-                reason: `release retry kept: ${String(cause)}`,
+                reason: `${outcome}: ${String(cause)}`,
               })
             } catch (journalCause) {
               input.io.stderr(`yrd: ${branch}: release warning journal failed: ${String(journalCause)}\n`)
@@ -463,22 +468,24 @@ export async function retireMergedComponentAuthors(
       })
       if (result.outcome !== "removed") {
         input.io.stderr(
-          `yrd: component ${author.path} ${author.branch}@${author.tip} kept: ${result.detail ?? result.reason}\n`,
+          `yrd: component ${author.path} ${author.branch}@${author.tip} ${result.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept"}: ${result.detail ?? result.reason}\n`,
         )
         input.log.write({
           kind: "warning",
           branch: author.branch,
           scope: "local-branch-retirement",
-          reason: `${author.path} kept: ${result.detail ?? result.reason}`,
+          reason: `${author.path} ${result.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept"}: ${result.detail ?? result.reason}`,
         })
       }
     } catch (cause) {
-      input.io.stderr(`yrd: component ${author.path} ${author.branch}@${author.tip} kept: ${String(cause)}\n`)
+      input.io.stderr(
+        `yrd: component ${author.path} ${author.branch}@${author.tip} retirement incomplete; inspect ref and archive: ${String(cause)}\n`,
+      )
       input.log.write({
         kind: "warning",
         branch: author.branch,
         scope: "local-branch-retirement",
-        reason: `${author.path} ${author.branch}@${author.tip} kept: ${String(cause)}`,
+        reason: `${author.path} ${author.branch}@${author.tip} retirement incomplete; inspect ref and archive: ${String(cause)}`,
       })
     }
   }
