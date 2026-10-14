@@ -2,8 +2,12 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, stat
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
+  createEventStore,
   gitIn,
   readBranchHistory,
+  registeredWorktrees,
+  remoteUrl,
+  selectionFor,
   type Git,
   type GitRunner,
   type GitSelection,
@@ -34,6 +38,7 @@ import {
   stageCloseRequest,
   unstageCloseRequest,
   writeCloseRequest,
+  type EnvCloseRequest,
   type StoredCloseRequest,
 } from "./env-close-requests.ts"
 import { environmentIssues, environmentProvenance } from "./env-cleanup-provenance.ts"
@@ -143,6 +148,7 @@ async function consumeCloseRequests(
                 options: request.options,
                 path: request.path,
                 head: request.head,
+                ...(request.ending === undefined ? {} : { ending: request.ending }),
                 ...(fingerprint === undefined ? {} : { fingerprint }),
                 ...(request.coverageAttempts === undefined ? {} : { coverageAttempts: request.coverageAttempts }),
               },
@@ -265,6 +271,30 @@ async function consumeCloseRequests(
         // The round IS the capable context: an incomplete census here must
         // never file a second request (that is a close nobody asked for).
         "refuse",
+        request.ending === undefined
+          ? undefined
+          : async () => {
+              const ending = request.ending!
+              const store = createEventStore(registry, ending.remote, selectionFor(worktrees))
+              const current = (await readBranchHistory(store, ending.queue, ending.branch)).history?.state
+              if (
+                current?.tip !== ending.event ||
+                current.commit !== request.head ||
+                (current.status !== "merged" && !(current.status === "cancelled" && current.reason === "withdrawn"))
+              ) {
+                throw new Error(
+                  `${request.path}: automatic close expected ${ending.remote}#${ending.queue} ${ending.branch}@${ending.event}/${request.head}; read ${current?.status ?? "no history"}@${current?.tip ?? "no event"}/${current?.commit ?? "no submitted head"}; environment kept`,
+                )
+              }
+              const registration = (await registeredWorktrees(worktrees)).find(
+                (row) => resolve(row.path) === request.path,
+              )
+              if (registration?.branch !== ending.branch || registration.head !== request.head) {
+                throw new Error(
+                  `${request.path}: native worktree registry expected ${ending.branch}@${request.head}; read ${registration?.branch ?? "no registration"}@${registration?.head ?? "no HEAD"}; environment kept`,
+                )
+              }
+            },
       )
     } catch (cause) {
       if (cause instanceof IncompleteCensusError) {
@@ -447,7 +477,9 @@ async function fileTerminalCloseRequests(
     env?: NodeJS.ProcessEnv
     record: (path: string, result: string, why: string) => void
     automaticKeep: (path: string, opening: EnvOpenRecordRead, terminal?: boolean) => string | undefined
-    terminalHead: (branch: string) => Promise<string>
+    terminalHead: (
+      branch: string,
+    ) => Promise<Readonly<{ head: string; ending: NonNullable<EnvCloseRequest["ending"]> }>>
   }>,
 ): Promise<void> {
   if (input.terminal.length === 0) return
@@ -462,7 +494,7 @@ async function fileTerminalCloseRequests(
       continue
     }
     try {
-      const head = await input.terminalHead(row.branch)
+      const { head, ending } = await input.terminalHead(row.branch)
       if (row.head !== head) {
         input.record(row.path, "kept", `terminal ${row.branch}@${head}; environment advanced to ${row.head}`)
         continue
@@ -507,6 +539,7 @@ async function fileTerminalCloseRequests(
         predicate: ENV_CLOSE_PREDICATE,
         options: { noRehome: true },
         head: row.head,
+        ending,
       })
       input.record(
         row.path,
@@ -773,12 +806,20 @@ async function cleanupEnvironments(
       const state = history?.state
       const withdrawn =
         input.withdrawn?.includes(branch) === true && state?.status === "cancelled" && state.reason === "withdrawn"
-      if ((state?.status !== "merged" && !withdrawn) || state?.commit === undefined) {
+      if ((state?.status !== "merged" && !withdrawn) || state?.commit === undefined || state.tip === undefined) {
         throw new Error(
           `${store.remote}#${config.target.branch}: ${branch} has no exact merged or withdrawn submission head`,
         )
       }
-      return state.commit
+      return {
+        head: state.commit,
+        ending: {
+          remote: await remoteUrl(git, config.target.remote),
+          queue: config.target.branch,
+          branch,
+          event: state.tip,
+        },
+      }
     },
   })
   let snapshot: ProcessCwdProjection

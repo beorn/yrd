@@ -924,6 +924,8 @@ export async function closeEnvironment(
    * and filing a request from it would close a path nobody asked for.
    */
   onIncompleteCensus: CloseAdmissionMode = "delegate",
+  /** Internal conditional-intent check; the package entry never forwards it. */
+  beforeRemove?: () => Promise<void>,
 ): Promise<YrdCliExitCode> {
   const root = requireRepository(io)
   const selection = await resolveGitSelection(root)
@@ -1067,6 +1069,7 @@ export async function closeEnvironment(
       unknownNotifyEvents: (unknown) => warnUnknownNotifyEvents(path, "env close", unknown, io),
     },
   )
+  await beforeRemove?.()
   const retirement = await prepareAuthorRelease(path, io)
   if (retirement.kind === "unreadable") {
     io.stderr(`yrd: ${retirement.reason}; read ${retirement.reads.join("; ")}; close continues\n`)
@@ -1108,6 +1111,7 @@ export async function closeEnvironment(
     // that cannot tell what this one did. Refuse loudly and preserve instead.
     throw uncertified(path, recheck, "after teardown")
   }
+  await beforeRemove?.()
   // 29073 (@cto ruling): with --preserve the no-submodule path takes the SAME git-super worktree
   // remove as the submodule path, so the verified-ref dirt gate has ONE implementation in ONE
   // process and yrd never re-derives it. The cost is an empty or absent modules retention and one

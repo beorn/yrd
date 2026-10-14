@@ -41,6 +41,8 @@ export type EnvCloseRequest = Readonly<{
   predicate: typeof ENV_CLOSE_PREDICATE
   options: EnvCloseRequestOptions
   head: string
+  /** Conditional automatic intent, never authority: the consumer freshly reads this exact ending before closing. */
+  ending?: Readonly<{ remote: string; queue: string; branch: string; event: string }>
 }>
 
 /** What is stored on disk: the requester's intent plus the consumer's retry bound. */
@@ -89,10 +91,17 @@ export function writeCloseRequest(
           `refusing to reuse a file this process does not own; inspect it before retrying`,
       )
     }
-    if (standing.path !== request.path || !sameOptions(standing.options, request.options)) {
+    if (
+      standing.path !== request.path ||
+      !sameOptions(standing.options, request.options) ||
+      standing.ending?.remote !== request.ending?.remote ||
+      standing.ending?.queue !== request.ending?.queue ||
+      standing.ending?.branch !== request.ending?.branch ||
+      standing.ending?.event !== request.ending?.event
+    ) {
       throw new Error(
         `a close request for ${standing.path} already stands at ${file} from ${standing.requester} (${standing.at}) ` +
-          `with options ${JSON.stringify(standing.options)}; this request asks for ${JSON.stringify(request.options)}; ` +
+          `with options ${JSON.stringify(standing.options)} and ending ${JSON.stringify(standing.ending)}; this request asks for ${JSON.stringify(request.options)} and ending ${JSON.stringify(request.ending)}; ` +
           `resolve the standing request before filing another`,
       )
     }
@@ -260,6 +269,24 @@ function parseCloseRequest(parsed: unknown, file: string): StoredCloseRequest {
   if (attempts !== undefined && (typeof attempts !== "number" || !Number.isSafeInteger(attempts) || attempts < 0)) {
     throw bad("coverageAttempts must be a non-negative safe integer")
   }
+  let ending: EnvCloseRequest["ending"]
+  if (raw.ending !== undefined) {
+    if (typeof raw.ending !== "object" || raw.ending === null) throw bad("ending must be an object")
+    const value = raw.ending as Record<string, unknown>
+    if (
+      typeof value.remote !== "string" ||
+      value.remote === "" ||
+      typeof value.queue !== "string" ||
+      value.queue === "" ||
+      typeof value.branch !== "string" ||
+      value.branch === "" ||
+      typeof value.event !== "string" ||
+      value.event === ""
+    ) {
+      throw bad("ending remote, queue, branch and event must be non-empty strings")
+    }
+    ending = { remote: value.remote, queue: value.queue, branch: value.branch, event: value.event }
+  }
   return {
     name: text("name"),
     path: text("path"),
@@ -273,6 +300,7 @@ function parseCloseRequest(parsed: unknown, file: string): StoredCloseRequest {
       ...(rawOptions.preserve === undefined ? {} : { preserve: rawOptions.preserve }),
     },
     head: text("head"),
+    ...(ending === undefined ? {} : { ending }),
     ...(attempts === undefined ? {} : { coverageAttempts: attempts }),
   }
 }
