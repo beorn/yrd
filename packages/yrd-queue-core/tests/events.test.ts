@@ -2083,7 +2083,6 @@ describe("the queue-format boundary", () => {
       type: "cancelled",
       at: new Date(),
       commit: head,
-      by: "@dev/2",
       reason: "dropped",
     })
     expect((await readEventOps(location, gitIn(store.repo), "lab", head, { knownQueue })).stop).toBeUndefined()
