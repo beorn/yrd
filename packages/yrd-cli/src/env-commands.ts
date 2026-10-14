@@ -793,9 +793,10 @@ export function parseWorktreePreserveReceipt(stdout: string, cli: string): Workt
   let parsed: unknown
   try {
     parsed = JSON.parse(stdout)
-  } catch {
+  } catch (error) {
     throw new Error(
       `env close --preserve: the worktree preserve CLI ${cli} printed no JSON receipt: ${stdout || "(empty stdout)"}; the environment was NOT removed`,
+      { cause: error },
     )
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
