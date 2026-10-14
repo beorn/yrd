@@ -2384,7 +2384,10 @@ describe("a queue is the selected origin branch carrying config", () => {
     )
     const records = readRunLog(dirname(outcome.log), outcome.run)
     const retirement = records.find((row) => row.kind === "local-branch-retirement" && row.branch === branch)
-    expect(retirement).toMatchObject({ outcome: kind === "pool" ? "kept" : "removed", branch, head })
+    expect(
+      retirement,
+      JSON.stringify(records.filter((row) => row.kind === "local-branch-retirement" && row.branch === branch)),
+    ).toMatchObject({ outcome: kind === "pool" ? "kept" : "removed", branch, head })
     if (kind === "bay") {
       const archive = retirement!.archive
       if (typeof archive !== "string") throw new Error("retirement journal omitted its archive ref")
