@@ -546,6 +546,54 @@ describe("ADR-0016 event fold", () => {
     expect(knownFields).toEqual(evolve(initial, opened))
   })
 
+  /** @failure Resubmission inherits another submit's component author, or an ending loses its author evidence.
+   * @level l0 @consumer component branch retirement after landing or release of a hold
+   * The native landing test does not resubmit a branch or decode malformed persisted metadata.
+   */
+  it("retains component authors through an ending and clears them on resubmission", () => {
+    const authors = [{ path: "vendor/child", branch: "topic/actual-author", tip: B }]
+    const written = changeInput("opened", {
+      queueTip: A,
+      at: new Date("2026-09-22T14:00:00.000Z"),
+      commit: B,
+      by: "fixture",
+      componentAuthors: authors,
+    })
+    const opened = evolve(initial, event("opened", A, written.props, [B]))
+    expect(opened).toHaveProperty("componentAuthors", authors)
+    const ended = evolve(opened, event("cancelled", B, [["Reason", "resubmitted"]]))
+    expect(ended).toHaveProperty("componentAuthors", authors)
+    expect(evolve(ended, event("opened", A, [["Commit", B]], [B]))).not.toHaveProperty("componentAuthors")
+  })
+
+  /** @failure Malformed persisted author metadata is accepted as deletion authority.
+   * @level l0 @consumer readers of the optional Component-Authors trailer
+   */
+  it.each([
+    "not-json",
+    "null",
+    JSON.stringify([{ path: "../child", branch: "topic/author", tip: B }]),
+    JSON.stringify([{ path: "vendor/child", branch: "topic/author", tip: "short" }]),
+    JSON.stringify([{ path: "vendor/child", branch: "../author", tip: B }]),
+    JSON.stringify([{ path: "vendor/child", tip: B }]),
+    JSON.stringify(Array(2).fill({ path: "vendor/child", branch: "topic/author", tip: B })),
+  ])("refuses malformed component authors: %s", (value) => {
+    expect(() =>
+      evolve(
+        initial,
+        event(
+          "opened",
+          A,
+          [
+            ["Commit", B],
+            ["Component-Authors", value],
+          ],
+          [B],
+        ),
+      ),
+    ).toThrow(/Component-Authors/)
+  })
+
   it("constructs required Yrd trailers and kept commits for a write", () => {
     const at = new Date("2026-09-22T14:00:00.000Z")
     const opened = changeInput("opened", { queueTip: A, at, commit: B, issue: "25040", by: "@dev/2" })

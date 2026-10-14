@@ -16,7 +16,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
-import { readRunLog } from "@yrd/queue-core"
+import { createLocalEventStore, readRunLog, readStatus } from "@yrd/queue-core"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -192,6 +192,12 @@ it("retires the actual component author after native landing without guessing eq
   await git(["commit", "--quiet", "-m", "deliver component\n\nRefs: 25804"])
   const submitted = await yrd(w.work, "submit", "--submitter", "fixture", "--json")
   expect(submitted.exitCode, submitted.report).toBe(0)
+  const state = await readStatus(
+    { ...createLocalEventStore(w.work, git.selection, git.backend), remote: "origin" },
+    "main",
+    rootBranch,
+  )
+  expect(state.componentAuthors).toEqual([{ path: "vendor/one", branch: authorBranch, tip }])
   // Submit observes attached authorship. Detaching afterwards releases this ref without destroying its store.
   await childGit(["checkout", "--quiet", "--detach", tip])
   const landed = await yrd(w.work, "queue", "run", "--queue", "main", "--json")
