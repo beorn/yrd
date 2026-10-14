@@ -1582,7 +1582,16 @@ export async function coreQueueCommand(
         throw new Error("drop --local requires a non-target branch and a full expected commit oid")
       }
       const eventStore = createEventStore(authorRepo, await remoteUrl(git, config.target.remote), selection)
-      const reading = await readEventQueueWithChanges(eventStore, config.target.branch)
+      const reading = local
+        ? await Promise.all([
+            readEventQueue(eventStore, config.target.branch),
+            readBranchHistory(eventStore, config.target.branch, request.branch, { invalid: "return" }),
+          ]).then(([queue, selected]) => ({
+            queue,
+            histories: new Map(selected.history === undefined ? [] : [[request.branch, selected.history]]),
+            invalid: new Map(selected.invalid === undefined ? [] : [[request.branch, selected.invalid]]),
+          }))
+        : await readEventQueueWithChanges(eventStore, config.target.branch)
       const heads = await listRefs("refs/heads/", createLocalEventStore(authorRepo, selection))
       if (local && !heads.has(`refs/heads/${request.branch}`)) {
         throw new Error(`drop --local: refs/heads/${request.branch} is absent in ${authorRepo}; nothing was removed`)
