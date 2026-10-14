@@ -899,7 +899,11 @@ export async function coreQueueCommand(
    * cannot be read — is stuck, has no change to stop the line on, and has
    * already said so.
    */
-  type ReadFailedRound = Readonly<{ kind: "read-failed"; ref: string; error: QueueAuthorityUnreadable }>
+  type ReadFailedRound = Readonly<{
+    kind: "read-failed"
+    ref: string
+    error: QueueAuthorityUnreadable | EventRefsMoved
+  }>
   type RetryExhaustedRound = Readonly<{ kind: "retry-exhausted"; error: QueueRunEventRetryExhausted }>
   type LegacyOverrideRound = Readonly<{ kind: "legacy-override-present"; error: LegacyOverridePresent }>
   const oneRound = async (
@@ -1013,6 +1017,13 @@ export async function coreQueueCommand(
       if (error instanceof QueueRunEventRetryExhausted && request.command === "up") {
         io.stderr(`yrd: ${error.message}; the service retries at its next interval\n`)
         return { kind: "retry-exhausted", error }
+      }
+      // A refused inventory has blamed no change (29381, ADR-0015). Reuse
+      // the service's read-failure lifecycle; a stable queue key counts races
+      // even when a different subset of change refs moves on the next attempt.
+      if (error instanceof EventRefsMoved && request.command === "up") {
+        io.stderr(`yrd: ${error.message}; the service retries at its next interval\n`)
+        return { kind: "read-failed", ref: queueRef(config.target.branch), error }
       }
       if (error instanceof QueueAuthorityUnreadable && error.publicationError !== undefined) {
         io.stderr(
@@ -3493,7 +3504,11 @@ export async function coreQueueCommand(
               continue
             }
             const message =
-              ran.error.readError instanceof Error ? ran.error.readError.message : String(ran.error.readError)
+              ran.error instanceof EventRefsMoved
+                ? ran.error.message
+                : ran.error.readError instanceof Error
+                  ? ran.error.readError.message
+                  : String(ran.error.readError)
             readFailure = {
               ref: ran.ref,
               error: message,

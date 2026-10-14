@@ -4884,6 +4884,115 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     }
   }, 30_000)
 
+  /** @failure 29381: a real event ref move between inventory and fetch exited the service with 2.
+   * @level l2 @consumer Hab supervisor and the submitter waiting for a fresh queue judgment
+   */
+  it.each([
+    ["up", "ref-race"],
+    ["run", "ref-race"],
+    ["up", "unrelated-error"],
+  ] as const)(
+    "%s handles an inventory %s without weakening genuine stops",
+    async (command, fault) => {
+      const w = await world()
+      const branches = ["task/inventory-a", "task/inventory-b"]
+      const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+      const remote = join(dirname(w.work), "remote.git")
+      const tips: { ref: string; before: string; after: string }[] = []
+      for (const branch of branches) {
+        const head = await oneChange(w, branch)
+        const queued = await readStatus(store, "main", branch)
+        if (queued.tip === undefined) throw new Error("submitted fixture has no event tip")
+        const after = await appendChangeEvent(store, "main", branch, queued.tip, {
+          type: "verifying",
+          at: new Date(),
+          commit: head,
+        })
+        const ref = changesRef("main", branch)
+        await w.git(["--git-dir", remote, "update-ref", ref, queued.tip, after])
+        tips.push({ ref, before: queued.tip, after })
+      }
+      const originalBackend = gitomic.createShellBackend
+      let moves = 0
+      using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
+        const backend = originalBackend(options)
+        const fetch = backend.fetchRefs
+        if (fetch === undefined) throw new Error("fixture needs Gitomic native ref acquisition")
+        return {
+          ...backend,
+          fetchRefs: async (...args: Parameters<typeof fetch>) => {
+            const [, refs] = args
+            if (moves < 4 && refs.includes(tips[0]!.ref)) {
+              if (fault === "unrelated-error") throw new Error("unrelated inventory read failure")
+              const tip = tips[moves % tips.length]!
+              const forward = Math.floor(moves / tips.length) % 2 === 0
+              await w.git([
+                "--git-dir",
+                remote,
+                "update-ref",
+                tip.ref,
+                forward ? tip.after : tip.before,
+                forward ? tip.before : tip.after,
+              ])
+              moves++
+            }
+            return fetch(...args)
+          },
+        }
+      })
+      const stop = new AbortController()
+      const deadline = setTimeout(() => stop.abort(), 20_000)
+      const run = capture(w.work)
+      const seen: QueueHealthDocument[] = []
+      const outcomes: QueueRunOutcome[] = []
+      let exit: YrdCliExitCode
+      try {
+        exit = await coreQueueCommand(
+          w.work,
+          run.io,
+          {
+            command,
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterHealth: (document) => {
+              seen.push(document)
+            },
+            afterRound: (outcome) => {
+              outcomes.push(outcome)
+              if (branches.every((branch) => outcomes.some((round) => round.merged.includes(branch)))) stop.abort()
+            },
+          },
+          { json: true, workdir: w.workdir },
+        )
+      } finally {
+        clearTimeout(deadline)
+        stop.abort()
+      }
+      const diagnostic = `${run.stdout()}\n${run.stderr()}`
+      expect(diagnostic).toContain(fault === "ref-race" ? "event refs moved" : "unrelated inventory read failure")
+      if (command !== "up" || fault === "unrelated-error") {
+        expect(exit, diagnostic).toBe(2)
+        expect(outcomes).toHaveLength(0)
+        return
+      }
+      expect(exit, `${diagnostic}\nactual native ref moves: ${moves}`).toBe(0)
+      expect(moves).toBe(4)
+      const failed = seen.filter((document) => document.facts?.roundReadFailure !== undefined)
+      expect(failed.map((document) => document.facts?.roundReadFailure)).toEqual([
+        { ref: queueRef("main"), error: expect.stringContaining(tips[0]!.ref), count: 1 },
+        { ref: queueRef("main"), error: expect.stringContaining(tips[1]!.ref), count: 2 },
+        { ref: queueRef("main"), error: expect.stringContaining(tips[0]!.ref), count: 3 },
+        { ref: queueRef("main"), error: expect.stringContaining(tips[1]!.ref), count: 4 },
+      ])
+      expect(failed.map((document) => document.state)).toEqual(["healthy", "healthy", "unhealthy", "unhealthy"])
+      expect(seen.at(-1)?.facts?.roundReadFailure).toBeUndefined()
+      expect(outcomes.flatMap((outcome) => outcome.merged)).toEqual(expect.arrayContaining(branches))
+      expect(run.stderr()).toContain(tips[0]!.ref)
+      expect(run.stderr()).toContain(tips[1]!.ref)
+    },
+    30_000,
+  )
+
   /** @failure 25708: three unreadable publication witnesses killed the service while its health stayed stale.
    * @level l2 @consumer Hab health probe and queue list/watch reader
    */
