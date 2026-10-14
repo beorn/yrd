@@ -16,6 +16,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
+import { readRunLog } from "@yrd/queue-core"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -162,6 +163,52 @@ const refs = async (remote: string): Promise<string> =>
 
 const remoteHead = async (remote: string, branch: string): Promise<string> =>
   (await gitIn(remote)(["rev-parse", `refs/heads/${branch}`])).trim()
+
+/**
+ * @failure A native root landing leaves the submitted component author ref behind or deletes an unrelated equal-tip ref.
+ * @level l3
+ * @consumer automatic archive-first component retirement after ordinary submit
+ * Existing pin-only carriers have no attached author ref; manual component drop does not exercise the landing call.
+ */
+it("retires the actual component author after native landing without guessing equal-tip refs", async () => {
+  const w = await world()
+  const git = gitIn(w.work)
+  const rootBranch = "task/root-delivery"
+  const authorBranch = "topic/component-author"
+  const child = join(w.work, "vendor/one")
+  const childGit = gitIn(child)
+  await git(["checkout", "--quiet", "-b", rootBranch])
+  await identity(child)
+  await childGit(["fetch", "--quiet", "origin", "main"])
+  await childGit(["checkout", "--quiet", "-b", authorBranch, "FETCH_HEAD"])
+  writeFileSync(join(child, "one.txt"), "authored component\n")
+  await childGit(["commit", "--quiet", "-am", "component work"])
+  const tip = (await childGit(["rev-parse", "HEAD"])).trim()
+  await childGit(["branch", "unrelated/same-tip", tip])
+  const untouched = gitIn(join(w.work, "vendor/two"))
+  const untouchedTip = (await untouched(["rev-parse", "HEAD"])).trim()
+  await untouched(["branch", authorBranch, untouchedTip])
+  await git(["add", "vendor/one"])
+  await git(["commit", "--quiet", "-m", "deliver component\n\nRefs: 25804"])
+  const submitted = await yrd(w.work, "submit", "--submitter", "fixture", "--json")
+  expect(submitted.exitCode, submitted.report).toBe(0)
+  // Submit observes attached authorship. Detaching afterwards releases this ref without destroying its store.
+  await childGit(["checkout", "--quiet", "--detach", tip])
+  const landed = await yrd(w.work, "queue", "run", "--queue", "main", "--json")
+  expect(landed.exitCode, landed.report).toBe(0)
+  const outcome = JSON.parse(landed.stdout) as { log: string; run: string; merged: string[] }
+  expect(outcome.merged).toEqual([rootBranch])
+  expect((await childGit(["for-each-ref", "--format=%(objectname)", `refs/heads/${authorBranch}`])).trim()).toBe("")
+  expect((await childGit(["rev-parse", "refs/heads/unrelated/same-tip"])).trim()).toBe(tip)
+  expect((await untouched(["rev-parse", `refs/heads/${authorBranch}`])).trim()).toBe(untouchedTip)
+  const records = readRunLog(join(outcome.log, ".."), outcome.run)
+  const retirement = records.find(
+    (row) => row.kind === "local-branch-retirement" && row.branch === authorBranch && row.head === tip,
+  )
+  expect(retirement).toMatchObject({ outcome: "removed", branch: authorBranch, head: tip })
+  if (typeof retirement?.archive !== "string") throw new Error("component retirement omitted archive custody")
+  expect((await childGit(["rev-parse", retirement.archive])).trim()).toBe(tip)
+}, 60_000)
 
 async function assertCarrier(
   w: World,

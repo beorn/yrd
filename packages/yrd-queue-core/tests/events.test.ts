@@ -524,6 +524,28 @@ describe("ADR-0016 event fold", () => {
     ).toThrow(/Gitlinks/)
   })
 
+  /** @failure An older pinned reader rejects the new optional author trailer or changes existing change facts.
+   * @level l0 @consumer mixed-version Yrd readers during the component-retirement landing window
+   * Existing landing-pin cases exercise known trailers, not an unknown optional opened trailer.
+   */
+  it("accepts optional component authors without changing the base opened fold", () => {
+    const opened = event("opened", A, [["Commit", B]], [B])
+    const attributed = {
+      ...opened,
+      props: [
+        ...opened.props,
+        [
+          "Component-Authors",
+          JSON.stringify([{ path: "vendor/child", branch: "topic/actual-author", tip: B }]),
+        ] as const,
+      ],
+    }
+    const { componentAuthors: _newFields, ...knownFields } = evolve(initial, attributed) as ReturnType<
+      typeof evolve
+    > & { componentAuthors?: unknown }
+    expect(knownFields).toEqual(evolve(initial, opened))
+  })
+
   it("constructs required Yrd trailers and kept commits for a write", () => {
     const at = new Date("2026-09-22T14:00:00.000Z")
     const opened = changeInput("opened", { queueTip: A, at, commit: B, issue: "25040", by: "@dev/2" })

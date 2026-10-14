@@ -39,6 +39,7 @@ import {
 import { workdirOf } from "../src/workdir.ts"
 import { environmentIssues, environmentProvenance } from "../src/env-cleanup-provenance.ts"
 import type { YrdCliIO } from "../src/types.ts"
+import { birthEventQueue } from "./support/event-queue-birth.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
 process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
@@ -253,6 +254,41 @@ async function world(setup: string, teardown?: string): Promise<World> {
   await git(["push", "--quiet", "origin", "main"])
   return { git, work }
 }
+
+/** @failure A merged branch kept while checked out receives no retirement retry after native close releases it.
+ * @level l3 @consumer yrd env close after a young author environment survives its landing round
+ * Existing native merge tests close only aged environments; primitive retry coverage invokes retirement manually.
+ */
+it("retries a held merged author branch after successful native environment close", async () => {
+  const w = await world(":")
+  await birthEventQueue(w.work, "main", { localStore: false })
+  const opened = capture(w.work)
+  expect(
+    await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "release-retirement", "--json"], opened.io),
+    opened.stderr(),
+  ).toBe(0)
+  const author = (JSON.parse(opened.stdout()) as { path: string }).path
+  const authorGit = gitIn(author)
+  const branch = "task/release-retirement"
+  await authorGit(["commit", "--quiet", "--allow-empty", "-m", "author work\n\nRefs: @example/29340-release"])
+  const head = (await authorGit(["rev-parse", "HEAD"])).trim()
+  const submitted = capture(author)
+  expect(await runYrdProcess(["bun", "yrd", "submit", "--json"], submitted.io), submitted.stderr()).toBe(0)
+  const landed = capture(w.work)
+  expect(
+    await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], landed.io),
+    landed.stderr(),
+  ).toBe(0)
+  expect(JSON.parse(landed.stdout())).toMatchObject({ merged: [branch] })
+  expect(existsSync(author)).toBe(true)
+  expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
+  const closed = capture(w.work)
+  expect(await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io), closed.stderr()).toBe(0)
+  expect(existsSync(author)).toBe(false)
+  expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe("")
+  const archives = (await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")
+  expect(archives).toContain(head)
+}, 60_000)
 
 async function addMaterializedDependency(w: World): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-env-submodule-"))
