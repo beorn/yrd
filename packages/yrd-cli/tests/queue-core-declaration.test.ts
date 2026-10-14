@@ -1985,6 +1985,35 @@ describe("a queue is the selected origin branch carrying config", () => {
       ],
     })
     expect((await git(["rev-parse", "refs/heads/task/28791-advanced"])).trim()).toBe(advanced)
+    const requested = capture(repo)
+    expect(
+      await runYrdProcess(
+        [
+          "bun",
+          "yrd",
+          "drop",
+          "task/28791-advanced",
+          "--local",
+          "--tip",
+          saved.get("task/28791-advanced")!,
+          "--submitter",
+          "fixture",
+          "--json",
+        ],
+        requested.io,
+      ),
+      requested.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(requested.stdout())).toMatchObject({
+      removed: [],
+      kept: [
+        {
+          branch: "task/28791-advanced",
+          reason: "advanced",
+          detail: "current tip " + advanced + " differs from requested tip " + saved.get("task/28791-advanced"),
+        },
+      ],
+    })
     // AC5: the command's journal must remain readable by the existing projection reader.
     // Custody assertions alone miss a writer that omits the required run header.
     const logs = join(await workdirOf(git, { cwd: repo }), "logs")
