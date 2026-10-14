@@ -2075,17 +2075,6 @@ describe("the queue-format boundary", () => {
     const knownQueue = await readEventQueue(location, "lab")
     const stop = (await readEventOps(location, gitIn(store.repo), "lab", head, { knownQueue })).stop
     expect(stop).toMatchObject({ sha: cutover.events[0]?.id, change: { branch, head } })
-    // Reusing queue ops must not freeze the stuck-stop conclusion when only its change advances.
-    const change = await openEvents({ ...store, ref: changesRef("lab", branch) })
-    const stuckTip = await change.head()
-    if (stuckTip === null) throw new Error("fixture stuck change is absent")
-    await appendChangeEvent(location, "lab", branch, stuckTip, {
-      type: "cancelled",
-      at: new Date(),
-      commit: head,
-      reason: "dropped",
-    })
-    expect((await readEventOps(location, gitIn(store.repo), "lab", head, { knownQueue })).stop).toBeUndefined()
     await writeQueueEvent(location, "lab", {
       type: "resumed",
       by: "@chief",
@@ -2093,6 +2082,30 @@ describe("the queue-format boundary", () => {
       at: new Date("2026-09-22T14:01:00.000Z"),
     })
     expect((await readEventOps(location, gitIn(store.repo), "lab", head)).stop).toBeUndefined()
+    // Reusing queue ops must not freeze the stuck-stop conclusion when only its change advances.
+    const change = await openEvents({ ...store, ref: changesRef("lab", branch) })
+    const stuckTip = await change.head()
+    if (stuckTip === null) throw new Error("fixture stuck change is absent")
+    await writeQueueEvent(location, "lab", {
+      type: "paused",
+      by: "@chief",
+      reason: "stuck again",
+      cause: "stuck",
+      change: { branch, head, event: stuckTip },
+      at: new Date(),
+    })
+    const paused = await readEventQueue(location, "lab")
+    expect((await readEventOps(location, gitIn(store.repo), "lab", head, { knownQueue: paused })).stop).toMatchObject({
+      cause: "stuck",
+      change: { branch, head },
+    })
+    await appendChangeEvent(location, "lab", branch, stuckTip, {
+      type: "cancelled",
+      at: new Date(),
+      commit: head,
+      reason: "dropped",
+    })
+    expect((await readEventOps(location, gitIn(store.repo), "lab", head, { knownQueue: paused })).stop).toBeUndefined()
   })
 
   // @failure 25041: a caller could mistake any earlier resume for a release of the latest stuck change.
