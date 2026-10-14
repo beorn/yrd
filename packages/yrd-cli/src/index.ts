@@ -10,3 +10,5 @@ export function closeEnvironment(operand: string, options: EnvCloseOptions, io: 
 export { YRD_VERSION, formatYrdRuntimeVersion } from "./version.ts"
 export type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 export { ownedQueueClone, resolveQueueLocation, type QueueLocation } from "./queue-location.ts"
+
+export { prepareAuthorRelease, type AuthorReleaseResult, type AuthorRelease } from "./branch-retirement.ts"

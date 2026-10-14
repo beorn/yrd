@@ -95,6 +95,9 @@ describe("the Yrd Gitomic boundary", () => {
       // (`createRef`, 27510: `update-ref --stdin create`, so an existing anchor is never moved), and the
       // remote-answers probe.
       "reference.ts": ["fetch", "update-ref", "fetch", "update-ref", "ls-remote"],
+      // CTO4500c62e moves the existing CLI default-branch reader here unchanged:
+      // this advertisement reads remote HEAD, never a queue event or change ref.
+      "remote.ts": ["ls-remote"],
       "settled-base.ts": ["fetch"],
       // Submit's two object-only fetches: collect an absent component pin (27091)
       // and model moved gitlinks during compose verification (26754).
@@ -102,7 +105,7 @@ describe("the Yrd Gitomic boundary", () => {
       "submit.ts": ["fetch", "fetch"],
     })
 
-    for (const name of ["git.ts", "pause.ts", "remote.ts", "withdraw.ts"]) {
+    for (const name of ["git.ts", "pause.ts", "withdraw.ts"]) {
       expect(refCommands(source(name)), name).toEqual([])
     }
 

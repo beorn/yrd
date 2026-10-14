@@ -82,6 +82,7 @@ export const EVENT_TRAILERS = {
   run: "Run",
   floors: "Floors",
   gitlinks: "Gitlinks",
+  componentAuthors: "Component-Authors",
 } as const
 const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 /** Only the run path that atomically publishes the target may write merged with this producer. */
@@ -154,6 +155,9 @@ function assertChangeEventType(type: string): asserts type is ChangeEventType {
   }
 }
 
+/** Submit-time authorship, independent of the component pin eventually composed at land. */
+export type ComponentAuthor = Readonly<{ path: string; branch: string; tip: string }>
+
 export type EventChange = Readonly<{
   status: ChangeStatus
   /** The submitted commit, or the last head when a branch was dropped before any submit. */
@@ -162,6 +166,8 @@ export type EventChange = Readonly<{
   merge?: string
   /** Exact component pins from this ending's published root; absent on old merged events. */
   landedGitlinks?: readonly CommitGitlink[]
+  /** Exact attached child branches observed at submit; absent on old or unattributed submissions. */
+  componentAuthors?: readonly ComponentAuthor[]
   /** The last verified composition, kept by its verifying event. */
   candidate?: string
   issue?: string
@@ -250,6 +256,7 @@ type ChangeInputDetails = Readonly<{
   notice?: NoticeWrite
   run?: string
   landedGitlinks?: readonly CommitGitlink[]
+  componentAuthors?: readonly ComponentAuthor[]
 }>
 
 /** Landing proof is deletion authority, so malformed persisted pins must never become an empty list. */
@@ -287,6 +294,48 @@ function readLandedGitlinks(event: EventShape): readonly CommitGitlink[] | undef
   } catch (cause) {
     throw new Error(
       `event ${event.id}: malformed Gitlinks: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    )
+  }
+}
+
+function checkedComponentAuthors(value: unknown): readonly ComponentAuthor[] {
+  try {
+    if (!Array.isArray(value)) throw new TypeError("must be a JSON array")
+    const authors = value.map((entry: unknown) => {
+      if (
+        typeof entry !== "object" ||
+        entry === null ||
+        !("path" in entry) ||
+        !("branch" in entry) ||
+        !("tip" in entry)
+      ) {
+        throw new TypeError("needs path, branch and tip on every author")
+      }
+      if (typeof entry.branch !== "string") throw new TypeError("needs a branch name")
+      assertBranch(entry.branch)
+      return { path: entry.path, branch: entry.branch, target: entry.tip }
+    })
+    // Authorship uses the same strict root-relative paths and full object ids as landing proof.
+    return checkedLandedGitlinks(authors).map(({ path, target }, index) => {
+      const author = authors[index]
+      if (author === undefined) throw new TypeError(`missing author at ${path}`)
+      return { path, branch: author.branch, tip: target }
+    })
+  } catch (cause) {
+    throw new TypeError(`Component-Authors: ${cause instanceof Error ? cause.message : String(cause)}`, { cause })
+  }
+}
+
+function readComponentAuthors(event: EventShape): readonly ComponentAuthor[] | undefined {
+  const value = prop(event, EVENT_TRAILERS.componentAuthors)
+  if (value === undefined) return undefined
+  if (event.type !== "opened") throw new Error(`event ${event.id}: Component-Authors: belongs on opened`)
+  try {
+    return checkedComponentAuthors(JSON.parse(value))
+  } catch (cause) {
+    throw new Error(
+      `event ${event.id}: malformed Component-Authors: ${cause instanceof Error ? cause.message : String(cause)}`,
       { cause },
     )
   }
@@ -419,6 +468,10 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   if (details.landedGitlinks !== undefined) {
     if (type !== "merged") throw new TypeError("Gitlinks: belongs on merged")
     props.push([EVENT_TRAILERS.gitlinks, JSON.stringify(checkedLandedGitlinks(details.landedGitlinks))])
+  }
+  if (details.componentAuthors !== undefined) {
+    if (type !== "opened") throw new TypeError("Component-Authors: belongs on opened")
+    props.push([EVENT_TRAILERS.componentAuthors, JSON.stringify(checkedComponentAuthors(details.componentAuthors))])
   }
   props.push(...evidenceProps(type, details))
   return {
@@ -666,6 +719,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
   }
   const at = requireCause(event)
   const landedGitlinks = readLandedGitlinks(event)
+  const componentAuthors = readComponentAuthors(event)
   checkedRows(event)
   const recipients = event.props.filter(([key]) => key === EVENT_TRAILERS.recipient)
   if (recipients.length > 1) throw new Error(`event ${event.id} repeats ${EVENT_TRAILERS.recipient}:`)
@@ -699,6 +753,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         admissionWarning: _previousAdmissionWarning,
         run: _previousRun,
         landedGitlinks: _previousGitlinks,
+        componentAuthors: _previousComponentAuthors,
         ...fresh
       } = next
       return {
@@ -713,6 +768,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         ending: undefined,
         reason: undefined,
         run: undefined,
+        ...(componentAuthors === undefined ? {} : { componentAuthors }),
       }
     }
     case "admission-warning": {

@@ -37,9 +37,18 @@ import {
   type Event,
 } from "./git.ts"
 import { readConfig, targetName, type Target } from "./config.ts"
-import { gitlinkRows, isAncestor, mergeBase, mergeBases, readRemoteCommit, seamProcess, type Git } from "./git.ts"
+import {
+  gitlinkRows,
+  isAncestor,
+  mergeBase,
+  mergeBases,
+  readRemoteCommit,
+  refAt,
+  seamProcess,
+  type Git,
+} from "./git.ts"
 import { type PauseRecord } from "./pause.ts"
-import { remoteUrl } from "./remote.ts"
+import { remoteHead, remoteUrl } from "./remote.ts"
 import {
   changeInput,
   changesRef,
@@ -52,8 +61,9 @@ import {
   readBranchHistory,
   readEventOps,
   readEventOpsWithRefs,
+  type ComponentAuthor,
 } from "./events.ts"
-import { archivedChangesPrefix, classifyQueueRef, pauseRef, queueRefPrefix } from "./refs.ts"
+import { archivedChangesPrefix, assertBranch, classifyQueueRef, pauseRef, queueRefPrefix } from "./refs.ts"
 import { verifyCandidate, type Verification, type SettledGitlink } from "./verifying.ts"
 import { revertedPathsFinding } from "./revert-guard.ts"
 import { gitlinksAt, holdsCommit } from "./reference.ts"
@@ -292,6 +302,10 @@ export type PublishedGitlink = Readonly<{
    * `published`: this submit wrote the ref. `retained`: it already named the pin (a retry, or a prior submit).
    */
   state: "published" | "retained"
+  /** Submit-time attached author; unavailable metadata never makes a pin publication fail. */
+  author?: Pick<ComponentAuthor, "branch" | "tip">
+  /** Named observation failure; the CLI renders it on its diagnostic stream. */
+  authorUnavailable?: string
 }>
 
 /** git-super's retention namespace: one ref per object, named by it, create-only, never advanced. */
@@ -304,8 +318,61 @@ const ZERO_SHA = /^0+$/u
 
 /** One branch-authored component pin, with its local object reader and exact comparison bases. */
 export type MovedGitlink = Readonly<
-  Omit<PublishedGitlink, "state"> & { checkout: string; child: Git; bases: readonly string[] }
+  Omit<PublishedGitlink, "state" | "author" | "authorUnavailable"> & {
+    checkout: string
+    child: Git
+    bases: readonly string[]
+  }
 >
+
+/** Observe actual checkout authorship, never infer it from equal-tip refs or the root branch name. */
+async function componentAuthor(
+  pin: MovedGitlink,
+): Promise<{ author: NonNullable<PublishedGitlink["author"]> } | { authorUnavailable: string }> {
+  const unavailable = (reason: string) => ({
+    authorUnavailable: `component author unavailable for ${pin.path}@${pin.sha} in ${pin.checkout}: ${reason}; submit continues without author attribution`,
+  })
+  try {
+    const process = seamProcess(pin.child, pin.checkout)
+    const args = ["symbolic-ref", "--quiet", "HEAD"]
+    const symbolic = await process.run({ repo: pin.checkout, args })
+    if (
+      symbolic.code === 1 &&
+      symbolic.stdout === "" &&
+      symbolic.stderr === "" &&
+      !symbolic.timedOut &&
+      symbolic.failure === undefined
+    ) {
+      return unavailable("detached HEAD")
+    }
+    if (symbolic.code !== 0 || symbolic.timedOut || symbolic.failure !== undefined) {
+      return unavailable(`cannot read HEAD symref: exit ${symbolic.code}; ${symbolic.failure ?? symbolic.stderr}`)
+    }
+    const ref = symbolic.stdout.trim()
+    if (!ref.startsWith("refs/heads/")) {
+      return unavailable(`HEAD names ${JSON.stringify(ref)}, not a local author branch`)
+    }
+    const branch = ref.slice("refs/heads/".length)
+    assertBranch(branch)
+    if (branch === "main") return unavailable("protected component target branch main")
+    const defaultBranch = await remoteHead(pin.child, pin.remote)
+    if (branch === defaultBranch) return unavailable(`protected component default branch ${defaultBranch}`)
+    const head = await refAt(pin.child, "HEAD")
+    const tip = await refAt(pin.child, ref)
+    if (head !== pin.sha || tip !== pin.sha) {
+      return unavailable(`HEAD ${head ?? "missing"} and ${ref} ${tip ?? "missing"} must both equal the submitted pin`)
+    }
+    const fresh = await process.run({ repo: pin.checkout, args })
+    if (fresh.code !== 0 || fresh.stdout.trim() !== ref || fresh.timedOut || fresh.failure !== undefined) {
+      return unavailable(
+        `HEAD symref changed or became unreadable during capture: exit ${fresh.code}; ${fresh.failure ?? fresh.stderr}`,
+      )
+    }
+    return { author: { branch, tip } }
+  } catch (cause) {
+    return unavailable(`author observation failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+  }
+}
 
 /**
  * Discover every branch-authored moved pin, nested paths included, without publishing refs.
@@ -409,6 +476,8 @@ export async function publishMovedGitlinks(
   const published: PublishedGitlink[] = []
   // Discover every eligible nested pin before the first remote write.
   const pins = await collectMovedGitlinks(git, root, from, to, prefix)
+  const authors = new Map<MovedGitlink, Awaited<ReturnType<typeof componentAuthor>>>()
+  for (const pin of pins) authors.set(pin, await componentAuthor(pin))
   const checkouts = new Map<string, MovedGitlink[]>()
   for (const pin of pins) {
     const group = checkouts.get(pin.checkout) ?? []
@@ -469,6 +538,7 @@ export async function publishMovedGitlinks(
           remote: pin.remote,
           ref: pin.ref,
           state: receipt.state === "updated" ? "published" : "retained",
+          ...authors.get(pin),
         })
       } else if (receipt?.detail?.code === "destination-changed") {
         failures.push(
@@ -1032,6 +1102,13 @@ async function submitEvent(
       at: new Date(),
       commit: head,
       by: request.submitter,
+      ...(published.some(({ author }) => author !== undefined)
+        ? {
+            componentAuthors: published.flatMap(({ path, author }) =>
+              author === undefined ? [] : [{ path, ...author }],
+            ),
+          }
+        : {}),
       ...(inspected.issue === undefined ? {} : { issue: inspected.issue.issue }),
       title: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
     })

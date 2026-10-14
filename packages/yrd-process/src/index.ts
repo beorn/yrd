@@ -203,7 +203,7 @@ type Spawned = Readonly<{
     close(): void
   }>
   exited: Promise<number>
-  signalCode: NodeJS.Signals | null
+  signalCode: number | NodeJS.Signals | null
   kill(signal?: number | NodeJS.Signals): void
 }>
 

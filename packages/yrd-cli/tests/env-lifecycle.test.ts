@@ -24,10 +24,12 @@ import { basename, dirname, join, relative, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import * as removely from "removely"
-import { createEventStore, previewCloneKey, previewSubjectPrefix } from "@yrd/queue-core"
+import { inspectCheckoutGitMetadata, verifyRetainedEntry, worktreeHomeRoot } from "git-super"
+import { createEventStore, freshWorktree, previewCloneKey, previewSubjectPrefix } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
+import * as publicCli from "../src/index.ts"
 import { admitEnvironmentClose, environmentCwdHolder } from "../src/env-close-holders.ts"
 import {
   closeRequestFile,
@@ -39,6 +41,7 @@ import {
 import { workdirOf } from "../src/workdir.ts"
 import { environmentIssues, environmentProvenance } from "../src/env-cleanup-provenance.ts"
 import type { YrdCliIO } from "../src/types.ts"
+import { birthEventQueue } from "./support/event-queue-birth.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
 process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
@@ -63,7 +66,10 @@ beforeEach(async () => {
     coverage: { ...observed.coverage, complete: true, unreadable: [] },
   })
 })
-afterEach(() => processCensus.mockReset())
+afterEach(() => {
+  processCensus.mockReset()
+  vi.unstubAllEnvs()
+})
 
 /** Scope real kernel observations to the native fixture; missing expected PIDs fail loudly. */
 function fixtureCensus(census: removely.ProcessCensus<"same-uid">, pids: readonly number[]) {
@@ -253,6 +259,283 @@ async function world(setup: string, teardown?: string): Promise<World> {
   await git(["push", "--quiet", "origin", "main"])
   return { git, work }
 }
+
+/** @failure A merged branch kept while checked out receives no retirement retry after native close releases it.
+ * @level l3 @consumer yrd env close after a young author environment survives its landing round
+ * Existing native merge tests close only aged environments; primitive retry coverage invokes retirement manually.
+ */
+it.each(["released", "held", "advanced", "failed"] as const)(
+  "retries a held merged author branch after native close: %s",
+  async (mode) => {
+    const w = await world(":")
+    await birthEventQueue(w.work, "main", { localStore: false })
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "release-retirement", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const author = (JSON.parse(opened.stdout()) as { path: string }).path
+    const authorGit = gitIn(author)
+    const branch = "task/release-retirement"
+    await authorGit(["commit", "--quiet", "--allow-empty", "-m", "author work\n\nRefs: @example/29340-release"])
+    const head = (await authorGit(["rev-parse", "HEAD"])).trim()
+    const submitted = capture(author)
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--json"], submitted.io), submitted.stderr()).toBe(0)
+    const landed = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], landed.io),
+      landed.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(landed.stdout())).toMatchObject({ merged: [branch] })
+    expect(existsSync(author)).toBe(true)
+    expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
+    const journals = dirname((JSON.parse(landed.stdout()) as { log: string }).log)
+    const beforeClose = new Set(readdirSync(journals))
+    let expectedHead = head
+    if (mode === "advanced") {
+      await authorGit(["commit", "--quiet", "--allow-empty", "-m", "new unsubmitted author work"])
+      expectedHead = (await authorGit(["rev-parse", "HEAD"])).trim()
+    }
+    const closed = capture(w.work)
+    if (mode === "held") closed.io.localBranchProtections = async () => ["fixture external hold"]
+    if (mode === "failed") {
+      // Release admission succeeds before capture, then loses certification before removal.
+      const observed = await realProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+      const permitted = { ...observed, rows: [], coverage: { ...observed.coverage, complete: true, unreadable: [] } }
+      processCensus
+        .mockResolvedValueOnce(permitted)
+        .mockResolvedValueOnce({ ...permitted, coverage: { ...permitted.coverage, complete: false } })
+    }
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io), closed.stderr()).toBe(
+      mode === "failed" ? 2 : 0,
+    )
+    expect(existsSync(author)).toBe(mode === "failed")
+    expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe(
+      mode === "released" ? "" : expectedHead,
+    )
+    const archives = (await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")
+    if (mode === "released") expect(archives).toContain(head)
+    else expect(archives).not.toContain(head)
+    if (mode === "failed") {
+      const records = readdirSync(journals)
+        .filter((file) => file.endsWith(".jsonl") && !beforeClose.has(file))
+        .flatMap((file) =>
+          readFileSync(join(journals, file), "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line) as { kind: string }),
+        )
+      expect(records.some((row) => row.kind === "local-branch-retirement")).toBe(false)
+    }
+  },
+  60_000,
+)
+
+/** @failure Native close skips a released component author or mutates a copied retained store after its proof is sealed.
+ * @level l3 @consumer automatic component retirement after native environment release
+ * Root-only release and component landing coverage do not observe post-removal component custody or retained-copy bytes.
+ */
+it.each(["snapshot", "shared"] as const)(
+  "native component release preserves retained custody: %s",
+  async (mode) => {
+    const seeded = await world(":")
+    await addMaterializedDependency(seeded)
+    const rootRemote = (await seeded.git(["remote", "get-url", "origin"])).trim()
+    const childRemote = (await gitIn(join(seeded.work, "vendor/dependency"))(["remote", "get-url", "origin"])).trim()
+    // Match the existing native component-landing fixture's hosted ownership and local transport.
+    vi.stubEnv("GIT_CONFIG_COUNT", "3")
+    for (const [index, local, hosted] of [
+      [1, rootRemote, `https://git-super.test/owned/release-root-${mode}.git`],
+      [2, childRemote, `https://git-super.test/owned/release-child-${mode}.git`],
+    ] as const) {
+      vi.stubEnv(`GIT_CONFIG_KEY_${index}`, `url.${local}.insteadOf`)
+      vi.stubEnv(`GIT_CONFIG_VALUE_${index}`, hosted)
+    }
+    const w = { ...seeded, git: gitIn(seeded.work) }
+    await w.git(["remote", "set-url", "origin", `https://git-super.test/owned/release-root-${mode}.git`])
+    await gitIn(join(w.work, "vendor/dependency"))([
+      "remote",
+      "set-url",
+      "origin",
+      `https://git-super.test/owned/release-child-${mode}.git`,
+    ])
+    await w.git([
+      "config",
+      "--file",
+      ".gitmodules",
+      "submodule.vendor/dependency.url",
+      `https://git-super.test/owned/release-child-${mode}.git`,
+    ])
+    await w.git(["config", "submodule.vendor/dependency.url", `https://git-super.test/owned/release-child-${mode}.git`])
+    await w.git(["add", ".gitmodules"])
+    await w.git(["commit", "--quiet", "-m", "declare hosted component ownership"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    await birthEventQueue(w.work, "main", { localStore: false })
+    const rootBranch = `task/component-release-${mode}`
+    const author = join(worktreeHomeRoot({ repo: w.work }), `component-release-${mode}`)
+    const base = (await w.git(["rev-parse", "HEAD"])).trim()
+    await freshWorktree(w.git, w.work, base, author, { selection: w.git.selection })
+    const authorGit = gitIn(author)
+    await authorGit(["checkout", "--quiet", "-b", rootBranch])
+    const componentBranch = `topic/released-component-${mode}`
+    const component = join(author, "vendor/dependency")
+    const primaryComponent = join(w.work, "vendor/dependency")
+    if (mode === "shared") {
+      // A native linked component uses the surviving primary's ref store, not a copied snapshot.
+      // raw-delete-allow: this isolated fixture replaces its own clean component clone before authoring
+      rmSync(component, { recursive: true })
+      await gitIn(primaryComponent)(["worktree", "add", "--quiet", "-b", componentBranch, component, "HEAD"])
+    } else {
+      await gitIn(component)(["checkout", "--quiet", "-b", componentBranch])
+    }
+    const componentGit = gitIn(component)
+    await componentGit(["remote", "set-url", "origin", `https://git-super.test/owned/release-child-${mode}.git`])
+    expect((await componentGit(["config", "--get", "remote.origin.url"])).trim()).toBe(
+      `https://git-super.test/owned/release-child-${mode}.git`,
+    )
+    await componentGit(["config", "user.email", "component-release@yrd.test"])
+    await componentGit(["config", "user.name", "component release"])
+    writeFileSync(join(component, "READY"), "authored component\n")
+    await componentGit(["commit", "--quiet", "-am", "component author work"])
+    const componentTip = (await componentGit(["rev-parse", "HEAD"])).trim()
+    const componentStore = (await inspectCheckoutGitMetadata(component)).commonDirectory
+    await authorGit(["add", "vendor/dependency"])
+    await authorGit(["commit", "--quiet", "-m", "deliver component\n\nRefs: @example/29340-component-release"])
+    const rootTip = (await authorGit(["rev-parse", "HEAD"])).trim()
+    const submitted = capture(author)
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--json"], submitted.io), submitted.stderr()).toBe(0)
+    const landed = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], landed.io),
+      landed.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(landed.stdout())).toMatchObject({ merged: [rootBranch] })
+    expect(existsSync(author)).toBe(true)
+    expect((await componentGit(["rev-parse", `refs/heads/${componentBranch}`])).trim()).toBe(componentTip)
+
+    const closed = capture(w.work)
+    const stderr = closed.io.stderr
+    let proofPath = ""
+    let sealedManifest: Buffer | undefined
+    closed.io.stderr = (text) => {
+      stderr(text)
+      const prefix = "retained environment removal proof "
+      if (text.startsWith(prefix)) {
+        proofPath = text.slice(prefix.length).trim()
+        sealedManifest = readFileSync(proofPath)
+      }
+    }
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io), closed.stderr()).toBe(0)
+    expect(existsSync(author)).toBe(false)
+    expect(proofPath).not.toBe("")
+    expect(readFileSync(proofPath)).toEqual(sealedManifest)
+    const entry = dirname(proofPath)
+    const verified = await verifyRetainedEntry({
+      entry,
+      root: dirname(entry),
+      artifactDir: join(dirname(w.work), `copy-proof-${mode}`),
+      allowTemporaryArtifactDir: true,
+      clock: new Date("2099-01-01T00:00:00.000Z"),
+      namespaceRoots: [w.work],
+    })
+    expect(
+      verified.gates.find((gate) => gate.gate === "copy-manifest"),
+      JSON.stringify(verified),
+    ).toMatchObject({ status: "pass" })
+    expect(readFileSync(proofPath)).toEqual(sealedManifest)
+    expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${rootBranch}`])).trim()).toBe("")
+    expect((await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")).toContain(
+      rootTip,
+    )
+    if (mode === "shared") {
+      const registrations = await gitIn(componentStore)(["worktree", "list", "--porcelain"])
+      expect(registrations, `${closed.stderr()}\nNative child registrations:\n${registrations}`).not.toContain(
+        `worktree ${component}\n`,
+      )
+      expect(
+        (
+          await gitIn(componentStore)(["for-each-ref", "--format=%(objectname)", `refs/heads/${componentBranch}`])
+        ).trim(),
+        closed.stderr(),
+      ).toBe("")
+      expect(
+        (await gitIn(componentStore)(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n"),
+      ).toContain(componentTip)
+    } else {
+      expect(closed.stderr()).toContain(componentBranch)
+    }
+  },
+  60_000,
+)
+
+/** @failure An external native release cannot retry merged refs without leaking private context,
+ * or reuses a stale/disposed handle and retires a newly bound checkout.
+ * @level l3 @consumer hosts composing successful native reset/remove with @yrd/cli
+ * Native close alone cannot prove the public handle's release identity, named result or single-use contract.
+ */
+it.each(["released", "unreleased", "rebound", "reused", "disposed", "unreadable", "none"] as const)(
+  "public author release preserves exact native identity: %s",
+  async (mode) => {
+    const w = await world(":")
+    await birthEventQueue(w.work, "main", { localStore: false })
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", `public-release-${mode}`, "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const author = (JSON.parse(opened.stdout()) as { path: string }).path
+    const authorGit = gitIn(author)
+    const branch = `task/public-release-${mode}`
+    await authorGit(["commit", "--quiet", "--allow-empty", "-m", "author work\n\nRefs: @example/29340-public-release"])
+    const head = (await authorGit(["rev-parse", "HEAD"])).trim()
+    if (mode !== "none") {
+      const submitted = capture(author)
+      expect(await runYrdProcess(["bun", "yrd", "submit", "--json"], submitted.io), submitted.stderr()).toBe(0)
+      const landed = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], landed.io),
+        landed.stderr(),
+      ).toBe(0)
+      expect(JSON.parse(landed.stdout())).toMatchObject({ merged: [branch] })
+    }
+    const output = capture(w.work)
+    if (mode === "unreadable") await w.git(["remote", "set-url", "origin", join(dirname(w.work), "missing-remote.git")])
+    const prepared = await publicCli.prepareAuthorRelease(author, output.io)
+    if (mode === "none" || mode === "unreadable") {
+      expect(prepared).toMatchObject({ kind: mode, reason: expect.any(String) })
+      if (prepared.kind === "unreadable") expect(prepared.reads.length).toBeGreaterThan(0)
+      expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
+      expect((await w.git(["for-each-ref", "refs/archive/"])).trim()).toBe("")
+      return
+    }
+    expect(prepared.kind).toBe("eligible")
+    if (prepared.kind !== "eligible") throw new Error(JSON.stringify(prepared))
+    using handle = prepared.handle
+    if (mode === "disposed") {
+      handle[Symbol.dispose]()
+      await expect(handle.retireAfterRelease()).rejects.toMatchObject({ name: "AuthorReleaseDisposed" })
+    } else {
+      let expectedHead = head
+      if (mode === "reused") {
+        await authorGit(["commit", "--quiet", "--allow-empty", "-m", "new unsubmitted work"])
+        expectedHead = (await authorGit(["rev-parse", "HEAD"])).trim()
+      }
+      if (mode === "rebound") await authorGit(["checkout", "--quiet", "--detach", "main"])
+      else if (mode !== "unreleased") await w.git(["worktree", "remove", author])
+      await handle.retireAfterRelease()
+      await expect(handle.retireAfterRelease()).rejects.toMatchObject({ name: "AuthorReleaseAlreadyUsed" })
+      const retired = mode === "released" || mode === "rebound"
+      expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe(
+        retired ? "" : expectedHead,
+      )
+      const archives = (await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")
+      if (retired) expect(archives).toContain(head)
+      else expect(archives).not.toContain(head)
+      if (mode === "unreleased") expect(output.stderr()).toContain("still bound")
+    }
+  },
+  60_000,
+)
 
 async function addMaterializedDependency(w: World): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-env-submodule-"))
