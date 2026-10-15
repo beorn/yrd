@@ -4918,15 +4918,20 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
   }, 30_000)
 
   /** @failure 29381: a real event ref move between inventory and fetch exited the service with 2.
-   * @level l2 @consumer Hab supervisor and the submitter waiting for a fresh queue judgment
-   */
+   *          29386 moved the fresh re-inventory into the one reader, so a race shorter than the
+   *          bound is re-read INSIDE the round — no read-failed round at all — and only a race that
+   *          outlasts the bound still fails: a foreground run refuses, a service takes a read-failed
+   *          round and retries at its next interval. The genuine-stop semantics are unchanged.
+   * @level l2 @consumer Hab supervisor and the submitter waiting for a fresh queue judgment */
   it.each([
-    ["up", "ref-race"],
-    ["run", "ref-race"],
-    ["up", "unrelated-error"],
+    { command: "up", fault: "ref-race", moves: 4, mode: "recover" },
+    { command: "run", fault: "ref-race", moves: 4, mode: "recover" },
+    { command: "up", fault: "unrelated-error", moves: 4, mode: "refuse" },
+    { command: "up", fault: "ref-race", moves: Number.POSITIVE_INFINITY, mode: "exhaust-up" },
+    { command: "run", fault: "ref-race", moves: Number.POSITIVE_INFINITY, mode: "exhaust-run" },
   ] as const)(
-    "%s handles an inventory %s without weakening genuine stops",
-    async (command, fault) => {
+    "$command handles an inventory $fault (bound $moves) without weakening genuine stops",
+    async ({ command, fault, moves: moveLimit, mode }) => {
       const w = await world()
       const branches = ["task/inventory-a", "task/inventory-b"]
       const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
@@ -4955,7 +4960,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
           ...backend,
           fetchRefs: async (...args: Parameters<typeof fetch>) => {
             const [, refs] = args
-            if (moves < 4 && refs.includes(tips[0]!.ref)) {
+            if (moves < moveLimit && refs.includes(tips[0]!.ref)) {
               if (fault === "unrelated-error") throw new Error("unrelated inventory read failure")
               const tip = tips[moves % tips.length]!
               const forward = Math.floor(moves / tips.length) % 2 === 0
@@ -4978,6 +4983,8 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
       const run = capture(w.work)
       const seen: QueueHealthDocument[] = []
       const outcomes: QueueRunOutcome[] = []
+      const readFailures = (): readonly QueueHealthDocument[] =>
+        seen.filter((document) => document.facts?.roundReadFailure !== undefined)
       let exit: YrdCliExitCode
       try {
         exit = await coreQueueCommand(
@@ -4989,6 +4996,8 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
             stop: stop.signal,
             afterHealth: (document) => {
               seen.push(document)
+              // A permanently moving inventory never merges: stop once the failure is proven twice.
+              if (mode === "exhaust-up" && readFailures().length >= 2) stop.abort()
             },
             afterRound: (outcome) => {
               outcomes.push(outcome)
@@ -5002,26 +5011,44 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
         stop.abort()
       }
       const diagnostic = `${run.stdout()}\n${run.stderr()}`
-      expect(diagnostic).toContain(fault === "ref-race" ? "event refs moved" : "unrelated inventory read failure")
-      if (command !== "up" || fault === "unrelated-error") {
+      if (mode === "refuse") {
+        expect(diagnostic).toContain("unrelated inventory read failure")
+        expect(exit, diagnostic).toBe(2)
+        expect(outcomes).toHaveLength(0)
+        return
+      }
+      if (mode === "exhaust-run") {
+        // A foreground run has no next interval, so the exhausted re-read still refuses.
+        expect(diagnostic).toContain("event refs moved after the selected inventory")
         expect(exit, diagnostic).toBe(2)
         expect(outcomes).toHaveLength(0)
         return
       }
       expect(exit, `${diagnostic}\nactual native ref moves: ${moves}`).toBe(0)
-      expect(moves).toBe(4)
-      const failed = seen.filter((document) => document.facts?.roundReadFailure !== undefined)
-      expect(failed.map((document) => document.facts?.roundReadFailure)).toEqual([
-        { ref: queueRef("main"), error: expect.stringContaining(tips[0]!.ref), count: 1 },
-        { ref: queueRef("main"), error: expect.stringContaining(tips[1]!.ref), count: 2 },
-        { ref: queueRef("main"), error: expect.stringContaining(tips[0]!.ref), count: 3 },
-        { ref: queueRef("main"), error: expect.stringContaining(tips[1]!.ref), count: 4 },
-      ])
-      expect(failed.map((document) => document.state)).toEqual(["healthy", "healthy", "unhealthy", "unhealthy"])
-      expect(seen.at(-1)?.facts?.roundReadFailure).toBeUndefined()
-      expect(outcomes.flatMap((outcome) => outcome.merged)).toEqual(expect.arrayContaining(branches))
-      expect(run.stderr()).toContain(tips[0]!.ref)
-      expect(run.stderr()).toContain(tips[1]!.ref)
+      if (mode === "recover") {
+        // The bounded race is re-read inside the one reader: every move is consumed there, no round
+        // ever reports a read failure, and the line still lands.
+        expect(moves).toBe(4)
+        expect(readFailures()).toEqual([])
+        // Only the service loop states each round's outcome; a foreground run has no next round, so
+        // its non-refusal (exit 0 above) is the evidence that the race was consumed inside it.
+        if (command === "up") {
+          expect(outcomes.flatMap((outcome) => outcome.merged)).toEqual(expect.arrayContaining(branches))
+        } else {
+          expect(outcomes).toEqual([])
+        }
+        return
+      }
+      // exhaust-up: the race outlasts the bound, so each round fails read-failed — counted on one
+      // stable queue ref and named with the moving ref — while the service stays up and paced.
+      const failed = readFailures()
+      const failures = failed.map(
+        (document) => document.facts?.roundReadFailure as { ref?: string; error?: string; count?: number } | undefined,
+      )
+      expect(failures.map((failure) => failure?.count)).toEqual([1, 2])
+      expect(failures.map((failure) => failure?.ref)).toEqual([queueRef("main"), queueRef("main")])
+      for (const failure of failures) expect(String(failure?.error)).toContain("event refs moved")
+      expect(outcomes).toEqual([])
     },
     30_000,
   )

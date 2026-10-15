@@ -986,9 +986,10 @@ process.exit(result.exitCode)
     await expect(oneShot).rejects.toThrow(
       /event refs moved after the selected inventory 8 times in a row; giving up: refs\/yrd\/main\/changes\/task\/unrelated/u,
     )
-    // The count is narrated while it retries, then named once when it stops.
-    expect(run.stderr()).toContain("(retry 7/8)")
-    expect(run.stderr()).toContain("task/unrelated")
+    // A recovered race is no longer narrated per attempt (29386): no retry line is written, and the
+    // exhaustion travels as the thrown error above — whose message names the count and the refs, and
+    // which the process layer prints for the operator.
+    expect(run.stderr()).not.toContain("(retry")
   })
 
   /**

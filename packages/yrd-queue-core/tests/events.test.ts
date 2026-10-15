@@ -11,7 +11,7 @@ import { Conflict, open, PublicationRejected } from "gitomic"
 import type { GitomicBackend, RefUpdate } from "gitomic"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { transientPush5xxOf, transientPushRetry } from "../src/transient-push.ts"
-import { readEventChain, readEventChains } from "../src/event-read.ts"
+import { EventRefsAcquireExhausted, readEventChain, readEventChains } from "../src/event-read.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
 import { classifyQueueRef, pauseRef, runIndexRef } from "../src/refs.ts"
 import { activateRunIndex, lookupRunIndex } from "../src/run-index.ts"
@@ -2979,7 +2979,10 @@ describe("the queue-format boundary", () => {
         },
       },
     }
-    await expect(listChanges(moving, "lab")).rejects.toThrow(Conflict)
+    // 29386: the reader re-acquires a moved inventory in-round, so one move recovers into a
+    // correct reading instead of refusing; only exhaustion past the bound is a loud failure.
+    const recovered = await listChanges(moving, "lab")
+    expect(recovered.get(branch)).toMatchObject({ status: "merged", merge: head, tip })
     expect(moved).toBe(true)
     expect((await listChanges(location, "lab")).get(branch)).toMatchObject({ status: "merged", merge: head, tip })
   })
@@ -3096,6 +3099,70 @@ describe("the queue-format boundary", () => {
     expect({ histories, invalid }).toEqual(await listChangeHistories(location, "lab", { knownQueue: queue }))
     expect([...histories.keys()]).toEqual(["task/42"])
   })
+
+  // @failure 29386: the fresh re-inventory lived only in the CLI listing, so the queue run's own
+  //          multi-prefix reader failed a round on a race it could have re-read in place.
+  // @level l1 @consumer queue list acquisition and the queue run (listChangeHistories)
+  it("re-inventories a moved multi-prefix selection in the reader itself, bounded and typed", async () => {
+    for (const [moves, outcome] of [
+      [3, "recovers"],
+      [8, "exhausts"],
+    ] as const) {
+      const { store, location } = remoteMemStore(`yrd-bounded-reinventory-${outcome}`)
+      const target = await open({ ...store, ref: "refs/heads/lab" })
+      const head = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+      const queueTip = await seedEventQueue(location, "lab", head, new Date("2026-09-22T14:00:00.000Z"))
+      const branch = "task/moving"
+      const ref = changesRef("lab", branch)
+      await (
+        await openEvents({ ...store, ref })
+      ).append([changeInput("opened", { queueTip, at: new Date(), commit: head, by: "@dev/2" })], { expect: null })
+      const original = location.backend.fetchRefs
+      if (original === undefined) throw new Error("fixture needs a fetch-capable backend")
+      let seen = 0
+      // The selected ref keeps advancing inside EVERY advertisement-to-fetch window until the budget
+      // runs out, so the reader's own re-inventory is the only thing that can make the two agree.
+      location.backend = {
+        ...location.backend,
+        fetchRefs: async (...args: Parameters<typeof original>) => {
+          const [, refs] = args
+          if (seen < moves && typeof refs !== "string" && refs.includes(ref)) {
+            seen++
+            const moved = await openEvents({ ...store, ref })
+            const tip = await moved.head()
+            await moved.append(
+              [
+                changeInput("verifying", {
+                  queueTip,
+                  at: new Date(Date.parse("2026-09-22T14:00:00.000Z") + seen * 1_000),
+                  commit: head,
+                }),
+              ],
+              { expect: tip },
+            )
+          }
+          return original(...args)
+        },
+      }
+      let readError: unknown
+      let histories: readonly string[] = []
+      try {
+        histories = [...(await readEventQueueWithChanges(location, "lab")).histories.keys()]
+      } catch (error) {
+        readError = error
+      }
+      expect(seen).toBe(moves)
+      if (outcome === "recovers") {
+        expect(readError).toBeUndefined()
+        expect(histories).toEqual([branch])
+      } else {
+        expect(readError).toBeInstanceOf(EventRefsAcquireExhausted)
+        const exhausted = readError as EventRefsAcquireExhausted
+        expect(exhausted.attempts).toBe(8)
+        expect(exhausted.refs).toEqual([ref])
+      }
+    }
+  }, 30_000)
 
   // @failure one malformed branch chain blinded every healthy branch in the queue (25658).
   it("projects readable no-opened history and isolates an unfoldable chain beside a healthy one", async () => {
