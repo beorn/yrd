@@ -1726,6 +1726,104 @@ describe("the queue-format boundary", () => {
     expect((await readStatus(location, "lab", "task/merged")).status).toBe("merged")
   })
 
+  // 29399: the old delete-only tests missed terminal-only selection, archive
+  // custody races and host protections changing between custody and deletion.
+  // These faults use the existing publish hooks and exercise the public drop API.
+  it.each([
+    "open",
+    "wrong-tip",
+    "collision",
+    "unreadable",
+    "held-later",
+    "branch-moved",
+    "ending-hot",
+    "ending-cold",
+    "archive-removed",
+    "archive-moved",
+    "custody-readback",
+    "final-readback",
+  ] as const)("keeps exact retirement custody loud on %s", async (fault) => {
+    const { store, location, afterNextPublish } = remoteMemStore(`retire-${fault}`)
+    const branchName = "task/retire"
+    const branchRef = `refs/heads/${branchName}`
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: branchRef })
+    const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
+    const hot = changesRef("lab", branchName)
+    const ref = fault === "ending-cold" ? "refs/yrd-archive/lab/task/retire" : hot
+    const chain = await openEvents({ ...store, ref: hot })
+    let ending = (
+      await chain.append(
+        [
+          changeInput("opened", { queueTip, at: new Date(), commit: head, by: "@dev/2" }),
+          ...(fault === "open" ? [] : [changeInput("merged", { queueTip, at: new Date(), commit: head })]),
+        ],
+        { expect: null },
+      )
+    ).head
+    const publish = store.backend.publish
+    if (publish === undefined || ending === null) throw new Error("fixture lacks retirement refs")
+    if (ref !== hot)
+      await publish(store.repo, [
+        { ref, expect: "0".repeat(40), oid: ending },
+        { ref: hot, expect: ending, oid: null },
+      ])
+    const archive = archiveRefFor(branchName, "@dev/2", new Date().toISOString().slice(0, 10))
+    if (fault === "collision") await publish(store.repo, [{ ref: archive, expect: "0".repeat(40), oid: base }])
+    if (fault === "custody-readback")
+      afterNextPublish(async () => {
+        await publish(store.repo, [{ ref: archive, expect: head, oid: null }])
+      })
+    let checks = 0
+    let expectedBranch: string | null = head
+    const action = drop(location, {
+      queue: "lab",
+      branch: branchName,
+      by: "@dev/2",
+      note: "retire exact ended work",
+      retire: { tip: fault === "wrong-tip" ? base : head },
+      protections: async () => {
+        checks++
+        if (fault === "unreadable") throw new Error("host protection census unreadable")
+        if (checks !== 2) return []
+        if (fault === "held-later") return ["author became held"]
+        if (fault === "branch-moved")
+          expectedBranch = (await branch.transact(async (map) => map.set("work", "new"), "advanced")).oid
+        if (fault === "ending-hot" || fault === "ending-cold") {
+          ending = (
+            await (
+              await openEvents({ ...store, ref })
+            ).append([changeInput("opened", { queueTip, at: new Date(), commit: head, by: "@dev/rival" })], {
+              expect: ending,
+            })
+          ).head
+        }
+        if (fault === "archive-removed" || fault === "archive-moved")
+          await publish(store.repo, [{ ref: archive, expect: head, oid: fault === "archive-removed" ? null : base }])
+        if (fault === "final-readback") {
+          expectedBranch = null
+          afterNextPublish(async () => {
+            await publish(store.repo, [{ ref: archive, expect: head, oid: null }])
+          })
+        }
+        return []
+      },
+    })
+    const refusal = await action.then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+    expect(refusal).toBeInstanceOf(Error)
+    if (fault === "final-readback") {
+      expect(String(refusal)).toContain(`retaining event ${ref}@${ending} keeps ${head}`)
+    }
+    expect(await branch.head()).toBe(expectedBranch)
+    expect((await listRefs(ref, store)).get(ref)).toBe(ending)
+    if (["open", "wrong-tip", "unreadable"].includes(fault)) expect((await listRefs(archive, store)).size).toBe(0)
+  })
+
   // @failure a rival branch move after an ended drop publishes would retire work the event did not keep (26223).
   it("leaves an ended change untouched when its branch-delete lease loses", async () => {
     const { store, location, beforeNextPublish } = remoteMemStore("yrd-event-drop-ended-race")
