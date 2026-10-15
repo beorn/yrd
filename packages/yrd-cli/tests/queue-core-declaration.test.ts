@@ -2131,7 +2131,8 @@ describe("a queue is the selected origin branch carrying config", () => {
   })
 
   /** @failure Root cleanup accepts custody for another branch or tip, ignores an active reopening,
-   * or invokes the external issue resolver. Existing component cases prove only gitlink custody.
+   * or lets a failing issue resolver change what is removed (29450: the resolver is consulted for the
+   * issue's status only). Existing component cases prove only gitlink custody.
    * @level l3 @consumer A closer previewing and applying exact root branch cleanup
    */
   it("drop by issue requires exact root custody and preserves active, held and unreadable branches", async () => {
@@ -2242,7 +2243,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect((await git(["rev-parse", row.archiveRef])).trim()).toBe(tips.get(row.branch))
       expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
     }
-    expect(existsSync(join(repo, "resolver-ran"))).toBe(false)
+    // 29450: the declared resolver is consulted ONCE per run for the issue's status so a closed issue's
+    // unsubmitted branch can take the closed disposition; this resolver fails (exit 1), so nothing above
+    // changed and the failure is named in the journal rather than read as closed.
+    expect(existsSync(join(repo, "resolver-ran"))).toBe(true)
     expect(applied).not.toHaveProperty("unclassified")
   })
 

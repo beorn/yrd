@@ -32,12 +32,16 @@ import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import { readCommitSubmodules } from "git-super/commit-graph"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
-import { issueResolver } from "./issue-resolver.ts"
+import { issueLookup, issueLookupMany, issueResolver } from "./issue-resolver.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup } from "./env-cleanup.ts"
 import {
+  CLOSED_ISSUE_STATUSES,
   captureMergedComponentAuthors,
+  closedIssueSweepDue,
   createLandedBranchRetirement,
+  markClosedIssueSweep,
+  retireClosedIssueBranches,
   retireMergedComponentAuthors,
   retireMergedRootAuthor,
 } from "./branch-retirement.ts"
@@ -1045,6 +1049,37 @@ export async function coreQueueCommand(
           // and in its row and RETURNS, so the round's outcome stands and the service
           // keeps running instead of exiting into Hab's restart budget.
           await sweepRoundOutputInRound({ workdir, now: new Date() })
+          // 29450: the service's round is where a close becomes a retirement (work.md § Events first;
+          // @cto dd209c0b). Only the service sweeps, by time: at its start, after a round that merged,
+          // and hourly. Like every disposal step here it reports and RETURNS; it never stops the line.
+          if (request.command === "up") {
+            const now = Date.now()
+            if (closedIssueSweepDue({ repo: authorRepo, merged: outcome.merged.length, now })) {
+              try {
+                await retireClosedIssueBranches({
+                  repo: authorRepo,
+                  git: authorGit,
+                  selection,
+                  store: eventStore,
+                  queue: config.target.branch,
+                  target: outcome.target,
+                  io,
+                  log: retirementLog,
+                  actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
+                  nameNumber: (branch) => issueFromBranchName(branch),
+                  lookupMany: issueLookupMany(config, authorRepo, env),
+                })
+              } catch (error) {
+                retirementLog.write({
+                  kind: "warning",
+                  scope: "closed-issue-retirement",
+                  reason: `closed-issue sweep failed; every branch kept: ${String(error)}`,
+                })
+              } finally {
+                markClosedIssueSweep(authorRepo, now)
+              }
+            }
+          }
         },
         ...(onRecord === undefined
           ? {}
@@ -1659,7 +1694,14 @@ export async function coreQueueCommand(
         config: config.blob,
       })
       log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
-      type Row = { branch: string; head: string; reason: string; detail?: string; archiveRef?: string }
+      type Row = {
+        branch: string
+        head: string
+        reason: string
+        detail?: string
+        archiveRef?: string
+        recovery?: string
+      }
       const eligible: Row[] = []
       const removed: Row[] = []
       const kept: Row[] = []
@@ -1668,6 +1710,27 @@ export async function coreQueueCommand(
       let excludedUnrelated = 0
       const unnumbered: { branch: string; head: string }[] = []
       const dryRun = !local && request.dryRun === true
+      // 29450: when the issue itself is closed or dropped, a never-submitted branch takes the closed
+      // disposition (archive and `dropped` event published to origin and read back) instead of staying
+      // `unreached`. An unprovable status keeps today's behaviour and is named in the journal.
+      let issueEnded: string | undefined
+      if (!local && issue !== undefined) {
+        const lookup = issueLookup(config, authorRepo, env)
+        if (lookup !== undefined) {
+          try {
+            const resolved = await lookup(issue)
+            if (typeof resolved.status === "string" && CLOSED_ISSUE_STATUSES.has(resolved.status)) {
+              issueEnded = resolved.status
+            }
+          } catch (error) {
+            log.write({
+              kind: "warning",
+              scope: "closed-issue-retirement",
+              reason: `issue ${issue}: status unproven, unsubmitted branches stay unreached: ${String(error)}`,
+            })
+          }
+        }
+      }
       try {
         // Inventory once. The date and actor occupy exactly two segments; branch names may contain slashes.
         const archives = local ? new Map<string, string>() : await listRefs("refs/archive/", eventStore)
@@ -1745,6 +1808,8 @@ export async function coreQueueCommand(
               }
             } else if (archive !== undefined) {
               disposition = { kind: "archived", target: head, ref: archive[0] }
+            } else if (issueEnded !== undefined) {
+              disposition = { kind: "closed", store: eventStore, queue: config.target.branch, target }
             } else {
               kept.push({
                 ...row,
@@ -1778,6 +1843,11 @@ export async function coreQueueCommand(
                 : result.reason,
             detail: result.detail,
             archiveRef: result.archiveRef,
+            ...(result.outcome === "removed" && disposition.kind === "closed"
+              ? {
+                  recovery: `git -C ${authorRepo} fetch ${eventStore.remote} ${result.archiveRef}:refs/heads/${branch}`,
+                }
+              : {}),
           }
           if (result.outcome === "eligible") eligible.push(output)
           else if (result.outcome === "removed") removed.push(output)

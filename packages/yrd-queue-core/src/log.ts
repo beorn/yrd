@@ -186,6 +186,10 @@ export const LOG_KINDS = [
   "branch-kept",
   // Local archive-first retirement, including protected/refused attempts, with actor and issue.
   "local-branch-retirement",
+  // One closed or dropped issue's branch judged by the service's closed-issue sweep (29450): the issue's
+  // status as the declared resolver returned it, the retirement outcome, the archive ref and, for a
+  // removed unmerged tip, the exact recovery command. A `scope: "summary"` row closes each sweep.
+  "closed-issue-retirement",
   // A notice delivered for an ending after a resubmission opened a new change above it (26989): the `opened`
   // clears the ending's notices, so its `notified` cannot be recorded. Names the delivery and the `opened` event.
   "notice-unrecorded",
