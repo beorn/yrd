@@ -79,8 +79,8 @@ async function world(): Promise<World> {
   const b0 = await repository(b, "b.txt")
   await repository(product, "product.txt")
   const productGit = gitIn(product)
-  await productGit(["submodule", "add", "--quiet", a, "vendor/a"])
-  await productGit(["submodule", "add", "--quiet", b, "vendor/b"])
+  await productGit(["submodule", "add", "--quiet", "-b", "main", a, "vendor/a"])
+  await productGit(["submodule", "add", "--quiet", "-b", "main", b, "vendor/b"])
   const hostedA = "https://github.com/beorn/yrd-exclusion-a-fixture.git"
   const hostedB = "https://github.com/beorn/yrd-exclusion-b-fixture.git"
   const hostedOrigin = "https://github.com/beorn/yrd-exclusion-fixture.git"

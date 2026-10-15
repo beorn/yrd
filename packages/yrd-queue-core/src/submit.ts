@@ -21,6 +21,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync } from "node:fs"
 import { join, resolve } from "node:path"
+import { localMainsAtPin } from "git-super/local-main"
 import { pushRefUpdates } from "git-super/push"
 import { publishWithTransientRetry, retryTransientPush, transientPush5xxOf } from "./transient-push.ts"
 import { discardWorktree, removeWorktreeRunScaffold } from "./worktree.ts"
@@ -1012,12 +1013,15 @@ async function endedSubjects(
 }
 
 /**
- * The root gitlinks nobody moved: declared at the target, at the same pin in the target, the head and their one merge
- * base (29560). That is git-super merge's own exclusion contract, so it refuses a list this gets wrong. With more than
- * one merge base nothing is left out, which is the full tree submit composed before.
+ * The root gitlinks a submit's candidate can leave out (29560): declared at the target, at the same pin in the target,
+ * the head and their one merge base (git-super merge's own exclusion contract, so it refuses a list this gets wrong),
+ * and whose component main, read the way the merge reads it, IS that pin. A merge raises a pin whose main ran ahead
+ * even when nobody moved it, so such a gitlink stays in and its raise shows in the receipt (@cto 0a2690f0). With more
+ * than one merge base, or any main git-super cannot confirm locally, the component stays in, as before.
  */
 async function unmovedGitlinks(
   git: Git,
+  root: string,
   targetHead: string,
   head: string,
   bases: readonly string[],
@@ -1032,8 +1036,20 @@ async function unmovedGitlinks(
     gitlinkRows(git, base, head),
   ])
   const moved = new Set([...towardTarget, ...towardHead].map((row) => row.path))
-  return atTarget
-    .filter((row) => !moved.has(row.path))
+  const unmoved = atTarget.filter((row) => !moved.has(row.path))
+  if (unmoved.length === 0) return []
+  // The query reads each component's persistent store, which for a linked worktree (every yrd environment) sits under
+  // the common dir's modules/, outside this root: the seam answers for both, each request bound to its own directory.
+  const common = resolve((await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim())
+  const answers = await localMainsAtPin({
+    repository: root,
+    commit: targetHead,
+    paths: unmoved.map((row) => row.path),
+    process: seamProcess(git, root, { also: [join(common, "modules")], at: (cwd) => runnerFor(git).at(cwd) }),
+  })
+  const atPin = new Set(answers.filter((answer) => answer.atPin).map((answer) => answer.path))
+  return unmoved
+    .filter((row) => atPin.has(row.path))
     .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
 }
 
@@ -1050,7 +1066,7 @@ async function composeSubmit(
   const scratch = mkdtempSync(join(tempRoot, "yrd-submit-verifying-"))
   const hooksPath = join(scratch, "hooks-disabled")
   mkdirSync(hooksPath)
-  const excluded = await unmovedGitlinks(git, admitted.targetHead, admitted.head, admitted.bases)
+  const excluded = await unmovedGitlinks(git, admitted.root, admitted.targetHead, admitted.head, admitted.bases)
   let verifying: Verification
   try {
     const composed = await verifyCandidate({
