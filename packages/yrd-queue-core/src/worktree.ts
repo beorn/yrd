@@ -28,7 +28,12 @@ import { createGitWorktreeStore } from "git-super/worktree"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
 import { frozenLockfileDiagnosis } from "./lockfile-diagnosis.ts"
 import type { LogWrite } from "./log.ts"
-import { GIT_SUPER_ABSENT_STORE, populateReferenceStores, ReferenceUnpopulated } from "./reference.ts"
+import {
+  declaredSubmodules,
+  GIT_SUPER_ABSENT_STORE,
+  populateReferenceStores,
+  ReferenceUnpopulated,
+} from "./reference.ts"
 import {
   GitExit,
   gitIn,
@@ -126,7 +131,21 @@ export async function freshWorktree(
   // Query the selected commit, not the reference checkout's working tree.
   // An invalid commit makes ls-tree fail; only empty output means absence.
   const modules = await git(["ls-tree", commit, "--", ".gitmodules"])
-  const excluded: readonly string[] = modules.trim() === "" ? [] : [...new Set(options.excludedSubmodules ?? [])].sort()
+  const excluded: readonly string[] = [...new Set(options.excludedSubmodules ?? [])].sort()
+  if (excluded.length > 0) {
+    // Only a declared submodule can be left out; any other path is the caller's error, never dropped (@cto 7015ba5e).
+    const declared = await declaredSubmodules(git, commit)
+    const undeclared = excluded.filter((excludedPath) => !declared.has(excludedPath))
+    if (undeclared.length > 0) {
+      throw new Error(
+        `fresh worktree ${path} at ${commit}: cannot leave out ${undeclared.join(", ")}, ` +
+          (modules.trim() === ""
+            ? "because that commit records no .gitmodules"
+            : "because that commit's .gitmodules declares no submodule at that path") +
+          "; only a declared submodule can be excluded",
+      )
+    }
+  }
   if (modules.trim() === "") {
     // A commit that declares no submodules has no boundary for git-super to
     // cross. `worktreeWithoutSubmodules` re-asks that question rather than

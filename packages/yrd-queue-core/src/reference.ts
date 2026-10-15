@@ -504,25 +504,49 @@ async function localSourceMiss(gitIn: (cwd: string) => Git, source: string, sha:
  */
 export async function declaredSubmodules(git: Git, commit: string): Promise<ReadonlyMap<string, string>> {
   const byPath = new Map<string, string>()
-  if ((await git(["ls-tree", commit, "--", ".gitmodules"])).trim() === "") return byPath
+  for (const section of (await gitmodulesSections(git, commit)).values()) {
+    const path = section.get("path")?.at(-1)
+    const url = section.get("url")?.at(-1)
+    if (path !== undefined && url !== undefined) byPath.set(path, url)
+  }
+  return byPath
+}
+
+/**
+ * Each declared submodule's whole `.gitmodules` section (name, url, branch and every other key), keyed by its path,
+ * as one comparable string. Two commits declare a component the same way exactly when the strings are equal, so a
+ * change to its url, branch or path is a move even when its gitlink stands still (29560, @cto 7015ba5e). Empty when
+ * the commit records no `.gitmodules`, as `declaredSubmodules` answers.
+ */
+export async function declaredSubmoduleConfig(git: Git, commit: string): Promise<ReadonlyMap<string, string>> {
+  const byPath = new Map<string, string>()
+  for (const [name, section] of await gitmodulesSections(git, commit)) {
+    const path = section.get("path")?.at(-1)
+    if (path === undefined) continue
+    const keys = [...section.entries()].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    byPath.set(path, JSON.stringify([name, keys]))
+  }
+  return byPath
+}
+
+/** The `submodule.<name>.<key>` entries a commit's `.gitmodules` records, by name, then key, in file order. */
+async function gitmodulesSections(git: Git, commit: string): Promise<ReadonlyMap<string, Map<string, string[]>>> {
+  const sections = new Map<string, Map<string, string[]>>()
+  if ((await git(["ls-tree", commit, "--", ".gitmodules"])).trim() === "") return sections
   const declared = await git(["config", "--null", "--blob", `${commit}:.gitmodules`, "--list"])
-  const paths = new Map<string, string>()
-  const urls = new Map<string, string>()
   for (const record of declared.split("\0")) {
     const separator = record.indexOf("\n")
     if (separator < 0) continue
-    const match = /^submodule\.(.+)\.(path|url)$/u.exec(record.slice(0, separator))
+    const match = /^submodule\.(.+)\.([^.]+)$/u.exec(record.slice(0, separator))
     const name = match?.[1]
     const key = match?.[2]
     const value = record.slice(separator + 1)
-    if (name === undefined || key === undefined || value === undefined) continue
-    ;(key === "path" ? paths : urls).set(name, value)
+    if (name === undefined || key === undefined) continue
+    const section = sections.get(name) ?? new Map<string, string[]>()
+    sections.set(name, section)
+    section.set(key, [...(section.get(key) ?? []), value])
   }
-  for (const [name, path] of paths) {
-    const url = urls.get(name)
-    if (url !== undefined) byPath.set(path, url)
-  }
-  return byPath
+  return sections
 }
 
 /**

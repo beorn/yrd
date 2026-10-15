@@ -4,6 +4,8 @@
  *          candidate (29560: about 1,580 local git processes per real submit). Or the partial candidate is wrong: an
  *          unmoved component is materialized, a component main moved since the branch's base is left out, a
  *          criss-cross history is left partial, or the receipt grows one "as written" row per untouched component.
+ *          Or a component whose .gitmodules entry changed is left out, an unmoved component git-super cannot read is
+ *          kept with no reason and no warning, or a fresh worktree silently drops an exclusion its commit cannot honour.
  * @level   l2 (real repositories, real submodules, real `git super worktree add`, merge and removal)
  * @consumer `yrd submit` and its dry run from every seat (composeSubmit, the submission receipt)
  * @testonly none
@@ -18,7 +20,7 @@ import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 import { populateReferenceStores } from "../src/reference.ts"
 import { inspectSubmit, submit, type SubmitRequest, type SubmitVerification } from "../src/submit.ts"
 import * as verifying from "../src/verifying.ts"
-import { registeredWorktrees } from "../src/worktree.ts"
+import { freshWorktree, registeredWorktrees } from "../src/worktree.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
 process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
@@ -30,6 +32,8 @@ afterAll(() => {
 })
 
 const author = ["-c", "user.email=exclusion@yrd.test", "-c", "user.name=yrd"] as const
+/** A second hosted name for vendor/b's repository, so a branch can change vendor/b's url and still resolve it. */
+const HOSTED_B2 = "https://github.com/beorn/yrd-exclusion-b2-fixture.git"
 /** The git-super this repository pins, never the host's PATH one. */
 const superEnv = { ...process.env, PATH: `${gitSuperBin}:${process.env.PATH ?? ""}` }
 
@@ -92,7 +96,7 @@ async function world(): Promise<World> {
   const a1 = await commitIn(a, "a-side.txt", "side")
   const env = {
     ...superEnv,
-    GIT_CONFIG_COUNT: "4",
+    GIT_CONFIG_COUNT: "5",
     GIT_CONFIG_KEY_0: "protocol.file.allow",
     GIT_CONFIG_VALUE_0: "always",
     GIT_CONFIG_KEY_1: `url.${a}.insteadOf`,
@@ -101,6 +105,8 @@ async function world(): Promise<World> {
     GIT_CONFIG_VALUE_2: hostedB,
     GIT_CONFIG_KEY_3: `url.${product}.insteadOf`,
     GIT_CONFIG_VALUE_3: hostedOrigin,
+    GIT_CONFIG_KEY_4: `url.${b}.insteadOf`,
+    GIT_CONFIG_VALUE_4: HOSTED_B2,
   }
   const repo = join(root, "queue-clone")
   await gitIn(root)(["clone", "--quiet", "--no-checkout", "--origin", "origin", product, repo])
@@ -248,6 +254,87 @@ describe("submit's candidate leaves out the components nobody moved (29560)", ()
     expect(receipt.verifying.excludedSubmodules).toBeUndefined()
     expect(watch.seen.map((row) => row.excluded)).toEqual([undefined])
     expect(watch.seen[0]?.bEntries).toBeGreaterThan(0)
+  }, 180_000)
+
+  it("materializes a component whose .gitmodules entry the branch changed, though its gitlink stands still", async () => {
+    const w = await world()
+    const productGit = gitIn(w.product)
+    await productGit(["checkout", "--quiet", "-b", "task/config", "main"])
+    await productGit(["update-index", "--cacheinfo", `160000,${w.a1},vendor/a`])
+    await productGit(["config", "-f", ".gitmodules", "submodule.vendor/b.url", HOSTED_B2])
+    await productGit(["add", ".gitmodules"])
+    await productGit([
+      ...author,
+      "commit",
+      "--quiet",
+      "--message",
+      "move vendor/a; vendor/b's url changes, its pin does not",
+    ])
+    await productGit(["checkout", "--quiet", "main"])
+    const git = queueGit(w)
+    await git(["fetch", "--quiet", "origin", "task/config:task/config", "main:refs/remotes/origin/main"])
+    expect((await git(["rev-parse", "task/config:vendor/b"])).trim()).toBe(w.b0)
+    const watch = watchCandidate()
+    let receipt: Awaited<ReturnType<typeof inspectSubmit>>
+    try {
+      receipt = await withSuperPath(w, () => inspectSubmit(git, "origin", requestFor("task/config")))
+    } finally {
+      watch.restore()
+    }
+    if (receipt.verifying.state !== "verified") throw new Error("fixture did not verify")
+    expect(receipt.verifying.excludedSubmodules).toBeUndefined()
+    expect(receipt.verifying.keptUnmoved).toBeUndefined()
+    expect(watch.seen.map((row) => row.excluded)).toEqual([undefined])
+    expect(watch.seen[0]?.bEntries).toBeGreaterThan(0)
+  }, 180_000)
+
+  it("materializes an unmoved component git-super cannot read, names its reason and warns", async () => {
+    const w = await world()
+    await candidateBranch(w, "task/unreadable")
+    const git = queueGit(w)
+    // vendor/b's local main is gone from its store, so the local-only query cannot answer for it.
+    await queueGit(w, "vendor/b")(["update-ref", "-d", "refs/remotes/origin/main"])
+    const watch = watchCandidate()
+    const warnings: string[] = []
+    const warned = vi.spyOn(console, "warn").mockImplementation((line: unknown) => {
+      warnings.push(String(line))
+    })
+    let receipt: Awaited<ReturnType<typeof inspectSubmit>>
+    try {
+      receipt = await withSuperPath(w, () => inspectSubmit(git, "origin", requestFor("task/unreadable")))
+    } finally {
+      watch.restore()
+      warned.mockRestore()
+    }
+    if (receipt.verifying.state !== "verified") throw new Error("fixture did not verify")
+    expect(receipt.verifying.excludedSubmodules).toBeUndefined()
+    expect(receipt.verifying.keptUnmoved).toEqual([
+      { path: "vendor/b", reason: expect.stringContaining("refs/remotes/origin/main is unreadable") },
+    ])
+    expect(watch.seen[0]?.bEntries).toBeGreaterThan(0)
+    expect(warnings.filter((line) => line.includes("keeps unmoved vendor/b"))).toEqual([
+      expect.stringContaining("git-super could not read its local main"),
+    ])
+  }, 180_000)
+
+  it("a fresh worktree refuses to leave out a path its commit does not declare, by name", async () => {
+    const w = await world()
+    const git = queueGit(w)
+    const head = (await git(["rev-parse", "refs/remotes/origin/main"])).trim()
+    const bare = (await git(["rev-list", "--max-parents=0", "refs/remotes/origin/main"])).trim()
+    expect((await git(["ls-tree", bare, "--", ".gitmodules"])).trim()).toBe("")
+    await expect(
+      withSuperPath(w, () =>
+        freshWorktree(git, w.repo, head, join(w.root, "undeclared"), { excludedSubmodules: ["vendor/none"] }),
+      ),
+    ).rejects.toThrow(/cannot leave out vendor\/none, because that commit's \.gitmodules declares no submodule/u)
+    await expect(
+      withSuperPath(w, () =>
+        freshWorktree(git, w.repo, bare, join(w.root, "no-modules"), { excludedSubmodules: ["vendor/a"] }),
+      ),
+    ).rejects.toThrow(/cannot leave out vendor\/a, because that commit records no \.gitmodules/u)
+    expect(existsSync(join(w.root, "undeclared"))).toBe(false)
+    expect(existsSync(join(w.root, "no-modules"))).toBe(false)
   }, 180_000)
 
   it("throws by name when the compose reports an excluded path as anything but as-written at the target's pin", async () => {

@@ -2321,9 +2321,7 @@ export async function coreQueueCommand(
               formatDryRunGitlinks(
                 inspected.verifying.state === "verified" ? inspected.verifying.gitlinks : undefined,
               ) +
-              formatDryRunExcluded(
-                inspected.verifying.state === "verified" ? inspected.verifying.excludedSubmodules : undefined,
-              ),
+              formatDryRunExcluded(inspected.verifying.state === "verified" ? inspected.verifying : undefined),
           )
           echoStop(inspected.stop)
           echoAdmission(inspected.admission, true)
@@ -2439,7 +2437,7 @@ export async function coreQueueCommand(
           `would open ${changeName({ branch, head })} on ${targetName(config.target)} for ${request.submitter}` +
             `${issue === undefined ? "" : ` (issue ${issue.issue})`}; nothing was pushed; ${freshnessLine(targetHead)}` +
             formatDryRunGitlinks(verifying.state === "verified" ? verifying.gitlinks : undefined) +
-            formatDryRunExcluded(verifying.state === "verified" ? verifying.excludedSubmodules : undefined),
+            formatDryRunExcluded(verifying.state === "verified" ? verifying : undefined),
         )
         echoStop(inspected.stop)
         echoAdmission(inspected.admission, true)
@@ -6856,11 +6854,26 @@ function emit(io: YrdCliIO, json: boolean | undefined, data: unknown, human: str
   else io.stdout(`${human}\n`)
 }
 
-/** The components a submit's candidate left out because nobody moved them (29560): the candidate was partial. */
-function formatDryRunExcluded(excluded: readonly string[] | undefined): string {
-  if (excluded === undefined || excluded.length === 0) return ""
-  return `\ncandidate left out ${String(excluded.length)} unmoved component(s): ${excluded.join(", ")}`
+/**
+ * The components a submit's candidate left out because nobody moved them (29560): the candidate was partial. Then one
+ * line per unmoved component it materialized anyway, with git-super's reason (@cto 7015ba5e).
+ */
+function formatDryRunExcluded(
+  verifying:
+    | Readonly<{ excludedSubmodules?: readonly string[]; keptUnmoved?: readonly SubmitKeptUnmoved[] }>
+    | undefined,
+): string {
+  const excluded = verifying?.excludedSubmodules ?? []
+  const kept = verifying?.keptUnmoved ?? []
+  return (
+    (excluded.length === 0
+      ? ""
+      : `\ncandidate left out ${String(excluded.length)} unmoved component(s): ${excluded.join(", ")}`) +
+    kept.map((row) => `\ncandidate keeps unmoved component ${row.path}: ${row.reason}`).join("")
+  )
 }
+
+type SubmitKeptUnmoved = Readonly<{ path: string; reason: string }>
 
 function formatDryRunGitlinks(gitlinks: readonly SubmitGitlink[] | undefined): string {
   if (gitlinks === undefined || gitlinks.length === 0) return ""

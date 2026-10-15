@@ -454,6 +454,18 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     expect(await refs(w.remote)).toBe(before)
   }, 90_000)
 
+  it("prints each unmoved component the candidate keeps, with git-super's reason (29560)", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const two = w.components[1]!
+    const preview = await yrd(w.work, "submit", "--gitlink", `${one.path}=${one.held}`, "--issue", "25804", "--dry-run")
+    expect(preview.exitCode, preview.report).toBe(0)
+    // vendor/two declares no branch, so the local-only query declines it by name and the candidate materializes it.
+    expect(preview.stdout, preview.report).toContain(`candidate keeps unmoved component ${two.path}: `)
+    expect(preview.stdout, preview.report).toContain(`${two.path} declares no branch`)
+    expect(preview.stdout, preview.report).not.toContain("candidate left out")
+  }, 90_000)
+
   it("refuses a locally present SHA absent at the declared component remote without publishing any root ref", async () => {
     const w = await world()
     const one = w.components[0]!
