@@ -312,6 +312,62 @@ describe("29450 closing an issue retires its branches", () => {
     })
   })
 
+  it("keeps and names a branch whose event history is unreadable: a diagnostic on its change, or an invalid chain (review2 ee911aeb)", async () => {
+    const repo = await world()
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const queueTip = (await readEventQueue(store, "main")).tip
+    if (queueTip === null) throw new Error("fixture queue has no tip")
+    const at = new Date()
+    // A merged change followed by an event this reader cannot fold: the fold keeps the merged state and names the
+    // event in `diagnostic`. Without the boundary the sweep retired this tip as landed by its recorded landing.
+    const diagnosed = await branchFor(repo, "task/29120-diagnosed", "@t/29120-x")
+    const diagnosedChain = await openEvents({
+      ...store,
+      ref: changesRef("main", "task/29120-diagnosed"),
+      writer: "fixture",
+    })
+    await diagnosedChain.append(
+      [
+        changeInput("opened", { queueTip, at, commit: diagnosed, by: "fixture", issue: "@t/29120-x" }),
+        changeInput("merged", { queueTip, at, commit: diagnosed }),
+        { type: "future-unreadable-state", title: "future event", content: "", props: [], links: [] },
+      ],
+      { expect: null },
+    )
+    // A chain whose first event lacks what an `opened` event must carry: the projection refuses it as invalid.
+    const broken = await branchFor(repo, "task/29121-broken", "@t/29121-x")
+    const brokenChain = await openEvents({ ...store, ref: changesRef("main", "task/29121-broken"), writer: "fixture" })
+    await brokenChain.append([{ type: "opened", title: "opened", content: "", props: [], links: [] }], { expect: null })
+
+    const { report, rows } = await sweep(repo, { "29120": "closed", "29121": "closed" })
+    expect(report.removed).toEqual([])
+    expect(report.failed).toEqual([])
+    expect(report.kept).toEqual([
+      expect.objectContaining({
+        branch: "task/29120-diagnosed",
+        head: diagnosed,
+        reason: "unreadable",
+        detail: expect.stringContaining("future-unreadable-state"),
+      }),
+      expect.objectContaining({
+        branch: "task/29121-broken",
+        head: broken,
+        reason: "unreadable",
+        detail: expect.stringContaining(changesRef("main", "task/29121-broken")),
+      }),
+    ])
+    expect((await git(["rev-parse", "refs/heads/task/29120-diagnosed"])).trim()).toBe(diagnosed)
+    expect((await git(["rev-parse", "refs/heads/task/29121-broken"])).trim()).toBe(broken)
+    expect(
+      rows.filter((r) => r.kind === "closed-issue-retirement" && r.scope !== "summary").map((r) => r.reason),
+    ).toEqual(["unreadable", "unreadable"])
+    expect(rows.find((r) => r.kind === "closed-issue-retirement" && r.scope === "summary")).toMatchObject({
+      removed: 0,
+      kept: 2,
+    })
+  })
+
   it("keeps and names a branch that moves between its archive and its delete", async () => {
     const repo = await world()
     const git = gitIn(repo)

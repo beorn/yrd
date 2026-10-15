@@ -866,6 +866,24 @@ export async function retireClosedIssueBranches(
     if (branch === queue || !/^(task|exp)\//u.test(branch)) continue
     examined++
     const change = reading.histories.get(branch)?.state
+    // review @dev/review2 ee911aeb: an unreadable history proves nothing about status or custody, so it is kept and
+    // named before any eligibility — the boundary the hand verb (`drop --issue`) already applies: an invalid chain,
+    // or a change whose fold carries a diagnostic (an event this reader could not fold).
+    const invalid = reading.invalid.get(branch)
+    if (invalid !== undefined) {
+      record({
+        branch,
+        head,
+        outcome: "kept",
+        reason: "unreadable",
+        detail: `${invalid.ref}@${invalid.tip}: ${invalid.error}`,
+      })
+      continue
+    }
+    if (change?.diagnostic !== undefined) {
+      record({ branch, head, outcome: "kept", reason: "unreadable", detail: change.diagnostic })
+      continue
+    }
     // @cto bbec7bb5 (work.md:99): eligibility comes from the canonical binding only — the recorded change's issue.
     // A branch that binds by its name alone is kept and listed; binding it through its commits' Refs trailers is
     // the named follow-up (the reader 29113 uses is not in yrd's io today). A person's `drop --issue` keeps its
