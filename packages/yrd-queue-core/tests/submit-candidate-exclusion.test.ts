@@ -16,7 +16,7 @@ import { afterAll, describe, expect, it, vi } from "vitest"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 import { populateReferenceStores } from "../src/reference.ts"
-import { inspectSubmit, submit, type SubmitRequest } from "../src/submit.ts"
+import { inspectSubmit, submit, type SubmitRequest, type SubmitVerification } from "../src/submit.ts"
 import * as verifying from "../src/verifying.ts"
 import { registeredWorktrees } from "../src/worktree.ts"
 
@@ -170,7 +170,10 @@ describe("submit's candidate leaves out the components nobody moved (29560)", ()
     const git = queueGit(w)
     const watch = watchCandidate()
     try {
-      for (const action of [inspectSubmit, submit]) {
+      const actions: readonly ((
+        ...args: Parameters<typeof inspectSubmit>
+      ) => Promise<{ verifying: SubmitVerification }>)[] = [inspectSubmit, submit]
+      for (const action of actions) {
         const receipt = await withSuperPath(w, () => action(git, "origin", requestFor("task/one")))
         if (receipt.verifying.state !== "verified") throw new Error("fixture did not verify")
         expect(receipt.verifying.excludedSubmodules).toEqual(["vendor/b"])
