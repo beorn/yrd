@@ -5,12 +5,15 @@ import type { GitWorktreeStore } from "git-super/worktree"
 import {
   collectMovedGitlinks,
   createEventStore,
+  createLocalEventStore,
   gitIn,
   isAncestor,
+  isOpen,
   listRefs,
   openLog,
   readBranchHistory,
   readConfig,
+  readEventQueueWithChanges,
   resolveGitSelection,
   readRemoteCommit,
   readStatus,
@@ -27,6 +30,7 @@ import {
   type QueueLocation,
   type QueueConfig,
 } from "@yrd/queue-core"
+import type { ResolvedIssue } from "./issue-resolver.ts"
 import type { YrdCliIO } from "./types.ts"
 import { originHead } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
@@ -609,7 +613,14 @@ export async function retireMergedComponentAuthors(
 
 type LandingPin = Readonly<{ event: string; path: string; tip: string }>
 type LandedCandidate = Omit<LocalBranchRetirement, "repo" | "git" | "disposition" | "reason"> &
-  Readonly<{ path: string; landings: readonly LandingPin[]; reason?: string }>
+  Readonly<{
+    path: string
+    landings: readonly LandingPin[]
+    reason?: string
+    /** 29450: the candidate's issue is closed or dropped, so a tip with no custody is archived to origin and
+     * ended with a `dropped` event (the closed disposition) instead of being kept `unreached`. */
+    closed?: Readonly<{ store: QueueLocation; queue: string }>
+  }>
 
 /** One store's origin-custody judgment, shared by explicit landing candidates and manual issue selection.
  * Selection stays with the caller; this operation never enumerates or guesses author branches.
@@ -628,7 +639,7 @@ export function createLandedBranchRetirement(
     candidate: LandedCandidate,
   ): Promise<Omit<LocalBranchRetirementResult, "archiveRef"> & { archiveRef?: string }> => {
     const { repo, git, remote, selection, target } = store
-    const { path, landings, reason, ...retirement } = candidate
+    const { path, landings, reason, closed, ...retirement } = candidate
     const pin = landings.find((pin) => pin.path === path && pin.tip === candidate.tip)
     let custody: string | undefined = (await isAncestor(git, candidate.tip, target)) ? target : undefined
     let proof: { kind: "ancestry" } | { kind: "landing"; event: string; path: string; tip: string } = {
@@ -647,6 +658,18 @@ export function createLandedBranchRetirement(
       }
     }
     if (custody === undefined) {
+      if (closed !== undefined) {
+        // work.md § Events first: a close archives, then removes, its unmerged branches. The closed
+        // disposition publishes the archive ref and the `dropped` event to origin in one write and reads
+        // both back before the compare-and-delete; a tip nobody archived is never deleted.
+        return retireLocalBranch({
+          ...retirement,
+          repo,
+          git,
+          reason: reason ?? "closed issue",
+          disposition: { kind: "closed", store: closed.store, queue: closed.queue, target },
+        })
+      }
       return {
         outcome: "kept",
         reason: "unreached",
@@ -661,4 +684,254 @@ export function createLandedBranchRetirement(
       disposition: { kind: "landed", target: custody, proof },
     })
   }
+}
+
+// ---------------------------------------------------------------------------
+// 29450 — closing an issue retires its branches
+//
+// work.md § Events first: "Closing an issue archives, then removes, its unmerged branches, so 'closed,
+// code left' cannot form." A close happens three ways (km bd close, merge-close, a hand edit of the file),
+// all of which end as the issue's status, so the service's round reads that status through the declared
+// resolver and retires the branches bound to closed or dropped issues through the one removal path.
+// Ruled by @cto dd209c0b (2026-10-15): the queue round is the consumer; time-based cadence; a resolver
+// failure keeps everything and is named; the delete is compare-and-delete against the archived tip.
+
+/** Issue statuses the declared resolver answers that end an issue (work.md:26: a dropped `[-]` ends it too). */
+export const CLOSED_ISSUE_STATUSES: ReadonlySet<string> = new Set(["closed", "dropped"])
+
+const CLOSED_ISSUE_SWEEP_INTERVAL_MS = 3_600_000
+/** The last sweep per authoring repository in THIS process: absent means the service just started. */
+const closedIssueSweeps = new Map<string, number>()
+
+/** Sweep at service start, after any round that merged, and when an hour has passed since the last sweep. */
+export function closedIssueSweepDue(input: Readonly<{ repo: string; merged: number; now: number }>): boolean {
+  const last = closedIssueSweeps.get(input.repo)
+  return last === undefined || input.merged > 0 || input.now - last >= CLOSED_ISSUE_SWEEP_INTERVAL_MS
+}
+
+export function markClosedIssueSweep(repo: string, now: number): void {
+  closedIssueSweeps.set(repo, now)
+}
+
+export type ClosedIssueRetirementRow = Readonly<{
+  branch: string
+  head: string
+  issue?: string
+  status?: string
+  outcome: "removed" | "kept" | "failed"
+  reason: string
+  detail?: string
+  archiveRef?: string
+  /** For a removed tip that main does not hold: the one command that brings it back as a branch. */
+  recovery?: string
+}>
+
+export type ClosedIssueRetirementReport = Readonly<{
+  repo: string
+  /** Local `task/*` and `exp/*` heads other than the target branch. */
+  examined: number
+  /** Heads the binding could not tie to an issue. */
+  unnumbered: number
+  /** Bound to an issue the resolver did not answer with exactly one bead. */
+  unknownIssues: number
+  /** Bound to an issue that is still open. */
+  openIssues: number
+  /** Distinct closed or dropped issues that still had a branch. */
+  closedIssues: number
+  removed: readonly ClosedIssueRetirementRow[]
+  kept: readonly ClosedIssueRetirementRow[]
+  failed: readonly ClosedIssueRetirementRow[]
+  /** Set when the resolver could not answer: every branch was kept and nothing below was judged. */
+  resolverFailure?: string
+}>
+
+export type ClosedIssueRetirementInput = Readonly<{
+  repo: string
+  git: Git
+  selection: GitSelection
+  /** The queue's event store at origin; the closed disposition publishes archive and ending through it. */
+  store: QueueLocation
+  queue: string
+  /** The target branch's commit at origin after this round: custody for a merged tip. */
+  target: string
+  io: YrdCliIO
+  log: LocalBranchRetirement["log"]
+  actor: string
+  date?: string
+  /** The branch-to-issue binding the caller already applies (recorded change issue first, never a bare guess). */
+  branchIssue: (branch: string, recordedIssue?: string) => string | undefined
+  /** One resolver run over every bound reference; absent when the target declares no resolver. */
+  lookupMany: ((raws: readonly string[]) => Promise<readonly (ResolvedIssue | null)[]>) | undefined
+}>
+
+/**
+ * Retire the local branches bound to closed or dropped issues (29450). Each branch's tip is judged by
+ * `createLandedBranchRetirement`: on main → landed (archived locally, compare-and-deleted); otherwise
+ * → the closed disposition (archive and `dropped` event published to origin and read back, then
+ * compare-and-deleted). A worktree-held or moved branch is kept and names why. A resolver that fails,
+ * or answers no bound bead for a reference, keeps those branches: unknown is never read as closed. This
+ * operation reports every failure in its rows and never throws into the merge round.
+ */
+export async function retireClosedIssueBranches(
+  input: ClosedIssueRetirementInput,
+): Promise<ClosedIssueRetirementReport> {
+  const { repo, git, selection, store, queue, target, io, log, actor } = input
+  const date = input.date ?? new Date().toISOString().slice(0, 10)
+  const removed: ClosedIssueRetirementRow[] = []
+  const kept: ClosedIssueRetirementRow[] = []
+  const failed: ClosedIssueRetirementRow[] = []
+  let examined = 0
+  let unnumbered = 0
+  let unknownIssues = 0
+  let openIssues = 0
+  const closedIssues = new Set<string>()
+  const summary = (resolverFailure?: string): ClosedIssueRetirementReport => {
+    const report: ClosedIssueRetirementReport = {
+      repo,
+      examined,
+      unnumbered,
+      unknownIssues,
+      openIssues,
+      closedIssues: closedIssues.size,
+      removed,
+      kept,
+      failed,
+      ...(resolverFailure === undefined ? {} : { resolverFailure }),
+    }
+    log.write({
+      kind: "closed-issue-retirement",
+      scope: "summary",
+      repo,
+      examined,
+      unnumbered,
+      unknownIssues,
+      openIssues,
+      closedIssues: closedIssues.size,
+      removed: removed.length,
+      kept: kept.length,
+      failed: failed.length,
+      ...(resolverFailure === undefined ? {} : { resolverFailure }),
+    })
+    io.stderr(
+      `yrd: closed-issue sweep in ${repo}: examined ${examined}, closed issues ${closedIssues.size}, ` +
+        `retired ${removed.length}, kept ${kept.length}, failed ${failed.length}` +
+        (resolverFailure === undefined ? "" : `; resolver failed, every branch kept: ${resolverFailure}`) +
+        "\n",
+    )
+    return report
+  }
+  const record = (row: ClosedIssueRetirementRow): void => {
+    ;(row.outcome === "removed" ? removed : row.outcome === "kept" ? kept : failed).push(row)
+    log.write({
+      kind: "closed-issue-retirement",
+      branch: row.branch,
+      head: row.head,
+      outcome: row.outcome,
+      reason: row.reason,
+      ...(row.issue === undefined ? {} : { issue: row.issue }),
+      ...(row.status === undefined ? {} : { status: row.status }),
+      ...(row.detail === undefined ? {} : { detail: row.detail }),
+      ...(row.archiveRef === undefined ? {} : { archive: row.archiveRef }),
+      ...(row.recovery === undefined ? {} : { recovery: row.recovery }),
+    })
+  }
+
+  // Inventory: the local heads and the queue's recorded changes, read once.
+  const heads = await listRefs("refs/heads/", createLocalEventStore(repo, selection))
+  const reading = await readEventQueueWithChanges(store, queue)
+  type Candidate = { branch: string; head: string; raw: string; change: EventChange | undefined }
+  const candidates: Candidate[] = []
+  for (const [ref, head] of heads) {
+    const branch = ref.slice("refs/heads/".length)
+    if (branch === queue || !/^(task|exp)\//u.test(branch)) continue
+    examined++
+    const change = reading.histories.get(branch)?.state
+    const raw = input.branchIssue(branch, change?.issue)
+    if (raw === undefined) {
+      unnumbered++
+      continue
+    }
+    candidates.push({ branch, head, raw, change })
+  }
+  if (candidates.length === 0) return summary()
+  if (input.lookupMany === undefined) {
+    return summary("target declaration has no issueResolver; issue status unproven")
+  }
+  const raws = [...new Set(candidates.map((candidate) => candidate.raw))]
+  let resolved: ReadonlyMap<string, ResolvedIssue | null>
+  try {
+    const answers = await input.lookupMany(raws)
+    resolved = new Map(raws.map((raw, index) => [raw, answers[index] ?? null]))
+  } catch (error) {
+    return summary(error instanceof Error ? error.message : String(error))
+  }
+
+  const retire = createLandedBranchRetirement({ repo, git, selection, remote: store.remote, target })
+  for (const { branch, head, raw, change } of candidates) {
+    const issue = resolved.get(raw)
+    if (issue === null || issue === undefined) {
+      unknownIssues++
+      continue
+    }
+    const status = typeof issue.status === "string" ? issue.status : undefined
+    if (status === undefined || !CLOSED_ISSUE_STATUSES.has(status)) {
+      openIssues++
+      continue
+    }
+    closedIssues.add(issue.id)
+    if (change !== undefined && isOpen(change.status)) {
+      record({
+        branch,
+        head,
+        issue: issue.id,
+        status,
+        outcome: "kept",
+        reason: "active",
+        detail: `change is ${change.status}`,
+      })
+      continue
+    }
+    try {
+      const result = await retire({
+        path: "",
+        landings: [],
+        branch,
+        tip: head,
+        actor,
+        owner: change?.submitter,
+        issue: issue.id,
+        date,
+        log,
+        protections: () =>
+          io.localBranchProtections?.({ repo, branch, tip: head, issue: issue.id }) ?? Promise.resolve([]),
+        closed: { store, queue },
+      })
+      const archiveRef = result.archiveRef
+      const onMain = await isAncestor(git, head, target)
+      record({
+        branch,
+        head,
+        issue: issue.id,
+        status,
+        outcome: result.outcome === "removed" ? "removed" : result.outcome === "failed" ? "failed" : "kept",
+        reason: result.reason,
+        ...(result.detail === undefined ? {} : { detail: result.detail }),
+        ...(archiveRef === undefined ? {} : { archiveRef }),
+        ...(result.outcome === "removed" && archiveRef !== undefined && !onMain
+          ? { recovery: `git -C ${repo} fetch ${store.remote} ${archiveRef}:refs/heads/${branch}` }
+          : {}),
+      })
+    } catch (error) {
+      record({
+        branch,
+        head,
+        issue: issue.id,
+        status,
+        outcome: "failed",
+        reason: "failed",
+        detail: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  return summary()
 }
