@@ -1819,7 +1819,7 @@ describe("the queue-format boundary", () => {
     if (fault === "final-readback") {
       expect(String(refusal)).toContain(`retaining event ${ref}@${ending} keeps ${head}`)
     }
-    expect(await branch.head()).toBe(expectedBranch)
+    expect((await listRefs(branchRef, store)).get(branchRef) ?? null).toBe(expectedBranch)
     expect((await listRefs(ref, store)).get(ref)).toBe(ending)
     if (["open", "wrong-tip", "unreadable"].includes(fault)) expect((await listRefs(archive, store)).size).toBe(0)
   })
