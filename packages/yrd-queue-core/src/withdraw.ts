@@ -83,6 +83,9 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
   let retirementError: string | undefined
   let remoteRemoved = false
   try {
+    const protections = request.protections
+    const reasons = await protections?.(head, state.issue)
+    if (reasons !== undefined && reasons.length > 0) throw new Error(`kept: ${reasons.join("; ")}`)
     const target = await readRemoteCommit(git, remote, `refs/heads/${queue}`)
     if (target === undefined) throw new Error(`published main ${remote}#${queue} is missing`)
     if (!(await isAncestor(git, head, target))) {
@@ -93,7 +96,6 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
       // Reusing the original name preserves the change and its issue binding on submit.
       recovery = `git branch '${request.branch.replaceAll("'", "'\\''")}' ${head}`
     }
-    const protections = request.protections
     await retireOriginBranch(store, {
       branch: request.branch,
       head,

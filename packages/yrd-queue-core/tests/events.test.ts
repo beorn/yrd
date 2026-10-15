@@ -8,6 +8,7 @@ import type { Event, EventInput } from "gitomic/events"
 import { listRefs, openEvents } from "gitomic/events"
 import { createMemBackend } from "gitomic/mem"
 import { Conflict, open, PublicationRejected } from "gitomic"
+import { archiveRefFor } from "git-super/archive-ref"
 import type { GitomicBackend, RefUpdate } from "gitomic"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { transientPush5xxOf, transientPushRetry } from "../src/transient-push.ts"
@@ -1680,7 +1681,45 @@ describe("the queue-format boundary", () => {
         { ref: changesRef("lab", "task/merged"), expect: merged.head, oid: null },
       ])
     }
-    await drop(location, { queue: "lab", branch: "task/merged", by: "@dev/2" })
+    // The previous branch-absence assertion missed missing custody and skipped
+    // host protections on hot/cold ended changes (29399).
+    const archive = archiveRefFor("task/merged", "@dev/2", new Date().toISOString().slice(0, 10))
+    await expect(
+      drop(location, {
+        queue: "lab",
+        branch: "task/merged",
+        by: "@dev/2",
+        retire: { tip: head },
+        note: "retire merged work",
+        protections: async () => ["author environment is held"],
+      }),
+    ).rejects.toThrow(/author environment is held/)
+    expect((await listRefs(archive, store)).size).toBe(0)
+    expect(await branch.head()).toBe(head)
+    let checks = 0
+    const dropped = await drop(location, {
+      queue: "lab",
+      branch: "task/merged",
+      by: "@dev/2",
+      protections: async () => {
+        checks++
+        expect((await listRefs(archive, store)).get(archive)).toBe(checks === 1 ? undefined : head)
+        expect(await branch.head()).toBe(head)
+        return []
+      },
+    })
+    expect(checks).toBe(2)
+    expect(dropped.archive).toBe(archive)
+    expect((await listRefs(archive, store)).get(archive)).toBe(head)
+    await expect(
+      drop(location, {
+        queue: "lab",
+        branch: "task/merged",
+        by: "@dev/2",
+        retire: { tip: head },
+        note: "already retired",
+      }),
+    ).resolves.toMatchObject({ archive, head, event: merged.head })
     expect((await listRefs(ref, store)).get(ref)).toBe(merged.head)
     if (custody === "cold") expect(await chain.head()).toBeNull()
     expect((await listRefs("refs/heads/task/merged", store)).size).toBe(0)
