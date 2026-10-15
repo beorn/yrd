@@ -882,6 +882,8 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
       exitOverride?: number
       stderr?: string
       noReceipt?: boolean
+      /** Repositories the stub reports as consulted and skipped, as bearly does since 29392 (29406). */
+      skipped?: ReadonlyArray<{ path: string; head: string; reason: string }>
     } = {},
   ): void {
     mkdirSync(join(root, "tools"), { recursive: true })
@@ -890,6 +892,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
       .replace("__STDERR__", JSON.stringify(options.stderr ?? ""))
       .replace("__NO_RECEIPT__", options.noReceipt === true ? "true" : "false")
       .replace("__EXIT_OVERRIDE__", options.exitOverride === undefined ? '""' : String(options.exitOverride))
+      .replace("__SKIPPED__", JSON.stringify(options.skipped ?? []))
     writeFileSync(join(root, "tools", "worktree.ts"), source)
   }
 
@@ -929,6 +932,7 @@ const badPath = __BAD_PATH__
 // The preserve verb's exit code for the two honest endings: 0 (preserved) or 3
 // (nothing preserved). An override forces an unexpected exit to prove yrd refuses it.
 const exitOverride = __EXIT_OVERRIDE__
+const skipped = __SKIPPED__
 process.stderr.write(__STDERR__)
 if (__NO_RECEIPT__) process.exit(exitOverride === "" ? 1 : Number(exitOverride))
 const receipt = (body) => {
@@ -957,12 +961,12 @@ for (const path of components) {
   rootDirty = true
 }
 if (!rootDirty) {
-  receipt({ schema: "bearly-worktree-preserve/1", slot, path: target, preserved: false, reason: "clean", ref: null, sha: null, submodules: [] })
+  receipt({ schema: "bearly-worktree-preserve/1", slot, path: target, preserved: false, reason: "clean", ref: null, sha: null, submodules: [], skipped })
   process.exit(exitOverride === "" ? 3 : Number(exitOverride))
 }
 const sha = snapshot(target)
 git(target, ["update-ref", "refs/heads/" + ref, sha])
-receipt({ schema: "bearly-worktree-preserve/1", slot, path: target, preserved: true, reason: "dirty", ref, sha, submodules })
+receipt({ schema: "bearly-worktree-preserve/1", slot, path: target, preserved: true, reason: "dirty", ref, sha, submodules, skipped })
 process.exit(exitOverride === "" ? 0 : Number(exitOverride))
 `
 
@@ -1060,6 +1064,35 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       .filter(Boolean)
     expect(refs).toHaveLength(1)
     expect((await w.git(["show", `${refs[0]}:root-dirt.txt`])).trim()).toBe("root preserved")
+  })
+
+  /**
+   * @failure 29406: bearly's receipt names the repositories it consulted and skipped (a child shared
+   *          main has no primary store for, clean on its recorded pin — 29392), and yrd dropped that
+   *          list at its boundary: the operator was never told vendor/brain8 was skipped.
+   * @level   l2 (real CLI, real bare remote, stub preserve CLI printing one skipped repository)
+   * @consumer every seat closing an environment with a storeless child
+   */
+  it("env close --preserve names each skipped repository in its stderr line and --json receipt (29406)", async () => {
+    const w = await world(":")
+    const skipped = {
+      path: "vendor/brain8",
+      head: "0123456789abcdef0123456789abcdef01234567",
+      reason: "clean on its recorded pin; shared main has no primary store for it",
+    }
+    installStubWorktreePreserve(w.work, { skipped: [skipped] })
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    writeFileSync(join(path, "root-dirt.txt"), "root preserved\n")
+
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+    expect(run.stderr()).toContain("preserved dirty state")
+    expect(run.stderr()).toContain(`; skipped: vendor/brain8@0123456789ab (${skipped.reason})`)
+    expect(existsSync(path)).toBe(false)
+    expect(JSON.parse(run.stdout())).toEqual({ closed: path, skipped: [skipped] })
   })
 
   /**

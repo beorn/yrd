@@ -765,6 +765,8 @@ export interface WorktreePreserveReceipt {
   ref: string | null
   sha: string | null
   submodules: ReadonlyArray<{ path: string; ref: string | null; sha: string }>
+  /** Repositories bearly consulted and skipped: no primary store under shared main, clean on the recorded pin (29392). */
+  skipped: ReadonlyArray<{ path: string; head: string; reason: string }>
 }
 
 /** The receipt schema the worktree preserve CLI promises (bearly tools/worktree.ts). */
@@ -837,6 +839,26 @@ export function parseWorktreePreserveReceipt(stdout: string, cli: string): Workt
     if (typeof component.sha !== "string") throw receiptRefusal(cli, `submodules[${index}].sha`, "expected a string")
     return { path: component.path, ref: component.ref, sha: component.sha }
   })
+  // 29406: bearly names the repositories it consulted and skipped — a child shared main has no
+  // primary store for that was clean on its recorded pin (29392). A receipt without the key comes
+  // from a bearly before 29392, which preserved or threw and never skipped, so absence means
+  // nothing was skipped; a present key is read by shape and refused by name like the fields above.
+  let skipped: WorktreePreserveReceipt["skipped"] = []
+  if (record.skipped !== undefined) {
+    if (!Array.isArray(record.skipped)) throw receiptRefusal(cli, "skipped", "expected an array")
+    skipped = record.skipped.map((entry, index) => {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        throw receiptRefusal(cli, `skipped[${index}]`, "expected an object")
+      }
+      const repository = entry as Record<string, unknown>
+      if (typeof repository.path !== "string") throw receiptRefusal(cli, `skipped[${index}].path`, "expected a string")
+      if (typeof repository.head !== "string") throw receiptRefusal(cli, `skipped[${index}].head`, "expected a string")
+      if (typeof repository.reason !== "string") {
+        throw receiptRefusal(cli, `skipped[${index}].reason`, "expected a string")
+      }
+      return { path: repository.path, head: repository.head, reason: repository.reason }
+    })
+  }
   return {
     slot: record.slot,
     path: record.path,
@@ -845,6 +867,7 @@ export function parseWorktreePreserveReceipt(stdout: string, cli: string): Workt
     ref: record.ref,
     sha: record.sha,
     submodules,
+    skipped,
   }
 }
 
@@ -1055,15 +1078,23 @@ export async function closeEnvironment(
   // retires them. A preserve that cannot complete throws (loud) and blocks the removal, so no path
   // discards uncommitted work silently.
   const preservedRefs: string[] = []
+  // 29406: the repositories the preserve consulted and skipped, named in the --json close receipt
+  // below; undefined when no preserve ran, so the plain close receipt is unchanged.
+  let skipped: WorktreePreserveReceipt["skipped"] | undefined
   if (options.preserve === true) {
     const receipt = await preserveEnvironmentWorktree(process, root, path)
     for (const ref of [receipt.ref, ...receipt.submodules.map((entry) => entry.ref)]) {
       if (ref !== null && ref !== "" && !preservedRefs.includes(ref)) preservedRefs.push(ref)
     }
+    skipped = receipt.skipped
+    const skippedNote =
+      receipt.skipped.length === 0
+        ? ""
+        : `; skipped: ${receipt.skipped.map((entry) => `${entry.path}@${entry.head.slice(0, 12)} (${entry.reason})`).join(", ")}`
     io.stderr(
       receipt.preserved
-        ? `yrd: env close preserved ${receipt.reason ?? "dirty"} state of ${path} before removal: ${receipt.ref ?? "(no ref)"} (${(receipt.sha ?? "").slice(0, 12)})${receipt.submodules.length === 0 ? "" : `; submodules: ${receipt.submodules.map((entry) => `${entry.path}@${entry.sha.slice(0, 12)}`).join(", ")}`}\n`
-        : `yrd: env close --preserve found nothing to preserve in ${path}; the close proceeds\n`,
+        ? `yrd: env close preserved ${receipt.reason ?? "dirty"} state of ${path} before removal: ${receipt.ref ?? "(no ref)"} (${(receipt.sha ?? "").slice(0, 12)})${receipt.submodules.length === 0 ? "" : `; submodules: ${receipt.submodules.map((entry) => `${entry.path}@${entry.sha.slice(0, 12)}`).join(", ")}`}${skippedNote}\n`
+        : `yrd: env close --preserve found nothing to preserve in ${path}; the close proceeds${skippedNote}\n`,
     )
   } else {
     await requireClean(treeGit, path)
@@ -1208,7 +1239,11 @@ export async function closeEnvironment(
   }
   if (retirementHandle !== undefined) await retirementHandle.retireAfterRelease(removalProof)
   if (removalProof !== undefined) removedProof?.(removalProof)
-  io.stdout(options.json === true ? `${JSON.stringify({ closed: path })}\n` : `closed environment ${path}\n`)
+  io.stdout(
+    options.json === true
+      ? `${JSON.stringify(skipped === undefined ? { closed: path } : { closed: path, skipped })}\n`
+      : `closed environment ${path}\n`,
+  )
   return 0
 }
 
