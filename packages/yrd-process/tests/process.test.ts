@@ -582,6 +582,42 @@ describe("Process", () => {
     expect(result).not.toHaveProperty("rawOutput")
   })
 
+  it("materializes wholly retained raw output only once while preserving decoded text", async () => {
+    const original = new Uint8Array([97, 226, 134, 146, 255, 0, 98])
+    const spawn: Spawn = () => ({
+      pid: 4242,
+      stdout: new ReadableStream({
+        start(controller) {
+          controller.enqueue(original.subarray(0, 3))
+          controller.enqueue(original.subarray(3))
+          controller.close()
+        },
+      }),
+      stderr: bytes(""),
+      exited: Promise.resolve(0),
+      signalCode: null,
+      kill() {},
+    })
+    await using process = createProcess({ maxOutputBytes: 64, inject: { spawn, log: silentLog } })
+    const concat = Buffer.concat
+    let materializedBytes = 0
+    using copies = vi.spyOn(Buffer, "concat").mockImplementation((...args) => {
+      const result = Reflect.apply(concat, Buffer, args)
+      materializedBytes += result.byteLength
+      return result
+    })
+
+    const result = await process.run({ argv: ["raw"], captureRawOutput: true })
+
+    expect(result.stdout).toBe("a→\uFFFD\0b")
+    expect(result.outputTruncation).toBeUndefined()
+    expect(Array.from(result.rawOutput?.stdout.head ?? [])).toEqual(Array.from(original))
+    expect(result.rawOutput?.stdout.tail.byteLength).toBe(0)
+    expect(result.rawOutput?.stdout.totalBytes).toBe(original.byteLength)
+    // The raw snapshot owns one copy; text decoding needs no second byte buffer.
+    expect(materializedBytes).toBeLessThanOrEqual(original.byteLength)
+  })
+
   it("hands every dropped byte to the output observer so the full stream survives elsewhere", async () => {
     const spawn: Spawn = () => ({
       pid: 4242,
