@@ -331,14 +331,14 @@ describe("29450 closing an issue retires its branches", () => {
       [
         changeInput("opened", { queueTip, at, commit: diagnosed, by: "fixture", issue: "@t/29120-x" }),
         changeInput("merged", { queueTip, at, commit: diagnosed }),
-        { type: "future-unreadable-state", title: "future event", content: "", props: [], links: [] },
+        { type: "future-unreadable-state", title: "future event", content: "", props: [] },
       ],
       { expect: null },
     )
     // A chain whose first event lacks what an `opened` event must carry: the projection refuses it as invalid.
     const broken = await branchFor(repo, "task/29121-broken", "@t/29121-x")
     const brokenChain = await openEvents({ ...store, ref: changesRef("main", "task/29121-broken"), writer: "fixture" })
-    await brokenChain.append([{ type: "opened", title: "opened", content: "", props: [], links: [] }], { expect: null })
+    await brokenChain.append([{ type: "opened", title: "opened", content: "", props: [] }], { expect: null })
 
     const { report, rows } = await sweep(repo, { "29120": "closed", "29121": "closed" })
     expect(report.removed).toEqual([])
