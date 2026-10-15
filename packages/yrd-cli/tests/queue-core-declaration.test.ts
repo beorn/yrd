@@ -2379,7 +2379,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     )
     const outcome = JSON.parse(run.stdout()) as { log: string; run: string; merged: string[] }
     expect(outcome.merged).toEqual([branch])
-    expect(existsSync(author)).toBe(kind === "pool")
+    expect(existsSync(author), run.stderr()).toBe(kind === "pool")
     expect((await git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe(
       kind === "pool" ? head : "",
     )
