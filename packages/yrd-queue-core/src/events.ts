@@ -2451,7 +2451,9 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
       return { queue, branch, head: wanted, event: state.ending.id, archive: held }
     }
     throw new Error(
-      `${branchRef}: expected ${wanted} at ${store.remote}, found ${head ?? "absent"}; exact archive custody is required`,
+      `${branchRef}: expected ${wanted} at ${store.remote}, found ${head ?? "absent"}; ` +
+        `looked for exact custody at ${held} (today's date, actor ${request.by}); ` +
+        `an exact-tip archive from another date or actor is not accepted as proof`,
     )
   }
   if (state.ending !== undefined && head !== undefined) {

@@ -1742,6 +1742,9 @@ describe("the queue-format boundary", () => {
     "archive-moved",
     "custody-readback",
     "final-readback",
+    "ending-final",
+    "absent",
+    "other-archive",
   ] as const)("keeps exact retirement custody loud on %s", async (fault) => {
     const { store, location, afterNextPublish } = remoteMemStore(`retire-${fault}`)
     const branchName = "task/retire"
@@ -1780,6 +1783,15 @@ describe("the queue-format boundary", () => {
     }
     let checks = 0
     let expectedBranch: string | null = head
+    if (fault === "absent" || fault === "other-archive") {
+      await publish(store.repo, [{ ref: branchRef, expect: head, oid: null }])
+      expectedBranch = null
+      if (fault === "other-archive") {
+        await publish(store.repo, [
+          { ref: archiveRefFor(branchName, "@dev/other", "2000-01-01"), expect: "0".repeat(40), oid: head },
+        ])
+      }
+    }
     const action = drop(location, {
       queue: "lab",
       branch: branchName,
@@ -1812,6 +1824,18 @@ describe("the queue-format boundary", () => {
             await publish(store.repo, [{ ref: archive, expect: head, oid: null }])
           })
         }
+        if (fault === "ending-final") {
+          expectedBranch = null
+          afterNextPublish(async () => {
+            ending = (
+              await (
+                await openEvents({ ...store, ref })
+              ).append([changeInput("opened", { queueTip, at: new Date(), commit: head, by: "@dev/rival" })], {
+                expect: ending,
+              })
+            ).head
+          })
+        }
         return []
       },
     })
@@ -1822,6 +1846,15 @@ describe("the queue-format boundary", () => {
     expect(refusal).toBeInstanceOf(Error)
     if (fault === "final-readback") {
       expect(String(refusal)).toContain(`retaining event ${ref}@${ending} keeps ${head}`)
+    }
+    if (fault === "ending-final") {
+      expect(String(refusal)).toContain("change moved during retirement")
+      expect(String(refusal)).toContain(archive)
+      expect(String(refusal)).toContain(`git branch '${branchName}' ${head}`)
+    }
+    if (fault === "absent" || fault === "other-archive") {
+      expect(String(refusal)).toContain(archive)
+      expect(String(refusal)).toContain("another date or actor is not accepted as proof")
     }
     expect((await listRefs(branchRef, store)).get(branchRef) ?? null).toBe(expectedBranch)
     expect((await listRefs(ref, store)).get(ref)).toBe(ending)

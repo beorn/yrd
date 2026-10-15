@@ -51,9 +51,10 @@ export async function retireOriginBranch(
     ],
     store.remote,
   )
-  const [branches, archives] = await Promise.all([
+  const [branches, archives, events] = await Promise.all([
     listRefs(branchRef, store),
     archive === undefined ? Promise.resolve(undefined) : listRefs(archive, store),
+    listRefs(eventRef, store),
   ])
   const branchHead = branches.get(branchRef)
   if (branchHead !== undefined) throw new Error(`${subject}: removal did not read back absent; found ${branchHead}`)
@@ -63,6 +64,13 @@ export async function retireOriginBranch(
     throw new Error(
       `${subject}: archive ${archive} no longer holds ${head} after removal; ` +
         `found ${archives?.get(archive) ?? "absent"}; retaining event ${eventRef}@${eventTip} keeps ${head}`,
+    )
+  }
+  if (events.get(eventRef) !== eventTip) {
+    throw new Error(
+      `${subject}: change moved during retirement; ${eventRef} expected ${eventTip}, found ${events.get(eventRef) ?? "absent"}; ` +
+        (archive === undefined ? "caller established published-main custody; " : `archive ${archive} holds ${head}; `) +
+        `restore branch ${branch} from that custody: git branch '${branch.replaceAll("'", "'\\''")}' ${head}`,
     )
   }
 }
