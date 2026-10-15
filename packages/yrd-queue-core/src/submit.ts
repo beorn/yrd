@@ -66,7 +66,7 @@ import {
 import { archivedChangesPrefix, assertBranch, classifyQueueRef, pauseRef, queueRefPrefix } from "./refs.ts"
 import { verifyCandidate, type Verification, type SettledGitlink } from "./verifying.ts"
 import { revertedPathsFinding } from "./revert-guard.ts"
-import { gitlinksAt, holdsCommit } from "./reference.ts"
+import { declaredSubmodules, gitlinksAt, holdsCommit } from "./reference.ts"
 import { withRemoteSeam } from "./remote-calls.ts"
 
 /** Outward submission evidence observes the candidate rather than relabelling the producer's claims. */
@@ -107,12 +107,38 @@ export type SubmitGitlink = Readonly<
 >
 
 export type SubmitVerification =
-  | Readonly<Omit<Extract<Verification, { state: "verified" }>, "gitlinks"> & { gitlinks: readonly SubmitGitlink[] }>
+  | Readonly<
+      Omit<Extract<Verification, { state: "verified" }>, "gitlinks"> & {
+        gitlinks: readonly SubmitGitlink[]
+        /** The root gitlinks the candidate left out because nobody moved them (29560); absent when none. */
+        excludedSubmodules?: readonly string[]
+      }
+    >
   | Extract<Verification, { state: "failed" }>
 
-async function submissionReceipt(git: Git, root: string, verifying: Verification): Promise<SubmitVerification> {
+/** A compose and the unmoved root gitlinks its candidate left out, each at the target's pin. */
+type ComposedSubmit = Readonly<{
+  verifying: Verification
+  excluded: readonly Readonly<{ path: string; sha: string }>[]
+}>
+
+async function submissionReceipt(git: Git, root: string, composed: ComposedSubmit): Promise<SubmitVerification> {
+  const verifying = composed.verifying
   if (verifying.state !== "verified") return verifying
-  const settled = verifying.gitlinks.filter((row) => row.state !== "not-run")
+  // 29560 (@cto 23225179): git-super reports each excluded path as an `as-written` row at the target's pin. The
+  // receipt drops exactly those rows and names the paths once instead; any other row for an excluded path throws.
+  const excluded = new Map(composed.excluded.map((row) => [row.path, row.sha]))
+  const reported = verifying.gitlinks.filter((row) => {
+    const pin = excluded.get(row.path)
+    if (pin === undefined) return true
+    if (row.state !== "as-written" || row.landingPin !== pin) {
+      throw new Error(
+        `submission receipt ${row.path}: left out of the candidate as unmoved at ${pin}, but the compose reported ${row.state} landing ${row.landingPin} at ${verifying.candidate}`,
+      )
+    }
+    return false
+  })
+  const settled = reported.filter((row) => row.state !== "not-run")
   const observed = new Map(
     (
       await gitlinksAt(
@@ -123,7 +149,7 @@ async function submissionReceipt(git: Git, root: string, verifying: Verification
     ).map((row) => [row.path, row.sha]),
   )
   const gitlinks: SubmitGitlink[] = []
-  for (const row of verifying.gitlinks) {
+  for (const row of reported) {
     if (row.state === "not-run") {
       gitlinks.push({ ...row, state: "not-run" })
       continue
@@ -150,7 +176,11 @@ async function submissionReceipt(git: Git, root: string, verifying: Verification
       ...(custody === undefined ? {} : { custody }),
     })
   }
-  return { ...verifying, gitlinks }
+  return {
+    ...verifying,
+    gitlinks,
+    ...(excluded.size === 0 ? {} : { excludedSubmodules: [...excluded.keys()] }),
+  }
 }
 
 /**
@@ -754,9 +784,9 @@ export async function inspectSubmitAtHead(
 ): Promise<SubmitInspection> {
   const admitted = await admitSubmitAtHead(git, remote, request, head)
   const { ended } = await withRemoteSeam("previewRetirement", () => endedSubjects(git, admitted.root, remote, request))
-  const verifying = await composeSubmit(git, request, admitted, ended)
+  const composed = await composeSubmit(git, request, admitted, ended)
   const { root, bases: _bases, operational: _operational, ...inspection } = admitted
-  return { ...inspection, verifying: await submissionReceipt(git, root, verifying) }
+  return { ...inspection, verifying: await submissionReceipt(git, root, composed) }
 }
 
 async function admitSubmitAtHead(
@@ -981,12 +1011,38 @@ async function endedSubjects(
   }
 }
 
+/**
+ * The root gitlinks nobody moved: declared at the target, at the same pin in the target, the head and their one merge
+ * base (29560). That is git-super merge's own exclusion contract, so it refuses a list this gets wrong. With more than
+ * one merge base nothing is left out, which is the full tree submit composed before.
+ */
+async function unmovedGitlinks(
+  git: Git,
+  targetHead: string,
+  head: string,
+  bases: readonly string[],
+): Promise<readonly Readonly<{ path: string; sha: string }>[]> {
+  const base = bases.length === 1 ? bases[0] : undefined
+  if (base === undefined) return []
+  const declared = await declaredSubmodules(git, targetHead)
+  if (declared.size === 0) return []
+  const [atTarget, towardTarget, towardHead] = await Promise.all([
+    gitlinksAt(git, targetHead, [...declared.keys()]),
+    gitlinkRows(git, base, targetHead),
+    gitlinkRows(git, base, head),
+  ])
+  const moved = new Set([...towardTarget, ...towardHead].map((row) => row.path))
+  return atTarget
+    .filter((row) => !moved.has(row.path))
+    .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+}
+
 async function composeSubmit(
   git: Git,
   request: SubmitRequest,
   admitted: SubmitAdmission,
   ended: ReadonlySet<string>,
-): Promise<Verification> {
+): Promise<ComposedSubmit> {
   // Submit, like the queue runner, keeps registered worktrees out of inherited habitat scratch.
   const common = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
   const tempRoot = join(common, "yrd", "tmp")
@@ -994,11 +1050,13 @@ async function composeSubmit(
   const scratch = mkdtempSync(join(tempRoot, "yrd-submit-verifying-"))
   const hooksPath = join(scratch, "hooks-disabled")
   mkdirSync(hooksPath)
+  const excluded = await unmovedGitlinks(git, admitted.targetHead, admitted.head, admitted.bases)
   let verifying: Verification
   try {
     const composed = await verifyCandidate({
       git,
       repo: admitted.root,
+      ...(excluded.length === 0 ? {} : { worktree: { excludedSubmodules: excluded.map((row) => row.path) } }),
       targetHead: admitted.targetHead,
       head: admitted.head,
       path: join(scratch, "candidate"),
@@ -1029,7 +1087,7 @@ async function composeSubmit(
     // question; a blanket `rmSync(scratch, { recursive: true })` would delete the kept checkout anyway.
     removeWorktreeRunScaffold(scratch)
   }
-  return verifying
+  return { verifying, excluded }
 }
 
 export async function prepareSubmit(git: Git, remote: string, request: SubmitRequest): Promise<Prepared> {
@@ -1047,8 +1105,8 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   const { ended, selected } = await withRemoteSeam("previewRetirement", () =>
     endedSubjects(git, admitted.root, remote, request),
   )
-  const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted, ended))
-  const receipt = await submissionReceipt(git, admitted.root, verifying)
+  const composed = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted, ended))
+  const receipt = await submissionReceipt(git, admitted.root, composed)
   const { root, bases: _bases, operational, ...inspection } = admitted
   return withRemoteSeam("submitEvent", () =>
     submitEvent(git, remote, request, root, { ...inspection, verifying: receipt }, operational, published, selected),

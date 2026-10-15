@@ -2318,7 +2318,12 @@ export async function coreQueueCommand(
               stopped: stopFact(inspected.stop),
             },
             `would open ${changeName({ branch: prepared.branch, head: prepared.head })} on ${targetName(config.target)}; nothing was pushed; ${freshnessLine(inspected.targetHead)}` +
-              formatDryRunGitlinks(inspected.verifying.state === "verified" ? inspected.verifying.gitlinks : undefined),
+              formatDryRunGitlinks(
+                inspected.verifying.state === "verified" ? inspected.verifying.gitlinks : undefined,
+              ) +
+              formatDryRunExcluded(
+                inspected.verifying.state === "verified" ? inspected.verifying.excludedSubmodules : undefined,
+              ),
           )
           echoStop(inspected.stop)
           echoAdmission(inspected.admission, true)
@@ -2433,7 +2438,8 @@ export async function coreQueueCommand(
           },
           `would open ${changeName({ branch, head })} on ${targetName(config.target)} for ${request.submitter}` +
             `${issue === undefined ? "" : ` (issue ${issue.issue})`}; nothing was pushed; ${freshnessLine(targetHead)}` +
-            formatDryRunGitlinks(verifying.state === "verified" ? verifying.gitlinks : undefined),
+            formatDryRunGitlinks(verifying.state === "verified" ? verifying.gitlinks : undefined) +
+            formatDryRunExcluded(verifying.state === "verified" ? verifying.excludedSubmodules : undefined),
         )
         echoStop(inspected.stop)
         echoAdmission(inspected.admission, true)
@@ -6848,6 +6854,12 @@ async function instantOfCommit(git: Git, text: string): Promise<Date | undefined
 function emit(io: YrdCliIO, json: boolean | undefined, data: unknown, human: string): void {
   if (json === true) io.stdout(`${JSON.stringify(data)}\n`)
   else io.stdout(`${human}\n`)
+}
+
+/** The components a submit's candidate left out because nobody moved them (29560): the candidate was partial. */
+function formatDryRunExcluded(excluded: readonly string[] | undefined): string {
+  if (excluded === undefined || excluded.length === 0) return ""
+  return `\ncandidate left out ${String(excluded.length)} unmoved component(s): ${excluded.join(", ")}`
 }
 
 function formatDryRunGitlinks(gitlinks: readonly SubmitGitlink[] | undefined): string {
