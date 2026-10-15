@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs"
-import { dirname, join, resolve } from "node:path"
-import { inspectCheckoutGitMetadata } from "git-super"
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { inspectCheckoutGitMetadata, verifyRetainedCopy } from "git-super"
+import type { GitWorktreeStore } from "git-super/worktree"
 import {
   collectMovedGitlinks,
   createEventStore,
@@ -105,9 +106,14 @@ export async function retireMergedRootAuthor(
   })
 }
 
+/** The existing public store's retention report owns the proof shape. */
+export type WorktreeRemovalProof = Parameters<
+  NonNullable<NonNullable<Parameters<GitWorktreeStore["remove"]>[1]>["retention"]>["report"]
+>[0]
+
 export type AuthorRelease = Readonly<{
   /** Best-effort retirement after the native action has released the captured checkout. */
-  retireAfterRelease(): Promise<void>
+  retireAfterRelease(proof?: WorktreeRemovalProof): Promise<void>
   [Symbol.dispose](): void
 }>
 
@@ -251,7 +257,7 @@ async function captureAuthorRelease(
     return {
       kind: "eligible",
       handle: {
-        async retireAfterRelease() {
+        async retireAfterRelease(proof) {
           if (disposed || used) {
             const error = new Error(
               `${branch}: author release handle ${disposed ? "was disposed" : "was already used"}`,
@@ -288,7 +294,7 @@ async function captureAuthorRelease(
             }
             const actor = globalThis.process.env.YRD_DEFAULT_SUBMITTER?.trim() || "yrd"
             attempted = true
-            await retireMergedComponentAuthors({ ...captured, authors, actor })
+            await retireMergedComponentAuthors({ ...captured, authors, actor, proofs: proof === undefined ? [] : [proof] })
             const root = await retireMergedRootAuthor({ ...captured, target: freshTarget, actor })
             if (root.outcome !== "removed") {
               input.io.stderr(
@@ -330,6 +336,8 @@ type AuthorStore = Readonly<{
   remote: string
   commonDirectory: string
   rootCommonDirectory: string
+  rootGitDirectory: string
+  rootCheckout: string
   rootBranch: string
   rootTip: string
   rootEventTip: string
@@ -394,6 +402,8 @@ export async function captureMergedComponentAuthors(
         remote: pin.remote,
         commonDirectory: child.commonDirectory,
         rootCommonDirectory: metadata.commonDirectory,
+        rootGitDirectory: metadata.gitDirectory,
+        rootCheckout: root.path,
         rootBranch: branch,
         rootTip: change.commit,
         rootEventTip: change.tip,
@@ -449,10 +459,38 @@ export async function retireMergedComponentAuthors(
     log: LocalBranchRetirement["log"]
     store: QueueLocation
     queue: string
+    proofs?: readonly WorktreeRemovalProof[]
   }>,
 ): Promise<void> {
   for (const author of input.authors) {
     try {
+      const modules = join(author.rootGitDirectory, "modules")
+      const inside = relative(modules, author.commonDirectory)
+      if (inside !== "" && inside !== ".." && !inside.startsWith(`..${sep}`) && !isAbsolute(inside)) {
+        const proof = input.proofs?.find((candidate) => resolve(candidate.path) === resolve(author.rootCheckout))
+        if (proof === undefined) throw new Error("root-owned component store kept: no sealed proof")
+        if (proof.head !== author.rootTip || resolve(proof.modules) !== resolve(modules) || proof.retained === null) {
+          throw new Error(`root-owned component store kept: removal proof identity does not match ${author.rootCheckout}@${author.rootTip}`)
+        }
+        const sealed = verifyRetainedCopy(proof, author.rootCommonDirectory)
+        if (sealed.status !== "ok") throw new Error(`root-owned component store kept: sealed proof ${proof.manifest} failed: ${JSON.stringify(sealed)}`)
+        const retained = realpathSync(proof.retained)
+        const copiedStore = realpathSync(join(retained, inside))
+        const copiedInside = relative(retained, copiedStore)
+        if (copiedInside === "" || copiedInside === ".." || copiedInside.startsWith(`..${sep}`) || isAbsolute(copiedInside)) {
+          throw new Error(`root-owned component store kept: ${copiedStore} is outside sealed copy ${retained}`)
+        }
+        const git = gitIn(copiedStore, undefined, input.selection, { env: input.env })
+        // Like GitSuper's retained reader, --bare avoids the sealed config's vanished core.worktree.
+        const finalTip = (await git(["--bare", "for-each-ref", "--format=%(objectname)", `refs/heads/${author.branch}`])).trim()
+        const unchanged = verifyRetainedCopy(proof, author.rootCommonDirectory)
+        if (unchanged.status !== "ok") throw new Error(`root-owned component store kept: sealed proof changed while reading ${proof.manifest}: ${JSON.stringify(unchanged)}`)
+        if (finalTip !== author.tip) throw new Error(`root-owned component store kept: final ref refs/heads/${author.branch} advanced or absent; captured ${author.tip}, sealed ${finalTip || "absent"}; proof ${proof.manifest}`)
+        const reason = `ended with its root: refs/heads/${author.branch}@${author.tip}; landing ${author.landing}; sealed proof ${proof.manifest}; retain until ${proof.retainUntil}`
+        input.io.stderr(`yrd: component ${author.path} ${reason}\n`)
+        input.log.write({ kind: "observation", branch: author.branch, scope: "local-branch-retirement", reason })
+        continue
+      }
       const repo = await activeAuthorCheckout(author, input.selection, input.env)
       const git = gitIn(repo, undefined, input.selection, { env: input.env })
       // One fresh default-branch read per action. Unreadable authority is caught below before custody changes.

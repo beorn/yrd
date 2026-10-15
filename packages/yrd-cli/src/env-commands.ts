@@ -47,6 +47,7 @@ import { createProcess, type Process } from "@yrd/process"
 // the whole queue (the derive's `bun install --lockfile-only` cannot resolve bearly@workspace:* in
 // yrd's own workspace); @chief withdrew that change (c6939f8255f0). Shape @cto, 2026-10-13.
 import { createLocalGitProcess } from "git-super/process"
+import type { WorktreeRemovalProof } from "./branch-retirement.ts"
 import {
   assertNoPrivateStore,
   createLocalGitWorktreeStore,
@@ -936,6 +937,8 @@ export async function closeEnvironment(
   onIncompleteCensus: CloseAdmissionMode = "delegate",
   /** Internal conditional-intent check; the package entry never forwards it. */
   beforeRemove?: () => Promise<void>,
+  /** Internal typed proof transport to the queue cleanup caller. */
+  removedProof?: (proof: WorktreeRemovalProof) => void,
 ): Promise<YrdCliExitCode> {
   const root = requireRepository(io)
   const selection = await resolveGitSelection(root)
@@ -1127,6 +1130,7 @@ export async function closeEnvironment(
   // process and yrd never re-derives it. The cost is an empty or absent modules retention and one
   // proof line for a tree that declares no .gitmodules. WITHOUT --preserve the plain path is
   // unchanged: a clean no-submodule close never reaches git-super.
+  let removalProof: WorktreeRemovalProof | undefined
   if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true || options.preserve === true) {
     const retain =
       options.retain === undefined
@@ -1193,7 +1197,8 @@ export async function closeEnvironment(
         `environment ${path} received malformed git-super removal proof; inspect git worktree list and retention directory ${retain} before retrying`,
       )
     }
-    io.stderr(`retained environment removal proof ${removed.proof.manifest}\n`)
+    removalProof = removed.proof as WorktreeRemovalProof
+    io.stderr(`retained environment removal proof ${removalProof.manifest}\n`)
   } else {
     // No submodules recorded at this commit, so there is no gitlink for
     // git-super to materialize on the way out. The helper re-asks before it
@@ -1201,7 +1206,8 @@ export async function closeEnvironment(
     // to the repository that owns the worktree registry.
     await worktreeWithoutSubmodules(treeGit, git, commit, ["remove", path])
   }
-  if (retirementHandle !== undefined) await retirementHandle.retireAfterRelease()
+  if (retirementHandle !== undefined) await retirementHandle.retireAfterRelease(removalProof)
+  if (removalProof !== undefined) removedProof?.(removalProof)
   io.stdout(options.json === true ? `${JSON.stringify({ closed: path })}\n` : `closed environment ${path}\n`)
   return 0
 }

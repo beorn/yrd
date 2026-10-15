@@ -495,6 +495,7 @@ it.each(["snapshot", "shared", "advanced"] as const)(
       expect(closed.stderr()).toContain("ended with its root")
       expect(closed.stderr()).toContain(`refs/heads/${componentBranch}`)
       expect(closed.stderr()).toContain(componentTip)
+      expect(closed.stderr()).toMatch(/landing [0-9a-f]{40}; sealed proof/u)
       expect(closed.stderr()).toContain(proofPath)
       expect(closed.stderr()).toContain(proof.retainUntil)
       expect(closed.stderr()).not.toContain("retirement incomplete")

@@ -51,6 +51,7 @@ import {
 import { repositoryHere } from "./declaration.ts"
 import { issueLookup, type ResolvedIssue } from "./issue-resolver.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
+import type { WorktreeRemovalProof } from "./branch-retirement.ts"
 
 type CachedEnvironment = {
   paths: { path: string; optional: boolean }[]
@@ -120,7 +121,8 @@ async function consumeCloseRequests(
     io: YrdCliIO
     outcome: Pick<QueueRunOutcome, "run" | "log">
   }>,
-): Promise<Readonly<{ closed: number; handled: ReadonlySet<string> }>> {
+): Promise<Readonly<{ closed: number; handled: ReadonlySet<string>; proofs: readonly WorktreeRemovalProof[] }>> {
+  const proofs: WorktreeRemovalProof[] = []
   const { workdir, registry, worktrees, io, outcome } = input
   const journal = (
     file: string,
@@ -207,7 +209,7 @@ async function consumeCloseRequests(
       journal(file, undefined, file, "unreadable", String(cause))
     }
   }
-  if (readable.length === 0) return { closed: 0, handled: new Set() }
+  if (readable.length === 0) return { closed: 0, handled: new Set(), proofs }
   const inventory = await environmentInventory(registry, worktrees, workdir)
   let closed = 0
   const handled = new Set<string>()
@@ -295,6 +297,7 @@ async function consumeCloseRequests(
                 )
               }
             },
+        (proof) => proofs.push(proof),
       )
     } catch (cause) {
       if (cause instanceof IncompleteCensusError) {
@@ -394,7 +397,7 @@ async function consumeCloseRequests(
     )
     dropCloseRequest(staged)
   }
-  return { closed, handled }
+  return { closed, handled, proofs }
 }
 
 /**
@@ -640,7 +643,8 @@ async function cleanupEnvironments(
   }>,
   cache: Map<string, CachedEnvironment>,
   progress: CleanupProgress,
-): Promise<void> {
+): Promise<readonly WorktreeRemovalProof[]> {
+  const proofs: WorktreeRemovalProof[] = []
   const { repo, git, config, workdir, outcome, io } = input
   // The author environments live in the worktree registry of the repository
   // this command STANDS IN — the declaration's own repository — never the
@@ -671,7 +675,7 @@ async function cleanupEnvironments(
         why: `no registered environments under ${inventory.roots.join(" or ")}`,
       })}\n`,
     )
-    return
+    return proofs
   }
   let closed = 0
   let kept = 0
@@ -824,7 +828,7 @@ async function cleanupEnvironments(
   })
   // Withdrawal records only its exact terminal intent. The queue service is
   // the sole consumer; an interactive withdrawal must not sweep other jobs.
-  if (input.withdrawn !== undefined) return
+  if (input.withdrawn !== undefined) return proofs
   let snapshot: ProcessCwdProjection
   try {
     snapshot = await census()
@@ -834,11 +838,12 @@ async function cleanupEnvironments(
       outcome.log,
       `${JSON.stringify({ kind: "observation", run: outcome.run, at: new Date().toISOString(), scope: "environment-cleanup", registry, closed, kept, deferred: 0, remaining: inventory.rows.length - closed, ...(censusReceipt === undefined ? {} : { census: censusReceipt }) })}\n`,
     )
-    return
+    return proofs
   }
   // 22894: a close no caller here could certify is consumed BEFORE the cursor
   // batch, because this round is the context whose census reads every pid.
   const requests = await consumeCloseRequests({ workdir, registry, worktrees: registryGit, io, outcome })
+  proofs.push(...requests.proofs)
   closed += requests.closed
   const lookup = issueLookup(config, repo, input.env)
   const statuses = new Map<string, Promise<ResolvedIssue>>()
@@ -1047,6 +1052,8 @@ async function cleanupEnvironments(
         // A sweep close is not asked for by anyone: an uncertifiable census is
         // the pre-22894 loud refusal, never a filed request (22894).
         "refuse",
+        undefined,
+        (proof) => proofs.push(proof),
       )
       if (exit !== 0) {
         // #27120 AC2: a refusal that names a class is still a refusal — the environment stays — but the
@@ -1106,4 +1113,5 @@ async function cleanupEnvironments(
       ...(censusReceipt === undefined ? {} : { census: censusReceipt }),
     })}\n`,
   )
+  return proofs
 }
