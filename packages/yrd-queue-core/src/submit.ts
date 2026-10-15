@@ -1078,9 +1078,11 @@ async function unmovedGitlinks(
   const kept: Array<Readonly<{ path: string; reason: string; error: boolean }>> = []
   for (const row of unmoved) {
     const answer = answers.get(row.path)
-    if (answer?.atPin === true) excluded.push(row)
-    else
+    if (answer?.atPin === true) {
+      excluded.push(row)
+    } else {
       kept.push({ path: row.path, reason: answer?.reason ?? "git-super gave no answer", error: answer?.error ?? true })
+    }
   }
   for (const row of kept) {
     if (row.error) {
