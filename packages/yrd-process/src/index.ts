@@ -814,7 +814,7 @@ class OutputWindow {
       // Raw capture already owns the complete byte sequence when its tail is
       // empty. Decoding only reads that buffer, so it needs no second copy.
       const complete =
-        raw !== undefined && raw.tail.byteLength === 0
+        raw !== undefined && raw.tail.byteLength === 0 && raw.head.byteLength === this.#total
           ? raw.head
           : Buffer.concat([...this.#head, ...this.#tail], this.#total)
       return {
