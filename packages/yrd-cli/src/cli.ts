@@ -267,8 +267,9 @@ function buildProgram(
         "drop --retire needs a branch, --tip <full-commit> and --reason <why>; choose origin retirement or local cleanup",
       )
     }
-    if (options.tip !== undefined && options.local !== true && options.retire !== true)
+    if (options.tip !== undefined && options.local !== true && options.retire !== true) {
       throw new Error("--tip requires drop --local or --retire")
+    }
     if (
       (options.submodules || options.dryRun || options.apply) &&
       (command !== "drop" || options.issue === undefined || options.local)
@@ -287,13 +288,13 @@ function buildProgram(
         tip: options.tip,
         ...(options.issue === undefined ? {} : { issue: options.issue }),
       }
-    } else if (branch !== undefined)
+    } else if (branch !== undefined) {
       subject = {
         command,
         branch,
         ...(options.retire && options.tip !== undefined ? { retire: { tip: options.tip } } : {}),
       }
-    else if (command === "drop" && options.issue !== undefined) {
+    } else if (command === "drop" && options.issue !== undefined) {
       subject = {
         command: "drop-issue",
         issue: options.issue,

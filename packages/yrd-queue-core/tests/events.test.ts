@@ -1765,17 +1765,19 @@ describe("the queue-format boundary", () => {
     ).head
     const publish = store.backend.publish
     if (publish === undefined || ending === null) throw new Error("fixture lacks retirement refs")
-    if (ref !== hot)
+    if (ref !== hot) {
       await publish(store.repo, [
         { ref, expect: "0".repeat(40), oid: ending },
         { ref: hot, expect: ending, oid: null },
       ])
+    }
     const archive = archiveRefFor(branchName, "@dev/2", new Date().toISOString().slice(0, 10))
     if (fault === "collision") await publish(store.repo, [{ ref: archive, expect: "0".repeat(40), oid: base }])
-    if (fault === "custody-readback")
+    if (fault === "custody-readback") {
       afterNextPublish(async () => {
         await publish(store.repo, [{ ref: archive, expect: head, oid: null }])
       })
+    }
     let checks = 0
     let expectedBranch: string | null = head
     const action = drop(location, {
@@ -1789,8 +1791,9 @@ describe("the queue-format boundary", () => {
         if (fault === "unreadable") throw new Error("host protection census unreadable")
         if (checks !== 2) return []
         if (fault === "held-later") return ["author became held"]
-        if (fault === "branch-moved")
+        if (fault === "branch-moved") {
           expectedBranch = (await branch.transact(async (map) => map.set("work", "new"), "advanced")).oid
+        }
         if (fault === "ending-hot" || fault === "ending-cold") {
           ending = (
             await (
@@ -1800,8 +1803,9 @@ describe("the queue-format boundary", () => {
             })
           ).head
         }
-        if (fault === "archive-removed" || fault === "archive-moved")
+        if (fault === "archive-removed" || fault === "archive-moved") {
           await publish(store.repo, [{ ref: archive, expect: head, oid: fault === "archive-removed" ? null : base }])
+        }
         if (fault === "final-readback") {
           expectedBranch = null
           afterNextPublish(async () => {

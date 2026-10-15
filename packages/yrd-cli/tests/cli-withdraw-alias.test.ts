@@ -124,7 +124,9 @@ describe("`yrd withdraw` is `yrd queue withdraw`", () => {
     expect(refusedAlias.stderr).toBe(refusedCanonical.stderr)
     // 29387: the refusal names its cure, because an ended change is retired by drop, never by withdraw.
     expect(refusedCanonical.stderr, refusedCanonical.report).toContain("already ended cancelled")
-    expect(refusedCanonical.stderr, refusedCanonical.report).toContain("yrd drop task/one --reason")
+    expect(refusedCanonical.stderr, refusedCanonical.report).toContain(
+      "yrd drop task/one --retire --tip <observed-full-oid> --reason",
+    )
   })
 
   it("takes the same flags and teaches the alias in help", async () => {
