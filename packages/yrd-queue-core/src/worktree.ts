@@ -28,7 +28,12 @@ import { createGitWorktreeStore } from "git-super/worktree"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
 import { frozenLockfileDiagnosis } from "./lockfile-diagnosis.ts"
 import type { LogWrite } from "./log.ts"
-import { GIT_SUPER_ABSENT_STORE, populateReferenceStores, ReferenceUnpopulated } from "./reference.ts"
+import {
+  declaredSubmodules,
+  GIT_SUPER_ABSENT_STORE,
+  populateReferenceStores,
+  ReferenceUnpopulated,
+} from "./reference.ts"
 import {
   GitExit,
   gitIn,
@@ -75,6 +80,12 @@ export type Worktree = Readonly<{
 /** What a fresh worktree needs beyond the repository and the commit: how to run Git elsewhere, and where to narrate. */
 export type FreshWorktree = Readonly<{
   /**
+   * Root gitlinks the tree leaves empty and uninitialized (`--exclude-submodule`). Absent means a full tree, which is
+   * what the queue's checks, `yrd check` and `yrd env` need. Only submit passes it, for the gitlinks nobody moved
+   * (29560); git-super's merge refuses an exclusion whose pin differs at HEAD, the target or their one merge base.
+   */
+  excludedSubmodules?: readonly string[]
+  /**
    * Whether this repository is the queue's OWN clone, and may therefore be
    * given the stores it lends.
    *
@@ -120,7 +131,21 @@ export async function freshWorktree(
   // Query the selected commit, not the reference checkout's working tree.
   // An invalid commit makes ls-tree fail; only empty output means absence.
   const modules = await git(["ls-tree", commit, "--", ".gitmodules"])
-  const excluded: readonly string[] = []
+  const excluded: readonly string[] = [...new Set(options.excludedSubmodules ?? [])].sort()
+  if (excluded.length > 0) {
+    // Only a declared submodule can be left out; any other path is the caller's error, never dropped (@cto 7015ba5e).
+    const declared = await declaredSubmodules(git, commit)
+    const undeclared = excluded.filter((excludedPath) => !declared.has(excludedPath))
+    if (undeclared.length > 0) {
+      throw new Error(
+        `fresh worktree ${path} at ${commit}: cannot leave out ${undeclared.join(", ")}, ` +
+          (modules.trim() === ""
+            ? "because that commit records no .gitmodules"
+            : "because that commit's .gitmodules declares no submodule at that path") +
+          "; only a declared submodule can be excluded",
+      )
+    }
+  }
   if (modules.trim() === "") {
     // A commit that declares no submodules has no boundary for git-super to
     // cross. `worktreeWithoutSubmodules` re-asks that question rather than

@@ -21,6 +21,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync } from "node:fs"
 import { join, resolve } from "node:path"
+import { localMainsAtPin } from "git-super/local-main"
 import { pushRefUpdates } from "git-super/push"
 import { publishWithTransientRetry, retryTransientPush, transientPush5xxOf } from "./transient-push.ts"
 import { discardWorktree, removeWorktreeRunScaffold } from "./worktree.ts"
@@ -66,7 +67,7 @@ import {
 import { archivedChangesPrefix, assertBranch, classifyQueueRef, pauseRef, queueRefPrefix } from "./refs.ts"
 import { verifyCandidate, type Verification, type SettledGitlink } from "./verifying.ts"
 import { revertedPathsFinding } from "./revert-guard.ts"
-import { gitlinksAt, holdsCommit } from "./reference.ts"
+import { declaredSubmoduleConfig, declaredSubmodules, gitlinksAt, holdsCommit } from "./reference.ts"
 import { withRemoteSeam } from "./remote-calls.ts"
 
 /** Outward submission evidence observes the candidate rather than relabelling the producer's claims. */
@@ -107,12 +108,40 @@ export type SubmitGitlink = Readonly<
 >
 
 export type SubmitVerification =
-  | Readonly<Omit<Extract<Verification, { state: "verified" }>, "gitlinks"> & { gitlinks: readonly SubmitGitlink[] }>
+  | Readonly<
+      Omit<Extract<Verification, { state: "verified" }>, "gitlinks"> & {
+        gitlinks: readonly SubmitGitlink[]
+        /** The root gitlinks the candidate left out because nobody moved them (29560); absent when none. */
+        excludedSubmodules?: readonly string[]
+        /**
+         * Unmoved root gitlinks the candidate materialized anyway because git-super did not confirm their local main
+         * at the pin, each with its reason (29560, @cto 7015ba5e); absent when none. The dry run prints one line each.
+         */
+        keptUnmoved?: readonly Readonly<{ path: string; reason: string }>[]
+      }
+    >
   | Extract<Verification, { state: "failed" }>
 
-async function submissionReceipt(git: Git, root: string, verifying: Verification): Promise<SubmitVerification> {
+/** A compose, the unmoved root gitlinks its candidate left out (each at the target's pin), and the ones it kept. */
+type ComposedSubmit = Readonly<{ verifying: Verification } & UnmovedGitlinks>
+
+async function submissionReceipt(git: Git, root: string, composed: ComposedSubmit): Promise<SubmitVerification> {
+  const verifying = composed.verifying
   if (verifying.state !== "verified") return verifying
-  const settled = verifying.gitlinks.filter((row) => row.state !== "not-run")
+  // 29560 (@cto 23225179): git-super reports each excluded path as an `as-written` row at the target's pin. The
+  // receipt drops exactly those rows and names the paths once instead; any other row for an excluded path throws.
+  const excluded = new Map(composed.excluded.map((row) => [row.path, row.sha]))
+  const reported = verifying.gitlinks.filter((row) => {
+    const pin = excluded.get(row.path)
+    if (pin === undefined) return true
+    if (row.state !== "as-written" || row.landingPin !== pin) {
+      throw new Error(
+        `submission receipt ${row.path}: left out of the candidate as unmoved at ${pin}, but the compose reported ${row.state} landing ${row.landingPin} at ${verifying.candidate}`,
+      )
+    }
+    return false
+  })
+  const settled = reported.filter((row) => row.state !== "not-run")
   const observed = new Map(
     (
       await gitlinksAt(
@@ -123,7 +152,7 @@ async function submissionReceipt(git: Git, root: string, verifying: Verification
     ).map((row) => [row.path, row.sha]),
   )
   const gitlinks: SubmitGitlink[] = []
-  for (const row of verifying.gitlinks) {
+  for (const row of reported) {
     if (row.state === "not-run") {
       gitlinks.push({ ...row, state: "not-run" })
       continue
@@ -150,7 +179,12 @@ async function submissionReceipt(git: Git, root: string, verifying: Verification
       ...(custody === undefined ? {} : { custody }),
     })
   }
-  return { ...verifying, gitlinks }
+  return {
+    ...verifying,
+    gitlinks,
+    ...(excluded.size === 0 ? {} : { excludedSubmodules: [...excluded.keys()] }),
+    ...(composed.kept.length === 0 ? {} : { keptUnmoved: composed.kept.map(({ path, reason }) => ({ path, reason })) }),
+  }
 }
 
 /**
@@ -754,9 +788,9 @@ export async function inspectSubmitAtHead(
 ): Promise<SubmitInspection> {
   const admitted = await admitSubmitAtHead(git, remote, request, head)
   const { ended } = await withRemoteSeam("previewRetirement", () => endedSubjects(git, admitted.root, remote, request))
-  const verifying = await composeSubmit(git, request, admitted, ended)
+  const composed = await composeSubmit(git, request, admitted, ended)
   const { root, bases: _bases, operational: _operational, ...inspection } = admitted
-  return { ...inspection, verifying: await submissionReceipt(git, root, verifying) }
+  return { ...inspection, verifying: await submissionReceipt(git, root, composed) }
 }
 
 async function admitSubmitAtHead(
@@ -981,12 +1015,94 @@ async function endedSubjects(
   }
 }
 
+/** What a submit's candidate leaves out, and the unmoved gitlinks it keeps with git-super's reason (29560). */
+type UnmovedGitlinks = Readonly<{
+  excluded: readonly Readonly<{ path: string; sha: string }>[]
+  kept: readonly Readonly<{ path: string; reason: string; error: boolean }>[]
+}>
+
+const BY_PATH = (left: Readonly<{ path: string }>, right: Readonly<{ path: string }>): number =>
+  left.path < right.path ? -1 : left.path > right.path ? 1 : 0
+
+/**
+ * The root gitlinks a submit's candidate can leave out (29560): declared at the target, at the same pin in the target,
+ * the head and their one merge base (git-super merge's own exclusion contract, so it refuses a list this gets wrong),
+ * with the same `.gitmodules` section in all three (a url, branch or path change is a move, @cto 7015ba5e), and whose
+ * component main, read the way the merge reads it, IS that pin. A merge raises a pin whose main ran ahead even when
+ * nobody moved it, so such a gitlink stays in and its raise shows in the receipt (@cto 0a2690f0). With more than one
+ * merge base, or any main git-super cannot confirm locally, the component stays in, as before. Every unmoved gitlink
+ * it keeps comes back with git-super's reason, and one git-super could not read at all is warned on stderr: a query
+ * failing for every path would otherwise bring back the full cost with nothing to say so.
+ */
+async function unmovedGitlinks(
+  git: Git,
+  root: string,
+  targetHead: string,
+  head: string,
+  bases: readonly string[],
+): Promise<UnmovedGitlinks> {
+  const none: UnmovedGitlinks = { excluded: [], kept: [] }
+  const base = bases.length === 1 ? bases[0] : undefined
+  if (base === undefined) return none
+  const declared = await declaredSubmodules(git, targetHead)
+  if (declared.size === 0) return none
+  const [atTarget, towardTarget, towardHead, configAtBase, configAtTarget, configAtHead] = await Promise.all([
+    gitlinksAt(git, targetHead, [...declared.keys()]),
+    gitlinkRows(git, base, targetHead),
+    gitlinkRows(git, base, head),
+    declaredSubmoduleConfig(git, base),
+    declaredSubmoduleConfig(git, targetHead),
+    declaredSubmoduleConfig(git, head),
+  ])
+  const moved = new Set([...towardTarget, ...towardHead].map((row) => row.path))
+  const unmoved = atTarget.filter((row) => {
+    if (moved.has(row.path)) return false
+    const atBase = configAtBase.get(row.path)
+    return atBase !== undefined && atBase === configAtTarget.get(row.path) && atBase === configAtHead.get(row.path)
+  })
+  if (unmoved.length === 0) return none
+  // The query reads each component's persistent store, which for a linked worktree (every yrd environment) sits under
+  // the common dir's modules/, outside this root: the seam answers for both, each request bound to its own directory.
+  const common = resolve((await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim())
+  const answers = new Map(
+    (
+      await localMainsAtPin({
+        repository: root,
+        commit: targetHead,
+        paths: unmoved.map((row) => row.path),
+        process: seamProcess(git, root, { also: [join(common, "modules")], at: (cwd) => runnerFor(git).at(cwd) }),
+      })
+    ).map((answer) => [answer.path, answer]),
+  )
+  const excluded: Array<Readonly<{ path: string; sha: string }>> = []
+  const kept: Array<Readonly<{ path: string; reason: string; error: boolean }>> = []
+  for (const row of unmoved) {
+    const answer = answers.get(row.path)
+    if (answer?.atPin === true) {
+      excluded.push(row)
+    } else {
+      kept.push({ path: row.path, reason: answer?.reason ?? "git-super gave no answer", error: answer?.error ?? true })
+    }
+  }
+  for (const row of kept) {
+    if (row.error) {
+      console.warn(
+        `yrd: submit candidate keeps unmoved ${row.path}: git-super could not read its local main (${row.reason}); it is materialized as before`,
+      )
+    }
+  }
+  return { excluded: excluded.sort(BY_PATH), kept: kept.sort(BY_PATH) }
+}
+
 async function composeSubmit(
   git: Git,
   request: SubmitRequest,
   admitted: SubmitAdmission,
   ended: ReadonlySet<string>,
-): Promise<Verification> {
+): Promise<ComposedSubmit> {
+  // Asked before the scratch exists, so a query that throws leaves nothing behind (@cto 7015ba5e).
+  const unmoved = await unmovedGitlinks(git, admitted.root, admitted.targetHead, admitted.head, admitted.bases)
+  const excluded = unmoved.excluded
   // Submit, like the queue runner, keeps registered worktrees out of inherited habitat scratch.
   const common = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
   const tempRoot = join(common, "yrd", "tmp")
@@ -999,6 +1115,7 @@ async function composeSubmit(
     const composed = await verifyCandidate({
       git,
       repo: admitted.root,
+      ...(excluded.length === 0 ? {} : { worktree: { excludedSubmodules: excluded.map((row) => row.path) } }),
       targetHead: admitted.targetHead,
       head: admitted.head,
       path: join(scratch, "candidate"),
@@ -1029,7 +1146,7 @@ async function composeSubmit(
     // question; a blanket `rmSync(scratch, { recursive: true })` would delete the kept checkout anyway.
     removeWorktreeRunScaffold(scratch)
   }
-  return verifying
+  return { verifying, ...unmoved }
 }
 
 export async function prepareSubmit(git: Git, remote: string, request: SubmitRequest): Promise<Prepared> {
@@ -1047,8 +1164,8 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   const { ended, selected } = await withRemoteSeam("previewRetirement", () =>
     endedSubjects(git, admitted.root, remote, request),
   )
-  const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted, ended))
-  const receipt = await submissionReceipt(git, admitted.root, verifying)
+  const composed = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted, ended))
+  const receipt = await submissionReceipt(git, admitted.root, composed)
   const { root, bases: _bases, operational, ...inspection } = admitted
   return withRemoteSeam("submitEvent", () =>
     submitEvent(git, remote, request, root, { ...inspection, verifying: receipt }, operational, published, selected),
