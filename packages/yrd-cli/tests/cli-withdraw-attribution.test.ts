@@ -136,6 +136,59 @@ async function cancelledRecord(
 }
 
 describe("`yrd withdraw` records the actor, not the notified seat (27262)", () => {
+  // 29399: ending a change does not prove that a surviving origin branch has dated custody.
+  // The existing drop cases allow event custody alone; withdrawal cannot retire an ended change.
+  it("retires merged and cancelled origin branches archive-first without replacing their endings", async () => {
+    const merged = "task/retire-merged"
+    const cancelled = "task/retire-cancelled"
+    const work = await queueWithChanges(merged, cancelled)
+    const git = gitIn(work)
+    const heads = new Map(
+      await Promise.all(
+        [merged, cancelled].map(async (branch) => [branch, (await git(["rev-parse", branch])).trim()] as const),
+      ),
+    )
+    const withdrawn = await yrd(work, "withdraw", cancelled, "--submitter", "@dev/withdrawer", "--json")
+    expect(withdrawn.exitCode, withdrawn.report).toBe(0)
+    const landed = await yrd(work, "queue", "run", "--json")
+    expect(landed.exitCode, landed.report).toBe(0)
+
+    for (const [branch, status] of [
+      [merged, "merged"],
+      [cancelled, "cancelled"],
+    ] as const) {
+      const head = heads.get(branch)
+      if (head === undefined) throw new Error(`fixture has no captured head for ${branch}`)
+      // Recreate only the remote pointer: its queue history remains ended.
+      await git(["push", "--quiet", "origin", `${head}:refs/heads/${branch}`])
+      const store = createEventStore(work, "origin", git.selection, git.backend)
+      const before = await readStatus(store, "main", branch)
+      expect(before.status).toBe(status)
+      const archive = `refs/archive/${new Date().toISOString().slice(0, 10)}/dev-retirer/${branch}`
+      expect((await git(["ls-remote", "origin", archive])).trim()).toBe("")
+      const retired = await yrd(
+        work,
+        "drop",
+        branch,
+        "--retire",
+        "--tip",
+        head,
+        "--reason",
+        "retire the already-ended origin pointer",
+        "--submitter",
+        "@dev/retirer",
+        "--json",
+      )
+      expect(retired.exitCode, retired.report).toBe(0)
+      expect((await git(["ls-remote", "origin", archive])).trim()).toBe(`${head}\t${archive}`)
+      expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
+      const after = await readStatus(store, "main", branch)
+      expect(after.tip).toBe(before.tip)
+      expect(after.status).toBe(before.status)
+      expect(after.reason).toBe(before.reason)
+    }
+  })
+
   // AC3: a reopened change must keep its job even when HEAD is unchanged. The existing
   // advanced-head controls cannot catch a re-submit between filing and consuming the close request.
   it("keeps a withdrawn job reopened at the same head before its close request is consumed", async () => {
