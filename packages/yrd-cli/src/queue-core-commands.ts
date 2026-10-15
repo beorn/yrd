@@ -977,7 +977,17 @@ export async function coreQueueCommand(
               })
             }
           }
-          const proofs = await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue })
+          const proofs = await cleanupEnvironments({
+            repo,
+            git,
+            config,
+            workdir,
+            outcome,
+            io,
+            env,
+            selection,
+            resolveIssue,
+          })
           await retireMergedComponentAuthors({
             authors: componentAuthors,
             proofs,
