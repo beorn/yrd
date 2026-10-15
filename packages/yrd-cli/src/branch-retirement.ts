@@ -471,7 +471,14 @@ export async function retireMergedComponentAuthors(
     try {
       const modules = join(author.rootGitDirectory, "modules")
       const inside = relative(modules, author.commonDirectory)
-      if (inside !== "" && inside !== ".." && !inside.startsWith(`..${sep}`) && !isAbsolute(inside)) {
+      // A primary root's modules survive; only a linked root's private admin store ends on close.
+      if (
+        author.rootGitDirectory !== author.rootCommonDirectory &&
+        inside !== "" &&
+        inside !== ".." &&
+        !inside.startsWith(`..${sep}`) &&
+        !isAbsolute(inside)
+      ) {
         const proof = input.proofs?.find((candidate) => resolve(candidate.path) === resolve(author.rootCheckout))
         if (proof === undefined) throw new Error("root-owned component store kept: no sealed proof")
         if (proof.head !== author.rootTip || resolve(proof.modules) !== resolve(modules) || proof.retained === null) {
