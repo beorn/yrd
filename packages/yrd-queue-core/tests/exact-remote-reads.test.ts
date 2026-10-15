@@ -110,15 +110,14 @@ describe("one remote ref is read by name, never from the whole advertisement", (
     // The old count alone could not distinguish repeated exact reads from an unrelated advertisement.
     const ref = retentionRef(pin)
     const remoteReads = recording.commands().filter((line) => line.startsWith("fetch "))
-    expect(remoteReads).toHaveLength(5)
+    expect(remoteReads).toHaveLength(2)
     for (const read of remoteReads) {
       expect(read).toContain("--refmap=")
       expect(read.endsWith(`origin +${ref}:refs/git-super/observed/${ref.slice(5)}`)).toBe(true)
     }
-    // Git-super observes during planning, rechecks before applying, and observes after pushing.
-    // The first two reads find no pin; post-push and both identical-retry reads advertise only that pin.
-    expect(recording.advertisedRefs()).toEqual([ref, ref, ref])
-    expect(recording.advertisedRefs()).toHaveLength(3)
+    // Git-super reads the destination once, while planning; the create-only lease and the push's porcelain row answer
+    // the recheck and the read after the push (28867). The first plan finds no pin; the retry's plan advertises only it.
+    expect(recording.advertisedRefs()).toEqual([ref])
   }, 60_000)
 
   /** @failure 27995: a GitHub 5xx on pin publish failed the submit with no retry. */
