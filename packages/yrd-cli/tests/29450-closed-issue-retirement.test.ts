@@ -368,6 +368,35 @@ describe("29450 closing an issue retires its branches", () => {
     })
   })
 
+  it("keeps a merged change whose tip moved past its landing: never the closed disposition, never a second ending (@cto 9a68f296)", async () => {
+    const repo = await world()
+    const git = gitIn(repo)
+    const landed = await branchFor(repo, "task/29122-moved", "@t/29122-x")
+    await recordChange(repo, "task/29122-moved", landed, "@t/29122-x", "merged")
+    // One more commit on the branch after its landing was recorded: no landing pin matches the tip, no ancestry.
+    await git(["checkout", "--quiet", "task/29122-moved"])
+    writeFileSync(join(repo, "after-the-landing.txt"), "after\n")
+    await git(["add", "."])
+    await git(["commit", "--quiet", "-m", "after the landing"])
+    const moved = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    const { report, git: g } = await sweep(repo, { "29122": "closed" })
+    expect(report.removed).toEqual([])
+    expect(report.failed).toEqual([])
+    expect(report.kept).toEqual([
+      expect.objectContaining({
+        branch: "task/29122-moved",
+        head: moved,
+        reason: `merged at ${landed}; tip has commits past the landing`,
+      }),
+    ])
+    expect((await g(["rev-parse", "refs/heads/task/29122-moved"])).trim()).toBe(moved)
+    expect(await g(["ls-remote", "origin", "refs/archive/*"]), "nothing was archived").toBe("")
+    // The chain still ends merged: no dropped event was appended.
+    const change = (await listChanges(createEventStore(repo, "origin", g.selection), "main")).get("task/29122-moved")
+    expect(change).toMatchObject({ status: "merged" })
+  })
+
   it("keeps and names a branch that moves between its archive and its delete", async () => {
     const repo = await world()
     const git = gitIn(repo)

@@ -968,6 +968,10 @@ export async function retireClosedIssueBranches(
         change?.status === "merged" && change.commit !== undefined && change.ending !== undefined
           ? [{ event: change.ending.id, path: "", tip: change.commit }]
           : []
+      // @cto 9a68f296 (the residual of blocking 2): a chain that ended merged takes no second ending. The closed
+      // disposition is for a branch no landing holds; a merged change whose tip moved past its landing (no pin at
+      // the tip, no ancestry) is kept and named, never archived as closed.
+      const merged = change?.status === "merged" ? change.commit : undefined
       const result = await retire({
         path: "",
         landings,
@@ -979,16 +983,20 @@ export async function retireClosedIssueBranches(
         date,
         log,
         protections: () => protectionsReader({ repo, branch, tip: head, issue: issue.id }),
-        closed: { store, queue },
+        ...(merged === undefined ? { closed: { store, queue } } : {}),
       })
       const archiveRef = result.archiveRef
+      const reason =
+        merged !== undefined && merged !== head && result.outcome === "kept" && result.reason === "unreached"
+          ? `merged at ${merged}; tip has commits past the landing`
+          : result.reason
       record({
         branch,
         head,
         issue: issue.id,
         status,
         outcome: result.outcome === "removed" ? "removed" : result.outcome === "failed" ? "failed" : "kept",
-        reason: result.reason,
+        reason,
         ...(result.detail === undefined ? {} : { detail: result.detail }),
         ...(archiveRef === undefined ? {} : { archiveRef }),
         ...(result.custody === undefined ? {} : { custody: result.custody }),
