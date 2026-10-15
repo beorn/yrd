@@ -78,6 +78,7 @@ import {
   selectionFor,
   listRefs,
   queueFormat,
+  pauseRef,
   queueRef,
   queueRefPrefix,
   parseChangeRef,
@@ -124,6 +125,7 @@ import {
   preparePinCarrier,
   freshnessLine,
   readRemoteCommit,
+  readRemoteCommits,
   refreshMirror,
   invalidateMirrorStamp,
   refAt,
@@ -777,7 +779,7 @@ export async function coreQueueCommand(
         : `no event marker ${queueRef(name)}; observed legacy change ref ${legacy}`
     throw new Error(`queue status store ${repo} has ${observed}; use --fresh for this reading`)
   }
-  type CapturedDeclaration = Readonly<{ config: QueueConfig; oid: string }>
+  type CapturedDeclaration = Readonly<{ config: QueueConfig; oid: string; fetched?: ReadonlyMap<string, string> }>
   // The commands that EXECUTE the target's declaration read it strictly: a key they
   // cannot read is a step they would skip. Every other command only addresses the
   // queue — submit, list, show, ls, stats, withdraw, drop, pause, resume, ignore,
@@ -797,10 +799,13 @@ export async function coreQueueCommand(
   // one-shot command; the service reads again before every round, so an edit at
   // the target takes effect on the next round.
   const declaration = async (): Promise<CapturedDeclaration | undefined> => {
-    const oid =
+    // 28867 B1 (@cto 0d28de34): one exact fetch reads the target with its queue ref and retired pause ref, so the
+    // format check and submit's admission reuse it instead of reading the same origin twice more.
+    const fetched =
       localStatus === undefined
-        ? await readRemoteCommit(git, remote, `refs/heads/${queue}`)
-        : await refAt(git, `refs/heads/${queue}`)
+        ? await readRemoteCommits(git, remote, [`refs/heads/${queue}`, queueRef(queue), pauseRef(queue)])
+        : undefined
+    const oid = fetched === undefined ? await refAt(git, `refs/heads/${queue}`) : fetched.get(`refs/heads/${queue}`)
     if (oid === undefined) throw new Error(`the target ${targetLabel} is not at ${remote}`)
     let declared: QueueConfig | undefined
     try {
@@ -838,13 +843,20 @@ export async function coreQueueCommand(
       throw new Error(`the declaration at ${targetLabel} cannot be read: ${detail}${skew}`, { cause: error })
     }
     if (declared === undefined) return undefined
-    return { config: declared, oid }
+    return { config: declared, oid, ...(fetched === undefined ? {} : { fetched }) }
   }
   const captured = await withRemoteSeam("declaration", declaration)
   if (captured === undefined) return noQueueOnTarget(targetLabel)
   const config = captured.config
   const eventStore = createEventStore(repo, config.target.remote, selection, git.backend)
-  const advertisedFormat = await withRemoteSeam("queueFormat", () => queueFormat(eventStore, config.target.branch))
+  // The fetched refs describe `remote`/`queue`; they stand in only for a declaration that targets that same queue.
+  const fetchedQueue =
+    captured.fetched !== undefined && config.target.remote === remote && config.target.branch === queue
+      ? captured.fetched
+      : undefined
+  const advertisedFormat = await withRemoteSeam("queueFormat", () =>
+    queueFormat(eventStore, config.target.branch, fetchedQueue === undefined ? {} : { fetched: fetchedQueue }),
+  )
   switch (advertisedFormat) {
     case "legacy":
       throw new Error(
@@ -2283,6 +2295,7 @@ export async function coreQueueCommand(
           submitter: request.submitter,
           target: config.target,
           expectedTargetHead: captured.oid,
+          ...(fetchedQueue === undefined ? {} : { fetchedQueueRefs: fetchedQueue }),
           issue: canonicalIssue,
           resolveIssue,
           admit,
@@ -2366,6 +2379,7 @@ export async function coreQueueCommand(
         submitter: request.submitter,
         target: config.target,
         expectedTargetHead: captured.oid,
+        ...(fetchedQueue === undefined ? {} : { fetchedQueueRefs: fetchedQueue }),
         ...(request.issue === undefined ? {} : { issue: request.issue }),
         resolveIssue,
         admit,

@@ -1112,11 +1112,31 @@ export async function refAt(
 
 /** Fetch one remote commit through Gitomic's private namespace. */
 export async function readRemoteCommit(git: Git, remote: string, ref: string): Promise<string | undefined> {
+  const { repo, fetchRefs } = await remoteRefReader(git, remote, ref)
+  return (await fetchRefs(repo, ref, remote)).get(ref)
+}
+
+/**
+ * Several exact refs in ONE fetch, objects included; an absent ref is left out of the map. One round trip where
+ * reading each ref with readRemoteCommit would pay one per ref (28867 B1).
+ */
+export async function readRemoteCommits(
+  git: Git,
+  remote: string,
+  refs: readonly string[],
+): Promise<ReadonlyMap<string, string>> {
+  const { repo, fetchRefs } = await remoteRefReader(git, remote, refs.join(" "))
+  return fetchRefs(repo, [...refs], remote, { absent: "omit" })
+}
+
+/** The repository store and the backend fetch every remote ref read here goes through. */
+async function remoteRefReader(git: Git, remote: string, what: string) {
   const repo = (await git(["rev-parse", "--absolute-git-dir"])).trim()
-  if (repo === "") throw new Error(`cannot read ${remote} ${ref}: git returned an empty repository store`)
+  if (repo === "") throw new Error(`cannot read ${remote} ${what}: git returned an empty repository store`)
   const backend = runnerFor(git).backend
-  if (backend.fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs")
-  return (await backend.fetchRefs(repo, ref, remote)).get(ref)
+  const fetchRefs = backend.fetchRefs?.bind(backend)
+  if (fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs")
+  return { repo, fetchRefs }
 }
 
 /** Whether `sha` is an ancestor of `of`. */

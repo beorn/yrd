@@ -130,6 +130,7 @@ export {
   listRefs,
   openEvents,
   readRemoteCommit,
+  readRemoteCommits,
   isAncestor,
   seamProcess,
   refAt,

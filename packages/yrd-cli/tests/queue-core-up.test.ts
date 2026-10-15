@@ -2444,7 +2444,8 @@ describe("yrd queue up, the service", () => {
     expect(records(run)[0]).toMatchObject({ issue: "24472", issueSource: "legacy-branch" })
     if (!dryRun) {
       expect(run.stderr()).toMatch(/seam\.declaration\.fetch=1/u)
-      expect(run.stderr()).toMatch(/seam\.inspectSubmit\.fetch=[1-9]/u)
+      // 28867 B1: admission reads its ops from the declaration's one fetch, so it makes no fetch of its own.
+      expect(run.stderr()).not.toMatch(/seam\.inspectSubmit\.fetch=/u)
       expect(run.stderr()).toMatch(/seam\.submitEvent\.(?:fetch|ls-remote)=/u)
       expect(run.stderr()).not.toContain("seam.unattributed.")
       expect(run.stderr()).not.toContain("seam.submit.setup.")
@@ -2769,6 +2770,44 @@ describe("yrd queue up, the service", () => {
     },
     30_000,
   )
+
+  /**
+   * @failure 28867 B1: a submit read the same origin three times before admission: the target for its declaration,
+   * the queue prefix for its format, and the queue and pause refs again for admission ops.
+   */
+  it("a submit reads the target, queue and pause refs in one fetch before admission (28867)", async () => {
+    const w = await world()
+    const branch = "task/one-fetch"
+    await w.git(["checkout", "--quiet", "-b", branch, "main"])
+    writeFileSync(join(w.work, "change.txt"), "candidate\n")
+    await w.git(["add", "change.txt"])
+    await w.git(["commit", "--quiet", "-m", "one fetch\n\nRefs: 28867"])
+    const run = capture(w.work)
+    await expect(
+      coreQueueCommand(
+        w.work,
+        run.io,
+        { branch, command: "submit", submitter: "@dev/8" },
+        { json: true, workdir: w.workdir },
+      ),
+    ).resolves.toBe(0)
+    const detail = run
+      .stderr()
+      .trimEnd()
+      .split("\n")
+      .find((line) => line.startsWith("yrd: submit remote call detail: "))
+    const row = JSON.parse(detail!.slice("yrd: submit remote call detail: ".length)) as Record<string, unknown>
+    expect(row["seam.declaration.fetch"], detail).toBe(1)
+    // The format comes from that fetch, and admission reads its ops from it: neither seam reaches the remote.
+    expect(
+      Object.keys(row).filter((key) => key.startsWith("seam.queueFormat.")),
+      detail,
+    ).toEqual([])
+    expect(
+      Object.keys(row).filter((key) => key.startsWith("seam.inspectSubmit.") && !key.endsWith(".remote_ms")),
+      detail,
+    ).toEqual([])
+  }, 30_000)
 
   // Accepted: a legacy protected declaration and its absent successor cannot
   // open a submission; malformed LOCAL hints still diagnose and reach a valid

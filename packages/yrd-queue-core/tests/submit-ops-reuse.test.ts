@@ -10,6 +10,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
+import { Conflict } from "gitomic"
 import {
   appendChangeEvent,
   changeInput,
@@ -29,7 +30,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { openEvents } from "../src/git.ts"
 import { readEventChain } from "../src/event-read.ts"
 import { pauseRef } from "../src/refs.ts"
-import { traceRemoteCalls } from "../src/remote-calls.ts"
+import { remoteSeam, traceRemoteCalls } from "../src/remote-calls.ts"
 
 const roots: string[] = []
 const processes: ReturnType<typeof createProcess>[] = []
@@ -116,6 +117,26 @@ function beforePublication(w: World, mutate: () => Promise<void>): Git {
   )
 }
 
+/** A real runner with one mutation at the first Git call inside one submit seam (28867). */
+function atSeam(w: World, seam: string, mutate: () => Promise<void>): Git {
+  let done = false
+  const process = createProcess({ cwd: w.work })
+  processes.push(process)
+  return gitIn(
+    w.work,
+    {
+      async run(request) {
+        if (!done && remoteSeam() === seam) {
+          done = true
+          await mutate()
+        }
+        return process.run(request)
+      },
+    },
+    selectionFor(w.git),
+  )
+}
+
 async function moveM2(w: World): Promise<string> {
   const tree = (await w.git(["rev-parse", `${w.target}^{tree}`])).trim()
   const next = (
@@ -159,7 +180,8 @@ describe("submit reuses a fenced admission observation", () => {
       vi.unstubAllEnvs()
     }
     expect(calls.seams.inspectSubmit?.ssh_children, JSON.stringify(calls.seams)).toBe(2)
-    expect(calls.seams.submitEvent).toMatchObject({ "ls-remote": 3, push: 1 })
+    // 28867 B3: the branch lease rides previewRetirement's exact fetch, so the event lists the queue and the chain tip only.
+    expect(calls.seams.submitEvent).toMatchObject({ "ls-remote": 2, push: 1 })
     // 27957: the one fetch is submit's exact hot+cold custody read. A branch with no hot history may have an
     // archived one under refs/yrd-archive/main/, which submit must reopen, and the hot-only listing cannot show it.
     // 29087: this fixture's branch has no history at previewRetirement, and an absent read fences nothing, so
@@ -350,7 +372,8 @@ process.exit(result.status ?? 1)
     } finally {
       calls = trace.end()
     }
-    expect(calls.seams.submitEvent).toMatchObject({ "ls-remote": 3, push: 1 })
+    // 28867 B3: the branch lease rides previewRetirement's exact fetch, so the event lists the queue and the chain tip only.
+    expect(calls.seams.submitEvent).toMatchObject({ "ls-remote": 2, push: 1 })
     expect(calls.unreadable).toBe(0)
     expect((await w.git(["ls-remote", "origin", legacyRef])).trim()).toBe(`${w.target}\t${legacyRef}`)
     expect((await w.git(["ls-remote", "origin", changesRef("main", "task/probe")])).trim()).not.toBe("")
@@ -411,6 +434,8 @@ process.exit(result.status ?? 1)
       at: new Date(),
       change: { branch: "task/stuck", head: w.target, event: stuck },
     })
+    // The CLI classifies the queue before admission; keep that boundary so admission's own reads are what is counted.
+    expect(await queueFormat(store, "main")).toBe("event")
     const trace = traceRemoteCalls(join(w.root, "trace-stuck"), { seams: true })
     w.git = gitIn(w.work, undefined, selectionFor(w.git), { env: { ...process.env, ...trace.env } })
     let calls: ReturnType<typeof trace.end>
@@ -421,6 +446,54 @@ process.exit(result.status ?? 1)
       calls = trace.end()
     }
     expect(calls.seams.submitEvent?.fetch ?? 0).toBeGreaterThan(0)
+    // 28867 C1: admission reads the stuck change's history through the preview's reader, one exact fetch, no listing.
+    expect(calls.seams.inspectSubmit?.["ls-remote"] ?? 0, JSON.stringify(calls.seams.inspectSubmit)).toBe(0)
+  })
+
+  /**
+   * @failure 28867 B3: for a branch with history the branch lease's expectation now comes from the preview read. A
+   * branch another writer publishes after that read (most likely a second submit of it) must refuse the atomic push,
+   * never be overwritten. A first submit (no history) re-reads its branch with the absent history before the push.
+   */
+  it("refuses, publishing nothing, when another writer moves the branch after the preview read (28867)", async () => {
+    const w = await world()
+    const store = createEventStore(w.work, "origin", selectionFor(w.git))
+    const tip = (await readEventQueue(store, "main")).tip
+    // An earlier change of this branch, withdrawn: the resubmit reuses previewRetirement's read of its history.
+    const earlier = await (
+      await openEvents({ ...store, ref: changesRef("main", "task/probe"), writer: "@dev/11" })
+    ).append([changeInput("opened", { queueTip: tip, at: new Date(), commit: w.target, by: "@dev/11" })], {
+      expect: null,
+    })
+    if (earlier.head === null) throw new Error("fixture earlier change has no opened event tip")
+    const withdrawn = await appendChangeEvent(store, "main", "task/probe", earlier.head, {
+      type: "cancelled",
+      at: new Date(),
+      reason: "withdrawn",
+    })
+    let mutated = false
+    // Compose runs after previewRetirement read the branch and before the submit event pushes.
+    const refused = await submit(
+      atSeam(w, "composeSubmit", async () => {
+        await w.git(["push", "--quiet", "origin", `${w.target}:refs/heads/task/probe`])
+        mutated = true
+      }),
+      "origin",
+      request,
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+    expect(mutated).toBe(true)
+    expect(refused).toBeInstanceOf(Conflict)
+    expect((refused as Conflict).refs).toContain("refs/heads/task/probe")
+    expect((await w.git(["ls-remote", "origin", "refs/heads/task/probe"])).trim()).toBe(
+      `${w.target}\trefs/heads/task/probe`,
+    )
+    // Nothing published: the change chain still ends at the withdrawal.
+    expect((await w.git(["ls-remote", "origin", changesRef("main", "task/probe")])).trim()).toBe(
+      `${withdrawn}\t${changesRef("main", "task/probe")}`,
+    )
   })
 
   /** @failure A failed combined acquisition must refuse admission with its Git reason, never use cached refs. */

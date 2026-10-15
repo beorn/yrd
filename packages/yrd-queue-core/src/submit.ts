@@ -229,6 +229,11 @@ export type SubmitRequest = Readonly<{
   target: Target
   /** Target declaration commit captured by the CLI; admission must not run newer code with older policy. */
   expectedTargetHead?: string
+  /**
+   * The queue ref and its retired pause ref from the CLI's declaration fetch, objects included (28867 B1). Admission
+   * reads ops from these instead of fetching them again; the submit's atomic push leases the queue tip it read.
+   */
+  fetchedQueueRefs?: ReadonlyMap<string, string>
   submitter: string
   issue?: string
   /** Host-owned issue identity. A configured resolver must either return one canonical issue or throw. */
@@ -906,7 +911,17 @@ async function admitSubmitAtHead(
       throw new Error(`${remote}#${queue} classified ${String(unreachable)}`)
     }
   }
-  const operational = await readEventOpsWithRefs(store, git, request.target.branch, targetHead)
+  // 28867 B1: a queue this submit just created was not in the CLI's fetch, so only an event queue it saw reuses it.
+  const fetched =
+    format === "event" && request.fetchedQueueRefs?.has(queueRef(queue)) === true ? request.fetchedQueueRefs : undefined
+  const operational = await readEventOpsWithRefs(
+    store,
+    git,
+    request.target.branch,
+    targetHead,
+    undefined,
+    fetched === undefined ? {} : { fetched },
+  )
   const stop = operational.ops.stop
   refuseMaintenance(stop, remote, request.target.branch)
   return {
@@ -949,7 +964,7 @@ async function endedSubjects(
   try {
     // 29087: this chain read is the same one submitEvent needs; return it so
     // the submit fetches the branch's chain once, not twice.
-    const selected = await readBranchHistory(store, request.target.branch, request.branch)
+    const selected = await readBranchHistory(store, request.target.branch, request.branch, { branchTip: true })
     const { history } = selected
     if (history === undefined) return { ended: new Set(), selected }
     const { reason, status } = history.state
@@ -1094,9 +1109,15 @@ async function submitEvent(
     const selected =
       attempt === 0 && preRead !== undefined && preRead.history !== undefined
         ? preRead
-        : await readBranchHistory(store, request.target.branch, request.branch)
+        : await readBranchHistory(store, request.target.branch, request.branch, { branchTip: true })
     const archived = selected.ref === coldRef ? selected.history?.events : undefined
-    const branchAt = (await listRefs(branchRef, store)).get(branchRef) ?? null
+    // 28867 B3 (@cto 0d28de34, 6a3eebb4): the branch lease's expectation rides the history read just made:
+    // previewRetirement's on attempt 0, a fresh one on attempt 1. A branch that moved meanwhile (another publisher of
+    // this same branch) refuses the atomic push, and that conflict throws: it is never retried over the other writer.
+    if (selected.branchTip === undefined) {
+      throw new Error(`${request.branch}: its history read carried no remote tip for ${branchRef}`)
+    }
+    const branchAt = selected.branchTip
     const input = changeInput("opened", {
       queueTip: ops.queue.tip,
       at: new Date(),

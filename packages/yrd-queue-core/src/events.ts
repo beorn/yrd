@@ -1195,7 +1195,11 @@ export async function readEventOpsWithRefs(
   queue: string,
   _targetSha: string,
   listed?: Readonly<{ refs: ReadonlyMap<string, Oid> }>,
-  options: Readonly<{ knownQueue?: EventQueue }> = {},
+  options: Readonly<{
+    knownQueue?: EventQueue
+    /** The queue and retired pause refs as this process fetched them by name moments ago, objects included (28867 B1). */
+    fetched?: ReadonlyMap<string, Oid>
+  }> = {},
 ): Promise<Readonly<{ ops: EventOps; listedQueueTip: string | null }>> {
   const knownQueue = options.knownQueue
   if (knownQueue !== undefined) assertQueueLocation(store, queue, knownQueue)
@@ -1211,7 +1215,9 @@ export async function readEventOpsWithRefs(
       )
     }
     try {
-      acquiredRefs = await store.backend.fetchRefs(store.repo, [ref, fenceRef], store.remote, { absent: "omit" })
+      acquiredRefs =
+        options.fetched ??
+        (await store.backend.fetchRefs(store.repo, [ref, fenceRef], store.remote, { absent: "omit" }))
     } catch (cause) {
       throw new Error(
         `${where}: could not fetch queue ${ref} and retired legacy ref ${fenceRef}: ${String(cause)}; admission refused. Check the fetch failure and retry`,
@@ -1286,9 +1292,13 @@ async function eventLineStop(
   if (pause?.kind !== "paused") return undefined
   if (pause.cause === "operator" || pause.cause === "maintenance" || pause.change === undefined) return pause
   const ref = changesRef(queue, pause.change.branch)
-  const events = await readEventChain(await openEvents({ ...store, ref }))
-  if (events.length === 0) throw new Error(`${ref}: stuck queue pause ${pause.sha} has no change events`)
-  const state = project(events, ref, store.repo)
+  // 28867 C1 (@cto 0d28de34): the history reader previewRetirement uses, one exact fetch of the hot and cold refs.
+  // A stuck pause names a live chain: an archived or absent one is the same defect it was.
+  const selected = await readBranchHistory(store, queue, pause.change.branch)
+  if (selected.history === undefined || selected.ref !== ref) {
+    throw new Error(`${ref}: stuck queue pause ${pause.sha} has no change events`)
+  }
+  const { events, state } = selected.history
   if (state.commit !== pause.change.head || !isOpen(state.status)) return undefined
   const stuckAt =
     pause.change.event === undefined
@@ -2005,11 +2015,19 @@ export function resetQueueFormatCache(): void {
 export type QueueFormat = "event" | "legacy" | "empty"
 
 /** One advertisement selects the format. An event queue with no changes is empty. Cached once per process. Empty is never cached. */
-export async function queueFormat(store: QueueReadStore, queue: string): Promise<QueueFormat> {
+export async function queueFormat(
+  store: QueueReadStore,
+  queue: string,
+  options: Readonly<{ fetched?: ReadonlyMap<string, Oid> }> = {},
+): Promise<QueueFormat> {
   const key = `${store.repo}#${store.remote ?? ""}#${queue}`
   const cached = formatCache.get(key)
   if (cached !== undefined) return cached
-  const refs = await listRefs(queueRefPrefix(queue), store)
+  // 28867 B1 (@cto 0d28de34): a caller that just fetched the queue ref by name feeds it to this one classifier. An
+  // absent queue ref still lists the prefix: only that listing tells an empty queue from a legacy one.
+  const fetchedTip = options.fetched?.get(queueRef(queue))
+  const refs =
+    fetchedTip === undefined ? await listRefs(queueRefPrefix(queue), store) : new Map([[queueRef(queue), fetchedTip]])
   if (refs.size === 0) return "empty"
   if (refs.has(queueRef(queue))) {
     formatCache.set(key, "event")
@@ -2788,19 +2806,25 @@ export async function readBranchHistory(
   store: QueueReadStore,
   queue: string,
   branch: string,
-  options: Readonly<{ invalid?: "return" }> = {},
-): Promise<Readonly<{ ref: string; history: ChangeHistory | undefined; invalid?: InvalidChangeHistory }>> {
+  options: Readonly<{ invalid?: "return"; branchTip?: boolean }> = {},
+): Promise<
+  Readonly<{ ref: string; history: ChangeHistory | undefined; invalid?: InvalidChangeHistory; branchTip?: Oid | null }>
+> {
   const prefixes = [`${queueRefPrefix(queue)}/changes/`, archivedChangesPrefix(queue)]
   const hot = changesRef(queue, branch)
   const cold = `${archivedChangesPrefix(queue)}${branch}`
-  const chains = await readEventChains([hot, cold], store)
+  // 28867 B3 (@cto 0d28de34): a submit leases its branch at the remote tip; that tip rides this exact fetch.
+  const branchRef = `refs/heads/${branch}`
+  const also = options.branchTip === true ? { refs: [branchRef], seen: new Map<string, Oid | null>() } : undefined
+  const chains = await readEventChains([hot, cold], store, undefined, also)
+  const tip = also === undefined ? {} : { branchTip: also.seen.get(branchRef) ?? null }
   const { histories, invalid } = projectChangeHistories(chains, prefixes, store.repo)
   const defect = invalid.get(branch)
   if (defect !== undefined) {
-    if (options.invalid === "return") return { ref: defect.ref, history: undefined, invalid: defect }
+    if (options.invalid === "return") return { ref: defect.ref, history: undefined, invalid: defect, ...tip }
     throw new Error(`${defect.ref}@${defect.tip}: ${defect.error}`)
   }
-  return { ref: chains.has(cold) ? cold : hot, history: histories.get(branch) }
+  return { ref: chains.has(cold) ? cold : hot, history: histories.get(branch), ...tip }
 }
 
 function projectChangeHistories(
