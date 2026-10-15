@@ -335,7 +335,7 @@ it.each(["released", "held", "advanced", "failed"] as const)(
  * @level l3 @consumer automatic component retirement after native environment release
  * Root-only release and component landing coverage do not observe post-removal component custody or retained-copy bytes.
  */
-it.each(["snapshot", "shared"] as const)(
+it.each(["snapshot", "shared", "advanced"] as const)(
   "native component release preserves retained custody: %s",
   async (mode) => {
     const seeded = await world(":")
@@ -412,6 +412,19 @@ it.each(["snapshot", "shared"] as const)(
     expect(JSON.parse(landed.stdout())).toMatchObject({ merged: [rootBranch] })
     expect(existsSync(author)).toBe(true)
     expect((await componentGit(["rev-parse", `refs/heads/${componentBranch}`])).trim()).toBe(componentTip)
+    const advancedTip =
+      mode === "advanced"
+        ? (
+            await componentGit([
+              "commit-tree",
+              `${componentTip}^{tree}`,
+              "-p",
+              componentTip,
+              "-m",
+              "new component work after author capture",
+            ])
+          ).trim()
+        : undefined
 
     const closed = capture(w.work)
     const stderr = closed.io.stderr
@@ -425,7 +438,17 @@ it.each(["snapshot", "shared"] as const)(
         sealedManifest = readFileSync(proofPath)
       }
     }
-    expect(await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io), closed.stderr()).toBe(0)
+    let releaseReads = 0
+    const exit =
+      mode === "advanced"
+        ? await closeEnvironment(author, { json: true }, closed.io, undefined, "delegate", async () => {
+            // The second existing intent check is after author capture and before retention seals.
+            if (++releaseReads !== 2) return
+            await componentGit(["checkout", "--quiet", "--detach", componentTip])
+            await componentGit(["update-ref", `refs/heads/${componentBranch}`, advancedTip!, componentTip])
+          })
+        : await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io)
+    expect(exit, closed.stderr()).toBe(0)
     expect(existsSync(author)).toBe(false)
     expect(proofPath).not.toBe("")
     expect(readFileSync(proofPath)).toEqual(sealedManifest)
@@ -461,8 +484,22 @@ it.each(["snapshot", "shared"] as const)(
       expect(
         (await gitIn(componentStore)(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n"),
       ).toContain(componentTip)
+    } else if (mode === "advanced") {
+      expect(releaseReads).toBe(2)
+      expect(closed.stderr()).toContain("kept")
+      expect(closed.stderr()).toContain(`refs/heads/${componentBranch}`)
+      expect(closed.stderr()).toContain(advancedTip)
+      expect(closed.stderr()).not.toContain("ended with its root")
     } else {
-      expect(closed.stderr()).toContain(componentBranch)
+      const proof = JSON.parse(sealedManifest!.toString("utf8")) as { retainUntil: string }
+      expect(closed.stderr()).toContain("ended with its root")
+      expect(closed.stderr()).toContain(`refs/heads/${componentBranch}`)
+      expect(closed.stderr()).toContain(componentTip)
+      expect(closed.stderr()).toMatch(/landing [0-9a-f]{40}; sealed proof/u)
+      expect(closed.stderr()).toContain(proofPath)
+      expect(closed.stderr()).toContain(proof.retainUntil)
+      expect(closed.stderr()).not.toContain("retirement incomplete")
+      expect(closed.stderr()).not.toContain(`its cwd '${componentStore}' does not exist`)
     }
   },
   60_000,
