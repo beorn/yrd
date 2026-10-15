@@ -637,7 +637,13 @@ export function createLandedBranchRetirement(
   let remoteRefs: ReadonlyMap<string, string> | undefined
   return async (
     candidate: LandedCandidate,
-  ): Promise<Omit<LocalBranchRetirementResult, "archiveRef"> & { archiveRef?: string }> => {
+  ): Promise<
+    Omit<LocalBranchRetirementResult, "archiveRef"> & {
+      archiveRef?: string
+      /** What held the tip when it was removed: main (ancestry), a recorded landing, or the origin archive (closed). */
+      custody?: "main" | "landing" | "origin"
+    }
+  > => {
     const { repo, git, remote, selection, target } = store
     const { path, landings, reason, closed, ...retirement } = candidate
     const pin = landings.find((pin) => pin.path === path && pin.tip === candidate.tip)
@@ -662,13 +668,14 @@ export function createLandedBranchRetirement(
         // work.md § Events first: a close archives, then removes, its unmerged branches. The closed
         // disposition publishes the archive ref and the `dropped` event to origin in one write and reads
         // both back before the compare-and-delete; a tip nobody archived is never deleted.
-        return retireLocalBranch({
+        const ended = await retireLocalBranch({
           ...retirement,
           repo,
           git,
           reason: reason ?? "closed issue",
           disposition: { kind: "closed", store: closed.store, queue: closed.queue, target },
         })
+        return { ...ended, custody: "origin" }
       }
       return {
         outcome: "kept",
@@ -676,13 +683,14 @@ export function createLandedBranchRetirement(
         detail: `tip has no main ancestry or origin-retained exact landing pin in ${repo}`,
       }
     }
-    return retireLocalBranch({
+    const landed = await retireLocalBranch({
       ...retirement,
       repo,
       git,
       reason: reason ?? `landed by ${proof.kind}`,
       disposition: { kind: "landed", target: custody, proof },
     })
+    return { ...landed, custody: proof.kind === "ancestry" ? "main" : "landing" }
   }
 }
 
@@ -722,17 +730,23 @@ export type ClosedIssueRetirementRow = Readonly<{
   reason: string
   detail?: string
   archiveRef?: string
-  /** For a removed tip that main does not hold: the one command that brings it back as a branch. */
+  /** What held the removed tip: main, a recorded landing, or the origin archive. */
+  custody?: "main" | "landing" | "origin"
+  /** For a tip the origin archive holds: the one command that brings it back as a branch. */
   recovery?: string
 }>
 
 export type ClosedIssueRetirementReport = Readonly<{
   repo: string
+  /** The target commit every tip was judged against. */
+  target: string
   /** Local `task/*` and `exp/*` heads other than the target branch. */
   examined: number
-  /** Heads the binding could not tie to an issue. */
+  /** Heads with no recorded change and no issue number in their name. */
   unnumbered: number
-  /** Bound to an issue the resolver did not answer with exactly one bead. */
+  /** Heads with no recorded change whose name alone carries an issue number: kept and listed, never judged (work.md:99). */
+  boundByNameOnly: number
+  /** Bound to an issue the resolver did not answer with exactly one bead; each is also a kept row. */
   unknownIssues: number
   /** Bound to an issue that is still open. */
   openIssues: number
@@ -741,8 +755,8 @@ export type ClosedIssueRetirementReport = Readonly<{
   removed: readonly ClosedIssueRetirementRow[]
   kept: readonly ClosedIssueRetirementRow[]
   failed: readonly ClosedIssueRetirementRow[]
-  /** Set when the resolver could not answer: every branch was kept and nothing below was judged. */
-  resolverFailure?: string
+  /** Set when nothing was judged — no protections reader, no resolver, or the resolver failed: every branch kept. */
+  everyBranchKept?: string
 }>
 
 export type ClosedIssueRetirementInput = Readonly<{
@@ -758,8 +772,8 @@ export type ClosedIssueRetirementInput = Readonly<{
   log: LocalBranchRetirement["log"]
   actor: string
   date?: string
-  /** The branch-to-issue binding the caller already applies (recorded change issue first, never a bare guess). */
-  branchIssue: (branch: string, recordedIssue?: string) => string | undefined
+  /** The issue number a branch NAME carries, for the receipt of a branch that binds by name alone; never eligibility. */
+  nameNumber: (branch: string) => string | undefined
   /** One resolver run over every bound reference; absent when the target declares no resolver. */
   lookupMany: ((raws: readonly string[]) => Promise<readonly (ResolvedIssue | null)[]>) | undefined
 }>
@@ -782,40 +796,45 @@ export async function retireClosedIssueBranches(
   const failed: ClosedIssueRetirementRow[] = []
   let examined = 0
   let unnumbered = 0
+  let boundByNameOnly = 0
   let unknownIssues = 0
   let openIssues = 0
   const closedIssues = new Set<string>()
-  const summary = (resolverFailure?: string): ClosedIssueRetirementReport => {
+  const summary = (everyBranchKept?: string): ClosedIssueRetirementReport => {
     const report: ClosedIssueRetirementReport = {
       repo,
+      target,
       examined,
       unnumbered,
+      boundByNameOnly,
       unknownIssues,
       openIssues,
       closedIssues: closedIssues.size,
       removed,
       kept,
       failed,
-      ...(resolverFailure === undefined ? {} : { resolverFailure }),
+      ...(everyBranchKept === undefined ? {} : { everyBranchKept }),
     }
     log.write({
       kind: "closed-issue-retirement",
       scope: "summary",
       repo,
+      target,
       examined,
       unnumbered,
+      boundByNameOnly,
       unknownIssues,
       openIssues,
       closedIssues: closedIssues.size,
       removed: removed.length,
       kept: kept.length,
       failed: failed.length,
-      ...(resolverFailure === undefined ? {} : { resolverFailure }),
+      ...(everyBranchKept === undefined ? {} : { everyBranchKept }),
     })
     io.stderr(
-      `yrd: closed-issue sweep in ${repo}: examined ${examined}, closed issues ${closedIssues.size}, ` +
+      `yrd: closed-issue sweep in ${repo} against ${target.slice(0, 12)}: examined ${examined}, closed issues ${closedIssues.size}, ` +
         `retired ${removed.length}, kept ${kept.length}, failed ${failed.length}` +
-        (resolverFailure === undefined ? "" : `; resolver failed, every branch kept: ${resolverFailure}`) +
+        (everyBranchKept === undefined ? "" : `; every branch kept: ${everyBranchKept}`) +
         "\n",
     )
     return report
@@ -832,6 +851,7 @@ export async function retireClosedIssueBranches(
       ...(row.status === undefined ? {} : { status: row.status }),
       ...(row.detail === undefined ? {} : { detail: row.detail }),
       ...(row.archiveRef === undefined ? {} : { archive: row.archiveRef }),
+      ...(row.custody === undefined ? {} : { custody: row.custody }),
       ...(row.recovery === undefined ? {} : { recovery: row.recovery }),
     })
   }
@@ -846,14 +866,37 @@ export async function retireClosedIssueBranches(
     if (branch === queue || !/^(task|exp)\//u.test(branch)) continue
     examined++
     const change = reading.histories.get(branch)?.state
-    const raw = input.branchIssue(branch, change?.issue)
+    // @cto bbec7bb5 (work.md:99): eligibility comes from the canonical binding only — the recorded change's issue.
+    // A branch that binds by its name alone is kept and listed; binding it through its commits' Refs trailers is
+    // the named follow-up (the reader 29113 uses is not in yrd's io today). A person's `drop --issue` keeps its
+    // explicit argument: naming the issue is not a name match.
+    const raw = change?.issue
     if (raw === undefined) {
-      unnumbered++
+      const named = input.nameNumber(branch)
+      if (named === undefined) {
+        unnumbered++
+      } else {
+        boundByNameOnly++
+        record({
+          branch,
+          head,
+          outcome: "kept",
+          reason: "bound by name only",
+          detail: `issue ${named} from the branch name; no recorded change binds this branch`,
+        })
+      }
       continue
     }
     candidates.push({ branch, head, raw, change })
   }
   if (candidates.length === 0) return summary()
+  // @cto b023d5e2 blocking 1: the host's protections reader (holds, leases, declared cwds, live use) is the one read
+  // that stands between this sweep and a seat's checkout. Absent, nothing is judged and the receipt says so; an
+  // absent reader is never read as "nothing is held".
+  const protectionsReader = io.localBranchProtections
+  if (protectionsReader === undefined) {
+    return summary("no localBranchProtections reader; every branch kept")
+  }
   if (input.lookupMany === undefined) {
     return summary("target declaration has no issueResolver; issue status unproven")
   }
@@ -863,14 +906,22 @@ export async function retireClosedIssueBranches(
     const answers = await input.lookupMany(raws)
     resolved = new Map(raws.map((raw, index) => [raw, answers[index] ?? null]))
   } catch (error) {
-    return summary(error instanceof Error ? error.message : String(error))
+    return summary(`resolver failed: ${error instanceof Error ? error.message : String(error)}`)
   }
 
   const retire = createLandedBranchRetirement({ repo, git, selection, remote: store.remote, target })
   for (const { branch, head, raw, change } of candidates) {
     const issue = resolved.get(raw)
     if (issue === null || issue === undefined) {
+      // @cto b023d5e2 small 3: a per-row receipt, so the resolver's gaps are visible in the first sweep's 91 rows.
       unknownIssues++
+      record({
+        branch,
+        head,
+        outcome: "kept",
+        reason: "unknown issue",
+        detail: `the resolver answered no single bead for ${raw}`,
+      })
       continue
     }
     const status = typeof issue.status === "string" ? issue.status : undefined
@@ -892,9 +943,16 @@ export async function retireClosedIssueBranches(
       continue
     }
     try {
+      // @cto b023d5e2 blocking 2: a merged change's custody is its merged event and recorded landing, never
+      // ancestry alone — the queue rebuilds branches, so a merged tip need not be an ancestor of main. The pin lets
+      // the judgment prove "landing" and the branch retires as landed, never as closed.
+      const landings =
+        change?.status === "merged" && change.commit !== undefined && change.ending !== undefined
+          ? [{ event: change.ending.id, path: "", tip: change.commit }]
+          : []
       const result = await retire({
         path: "",
-        landings: [],
+        landings,
         branch,
         tip: head,
         actor,
@@ -902,12 +960,10 @@ export async function retireClosedIssueBranches(
         issue: issue.id,
         date,
         log,
-        protections: () =>
-          io.localBranchProtections?.({ repo, branch, tip: head, issue: issue.id }) ?? Promise.resolve([]),
+        protections: () => protectionsReader({ repo, branch, tip: head, issue: issue.id }),
         closed: { store, queue },
       })
       const archiveRef = result.archiveRef
-      const onMain = await isAncestor(git, head, target)
       record({
         branch,
         head,
@@ -917,7 +973,9 @@ export async function retireClosedIssueBranches(
         reason: result.reason,
         ...(result.detail === undefined ? {} : { detail: result.detail }),
         ...(archiveRef === undefined ? {} : { archiveRef }),
-        ...(result.outcome === "removed" && archiveRef !== undefined && !onMain
+        ...(result.custody === undefined ? {} : { custody: result.custody }),
+        // The recovery command is for a tip only the origin archive holds; main and a recorded landing keep the rest.
+        ...(result.outcome === "removed" && archiveRef !== undefined && result.custody === "origin"
           ? { recovery: `git -C ${repo} fetch ${store.remote} ${archiveRef}:refs/heads/${branch}` }
           : {}),
       })

@@ -1066,10 +1066,7 @@ export async function coreQueueCommand(
                   io,
                   log: retirementLog,
                   actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
-                  branchIssue: (branch, recordedIssue) =>
-                    io.branchIssue === undefined
-                      ? (recordedIssue ?? issueFromBranchName(branch))
-                      : io.branchIssue({ branch, recordedIssue }),
+                  nameNumber: (branch) => issueFromBranchName(branch),
                   lookupMany: issueLookupMany(config, authorRepo, env),
                 })
               } catch (error) {

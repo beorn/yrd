@@ -91,14 +91,20 @@ export function issueLookupMany(
   return async (raws) => {
     if (raws.length === 0) return []
     const payload = await runIssueResolver(command, raws, cwd, env)
-    if (!Array.isArray(payload) || payload.length !== raws.length) {
+    // A single reference may be answered the single-lookup way (one object): the root's resolver answers an
+    // array only for several. Any other shape is refused by name; it is never read as "unbound".
+    const entries =
+      raws.length === 1 && payload !== null && typeof payload === "object" && !Array.isArray(payload)
+        ? [payload]
+        : payload
+    if (!Array.isArray(entries) || entries.length !== raws.length) {
       throw new Error(
-        `target .yrd.yml issueResolver ${label} answered ${raws.length} issue references with ${
-          Array.isArray(payload) ? `${payload.length} entries` : "a non-array"
-        }; expected one entry per reference`,
+        `target .yrd.yml issueResolver ${label} answered ${raws.length} issue reference${raws.length === 1 ? "" : "s"} with ${
+          Array.isArray(entries) ? `${entries.length} entries` : `a ${entries === null ? "null" : typeof entries}`
+        }; expected one object or null per reference${raws.length === 1 ? " (or the one object itself)" : ""}`,
       )
     }
-    return payload.map((entry, index) => (entry === null ? null : resolvedIssueOf(entry, label, raws[index] ?? "")))
+    return entries.map((entry, index) => (entry === null ? null : resolvedIssueOf(entry, label, raws[index] ?? "")))
   }
 }
 
