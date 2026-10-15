@@ -416,7 +416,14 @@ export type CoreQueueCommand =
       verified: boolean
     }>
   | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string; recipient?: string }>
-  | Readonly<{ command: "drop"; branch: string; by: string; reason?: string; recipient?: string }>
+  | Readonly<{
+      command: "drop"
+      branch: string
+      by: string
+      reason?: string
+      recipient?: string
+      retire?: Readonly<{ tip: string }>
+    }>
   | Readonly<{
       command: "drop-issue"
       issue: string
@@ -1818,6 +1825,9 @@ export async function coreQueueCommand(
         queue: config.target.branch,
         branch: request.branch,
         by: request.by,
+        ...(request.retire === undefined ? {} : { retire: request.retire }),
+        protections: (tip, issue) =>
+          io.localBranchProtections?.({ repo, branch: request.branch, tip, issue }) ?? Promise.resolve([]),
         ...(request.reason === undefined ? {} : { note: request.reason }),
         ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
       })
@@ -1825,7 +1835,8 @@ export async function coreQueueCommand(
         io,
         options.json,
         dropped,
-        `dropped ${request.branch} at ${dropped.head.slice(0, 12)}; ending ${dropped.event.slice(0, 12)} kept its commit`,
+        `dropped ${request.branch} at ${dropped.head.slice(0, 12)}; ending ${dropped.event.slice(0, 12)} kept its commit` +
+          (dropped.archive === undefined ? "" : `; origin archive ${dropped.archive}`),
       )
       return 0
     }
@@ -2021,6 +2032,8 @@ export async function coreQueueCommand(
           branch: request.branch,
           by: request.by,
           target: config.target,
+          protections: (tip, issue) =>
+            io.localBranchProtections?.({ repo, branch: request.branch, tip, issue }) ?? Promise.resolve([]),
           ...(request.reason === undefined ? {} : { reason: request.reason }),
           ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
         })

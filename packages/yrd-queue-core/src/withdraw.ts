@@ -3,16 +3,8 @@ import { archiveRefFor, ensureArchiveRef } from "git-super/archive-ref"
 import { deleteCandidateRefsForShas } from "./candidate-refs.ts"
 import { changeInput, changesRef, decide, isOpen, project, queueFormat, queueRef, readEventQueue } from "./events.ts"
 import { readEventChain } from "./event-read.ts"
-import {
-  createEventStore,
-  gitIn,
-  isAncestor,
-  listRefs,
-  openEvents,
-  readRemoteCommit,
-  selectionFor,
-  type Git,
-} from "./git.ts"
+import { createEventStore, gitIn, isAncestor, openEvents, readRemoteCommit, selectionFor, type Git } from "./git.ts"
+import { retireOriginBranch } from "./origin-branch-retirement.ts"
 
 export type WithdrawRequest = Readonly<{
   branch: string
@@ -20,6 +12,7 @@ export type WithdrawRequest = Readonly<{
   by: string
   reason?: string
   recipient?: string
+  protections?: (head: string, issue?: string) => Promise<readonly string[]>
 }>
 
 export type WithdrawnChange = Readonly<{
@@ -90,44 +83,25 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
   let retirementError: string | undefined
   let remoteRemoved = false
   try {
-    const publish = store.backend.publish
-    if (publish === undefined) throw new Error("Gitomic backend lacks publish for withdrawal retirement")
     const target = await readRemoteCommit(git, remote, `refs/heads/${queue}`)
     if (target === undefined) throw new Error(`published main ${remote}#${queue} is missing`)
     if (!(await isAncestor(git, head, target))) {
       archive = archiveRefFor(request.branch, request.by, new Date().toISOString().slice(0, 10))
       const custody = ensureArchiveRef(root, archive, head)
       if (!custody.ok) throw new Error(custody.reason)
-      const previous = (await listRefs(archive, store)).get(archive)
-      if (previous !== undefined && previous !== head) {
-        throw new Error(`archive ${archive} holds ${previous}, not ${head}; it is never overwritten`)
-      }
-      await publish(
-        root,
-        [
-          { ref, expect: record, oid: record },
-          { ref: archive, expect: previous ?? "0".repeat(head.length), oid: head },
-        ],
-        remote,
-      )
-      const observed = (await listRefs(archive, store)).get(archive)
-      if (observed !== head) {
-        throw new Error(`archive ${archive} did not read back as ${head}; found ${observed ?? "absent"}`)
-      }
       // The local protected archive also keeps this object after environment closure.
       // Reusing the original name preserves the change and its issue binding on submit.
       recovery = `git branch '${request.branch.replaceAll("'", "'\\''")}' ${head}`
     }
-    await publish(
-      root,
-      [
-        { ref, expect: record, oid: record },
-        { ref: branchRef, expect: head, oid: null },
-      ],
-      remote,
-    )
-    const observed = await readRemoteCommit(git, remote, branchRef)
-    if (observed !== undefined) throw new Error(`remote branch removal did not read back absent; found ${observed}`)
+    const protections = request.protections
+    await retireOriginBranch(store, {
+      branch: request.branch,
+      head,
+      eventRef: ref,
+      eventTip: record,
+      archive,
+      protections: protections === undefined ? undefined : () => protections(head, state.issue),
+    })
     remoteRemoved = true
     await deleteCandidateRefsForShas(gitIn(root, undefined, selectionFor(git)), root, remote, [head])
   } catch (cause) {

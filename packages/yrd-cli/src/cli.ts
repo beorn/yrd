@@ -240,6 +240,7 @@ function buildProgram(
     options: PauseOptions & {
       issue?: string
       local?: boolean
+      retire?: boolean
       tip?: string
       submodules?: boolean
       dryRun?: boolean
@@ -253,7 +254,21 @@ function buildProgram(
     if (options.local === true && (branch === undefined || options.tip === undefined)) {
       throw new Error("drop --local needs a branch and --tip <expected-commit>")
     }
-    if (options.tip !== undefined && options.local !== true) throw new Error("--tip requires drop --local")
+    if (
+      options.retire &&
+      (command !== "drop" ||
+        options.local ||
+        options.issue !== undefined ||
+        branch === undefined ||
+        options.tip === undefined ||
+        !options.reason?.trim())
+    ) {
+      throw new Error(
+        "drop --retire needs a branch, --tip <full-commit> and --reason <why>; choose origin retirement or local cleanup",
+      )
+    }
+    if (options.tip !== undefined && options.local !== true && options.retire !== true)
+      throw new Error("--tip requires drop --local or --retire")
     if (
       (options.submodules || options.dryRun || options.apply) &&
       (command !== "drop" || options.issue === undefined || options.local)
@@ -262,7 +277,7 @@ function buildProgram(
     }
     if (options.dryRun && options.apply) throw new Error("choose --dry-run or --apply")
     let subject:
-      | { command: "withdraw" | "drop"; branch: string }
+      | { command: "withdraw" | "drop"; branch: string; retire?: Readonly<{ tip: string }> }
       | { command: "drop-issue"; issue: string; submodules?: boolean; apply?: boolean; dryRun?: boolean }
       | { command: "drop-local"; branch: string; tip: string; issue?: string }
     if (command === "drop" && options.local === true && branch !== undefined && options.tip !== undefined) {
@@ -272,7 +287,12 @@ function buildProgram(
         tip: options.tip,
         ...(options.issue === undefined ? {} : { issue: options.issue }),
       }
-    } else if (branch !== undefined) subject = { command, branch }
+    } else if (branch !== undefined)
+      subject = {
+        command,
+        branch,
+        ...(options.retire && options.tip !== undefined ? { retire: { tip: options.tip } } : {}),
+      }
     else if (command === "drop" && options.issue !== undefined) {
       subject = {
         command: "drop-issue",
@@ -1328,7 +1348,11 @@ function buildProgram(
         "end a change, or archive and retire local branches; root issue cleanup applies by default using exact origin custody; --submodules previews because it expands to component repositories",
       )
       .option("--local", "archive and retire only the named local branch; requires --tip")
-      .option("--tip <commit>", "expected full local commit for --local; an advanced branch is kept")
+      .option(
+        "--retire",
+        "archive and retire an already-ended origin branch without changing its ending; requires --tip and --reason",
+      )
+      .option("--tip <commit>", "expected full commit for --local or --retire; an advanced branch is kept")
       .option("--issue <id>", "retire issue-bound local refs; with --local, carry the reviewed issue identity")
       .option(
         "--submodules",

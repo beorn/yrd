@@ -1,6 +1,7 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
 import { Conflict, RetriesExhausted } from "./git.ts"
-import { ARCHIVE_REF_PREFIX } from "git-super/archive-ref"
+import { ARCHIVE_REF_PREFIX, archiveRefFor } from "git-super/archive-ref"
+import { retireOriginBranch } from "./origin-branch-retirement.ts"
 import { readCommitSubmodules, type CommitGitlink } from "git-super/commit-graph"
 import { listRefs, openEvents } from "./git.ts"
 import { publishWithTransientRetry } from "./transient-push.ts"
@@ -1045,8 +1046,12 @@ export type DropRequest = Readonly<{
   issue?: string
   /** Publish custody for local retirement; leave the remote branch and candidate refs intact. */
   localArchive?: Readonly<{ ref: string; tip: string }>
+  /** Retire this exact origin tip without changing an already-terminal history. */
+  retire?: Readonly<{ tip: string }>
+  /** Optional host policy; absence means a standalone caller with no host policy. */
+  protections?: (head: string, issue?: string) => Promise<readonly string[]>
 }>
-export type Dropped = Readonly<{ queue: string; branch: string; head: string; event: string }>
+export type Dropped = Readonly<{ queue: string; branch: string; head: string; event: string; archive?: string }>
 export type SetBranchIgnoredRequest = Readonly<
   { queue: string; branch: string; by: string } & ({ ignored: true; reason: string } | { ignored: false })
 >
@@ -2398,6 +2403,15 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   const state = selected?.state ?? initial
   const branchRef = `refs/heads/${branch}`
   const archive = request.localArchive
+  if (request.retire !== undefined) {
+    if (archive !== undefined) throw new Error(`${branch}: choose origin retirement or local archive custody`)
+    if (!COMMIT_OID.test(request.retire.tip) || !request.note?.trim()) {
+      throw new Error(`${branch}: drop --retire needs a full --tip and nonempty --reason`)
+    }
+    if (state.ending === undefined || isOpen(state.status) || selectedTip === null) {
+      throw new Error(`${branch}: drop --retire requires an already-ended change; found ${state.status}`)
+    }
+  }
   let archiveUpdate: AlsoRef | undefined
   if (archive !== undefined) {
     if (!archive.ref.startsWith(`${ARCHIVE_REF_PREFIX}/`) || !COMMIT_OID.test(archive.tip)) {
@@ -2424,6 +2438,22 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   const fetchRefs = store.backend.fetchRefs
   if (fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs for dropped branch commit")
   const head = archive?.tip ?? (await fetchRefs(store.repo, branchRef, store.remote)).get(branchRef)
+  if (request.retire !== undefined && head !== request.retire.tip) {
+    const wanted = request.retire.tip
+    const held = archiveRefFor(branch, request.by, new Date().toISOString().slice(0, 10))
+    if (
+      head === undefined &&
+      history.some((event) => event.links.includes(wanted)) &&
+      (await listRefs(held, store)).get(held) === wanted &&
+      (await listRefs(ref, store)).get(ref) === selectedTip
+    ) {
+      if (state.ending === undefined) throw new Error(`${branch}: terminal retirement lost its ending`)
+      return { queue, branch, head: wanted, event: state.ending.id, archive: held }
+    }
+    throw new Error(
+      `${branchRef}: expected ${wanted} at ${store.remote}, found ${head ?? "absent"}; exact archive custody is required`,
+    )
+  }
   if (state.ending !== undefined && head !== undefined) {
     const kept = history.flatMap((event) => event.links)
     if (!kept.includes(head)) {
@@ -2438,6 +2468,28 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   const alreadyDropped = state.status === "cancelled" && state.reason === "dropped"
   const retiringEnded = state.ending !== undefined && !alreadyDropped && state.status !== "merged"
   const note = request.note?.trim()
+  const protections = request.protections
+  const retire = async (eventTip: string, keptHead: string): Promise<string> => {
+    const originArchive = archiveRefFor(branch, request.by, new Date().toISOString().slice(0, 10))
+    await retireOriginBranch(store, {
+      branch,
+      head: keptHead,
+      eventRef: ref,
+      eventTip,
+      archive: originArchive,
+      protections: protections === undefined ? undefined : () => protections(keptHead, state.issue),
+    })
+    await deleteCandidateRefsForShas(gitIn(store.repo, undefined, store.selection), store.repo, store.remote, [
+      keptHead,
+    ])
+    return originArchive
+  }
+  if (request.retire !== undefined) {
+    if (head === undefined || selectedTip === null || state.ending === undefined) {
+      throw new Error(`${branch}: terminal retirement lost its exact head or ending`)
+    }
+    return { queue, branch, head, event: state.ending.id, archive: await retire(selectedTip, head) }
+  }
   if (retiringEnded && !note) {
     throw new Error(`${ref} in ${store.repo}: dropping an ended change requires --reason`)
   }
@@ -2464,15 +2516,13 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
       throw new Error("Gitomic backend lacks publish for dropped branch deletion")
     }
     if (selectedTip === null) throw new Error(`${ref} in ${store.repo}: ended change has no chain tip`)
-    const disposition =
-      archiveUpdate === undefined
-        ? { ref: branchRef, expect: head, oid: null }
-        : { ref: archiveUpdate.ref, expect: archiveUpdate.expect ?? "0".repeat(head.length), oid: head }
+    if (archive === undefined) {
+      return { queue, branch, head, event: state.ending.id, archive: await retire(selectedTip, head) }
+    }
+    if (archiveUpdate === undefined) throw new Error(`${branch}: local retirement has no archive update`)
+    const disposition = { ref: archiveUpdate.ref, expect: archiveUpdate.expect ?? "0".repeat(head.length), oid: head }
     await store.backend.publish(store.repo, [{ ref, expect: selectedTip, oid: selectedTip }, disposition], store.remote)
     await verifyCustody(selectedTip)
-    if (archive === undefined) {
-      await deleteCandidateRefsForShas(gitIn(store.repo, undefined, store.selection), store.repo, store.remote, [head])
-    }
     return { queue, branch, event: state.ending.id, head }
   }
   const at = new Date()
@@ -2507,12 +2557,15 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
     ...(archiveUpdate === undefined
       ? head === undefined
         ? {}
-        : { also: [{ ref: branchRef, expect: head, oid: null }] }
+        : { also: [{ ref: branchRef, expect: head, oid: retiringEnded ? head : null }] }
       : { also: [archiveUpdate] }),
   })
   const written = result.events.findLast((event) => event.type === "cancelled")?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: dropped event was not written`)
   await verifyCustody(written)
+  if (retiringEnded && head !== undefined && archive === undefined) {
+    return { queue, branch, event: written, head: keptHead, archive: await retire(written, head) }
+  }
   if (head !== undefined && archive === undefined) {
     await deleteCandidateRefsForShas(gitIn(store.repo, undefined, store.selection), store.repo, store.remote, [head])
   }
