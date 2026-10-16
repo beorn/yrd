@@ -15,7 +15,6 @@ import {
   changesRef,
   createEventQueue,
   createEventStore,
-  listChanges,
   readConfig,
   readEventQueue,
   readStatus,
@@ -24,12 +23,7 @@ import {
 } from "@yrd/queue-core"
 import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
-import {
-  mergedBranchSweepDue,
-  markMergedBranchSweep,
-  retireMergedBranches,
-  retireMergedRootAuthor,
-} from "../src/branch-retirement.ts"
+import { retireMergedRootAuthor } from "../src/branch-retirement.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -116,24 +110,26 @@ function collector(): { rows: LogRecord[]; log: LocalBranchRetirement["log"] } {
     },
   }
 }
-async function sweep(repo: string, protections?: YrdCliIO["localBranchProtections"]) {
+async function retire(repo: string, branch: string, protections: NonNullable<YrdCliIO["localBranchProtections"]>) {
   const git = gitIn(repo),
     out = capture(repo),
     { rows, log } = collector()
   const target = (await git(["rev-parse", "origin/main"])).trim()
-  const report = await retireMergedBranches({
+  const store = createEventStore(repo, "origin", git.selection)
+  const result = await retireMergedRootAuthor({
     repo,
     git,
-    selection: git.selection,
-    store: createEventStore(repo, "origin", git.selection),
+    branch,
+    change: await readStatus(store, "main", branch),
+    base: target,
+    store,
     queue: "main",
     target,
     io: { ...out.io, localBranchProtections: protections },
     log,
     actor: "fixture",
-    nameNumber: (b) => b.split("/").at(-1)?.split("-")[0],
   })
-  return { report, git, rows }
+  return { result, git, rows }
 }
 const idle: NonNullable<YrdCliIO["localBranchProtections"]> = async () => ({ protections: [], evidence: [] })
 
@@ -185,7 +181,7 @@ describe("automatic retirement is licensed by exact-head ancestry", () => {
     expect(out.stderr()).toContain("owner review")
   })
 
-  it("archives and removes an ancestor while keeping the unmerged/graph-only population", async () => {
+  it("archives a targeted ancestor and keeps targeted unmerged or graph-only heads", async () => {
     const repo = await world()
     const merged = await branchFor(repo, "task/29100-merged", "opaque-key")
     await recordChange(repo, "task/29100-merged", merged, "opaque-key", "merged")
@@ -193,19 +189,19 @@ describe("automatic retirement is licensed by exact-head ancestry", () => {
     await git(["merge", "--quiet", "--ff-only", "task/29100-merged"])
     await git(["push", "--quiet", "origin", "main"])
     const unmerged = await branchFor(repo, "task/29101-unmerged", "other-key")
-    await recordChange(repo, "task/29101-unmerged", unmerged, "other-key", "withdrawn")
+    await recordChange(repo, "task/29101-unmerged", unmerged, "other-key", "merged")
     await git(["checkout", "--quiet", "-b", "task/29267-graph-only", "main"])
     await git(["commit", "--quiet", "--allow-empty", "-m", "graph-only e81f7ace class"])
     const graph = (await git(["rev-parse", "HEAD"])).trim()
     await git(["checkout", "--quiet", "main"])
     expect((await git(["rev-parse", graph + "^{tree}"])).trim()).toBe((await git(["rev-parse", "main^{tree}"])).trim())
     await recordChange(repo, "task/29267-graph-only", graph, "graph-key", "merged")
-    const { report } = await sweep(repo, idle)
-    expect(report.failed).toEqual([])
-    expect(report.removed.map((r) => r.branch)).toEqual(["task/29100-merged"])
-    expect(new Set(report.kept.map((r) => r.branch))).toEqual(new Set(["task/29101-unmerged", "task/29267-graph-only"]))
-    expect(report.kept.every((r) => r.reason === "unreached")).toBe(true)
-    const archive = report.removed[0]?.archiveRef
+    const landed = await retire(repo, "task/29100-merged", idle)
+    expect(landed.result.outcome).toBe("removed")
+    for (const branch of ["task/29101-unmerged", "task/29267-graph-only"]) {
+      expect((await retire(repo, branch, idle)).result).toMatchObject({ outcome: "kept", reason: "unreached" })
+    }
+    const archive = landed.result.archiveRef
     expect(archive).toBeTruthy()
     expect((await git(["rev-parse", archive!])).trim()).toBe(merged)
     expect((await git(["for-each-ref", "--format=%(objectname)", "refs/heads/task/29100-merged"])).trim()).toBe("")
@@ -219,28 +215,21 @@ describe("automatic retirement is licensed by exact-head ancestry", () => {
     const git = gitIn(repo)
     await git(["merge", "--quiet", "--ff-only", branch])
     await git(["push", "--quiet", "origin", "main"])
-    const held = await sweep(repo, async () => ({ protections: ["explicit hold"], evidence: [] }))
-    expect(held.report.removed).toEqual([])
-    expect(held.report.kept[0]?.detail).toContain("explicit hold")
+    const held = await retire(repo, branch, async () => ({ protections: ["explicit hold"], evidence: [] }))
+    expect(held.result.outcome).toBe("kept")
+    expect(held.result.detail).toContain("explicit hold")
     const advanced = (await git(["commit-tree", head + "^{tree}", "-p", head], "advanced\n")).trim()
-    let moved = false
-    const raced = await sweep(repo, async () => {
-      if (!moved) {
-        moved = true
+    let protectionReads = 0
+    const raced = await retire(repo, branch, async () => {
+      if (++protectionReads === 2) {
+        expect((await git(["rev-parse", held.result.archiveRef])).trim()).toBe(head)
         await git(["update-ref", "refs/heads/" + branch, advanced, head])
       }
       return { protections: [], evidence: [] }
     })
-    expect(raced.report.removed).toEqual([])
-    expect(raced.report.kept[0]?.reason).toBe("moved")
+    expect(protectionReads).toBe(2)
+    expect(raced.result.outcome).toBe("kept")
+    expect(raced.result.detail).toContain("branch moved")
     expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(advanced)
-  })
-  it("keeps every branch when the protections authority is absent", async () => {
-    const repo = await world()
-    const head = await branchFor(repo, "task/29100-held", "opaque")
-    await recordChange(repo, "task/29100-held", head, "opaque", "merged")
-    const { report } = await sweep(repo)
-    expect(report.everyBranchKept).toContain("localBranchProtections")
-    expect(report.removed).toEqual([])
   })
 })

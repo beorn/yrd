@@ -93,7 +93,6 @@ import { resolveQueueLocation } from "../src/queue-location.ts"
 import { transientPushRetry } from "../../yrd-queue-core/src/transient-push.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
-import { retireMergedBranches } from "../src/branch-retirement.ts"
 
 // A mutable facade, so a test can catch each health document at the rename
 // that publishes it. Every call passes through to the real filesystem.
@@ -205,7 +204,21 @@ function cleanupRows(root: string): readonly Record<string, unknown>[] {
 /** Observe the asynchronous round cleanup before a fixture stops its service. */
 async function waitForEnvironmentCleanup(workdir: string, run: string): Promise<void> {
   await vi.waitFor(
-    () => expect(allCleanupRows(workdir).some((row) => row.run === run && row.registry !== undefined)).toBe(true),
+    () => {
+      const dir = join(workdir, "logs", "post-merge")
+      const cleanupRuns = new Set(
+        (existsSync(dir) ? readdirSync(dir) : [])
+          .filter((name) => name.endsWith(".jsonl"))
+          .map((name) => name.slice(0, -".jsonl".length))
+          .filter((id) => readRunLog(dir, id).some((row) => row.kind === "run" && row.queueRun === run)),
+      )
+      expect(
+        allCleanupRows(workdir).some(
+          (row) => cleanupRuns.has(String(row.run)) && row.registry !== undefined && typeof row.remaining === "number",
+        ),
+        `completed cleanup linked to queue run ${run}`,
+      ).toBe(true)
+    },
     { timeout: 30_000 },
   )
 }
@@ -572,7 +585,6 @@ async function gitlinkVectorWorld(
 describe("yrd queue up, the service", () => {
   /**
    * @failure Restart forgets terminal cleanup after a durable merge interrupted its provider attempt,
-   *          or the ordinary sweep skips its issue-less released author ref or crosses namespace custody.
    * @level l2
    * @consumer the author whose fresh recorded job must close after service restart
    * @testonly none
@@ -642,9 +654,8 @@ describe("yrd queue up, the service", () => {
       expect(existsSync(environment), "merge is durable while its pending cleanup is interrupted").toBe(true)
       writeFileSync(release, "go")
       const restarted = capture(w.work)
-      let holdAuthor = true
       restarted.io.localBranchProtections = async () => ({
-        protections: holdAuthor ? ["fixture author hold"] : [],
+        protections: ["fixture author hold"],
         evidence: [],
       })
       restarted.io.liveEnvironmentUse = async () => []
@@ -689,74 +700,6 @@ describe("yrd queue up, the service", () => {
           detail: "fixture author hold",
         }),
       )
-      const outside = "release/owner-retained"
-      await w.git(["checkout", "--quiet", "-b", outside, "origin/main"])
-      await w.git(["commit", "--quiet", "--allow-empty", "-m", "outside Yrd namespace"])
-      const outsideHead = (await w.git(["rev-parse", "HEAD"])).trim()
-      await submit(w.git, "origin", {
-        branch: outside,
-        submitter: "fixture",
-        target: { remote: "origin", branch: "main" },
-      })
-      await w.git(["checkout", "--quiet", "main"])
-      const outsideMerge = capture(w.work)
-      outsideMerge.io.localBranchProtections = restarted.io.localBranchProtections
-      expect(
-        await coreQueueCommand(
-          w.work,
-          outsideMerge.io,
-          {
-            command: "merge",
-            branch: outside,
-            submitter: "fixture",
-          },
-          { json: true, workdir },
-        ),
-        outsideMerge.stderr(),
-      ).toBe(0)
-      expect((await queueCore.readStatus(store, "main", outside)).status).toBe("merged")
-      await w.git(["fetch", "--quiet", "origin", "main"])
-      // This issue-less task ref is in the existing ordinary sweep population.
-      // The environment is gone; no startup history scan is needed to recover it.
-      holdAuthor = false
-      const sweepLog = queueCore.openLog(logs)
-      try {
-        sweepLog.write({ kind: "run", command: "fixture ordinary branch sweep" })
-        const swept = await retireMergedBranches({
-          repo: w.work,
-          git: w.git,
-          selection: gitIn(w.work).selection,
-          store,
-          queue: "main",
-          target: (await w.git(["rev-parse", "origin/main"])).trim(),
-          io: restarted.io,
-          log: sweepLog,
-          actor: "fixture",
-          nameNumber: () => undefined,
-        })
-        expect(swept.failed).toEqual([])
-        const removed = swept.removed.find((row) => row.branch === branch)
-        expect(removed).toMatchObject({ branch, head })
-        expect(removed?.archiveRef).toBeTypeOf("string")
-        expect((await w.git(["rev-parse", removed!.archiveRef!])).trim()).toBe(head)
-        expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe("")
-        expect(readRunLog(logs, sweepLog.id)).toContainEqual(
-          expect.objectContaining({
-            kind: "local-branch-retirement",
-            branch,
-            head,
-            outcome: "removed",
-            archive: removed!.archiveRef,
-          }),
-        )
-        expect(
-          (await w.git(["rev-parse", `refs/heads/${outside}`])).trim(),
-          "namespace custody preserves the merged release ref",
-        ).toBe(outsideHead)
-        expect([...swept.removed, ...swept.kept, ...swept.failed].some((row) => row.branch === outside)).toBe(false)
-      } finally {
-        sweepLog.finish()
-      }
     } finally {
       writeFileSync(release, "go")
       census.mockRestore()
@@ -7466,12 +7409,19 @@ describe("yrd queue run --tier long", () => {
     await redeclare(w, "setup: ':'\n")
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    // A native ancestor is eligible for the old population sweep, but it is not
+    // this attempt's terminal change or a registered author environment.
+    const unrelated = "task/unrelated-ancestor"
+    const unrelatedHead = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["branch", unrelated, unrelatedHead])
+    const submittedHeads = new Map<string, string>()
     for (let index = 0; index < 8; index++) {
       const branch = `task/noise-${String(index).padStart(2, "0")}`
       await w.git(["checkout", "--quiet", "-b", branch, "main"])
       writeFileSync(join(w.work, `${branch.replace("/", "-")}.txt`), "work\n")
       await w.git(["add", "-A"])
       await w.git(["commit", "--quiet", "-m", branch])
+      submittedHeads.set(branch, (await w.git(["rev-parse", "HEAD"])).trim())
       await w.git(["checkout", "--quiet", "main"])
       await submit(w.git, "origin", { branch, submitter: "@dev/4", target: { branch: "main", remote: "origin" } })
     }
@@ -7497,6 +7447,12 @@ describe("yrd queue run --tier long", () => {
       .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
     const stop = new AbortController()
     const run = capture(w.work)
+    const protections = vi.fn<NonNullable<YrdCliIO["localBranchProtections"]>>(async () => ({
+      protections: [],
+      evidence: [],
+    }))
+    run.io.localBranchProtections = protections
+    const merged: string[] = []
     try {
       expect(
         await coreQueueCommand(
@@ -7507,6 +7463,7 @@ describe("yrd queue run --tier long", () => {
             intervalSeconds: 0,
             stop: stop.signal,
             afterRound: async (outcome) => {
+              merged.push(...outcome.merged)
               await waitForEnvironmentCleanup(workdir, outcome.run)
               stop.abort()
             },
@@ -7515,6 +7472,31 @@ describe("yrd queue run --tier long", () => {
         ),
         run.stderr(),
       ).toBe(0)
+      expect(merged.length, "the real queue merges a submitted source").toBeGreaterThan(0)
+      const archives = (await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/archive/"]))
+        .trim()
+        .split("\n")
+        .map((line) => line.split(" "))
+      for (const branch of merged) {
+        const head = submittedHeads.get(branch)
+        expect(head, "the merged source has its recorded native submitted tip").toBeDefined()
+        expect(
+          archives.some(([ref, tip]) => ref?.endsWith(`/${branch}`) && tip === head),
+          "targeted cleanup archives the exact submitted source tip",
+        ).toBe(true)
+        expect(
+          (await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim(),
+          "targeted cleanup retires the merged local source ref",
+        ).toBe("")
+      }
+      expect(
+        (await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${unrelated}`])).trim(),
+        "post-merge cleanup preserves an unrelated ancestor ref",
+      ).toBe(unrelatedHead)
+      expect(
+        protections.mock.calls.some(([input]) => input.branch === unrelated),
+        "post-merge cleanup does not inspect protections for the unrelated branch population",
+      ).toBe(false)
       expect(
         listed.length === 0 ? 0 : Math.max(...listed),
         `cleanup materialized unrelated histories ${JSON.stringify(listed)}\n${run.stderr()}`,
