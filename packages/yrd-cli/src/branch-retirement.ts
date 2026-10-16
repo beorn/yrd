@@ -1,9 +1,16 @@
-import { realpathSync } from "node:fs"
+import { lstatSync, readFileSync, realpathSync } from "node:fs"
+import { createHash } from "node:crypto"
+import { archiveRefFor, ensureArchiveRef } from "git-super/archive-ref"
+import { readCommitSubmodules } from "git-super/commit-graph"
+import { createGitWorktreeStore } from "git-super/worktree"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { inspectCheckoutGitMetadata, verifyRetainedCopy } from "git-super"
 import type { GitWorktreeStore } from "git-super/worktree"
 import {
   collectMovedGitlinks,
+  drop,
+  issueFromBranchName,
+  seamProcess,
   createEventStore,
   createLocalEventStore,
   gitIn,
@@ -34,6 +41,354 @@ import type { ResolvedIssue } from "./issue-resolver.ts"
 import type { YrdCliIO } from "./types.ts"
 import { originHead } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
+import { admitEnvironmentClose } from "./env-close-holders.ts"
+
+/** Explicit exact-tip drop retaining the checkout and its private bytes.
+ * The root event owns the environment receipt; each repository owns its archive.
+ */
+export async function releaseRetainedCheckouts(
+  input: Readonly<{
+    repo: string
+    git: Git
+    selection: GitSelection
+    env?: NodeJS.ProcessEnv
+    io: YrdCliIO
+    log: LocalBranchRetirement["log"]
+    queue: string
+    remote: string
+    issueIdentity: (value: string) => string
+    request: Readonly<{
+      branch: string
+      tip: string
+      issue: string
+      reason: string
+      by: string
+      submodules?: boolean
+      apply?: boolean
+    }>
+  }>,
+) {
+  const { request, io } = input
+  type Row = {
+    repo: string
+    path: string
+    branch: string
+    head: string
+    archiveRef: string
+    remote: string
+    reason: string
+    detail?: string
+  }
+  const eligible: Row[] = [],
+    removed: Row[] = [],
+    kept: Row[] = [],
+    failed: Row[] = []
+  const excluded: { repo: string; path: string; reason: string }[] = []
+  const identity = input.issueIdentity
+  const date = new Date().toISOString().slice(0, 10)
+  const rootStore = createEventStore(input.repo, await remoteUrl(input.git, input.remote), input.selection)
+  const rootRow: Row = {
+    repo: input.repo,
+    path: "",
+    branch: request.branch,
+    head: request.tip,
+    remote: rootStore.remote,
+    archiveRef: archiveRefFor(request.branch, request.by, date),
+    reason: request.reason,
+  }
+  type Candidate = { row: Row; checkout: string; git: Git }
+  const candidates: Candidate[] = []
+  const readGit = (repo: string) => gitIn(repo, undefined, input.selection, { env: input.env })
+  const overlaps = (root: string, path: string) => {
+    const inside = relative(root, path)
+    return inside === "" || (inside !== ".." && !inside.startsWith(`..${sep}`) && !isAbsolute(inside))
+  }
+  const protect = async ({ row, checkout }: Candidate): Promise<readonly string[]> => {
+    const admission = await admitEnvironmentClose(checkout, io)
+    if (admission.kind !== "admitted") return [`needs-delegation: ${admission.refusal}`]
+    const uses: unknown = (await io.liveEnvironmentUse?.()) ?? []
+    if (!Array.isArray(uses)) throw new Error("live environment-use reader did not return an array")
+    for (const use of uses as readonly unknown[]) {
+      if (
+        typeof use !== "object" ||
+        use === null ||
+        !("path" in use) ||
+        typeof use.path !== "string" ||
+        !isAbsolute(use.path) ||
+        !("reason" in use) ||
+        typeof use.reason !== "string" ||
+        !use.reason.trim()
+      ) {
+        throw new Error("live environment-use reader needs absolute paths and nonempty reasons")
+      }
+      if (overlaps(checkout, use.path) || overlaps(use.path, checkout)) return [`live use: ${use.reason} (${use.path})`]
+    }
+    return (
+      (await io.localBranchProtections?.({
+        repo: row.repo,
+        branch: row.branch,
+        tip: row.head,
+        issue: request.issue,
+        retainedCheckout: checkout,
+      })) ?? []
+    )
+  }
+  const hash = (path: string): string | null => {
+    try {
+      return createHash("sha256").update(readFileSync(path)).digest("hex")
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null
+      throw cause
+    }
+  }
+  const receipt = async ({ checkout, git }: Candidate) => {
+    const metadata = await inspectCheckoutGitMetadata(checkout)
+    return {
+      status: await git(["--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=all"]),
+      head: await refAt(git, "HEAD"),
+      index: hash(join(metadata.gitDirectory, "index")),
+      lease: hash(join(checkout, ".agent-lease.json")),
+      lock: hash(join(metadata.gitDirectory, "locked")),
+    }
+  }
+  type Snapshot = Awaited<ReturnType<typeof receipt>>
+  const receipts: { checkout: string; before: Snapshot; after: Snapshot }[] = []
+  const report = {
+    repo: input.repo,
+    branch: request.branch,
+    issue: request.issue,
+    apply: request.apply === true,
+    eligible,
+    removed,
+    kept,
+    failed,
+    excluded,
+    receipts,
+  }
+  const verify = async (candidate: Candidate, before: Awaited<ReturnType<typeof receipt>>) => {
+    const after = await receipt(candidate)
+    if (JSON.stringify(after) !== JSON.stringify(before)) {
+      throw new Error(
+        `${candidate.checkout}: retained checkout receipt changed; inspect status, HEAD, index, lease and lock; checkout preserved`,
+      )
+    }
+    const existing = receipts.find((row) => row.checkout === candidate.checkout)
+    if (existing === undefined) receipts.push({ checkout: candidate.checkout, before, after })
+    else existing.after = after
+    io.stderr(
+      `yrd: retained checkout ${candidate.checkout}: status --porcelain=v2 -z (all untracked), HEAD ${after.head}, index, .agent-lease.json and Git lock unchanged\n`,
+    )
+  }
+  try {
+    const actual = await refAt(input.git, `refs/heads/${request.branch}`)
+    if (actual !== request.tip) {
+      kept.push({
+        ...rootRow,
+        reason: "moved",
+        detail: `tip moved: expected ${request.tip}, found ${actual ?? "absent"}`,
+      })
+      return report
+    }
+    const bound = await readBranchHistory(rootStore, input.queue, request.branch)
+    if (bound.history?.state.diagnostic !== undefined) throw new Error(bound.history.state.diagnostic)
+    if (bound.history?.state.issue !== undefined && identity(bound.history.state.issue) !== identity(request.issue)) {
+      throw new Error(`recorded issue ${bound.history.state.issue} differs from requested ${request.issue}`)
+    }
+    const roots = (await registeredWorktrees(input.git)).filter(
+      (row) => row.branch === request.branch && row.head === request.tip,
+    )
+    const root = roots[0]
+    if (roots.length !== 1 || root === undefined) {
+      throw new Error(`expected one attached checkout for ${request.branch}@${request.tip}; found ${roots.length}`)
+    }
+    rootRow.repo = root.path
+    const visit = async (repository: string, path: string, commit: string, branch?: string): Promise<void> => {
+      const git = readGit(repository)
+      const metadata = await inspectCheckoutGitMetadata(repository)
+      if (realpathSync((await git(["rev-parse", "--show-toplevel"])).trim()) !== realpathSync(repository)) {
+        throw new Error(`${repository}: pinned repository is not materialized at its named path`)
+      }
+      const registrations = await registeredWorktrees(git)
+      // Git reports a submodule's primary checkout by its admin/common directory.
+      // The existing metadata reader plus exact native toplevel proof above bind that row to this checkout.
+      const attached =
+        registrations.find((row) => resolve(row.path) === realpathSync(repository)) ??
+        (metadata.gitDirectory === metadata.commonDirectory
+          ? registrations.find((row) => resolve(row.path) === metadata.commonDirectory)
+          : undefined)
+      io.stderr(
+        `yrd: release inspection ${repository}@${commit}: attached ${attached?.branch ?? "none"} at ${attached?.head ?? "unreadable"}\n`,
+      )
+      const mappedIssue =
+        attached?.branch === undefined
+          ? undefined
+          : io.branchIssue === undefined
+            ? issueFromBranchName(attached.branch)
+            : io.branchIssue({ branch: attached.branch })
+      if (branch !== undefined || (mappedIssue !== undefined && identity(mappedIssue) === identity(request.issue))) {
+        const selectedBranch = branch ?? attached?.branch
+        if (selectedBranch === undefined) throw new Error(`${repository}: selected attached branch became unreadable`)
+        const row: Row =
+          path === ""
+            ? rootRow
+            : {
+                repo: repository,
+                path,
+                branch: selectedBranch,
+                head: commit,
+                remote: await remoteUrl(git, "origin"),
+                archiveRef: archiveRefFor(selectedBranch, request.by, date),
+                reason: request.reason,
+              }
+        if (
+          attached?.head !== commit ||
+          attached.branch !== selectedBranch ||
+          (await refAt(git, `refs/heads/${selectedBranch}`)) !== commit
+        ) {
+          kept.push({
+            ...row,
+            reason: "moved",
+            detail: `attached checkout does not match exact recorded pin ${commit}`,
+          })
+        } else candidates.push({ row, checkout: realpathSync(repository), git })
+      } else {
+        excluded.push({ repo: repository, path, reason: "no current attached branch mapping to the requested issue" })
+      }
+      if (request.submodules) {
+        for (const child of await readCommitSubmodules(seamProcess(git, repository), repository, commit)) {
+          const childRepo = join(repository, child.path)
+          const childPath = path === "" ? child.path : `${path}/${child.path}`
+          let materialized = true
+          try {
+            lstatSync(join(childRepo, ".git"))
+          } catch (cause) {
+            if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause
+            materialized = false
+          }
+          if (!materialized) {
+            excluded.push({
+              repo: childRepo,
+              path: childPath,
+              reason: `recorded pin ${child.target} has no materialized checkout metadata`,
+            })
+            continue
+          }
+          await visit(childRepo, childPath, child.target)
+        }
+      }
+    }
+    await visit(root.path, "", request.tip, request.branch)
+    const snapshots = new Map<Candidate, Awaited<ReturnType<typeof receipt>>>()
+    for (const candidate of candidates) {
+      const before = await receipt(candidate)
+      snapshots.set(candidate, before)
+      let reasons: readonly string[]
+      try {
+        reasons = await protect(candidate)
+      } catch (cause) {
+        reasons = [String(cause)]
+      }
+      await verify(candidate, before)
+      if (reasons.length > 0) kept.push({ ...candidate.row, reason: "held", detail: reasons.join("; ") })
+    }
+    if (kept.length > 0) return report
+    if (!request.apply) {
+      eligible.push(...candidates.map((candidate) => candidate.row))
+      return report
+    }
+    const content = [
+      request.reason,
+      ...candidates.map(
+        ({ row }) =>
+          `repository ${row.repo}; path ${row.path || "."}; old tip ${row.head}; archive ${row.archiveRef}; remote ${row.remote}`,
+      ),
+    ].join("\n")
+    const endingId = bound.history?.state.ending?.id
+    if (endingId !== undefined) {
+      const ending = bound.history?.events.find((event) => event.id === endingId)
+      if (ending?.content !== content) {
+        throw new Error("existing ending has no identical repository custody receipt; refs kept")
+      }
+    }
+    for (const { row } of candidates) {
+      const archive = ensureArchiveRef(row.repo, row.archiveRef, row.head)
+      if (!archive.ok) throw new Error(archive.reason)
+      if (row.path === "") continue
+      const store = createEventStore(row.repo, row.remote, input.selection)
+      const previous = (await listRefs(row.archiveRef, store)).get(row.archiveRef)
+      if (previous !== undefined && previous !== row.head) {
+        throw new Error(`${row.repo}: origin archive holds ${previous}, not ${row.head}`)
+      }
+      if (store.backend.publish === undefined) throw new Error(`${row.repo}: Gitomic backend lacks archive publication`)
+      await store.backend.publish(
+        row.repo,
+        [{ ref: row.archiveRef, expect: previous ?? "0".repeat(row.head.length), oid: row.head }],
+        row.remote,
+      )
+      if ((await readRemoteCommit(readGit(row.repo), row.remote, row.archiveRef)) !== row.head) {
+        throw new Error(`${row.repo}: archive custody did not read back; local refs kept`)
+      }
+    }
+    await drop(rootStore, {
+      queue: input.queue,
+      branch: request.branch,
+      by: request.by,
+      issue: request.issue,
+      note: content,
+      localArchive: { ref: rootRow.archiveRef, tip: request.tip },
+    })
+    for (const candidate of candidates) {
+      const { row } = candidate
+      const before = snapshots.get(candidate)
+      if (before === undefined) throw new Error(`${candidate.checkout}: expected retained-checkout snapshot is missing`)
+      let original: { branch: string; tip: string } | undefined
+      try {
+        const reasons = await protect(candidate)
+        await verify(candidate, before)
+        if (reasons.length > 0) {
+          kept.push({ ...row, reason: "held", detail: reasons.join("; ") })
+          continue
+        }
+        const store = createGitWorktreeStore({ repo: row.repo, gitProcess: seamProcess(candidate.git, row.repo) })
+        original = await store.detachAt(candidate.checkout, row.head)
+        const result = await retireLocalBranch({
+          repo: row.repo,
+          git: candidate.git,
+          branch: row.branch,
+          tip: row.head,
+          actor: request.by,
+          issue: request.issue,
+          reason: request.reason,
+          date,
+          log: input.log,
+          protections: async () => {
+            const reasons = await protect(candidate)
+            if ((await readRemoteCommit(candidate.git, row.remote, row.archiveRef)) !== row.head) {
+              return [...reasons, "origin archive custody changed"]
+            }
+            await verify(candidate, before)
+            return reasons
+          },
+          disposition: { kind: "archived", target: row.head, ref: row.archiveRef },
+        })
+        if (result.outcome !== "removed") {
+          await candidate.git(["symbolic-ref", "HEAD", original.branch])
+          original = undefined
+          kept.push({ ...row, reason: result.reason, detail: result.detail ?? result.reason })
+        } else removed.push(row)
+        await verify(candidate, before)
+      } catch (cause) {
+        if (original !== undefined && (await refAt(candidate.git, original.branch)) !== undefined) {
+          await candidate.git(["symbolic-ref", "HEAD", original.branch])
+        }
+        failed.push({ ...row, reason: "failed", detail: String(cause) })
+      }
+    }
+  } catch (cause) {
+    failed.push({ ...rootRow, reason: "failed", detail: String(cause) })
+  }
+  return report
+}
 
 /** Both landing and successful native release use the same root retirement caller. */
 export async function retireMergedRootAuthor(

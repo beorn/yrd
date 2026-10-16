@@ -44,6 +44,7 @@ import {
   retireClosedIssueBranches,
   retireMergedComponentAuthors,
   retireMergedRootAuthor,
+  releaseRetainedCheckouts,
 } from "./branch-retirement.ts"
 import { sweepRoundOutputInRound } from "./log-retention.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
@@ -443,6 +444,10 @@ export type CoreQueueCommand =
     }>
   | Readonly<{
       command: "drop-local"
+      releaseCheckout?: boolean
+      submodules?: boolean
+      dryRun?: boolean
+      apply?: boolean
       branch: string
       tip: string
       issue?: string
@@ -904,7 +909,7 @@ export async function coreQueueCommand(
     request.command === "withdraw" ||
     request.command === "drop" ||
     (request.command === "drop-issue" && (request.submodules ? request.apply : !request.dryRun)) ||
-    request.command === "drop-local" ||
+    (request.command === "drop-local" && (!request.releaseCheckout || request.apply)) ||
     request.command === "ignore" ||
     request.command === "unignore" ||
     request.command === "merge" ||
@@ -1493,6 +1498,52 @@ export async function coreQueueCommand(
             ? (recordedIssue ?? issueFromBranchName(branch))
             : io.branchIssue({ branch, recordedIssue })
         return mapped === undefined ? undefined : issueIdentity(mapped)
+      }
+      if (request.command === "drop-local" && request.releaseCheckout) {
+        if (
+          !request.issue?.trim() ||
+          !request.reason?.trim() ||
+          !request.by.trim() ||
+          request.branch === config.target.branch ||
+          !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(request.tip)
+        ) {
+          throw new Error(
+            "drop --release-checkout requires a non-target branch, exact full tip, actor, issue and reason",
+          )
+        }
+        if (request.apply && request.dryRun) throw new Error("choose --dry-run or --apply")
+        const log = openLog(join(workdir, "logs"))
+        log.write({ kind: "run", command: "drop --local --release-checkout", target: targetLabel, config: config.blob })
+        log.write({ kind: "queue", queue: targetLabel })
+        try {
+          const report = await releaseRetainedCheckouts({
+            repo: authorRepo,
+            git: authorGit,
+            selection,
+            env,
+            io,
+            log,
+            queue: config.target.branch,
+            remote: config.target.remote,
+            issueIdentity,
+            request: { ...request, issue: request.issue, reason: request.reason },
+          })
+          emit(
+            io,
+            options.json,
+            report,
+            `checkout release in ${authorRepo}: eligible ${report.eligible.length}, retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}; ${report.apply ? "applied" : "preview; use --apply"}\n` +
+              [...report.eligible, ...report.removed, ...report.kept, ...report.failed]
+                .map(
+                  (row) =>
+                    `${row.repo} ${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`,
+                )
+                .join("\n"),
+          )
+          return report.failed.length === 0 ? 0 : 1
+        } finally {
+          log.finish()
+        }
       }
       if (request.command === "drop-issue" && request.submodules) {
         const issue = normalizeIssueReference(request.issue)

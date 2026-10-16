@@ -3675,3 +3675,208 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(run.stderr()).toContain("superproject")
   })
 })
+
+/**
+ * @failure Explicit checkout release must preserve retained bytes and publish every repository's custody before deleting refs.
+ * @level l2: real local remotes through the public CLI; the existing removely census boundary controls holder races.
+ * @consumer Authors retaining dirty checkouts while dropping reviewed exact tips (29600).
+ * Existing issue-drop tests preserve attached branches; they cannot exercise opt-in detach or one-root custody.
+ */
+describe("drop --local --release-checkout", () => {
+  async function releaseWorld(component = false) {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const branch = "task/29600-retained"
+    let child: string | undefined
+    if (component) {
+      const seed = await world()
+      await git([
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        join(dirname(seed), "remote.git"),
+        "modules/child",
+      ])
+      child = join(repo, "modules/child")
+      await gitIn(child)(["checkout", "--quiet", "-b", branch])
+      await gitIn(child)(["branch", "task/29600-unselected"])
+      await git(["commit", "--quiet", "-am", "record exact child"])
+      await git(["push", "--quiet", "origin", "main"])
+    }
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    await createQueue(repo, "main", target, new Date())
+    await git(["checkout", "--quiet", "-b", branch])
+    writeFileSync(join(repo, "payload.txt"), "private committed work\n")
+    await git(["add", "payload.txt"])
+    await git(["commit", "--quiet", "-m", "unpublished author work"])
+    const tip = (await git(["rev-parse", "HEAD"])).trim()
+    const checkoutFiles = new Map<string, { lease: string; lock: string; index: string; bytes: Buffer[] }>()
+    for (const path of [repo, ...(child === undefined ? [] : [child])]) {
+      const read = gitIn(path)
+      const gitdir = (await read(["rev-parse", "--absolute-git-dir"])).trim()
+      writeFileSync(join(path, "README.md"), "dirty tracked bytes\n")
+      writeFileSync(join(path, "private.bin"), Buffer.from([0, 255, 12, 8]))
+      const lease = join(path, ".agent-lease.json")
+      const lock = join(gitdir, "locked")
+      const index = join(gitdir, "index")
+      writeFileSync(lease, '{"bad":"retained evidence"}\n')
+      writeFileSync(lock, "retained lock\n")
+      checkoutFiles.set(path, {
+        lease,
+        lock,
+        index,
+        bytes: [readFileSync(lease), readFileSync(lock), readFileSync(index)],
+      })
+    }
+    const argv = [
+      "bun",
+      "yrd",
+      "drop",
+      branch,
+      "--local",
+      "--tip",
+      tip,
+      "--issue",
+      "29600",
+      "--reason",
+      "retain checkout",
+      "--release-checkout",
+      "--submitter",
+      "fixture",
+      "--json",
+      ...(component ? ["--submodules"] : []),
+    ]
+    return { repo, git, branch, tip, child, checkoutFiles, argv }
+  }
+  async function permitCensus() {
+    const actual = await vi.importActual<typeof import("removely")>("removely")
+    const observed = await actual.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2000 })
+    const permitted = { ...observed, rows: [], coverage: { ...observed.coverage, complete: true, unreadable: [] } }
+    const spy = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue(permitted)
+    return { spy, permitted }
+  }
+  it("previews by default, then retains dirty/private/index/lease/lock bytes with own-remote custody and one root ending", async () => {
+    const fixture = await releaseWorld(true)
+    const { spy } = await permitCensus()
+    try {
+      const before = new Map<string, string>()
+      for (const path of fixture.checkoutFiles.keys()) {
+        before.set(
+          path,
+          await gitIn(path)(["--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=all"]),
+        )
+      }
+      for (const flags of [[], ["--dry-run"]]) {
+        const preview = capture(fixture.repo)
+        expect(await runYrdProcess([...fixture.argv, ...flags], preview.io), preview.stderr()).toBe(0)
+        const report = JSON.parse(preview.stdout())
+        expect(report.eligible, JSON.stringify(report) + preview.stderr()).toHaveLength(2)
+        expect(report.removed).toEqual([])
+        expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+        expect((await listChanges(createEventStore(fixture.repo, "origin", fixture.git.selection), "main")).size).toBe(
+          0,
+        )
+        expect(await fixture.git(["for-each-ref", "refs/archive/"])).toBe("")
+      }
+      const applied = capture(fixture.repo)
+      applied.io.localBranchProtections = async ({ repo, branch, tip, retainedCheckout }) => {
+        expect(retainedCheckout).toBe(repo)
+        // Once detached, every own remote must ALREADY hold custody and the root ending must exist.
+        if ((await gitIn(repo)(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")) === "") {
+          expect(
+            (await listChanges(createEventStore(fixture.repo, "origin", fixture.git.selection), "main")).size,
+          ).toBe(1)
+          const remote = (await gitIn(repo)(["remote", "get-url", "origin"])).trim()
+          expect(await gitIn(repo)(["ls-remote", remote, `refs/archive/*/*/${branch}`])).toContain(tip)
+        }
+        return []
+      }
+      expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(0)
+      const report = JSON.parse(applied.stdout())
+      expect(report.removed).toHaveLength(2)
+      expect(report.failed).toEqual([])
+      for (const row of report.removed) {
+        const read = gitIn(row.repo)
+        expect(await read(["for-each-ref", `refs/heads/${row.branch}`])).toBe("")
+        expect((await read(["rev-parse", "HEAD"])).trim()).toBe(row.head)
+        expect(await read(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")).toBe("")
+        expect(await read(["--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=all"])).toBe(
+          before.get(row.repo),
+        )
+        expect(readFileSync(join(row.repo, "private.bin"))).toEqual(Buffer.from([0, 255, 12, 8]))
+        const files = fixture.checkoutFiles.get(row.repo)!
+        expect([readFileSync(files.lease), readFileSync(files.lock), readFileSync(files.index)]).toEqual(files.bytes)
+        expect(await read(["ls-remote", "origin", row.archiveRef])).toContain(`${row.head}\t${row.archiveRef}`)
+      }
+      expect(await gitIn(fixture.child!)(["rev-parse", "refs/heads/task/29600-unselected"])).not.toBe("")
+      const events = (
+        await readEventQueueWithChanges(createEventStore(fixture.repo, "origin", fixture.git.selection), "main")
+      ).histories.get(fixture.branch)!.events
+      expect(events.filter((event) => event.type === "cancelled")).toHaveLength(1)
+      const ending = events.find((event) => event.type === "cancelled")!
+      for (const row of report.removed) {
+        for (const value of [row.repo, row.head, row.archiveRef]) expect(ending.content).toContain(value)
+      }
+    } finally {
+      spy.mockRestore()
+    }
+  }, 60_000)
+  it.each(["moved", "cwd", "delegation", "declared", "host", "late entrant"])(
+    "keeps %s and restores an attached checkout after late refusal",
+    async (kind) => {
+      const fixture = await releaseWorld()
+      const { spy, permitted } = await permitCensus()
+      try {
+        const output = capture(fixture.repo)
+        let reads = 0
+        if (kind === "moved") {
+          fixture.argv[fixture.argv.indexOf("--tip") + 1] = (await fixture.git(["rev-parse", "main"])).trim()
+        }
+        if (kind === "cwd") {
+          spy.mockResolvedValue({
+            ...permitted,
+            rows: [{ pid: 987654321, ppid: 0, sources: { cwd: { availability: "readable", value: fixture.repo } } }],
+          } as never)
+        }
+        if (kind === "delegation") {
+          spy.mockResolvedValue({ ...permitted, coverage: { ...permitted.coverage, complete: false } })
+        }
+        if (kind === "declared") {
+          output.io.liveEnvironmentUse = async () => [{ path: fixture.repo, reason: "declared live owner" }]
+        }
+        output.io.localBranchProtections = async () => {
+          reads++
+          if (kind === "late entrant" && reads === 4) {
+            expect(await fixture.git(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")).toBe("")
+          }
+          return kind === "host" || (kind === "late entrant" && reads > 3) ? ["live lease or host hold"] : []
+        }
+        expect(await runYrdProcess([...fixture.argv, "--apply"], output.io), output.stderr()).toBe(0)
+        const report = JSON.parse(output.stdout())
+        expect(report.removed).toEqual([])
+        expect(report.kept).toHaveLength(1)
+        expect(report.kept[0].detail).toMatch(
+          kind === "moved"
+            ? /tip|moved/
+            : kind === "cwd"
+              ? /CWD/
+              : kind === "delegation"
+                ? /census|delegation/
+                : kind === "declared"
+                  ? /declared live owner/
+                  : /live lease or host hold/,
+        )
+        expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+        expect((await fixture.git(["rev-parse", `refs/heads/${fixture.branch}`])).trim()).toBe(fixture.tip)
+        for (const files of fixture.checkoutFiles.values()) {
+          expect([readFileSync(files.lease), readFileSync(files.lock), readFileSync(files.index)]).toEqual(files.bytes)
+        }
+      } finally {
+        spy.mockRestore()
+      }
+    },
+    30_000,
+  )
+})

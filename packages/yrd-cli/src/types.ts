@@ -53,6 +53,6 @@ export type YrdCliIO = {
    * Rejections preserve the branch; no host callback means a standalone repository with no host policy.
    */
   localBranchProtections?: (
-    input: Readonly<{ repo: string; branch: string; tip: string; issue?: string }>,
+    input: Readonly<{ repo: string; branch: string; tip: string; issue?: string; retainedCheckout?: string }>,
   ) => Promise<readonly string[]>
 }
