@@ -43,6 +43,137 @@ import { originHead } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
 import { admitEnvironmentClose } from "./env-close-holders.ts"
 
+/** The existing per-repository custody step, shared by component drops and retained checkout release. */
+async function publishRetirementArchive(
+  input: Readonly<{
+    repo: string
+    git: Git
+    selection: GitSelection
+    remote: string
+    archiveRef: string
+    tip: string
+  }>,
+): Promise<void> {
+  const { repo, git, selection, remote, archiveRef, tip } = input
+  const archive = ensureArchiveRef(repo, archiveRef, tip)
+  if (!archive.ok) throw new Error(archive.reason)
+  const store = createEventStore(repo, remote, selection)
+  const previous = (await listRefs(archiveRef, store)).get(archiveRef)
+  if (previous !== undefined && previous !== tip)
+    throw new Error(`${repo}: origin archive holds ${previous}, not ${tip}`)
+  if (store.backend.publish === undefined) throw new Error(`${repo}: Gitomic backend lacks archive publication`)
+  await store.backend.publish(repo, [{ ref: archiveRef, expect: previous ?? "0".repeat(tip.length), oid: tip }], remote)
+  if ((await readRemoteCommit(git, remote, archiveRef)) !== tip) {
+    throw new Error(`${repo}: archive custody did not read back; local refs kept`)
+  }
+}
+
+/** Plain component-local cleanup has no queue event; its declared owner's existing log owns the result. */
+export async function retireComponentLocalBranch(
+  input: Readonly<{
+    repo: string
+    git: Git
+    selection: GitSelection
+    env?: NodeJS.ProcessEnv
+    io: YrdCliIO
+    request: Readonly<{ branch: string; tip: string; by: string; issue?: string; reason?: string }>
+  }>,
+) {
+  const { repo, git, selection, env, io, request } = input
+  try {
+    lstatSync(join(repo, ".yrd.yml"))
+    throw new Error(`${repo}: local .yrd.yml exists but the selected target has no declaration`)
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause
+  }
+  let owner = (await git(["rev-parse", "--show-superproject-working-tree"])).trim()
+  while (owner !== "") {
+    const ownerGit = gitIn(owner, undefined, selection, { env })
+    const queue = await originHead(ownerGit)
+    const ownerTarget = await readRemoteCommit(ownerGit, "origin", `refs/heads/${queue}`)
+    if (ownerTarget === undefined) throw new Error(`${owner}: owning queue target origin/${queue} is absent`)
+    const config = await readConfig(ownerGit, ownerTarget, { remote: "origin", branch: queue })
+    if (config === undefined) {
+      owner = (await ownerGit(["rev-parse", "--show-superproject-working-tree"])).trim()
+      continue
+    }
+    const targetBranch = await originHead(git)
+    if (request.branch === targetBranch || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(request.tip)) {
+      throw new Error(`${repo}: drop --local requires a non-target branch and a full expected commit oid`)
+    }
+    const remote = await remoteUrl(git, "origin")
+    const target = await readRemoteCommit(git, remote, `refs/heads/${targetBranch}`)
+    if (target === undefined) throw new Error(`${repo}: target origin/${targetBranch} is absent`)
+    const log = openLog(join(await workdirOf(ownerGit, { cwd: owner, env }), "logs"))
+    log.write({ kind: "run", command: "drop --local", target: `origin/${queue}`, config: config.blob })
+    const date = new Date().toISOString().slice(0, 10)
+    const archiveRef = archiveRefFor(request.branch, request.by, date)
+    const merged = await isAncestor(git, request.tip, target)
+    const protections = async (): Promise<readonly string[]> => {
+      const host =
+        (await io.localBranchProtections?.({ repo, branch: request.branch, tip: request.tip, issue: request.issue }))
+          ?.protections ?? []
+      if (!merged && (await readRemoteCommit(git, remote, archiveRef)) !== request.tip) {
+        throw new Error(`${repo}: archive custody changed before conditional removal`)
+      }
+      return host
+    }
+    const retirement = {
+      repo,
+      git,
+      branch: request.branch,
+      tip: request.tip,
+      actor: request.by,
+      issue: request.issue,
+      reason: request.reason ?? "explicit local branch cleanup",
+      date,
+      log,
+      disposition: merged
+        ? { kind: "merged" as const, base: target, target }
+        : { kind: "archived" as const, target: request.tip, ref: archiveRef },
+    }
+    try {
+      let result: LocalBranchRetirementResult
+      if (!merged) {
+        // The same policy's existing preview checks native and host protections before custody is written.
+        const preview = await retireLocalBranch({
+          ...retirement,
+          dryRun: true,
+          protections: async () =>
+            (
+              await io.localBranchProtections?.({
+                repo,
+                branch: request.branch,
+                tip: request.tip,
+                issue: request.issue,
+              })
+            )?.protections ?? [],
+        })
+        if (preview.outcome !== "eligible") result = preview
+        else {
+          await publishRetirementArchive({ repo, git, selection, remote, archiveRef, tip: request.tip })
+          result = await retireLocalBranch({ ...retirement, protections })
+        }
+      } else result = await retireLocalBranch({ ...retirement, protections })
+      const row = {
+        branch: request.branch,
+        head: request.tip,
+        archiveRef: result.archiveRef,
+        reason: result.reason,
+        detail: result.detail,
+      }
+      return {
+        removed: result.outcome === "removed" ? [row] : [],
+        kept: result.outcome === "kept" ? [row] : [],
+        failed: result.outcome === "failed" ? [row] : [],
+      }
+    } finally {
+      log.finish()
+    }
+  }
+  return undefined
+}
+
 /** Explicit exact-tip drop retaining the checkout and its private bytes.
  * The root event owns the environment receipt; each repository owns its archive.
  */
@@ -397,22 +528,14 @@ export async function releaseRetainedCheckouts(
       return report
     }
     for (const { row, remote } of candidates) {
-      const archive = ensureArchiveRef(row.repo, row.archiveRef, row.head)
-      if (!archive.ok) throw new Error(archive.reason)
-      const store = createEventStore(row.repo, remote, input.selection)
-      const previous = (await listRefs(row.archiveRef, store)).get(row.archiveRef)
-      if (previous !== undefined && previous !== row.head) {
-        throw new Error(`${row.repo}: origin archive holds ${previous}, not ${row.head}`)
-      }
-      if (store.backend.publish === undefined) throw new Error(`${row.repo}: Gitomic backend lacks archive publication`)
-      await store.backend.publish(
-        row.repo,
-        [{ ref: row.archiveRef, expect: previous ?? "0".repeat(row.head.length), oid: row.head }],
+      await publishRetirementArchive({
+        repo: row.repo,
+        git: readGit(row.repo),
+        selection: input.selection,
         remote,
-      )
-      if ((await readRemoteCommit(readGit(row.repo), remote, row.archiveRef)) !== row.head) {
-        throw new Error(`${row.repo}: archive custody did not read back; local refs kept`)
-      }
+        archiveRef: row.archiveRef,
+        tip: row.head,
+      })
     }
     for (const candidate of candidates) {
       const { row } = candidate

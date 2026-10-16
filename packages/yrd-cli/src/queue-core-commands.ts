@@ -45,6 +45,7 @@ import {
   retireMergedComponentAuthors,
   retireMergedRootAuthor,
   releaseRetainedCheckouts,
+  retireComponentLocalBranch,
 } from "./branch-retirement.ts"
 import { sweepRoundOutputInRound } from "./log-retention.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
@@ -712,7 +713,7 @@ export async function coreQueueCommand(
         "The queue's config lives on the queue branch itself. Point at a different one with " +
         "--queue <repo>#<branch>, or, if this repository is a submodule with none of its own, " +
         "the superproject that vendors it gates the change instead, by checking the gitlink, " +
-        "not a declaration here.\n" +
+        `not a declaration here. Repository: ${repo}.\n` +
         (request.command === "drop-local" || request.command === "drop-issue"
           ? "For retained-checkout cleanup, run from that superproject: " +
             "yrd drop <root-branch> --local --tip <root-tip> --issue <issue> --reason <why> --release-checkout --submodules. " +
@@ -857,7 +858,35 @@ export async function coreQueueCommand(
     return { config: declared, oid, ...(fetched === undefined ? {} : { fetched }) }
   }
   const captured = await withRemoteSeam("declaration", declaration)
-  if (captured === undefined) return noQueueOnTarget(targetLabel)
+  if (captured === undefined) {
+    if (request.command === "drop-local" && !request.releaseCheckout) {
+      const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd())
+      if (authorRepo === undefined) throw new Error("drop --local requires the authoring repository as cwd")
+      const report = await retireComponentLocalBranch({
+        repo: authorRepo,
+        git: gitIn(authorRepo, undefined, selection, { env }),
+        selection,
+        env,
+        io,
+        request,
+      }).catch((cause: unknown) => {
+        throw new Error(
+          `${authorRepo}: component retirement failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+          { cause },
+        )
+      })
+      if (report !== undefined) {
+        emit(
+          io,
+          options.json,
+          report,
+          `local retirement in ${authorRepo}: retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}`,
+        )
+        return report.failed.length === 0 ? 0 : 1
+      }
+    }
+    return noQueueOnTarget(targetLabel)
+  }
   const config = captured.config
   const eventStore = createEventStore(repo, config.target.remote, selection, git.backend)
   // The fetched refs describe `remote`/`queue`; they stand in only for a declaration that targets that same queue.
