@@ -3801,10 +3801,11 @@ describe("component-local retirement without a component queue", () => {
         expect(report.removed).toEqual([expect.objectContaining({ branch, head: tip })])
         const archive = report.removed[0]?.archiveRef
         expect(archive).toMatch(/^refs\/archive\//u)
-        expect((await git(["rev-parse", archive as string])).trim()).toBe(tip)
+        if (typeof archive !== "string") throw new Error("removed component result has no archive ref")
+        expect((await git(["rev-parse", archive])).trim()).toBe(tip)
         expect((await git(["for-each-ref", "--format=%(objectname)", "refs/heads/" + branch])).trim()).toBe("")
         if (mode === "unmerged")
-          expect((await git(["ls-remote", "origin", archive as string])).split("\t")[0]).toBe(tip)
+          expect((await git(["ls-remote", "origin", archive])).split("\t")[0]).toBe(tip)
       }
       expect((await git(["ls-remote", "origin", "refs/yrd/*"])).trim()).toBe("")
       const logs = join(await workdirOf(rootGit), "logs")
