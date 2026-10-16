@@ -200,6 +200,14 @@ function cleanupRows(root: string): readonly Record<string, unknown>[] {
   return allCleanupRows(root).filter((row) => row.census !== undefined)
 }
 
+/** Observe the asynchronous round cleanup before a fixture stops its service. */
+async function waitForEnvironmentCleanup(workdir: string, run: string): Promise<void> {
+  await vi.waitFor(
+    () => expect(allCleanupRows(workdir).some((row) => row.run === run && row.registry !== undefined)).toBe(true),
+    { timeout: 30_000 },
+  )
+}
+
 /** Exercise retirement rules after the independently tested opening grace. */
 async function ageOpening(path: string): Promise<void> {
   const gitDir = (await gitIn(path)(["rev-parse", "--absolute-git-dir"])).trim()
@@ -1207,27 +1215,19 @@ describe("yrd queue up, the service", () => {
   }, 120_000)
 
   /**
-   * @failure A named, merged environment whose issue is closed is left behind,
-   *          or an environment the queue must not close is removed anyway: a
-   *          held one, one whose named issue is still open, one whose commit is
-   *          not yet on main, or one whose submodule stores another tree borrows.
+   * @failure Issue-looking names override native cleanup eligibility, or a
+   *          held environment, an unmerged HEAD, or a borrowed store is removed.
    * @level l2
-   * @consumer the operator whose closed-issue environment is retired while their
-   *           held or in-flight one must survive an idle queue round
+   * @consumer the operator whose ancestor environments retire while held,
+   *           unmerged or borrowed work survives an idle queue round
    * @testonly none
    */
-  it("closes a merged, closed-issue environment and keeps each ineligible class with its reason", async () => {
+  it("closes ancestor environments regardless of issue-looking names and keeps native protections", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
-    // The target-owned resolver proves closure: a closed or dropped status lets
-    // the queue retire the environment, an open status is a KEEP. Unique HEAD
-    // still keeps a dropped issue (21122: do not close unique commits).
-    const resolver = join(dirname(w.work), "issue-resolver.sh")
-    writeFileSync(
-      resolver,
-      '#!/usr/bin/env bash\ncase "$1" in 27601) status=closed ;; 27602) status=dropped ;; *) status=open ;; esac\nprintf \'{"id":"%s","status":"%s"}\' "$1" "$status"\n',
-    )
-    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    // Issue-looking names do not license or prevent cleanup. Exact ancestry,
+    // explicit holds and native borrower custody determine the result.
+    await redeclare(w, "setup: ':'\n")
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
     const workdir = await workdirOf(w.git, { cwd: w.work })
@@ -1295,7 +1295,17 @@ describe("yrd queue up, the service", () => {
         await coreQueueCommand(
           w.work,
           run.io,
-          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async () => {
+              await vi.waitFor(() => expect([closedIssue, issueOpen].every((path) => !existsSync(path))).toBe(true), {
+                timeout: 30_000,
+              })
+              stop.abort()
+            },
+          },
           { json: true, workdir },
         ),
         run.stderr(),
@@ -1304,13 +1314,13 @@ describe("yrd queue up, the service", () => {
       const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
       expect(existsSync(closedIssue), stderr).toBe(false)
       expect(registration, stderr).not.toContain(closedIssue)
-      for (const path of [held, issueOpen, unmerged, droppedUnmerged, borrowed]) {
+      expect(existsSync(issueOpen), stderr).toBe(false)
+      expect(registration, stderr).not.toContain(issueOpen)
+      for (const path of [held, unmerged, droppedUnmerged, borrowed]) {
         expect(existsSync(path), stderr).toBe(true)
         expect(registration, stderr).toContain(path)
       }
       expect(stderr).toContain("held: operator asked")
-      expect(stderr).toContain("issue 27600")
-      expect(stderr).toContain("closure unproven")
       expect(stderr).toContain("is not on target")
       expect(stderr).toContain(`borrowed by ${borrower}`)
     } finally {
@@ -1359,9 +1369,7 @@ describe("yrd queue up, the service", () => {
         await w.git(["config", "worktree.poolRoot", alias])
       }
       await w.git(["config", "yrd.workdir", w.workdir])
-      const resolver = join(dirname(w.work), "issue-resolver.sh")
-      writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
-      await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+      await redeclare(w, "setup: ':'\n")
       await w.git(["fetch", "--quiet", "origin", "main"])
       await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
       const workdir = await workdirOf(w.git, { cwd: w.work })
@@ -1377,7 +1385,10 @@ describe("yrd queue up, the service", () => {
       })
       const opened = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", bay, "--json"], opened.io),
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", "--bay", bay, "--json", ...(bay === "21122-personal" ? ["--keep"] : [])],
+          opened.io,
+        ),
         opened.stderr(),
       ).toBe(0)
       const openedEnvironment = JSON.parse(opened.stdout()) as { path: string }
@@ -1423,7 +1434,7 @@ describe("yrd queue up, the service", () => {
         expect(merged, run.stderr()).toEqual(["task/21122-merge"])
         expect(existsSync(environment.path), run.stderr()).toBe(!closes)
         expect(listCloseRequests(workdir), run.stderr()).toEqual([])
-        if (liveUse || failingReader || invalidReader) expect(run.io.liveEnvironmentUse).toHaveBeenCalledTimes(1)
+        if (liveUse || failingReader || invalidReader) expect(run.io.liveEnvironmentUse).toHaveBeenCalledTimes(2)
         if (invalidReader) expect(run.stderr()).toContain("live environment-use reader unavailable")
         if (liveUse) expect(run.stderr()).toContain("live use: declared work")
         if (failingReader) {
@@ -1447,8 +1458,9 @@ describe("yrd queue up, the service", () => {
   )
 
   /**
-   * @failure 21122: MERGED-close treated `--bay` as standing (Option 1) or
-   *          closed unrecorded seat homes; lifetime must be recorded at open.
+   * @failure MERGED-close treats `--bay` as standing or files terminal intent
+   *          without recorded opening lifetime. General ancestry cleanup is
+   *          independent and must carry its native removal proof.
    * @level l2
    * @consumer the seat whose job env should delete itself and whose standing
    *           home must survive the same merge
@@ -1472,11 +1484,12 @@ describe("yrd queue up, the service", () => {
       why: undefined,
     },
     {
-      label: "unrecorded keeps",
+      label: "unrecorded skips MERGED filing while the general ancestry sweep can close",
       leaf: "21122-unrecorded",
       open: ["--bay", "21122-unrecorded"],
       unlinkRecord: true,
       closes: false,
+      generalSweepCloses: true,
       why: "opening lifetime unrecorded",
     },
     {
@@ -1489,12 +1502,10 @@ describe("yrd queue up, the service", () => {
     },
   ])(
     "opening lifetime $label",
-    async ({ leaf, open, unlinkRecord, closes, why }) => {
+    async ({ leaf, open, unlinkRecord, closes, why, generalSweepCloses }) => {
       const w = await world()
       await w.git(["config", "yrd.workdir", w.workdir])
-      const resolver = join(dirname(w.work), "issue-resolver.sh")
-      writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
-      await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+      await redeclare(w, "setup: ':'\n")
       await w.git(["fetch", "--quiet", "origin", "main"])
       await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
       const workdir = await workdirOf(w.git, { cwd: w.work })
@@ -1512,8 +1523,27 @@ describe("yrd queue up, the service", () => {
       if (unlinkRecord) {
         const gitDir = (await gitIn(environment.path)(["rev-parse", "--absolute-git-dir"])).trim()
         unlinkSync(join(gitDir, "yrd-open.json"))
+        expect(existsSync(join(gitDir, "yrd-open.json")), "unrecorded opening has no standing lifetime").toBe(false)
       }
       await gitIn(environment.path)(["checkout", "--quiet", branch])
+      const environmentHead = (await gitIn(environment.path)(["rev-parse", "HEAD"])).trim()
+      const inspections: Awaited<
+        ReturnType<ReturnType<typeof gitSuperWorktree.createLocalGitWorktreeStore>["inspectRemoval"]>
+      >[] = []
+      const native = gitSuperWorktree.createLocalGitWorktreeStore
+      const factory = vi.spyOn(gitSuperWorktree, "createLocalGitWorktreeStore").mockImplementation((options) => {
+        const store = native(options)
+        return {
+          ...store,
+          async inspectRemoval(
+            ...args: Parameters<ReturnType<typeof gitSuperWorktree.createLocalGitWorktreeStore>["inspectRemoval"]>
+          ) {
+            const inspection = await store.inspectRemoval(...args)
+            if (args[0] === environment.path) inspections.push(inspection)
+            return inspection
+          },
+        }
+      })
       // Opening with --issue can add a binding commit; submit that exact job head.
       await submit(w.git, "origin", {
         branch,
@@ -1526,32 +1556,66 @@ describe("yrd queue up, the service", () => {
         .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
       const stop = new AbortController()
       const run = capture(w.work)
+      if (generalSweepCloses) run.io.liveEnvironmentUse = vi.fn(async () => [])
       try {
         expect(
           await coreQueueCommand(
             w.work,
             run.io,
-            { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+            {
+              command: "up",
+              intervalSeconds: 0,
+              stop: stop.signal,
+              afterRound: async (outcome) => {
+                await waitForEnvironmentCleanup(workdir, outcome.run)
+                stop.abort()
+              },
+            },
             { json: true, workdir },
           ),
           run.stderr(),
         ).toBe(0)
-        expect(existsSync(environment.path), run.stderr()).toBe(!closes)
+        expect(existsSync(environment.path), run.stderr()).toBe(!(closes || generalSweepCloses))
         expect(listCloseRequests(workdir), run.stderr()).toEqual([])
         const filed = allCleanupRows(workdir).filter((row) => row.result === "filed" && row.path === environment.path)
         expect(filed, JSON.stringify(allCleanupRows(workdir))).toHaveLength(closes ? 1 : 0)
         if (!closes) {
           expect(run.stderr()).toContain(why)
         }
-        const closed = allCleanupRows(workdir).find((row) => row.result === "closed" && typeof row.request === "object")
+        const closed = allCleanupRows(workdir).find((row) => row.result === "closed" && row.path === environment.path)
         if (closes) {
           expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeDefined()
           expect(closed?.path).toBe(environment.path)
+          expect(closed?.request).toBeTypeOf("object")
+        } else if (generalSweepCloses) {
+          expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeDefined()
+          expect(closed?.request, "independent sweep files no MERGED request").toBeUndefined()
+          expect(closed?.why).toBe("native retained removal proof accepted")
+          expect(run.stderr()).toContain("native retained removal proof accepted")
+          expect(run.io.liveEnvironmentUse, "no declared live use").toHaveBeenCalled()
+          expect(inspections.length, "actual native clean-root/component inspections").toBeGreaterThan(0)
+          for (const inspection of inspections) {
+            expect(inspection.records, "clean root/components").toEqual([])
+            expect(inspection.notCompared, "complete native comparison").toEqual([])
+            expect(inspection.borrowers, "no native borrower").toEqual([])
+          }
+          const manifests = [...run.stderr().matchAll(/retained environment removal proof (.+)/g)].map((match) =>
+            JSON.parse(readFileSync(match[1]!, "utf8")),
+          )
+          expect(manifests).toContainEqual(
+            expect.objectContaining({ path: environment.path, head: environmentHead, notCompared: [] }),
+          )
+          await w.git(["fetch", "--quiet", "origin", "main"])
+          expect(
+            await w.git(["merge-base", "--is-ancestor", environmentHead, "origin/main"]),
+            "retained exact head is an ancestor of main",
+          ).toBe("")
         } else {
           expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeUndefined()
         }
       } finally {
         stop.abort()
+        factory.mockRestore()
         census.mockRestore()
       }
     },
@@ -1559,19 +1623,15 @@ describe("yrd queue up, the service", () => {
   )
 
   /**
-   * @failure 21122 P3: a dropped bead's environment whose HEAD is already on
-   *          the target stays forever because requireClosed only accepts
-   *          status "closed".
+   * @failure Issue metadata prevents cleanup of an exact ancestor environment.
    * @level l2
-   * @consumer the operator who dropped the issue and expects the empty env gone
+   * @consumer the operator expecting an ancestor environment to close
    * @testonly none
    */
-  it("closes an environment whose bound issue is dropped when HEAD is on the target", async () => {
+  it("closes an ancestor environment without consulting issue status", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
-    const resolver = join(dirname(w.work), "issue-resolver.sh")
-    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"dropped"}\' "$1"\n')
-    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await redeclare(w, "setup: ':'\n")
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
     const workdir = await workdirOf(w.git, { cwd: w.work })
@@ -1593,7 +1653,15 @@ describe("yrd queue up, the service", () => {
         await coreQueueCommand(
           w.work,
           run.io,
-          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async (outcome) => {
+              await waitForEnvironmentCleanup(workdir, outcome.run)
+              stop.abort()
+            },
+          },
           { json: true, workdir },
         ),
         run.stderr(),
@@ -1623,9 +1691,7 @@ describe("yrd queue up, the service", () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
     await addMaterializedDependency(w)
-    const resolver = join(dirname(w.work), "issue-resolver.sh")
-    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"closed"}\' "$1"\n')
-    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await redeclare(w, "setup: ':'\n")
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
     const workdir = await workdirOf(w.git, { cwd: w.work })
@@ -1681,7 +1747,15 @@ describe("yrd queue up, the service", () => {
         await coreQueueCommand(
           w.work,
           run.io,
-          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async (outcome) => {
+              await waitForEnvironmentCleanup(workdir, outcome.run)
+              stop.abort()
+            },
+          },
           { json: true, workdir },
         ),
         run.stderr(),
@@ -1714,7 +1788,7 @@ describe("yrd queue up, the service", () => {
    *           only inside a submodule, whose closure root history never records
    * @testonly none
    */
-  it("counts a component-only binding as no binding and closes the environment", async () => {
+  it("closes an ancestor environment despite component-only issue references", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
     await addMaterializedDependency(w)
@@ -1729,11 +1803,8 @@ describe("yrd queue up, the service", () => {
     // The fixture's whole point: the component names 27601 and no root commit does.
     expect((await dependencyGit(["log", "-1", "--format=%B"])).trim()).toContain("Refs: 27601")
     expect(await w.git(["log", "--format=%B"])).not.toContain("27601")
-    // The resolver reports 27601 open, so an environment that did count the
-    // component binding would be kept with `closure unproven`.
-    const resolver = join(dirname(w.work), "issue-resolver.sh")
-    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
-    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    // Component issue references do not participate in native cleanup.
+    await redeclare(w, "setup: ':'\n")
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
     const workdir = await workdirOf(w.git, { cwd: w.work })
@@ -1755,7 +1826,15 @@ describe("yrd queue up, the service", () => {
         await coreQueueCommand(
           w.work,
           run.io,
-          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async (outcome) => {
+              await waitForEnvironmentCleanup(workdir, outcome.run)
+              stop.abort()
+            },
+          },
           { json: true, workdir },
         ),
         run.stderr(),
@@ -1771,15 +1850,14 @@ describe("yrd queue up, the service", () => {
   }, 120_000)
 
   /**
-   * @failure An environment whose per-worktree HEAD reflog lost its creation
-   *          evidence — expired or truncated — reads as bound to no issue and is
-   *          retired, discarding the work its own commits recorded.
+   * @failure Issue-association creation evidence blocks cleanup even though
+   *          native ancestry proves the environment HEAD is already on target.
    * @level l2
-   * @consumer the operator whose long-lived or reflog-rewritten environment must
-   *           survive an idle queue round, named by reason
+   * @consumer the operator whose exact ancestor environment can retire
+   *           independently of historical issue-association evidence
    * @testonly none
    */
-  it("keeps an environment whose HEAD reflog lost its creation evidence", async () => {
+  it("closes an ancestor environment without issue-association creation evidence", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
     await redeclare(w, "setup: ':'\n")
@@ -1810,14 +1888,21 @@ describe("yrd queue up, the service", () => {
         await coreQueueCommand(
           w.work,
           run.io,
-          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async (outcome) => {
+              await waitForEnvironmentCleanup(workdir, outcome.run)
+              stop.abort()
+            },
+          },
           { json: true, workdir },
         ),
         run.stderr(),
       ).toBe(0)
-      expect(existsSync(environment.path), run.stderr()).toBe(true)
-      expect(await w.git(["worktree", "list", "--porcelain", "-z"])).toContain(environment.path)
-      expect(run.stderr()).toContain("creation evidence")
+      expect(existsSync(environment.path), run.stderr()).toBe(false)
+      expect(await w.git(["worktree", "list", "--porcelain", "-z"])).not.toContain(environment.path)
     } finally {
       stop.abort()
       census.mockRestore()
@@ -1825,20 +1910,17 @@ describe("yrd queue up, the service", () => {
   })
 
   /**
-   * @failure An environment that held an issue-bound branch and was later
-   *          detached is treated as bound to no issue, and the idle round
-   *          retires it while that issue is still open.
+   * @failure A historical branch name reintroduces issue-state eligibility
+   *          for a detached environment whose exact HEAD is already on target.
    * @level l2
-   * @consumer the operator whose reused or branch-then-detached environment
-   *           still owes an open issue
+   * @consumer the operator whose clean branch-then-detached environment
+   *           can retire by native ancestry
    * @testonly none
    */
-  it("keeps a branch-then-detached environment bound through its reflog branch", async () => {
+  it("closes a branch-then-detached environment whose HEAD is on target", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
-    const resolver = join(dirname(w.work), "issue-resolver.sh")
-    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
-    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await redeclare(w, "setup: ':'\n")
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
     const workdir = await workdirOf(w.git, { cwd: w.work })
@@ -1866,15 +1948,21 @@ describe("yrd queue up, the service", () => {
         await coreQueueCommand(
           w.work,
           run.io,
-          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async (outcome) => {
+              await waitForEnvironmentCleanup(workdir, outcome.run)
+              stop.abort()
+            },
+          },
           { json: true, workdir },
         ),
         run.stderr(),
       ).toBe(0)
-      expect(existsSync(environment.path), run.stderr()).toBe(true)
-      expect(await w.git(["worktree", "list", "--porcelain", "-z"])).toContain(environment.path)
-      expect(run.stderr()).toContain("issue 27601")
-      expect(run.stderr()).toContain("closure unproven")
+      expect(existsSync(environment.path), run.stderr()).toBe(false)
+      expect(await w.git(["worktree", "list", "--porcelain", "-z"])).not.toContain(environment.path)
     } finally {
       stop.abort()
       census.mockRestore()
@@ -2424,9 +2512,8 @@ describe("yrd queue up, the service", () => {
     expect(await readQueueHealth(w.workdir, SERVICE)).toMatchObject({ facts: { stopped: { by: "@chief" } } })
   })
 
-  // 24472: legacy branch-name inference must be visible in both submit modes;
-  // the domain reader tests cannot prove the CLI tells its caller.
-  it.each([true, false])("reports legacy issue fallback during submit (dryRun=%s)", async (dryRun) => {
+  // Both submit modes preserve fetch behavior while leaving an unbound branch unbound.
+  it.each([true, false])("does not infer an issue from a branch name during submit (dryRun=%s)", async (dryRun) => {
     const w = await world()
     const branch = "task/24472-legacy"
     await w.git(["checkout", "--quiet", "-b", branch])
@@ -2440,8 +2527,9 @@ describe("yrd queue up, the service", () => {
         { workdir: w.workdir, json: true },
       ),
     ).toBe(0)
-    expect(run.stderr()).toContain(`legacy branch-name fallback: ${branch} -> 24472`)
-    expect(records(run)[0]).toMatchObject({ issue: "24472", issueSource: "legacy-branch" })
+    expect(run.stderr()).toContain("has no issue link")
+    expect(records(run)[0]).not.toHaveProperty("issue")
+    expect(records(run)[0]).not.toHaveProperty("issueSource")
     if (!dryRun) {
       expect(run.stderr()).toMatch(/seam\.declaration\.fetch=1/u)
       // 28867 B1: admission reads its ops from the declaration's one fetch, so it makes no fetch of its own.
@@ -6215,16 +6303,12 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     return head
   }
 
-  it("resolves both spellings of one issue before merging an unsubmitted branch", async () => {
+  it("merges an unsubmitted branch with the same explicit opaque issue binding", async () => {
     const w = await verbWorld()
-    await redeclare(
-      w,
-      `issueResolver: ${JSON.stringify(["sh", "-c", 'printf \'{"id":"@km/storage/26050-full"}\\n\'', "resolver"])}\n`,
-    )
     await branchWith(w, "task/26050", "change.txt")
     await w.git(["checkout", "--quiet", "task/26050"])
-    await w.git(["commit", "--quiet", "--allow-empty", "-m", "bind short\n\nRefs: 26050"])
-    await w.git(["commit", "--quiet", "--allow-empty", "-m", "bind full\n\nRefs: @km/storage/26050-full"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "first binding\n\nRefs: @km/storage/26050-full"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "repeat binding\n\nRefs: @km/storage/26050-full"])
     const head = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["checkout", "--quiet", "main"])
     const merged = await yrd(w, "merge", "task/26050")
@@ -6807,9 +6891,7 @@ describe("yrd queue run --tier long", () => {
   it("closes an environment registered in the repository the command stands in, not the round's own clone", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
-    const resolver = join(dirname(w.work), "issue-resolver.sh")
-    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"closed"}\' "$1"\n')
-    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await redeclare(w, "setup: ':'\n")
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
     const workdir = await workdirOf(w.git, { cwd: w.work })
@@ -6842,7 +6924,15 @@ describe("yrd queue run --tier long", () => {
         await coreQueueCommand(
           w.work,
           run.io,
-          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async (outcome) => {
+              await waitForEnvironmentCleanup(workdir, outcome.run)
+              stop.abort()
+            },
+          },
           { json: true, workdir },
         ),
         run.stderr(),
@@ -6868,9 +6958,7 @@ describe("yrd queue run --tier long", () => {
   it("slices the first pass across rounds and resumes where it stopped", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
-    const resolver = join(dirname(w.work), "issue-resolver.sh")
-    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
-    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await redeclare(w, "setup: ':'\n")
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
     const workdir = await workdirOf(w.git, { cwd: w.work })
@@ -6904,8 +6992,15 @@ describe("yrd queue run --tier long", () => {
             command: "up",
             intervalSeconds: 0,
             stop: stop.signal,
-            afterRound: () => {
+            afterRound: async () => {
               rounds++
+              await vi.waitFor(
+                () =>
+                  expect(
+                    allCleanupRows(workdir).filter((row) => row.charged !== undefined).length,
+                  ).toBeGreaterThanOrEqual(rounds),
+                { timeout: 30_000 },
+              )
               if (rounds === 2) stop.abort()
             },
           },
@@ -6914,7 +7009,11 @@ describe("yrd queue run --tier long", () => {
         run.stderr(),
       ).toBe(0)
       const summaries = allCleanupRows(workdir).filter((row) => row.charged !== undefined)
-      expect(summaries.length, run.stderr()).toBe(2)
+      expect(summaries.length, run.stderr()).toBeGreaterThanOrEqual(2)
+      expect(
+        summaries.every((row) => Number(row.charged) <= 8),
+        run.stderr(),
+      ).toBe(true)
       expect(summaries[0]?.charged, run.stderr()).toBe(8)
       expect(summaries[0]?.deferred, run.stderr()).toBe(8)
       // The second round resumed where the first stopped, so between them every
@@ -6939,9 +7038,7 @@ describe("yrd queue run --tier long", () => {
   it("cleanup does not materialize change histories unrelated to registered environments", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
-    const resolver = join(dirname(w.work), "issue-resolver.sh")
-    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
-    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await redeclare(w, "setup: ':'\n")
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
     for (let index = 0; index < 8; index++) {
@@ -6980,7 +7077,15 @@ describe("yrd queue run --tier long", () => {
         await coreQueueCommand(
           w.work,
           run.io,
-          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async (outcome) => {
+              await waitForEnvironmentCleanup(workdir, outcome.run)
+              stop.abort()
+            },
+          },
           { json: true, workdir },
         ),
         run.stderr(),
@@ -7014,12 +7119,7 @@ describe("yrd queue run --tier long", () => {
   it("a corrupt provenance chain keeps that env and still closes an eligible sibling", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
-    const resolver = join(dirname(w.work), "issue-resolver.sh")
-    writeFileSync(
-      resolver,
-      '#!/usr/bin/env bash\ncase "$1" in 27601) status=closed ;; *) status=open ;; esac\nprintf \'{"id":"%s","status":"%s"}\' "$1" "$status"\n',
-    )
-    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await redeclare(w, "setup: ':'\n")
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
     const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
@@ -7052,7 +7152,15 @@ describe("yrd queue run --tier long", () => {
         await coreQueueCommand(
           w.work,
           run.io,
-          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async (outcome) => {
+              await waitForEnvironmentCleanup(workdir, outcome.run)
+              stop.abort()
+            },
+          },
           { json: true, workdir },
         ),
         run.stderr(),
@@ -7068,22 +7176,16 @@ describe("yrd queue run --tier long", () => {
   }, 120_000)
 
   /**
-   * @failure A provenance branch with no change chain is treated as unbound,
-   *          so cleanup newly closes an env whose issue is still open (28011).
+   * @failure Missing issue-association history blocks cleanup of an ancestor
+   *          environment that has no native hold or unique work.
    * @level l2
-   * @consumer the operator whose environment holds an issue-named branch that
-   *           was never submitted
+   * @consumer the operator whose ancestor environment held an unsubmitted branch
    * @testonly none
    */
-  it("a provenance branch with no change chain does not newly close the env", async () => {
+  it("closes an ancestor environment even when its provenance branch has no change chain", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
-    const resolver = join(dirname(w.work), "issue-resolver.sh")
-    writeFileSync(
-      resolver,
-      '#!/usr/bin/env bash\ncase "$1" in 27601) status=closed ;; *) status=open ;; esac\nprintf \'{"id":"%s","status":"%s"}\' "$1" "$status"\n',
-    )
-    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await redeclare(w, "setup: ':'\n")
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
     const workdir = await workdirOf(w.git, { cwd: w.work })
@@ -7111,16 +7213,24 @@ describe("yrd queue run --tier long", () => {
         await coreQueueCommand(
           w.work,
           run.io,
-          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async () => {
+              await vi.waitFor(() => expect([closedIssue, absent].every((path) => !existsSync(path))).toBe(true), {
+                timeout: 30_000,
+              })
+              stop.abort()
+            },
+          },
           { json: true, workdir },
         ),
         run.stderr(),
       ).toBe(0)
       const stderr = run.stderr()
       expect(existsSync(closedIssue), stderr).toBe(false)
-      expect(existsSync(absent), stderr).toBe(true)
-      expect(stderr).toContain("issue 27600")
-      expect(stderr).toContain("closure unproven")
+      expect(existsSync(absent), stderr).toBe(false)
     } finally {
       stop.abort()
       census.mockRestore()
@@ -7139,17 +7249,17 @@ describe("yrd queue run --tier long", () => {
   it("a restarted sweep resumes from its hint, and a corrupt hint restarts at 0 by name", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
-    const resolver = join(dirname(w.work), "issue-resolver.sh")
-    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \x27{"id":"%s","status":"open"}\x27 "$1"\n')
-    await redeclare(w, "setup: \x27:\x27\nissueResolver: [\x27bash\x27, \x27" + resolver + "\x27]\n")
+    await redeclare(w, "setup: ':'\n")
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
     const workdir = await workdirOf(w.git, { cwd: w.work })
     const environments = join(workdir, "environments")
     mkdirSync(environments, { recursive: true })
-    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const base = (await w.git(["rev-parse", "HEAD"])).trim()
+    // Unique fixture work keeps the population stable independently of issue state.
+    const head = (await w.git(["commit-tree", `${base}^{tree}`, "-p", base], "cursor fixture work\n")).trim()
     const paths: string[] = []
-    for (let index = 0; index < 16; index++) {
+    for (let index = 0; index < 24; index++) {
       // Zero-padded: `git worktree list` sorts by path, so the registry order
       // must equal creation order for the slice assertions below.
       const path = join(environments, "27601-hint-" + String(index).padStart(2, "0"))
@@ -7163,10 +7273,18 @@ describe("yrd queue run --tier long", () => {
     // Only environment rows count: the sweep also logs cursor rows whose `path`
     // is the resume-hint file, and those are not environments evaluated.
     const envPrefix = environments + "/"
-    const evaluatedSince = (before: Set<string>): string[] =>
-      allCleanupRows(workdir)
-        .filter((row) => typeof row.path === "string" && row.path.startsWith(envPrefix) && !before.has(String(row.run)))
-        .map((row) => String(row.path))
+    const batchesSince = (before: Set<string>): string[][] => {
+      const rows = allCleanupRows(workdir).filter((row) => !before.has(String(row.run)))
+      const summaries = rows
+        .filter((row) => row.charged !== undefined)
+        .sort((a, b) => String(a.at).localeCompare(String(b.at)))
+      return summaries.map((summary) => {
+        expect(summary.charged, "each native cleanup batch charges eight environments").toBe(8)
+        return rows
+          .filter((row) => row.run === summary.run && typeof row.path === "string" && row.path.startsWith(envPrefix))
+          .map((row) => String(row.path))
+      })
+    }
     const oneRound = async (): Promise<void> => {
       const stop = new AbortController()
       let rounds = 0
@@ -7197,21 +7315,26 @@ describe("yrd queue run --tier long", () => {
     try {
       let before = runIds()
       await oneRound()
-      expect(new Set(evaluatedSince(before)), "the first round evaluates the head of the registry").toEqual(
+      expect(new Set(batchesSince(before)[0]), "the first batch evaluates the head of the registry").toEqual(
         new Set(paths.slice(0, 8)),
       )
       expect(existsSync(hint), "the round writes its resume hint").toBe(true)
+      const saved = JSON.parse(readFileSync(hint, "utf8")) as { cursorEnv: string }
+      const offset = paths.findIndex((path) => basename(path) === saved.cursorEnv)
+      expect(offset, "startup plus one round leave a nonzero persisted continuation").toBeGreaterThan(0)
       // A RESTART is a new command invocation: fresh cleanup state, same workdir.
       before = runIds()
       await oneRound()
-      expect(new Set(evaluatedSince(before)), "the restarted sweep resumes after the last completed round").toEqual(
-        new Set(paths.slice(8)),
+      expect(new Set(batchesSince(before)[0]), "the restarted sweep resumes at the persisted environment").toEqual(
+        new Set(paths.slice(offset, offset + 8)),
       )
       // A corrupt hint is named with its path and starts at index 0.
       writeFileSync(hint, "{ not json")
       before = runIds()
       await oneRound()
-      expect(new Set(evaluatedSince(before)), "a corrupt hint restarts at index 0").toEqual(new Set(paths.slice(0, 8)))
+      expect(new Set(batchesSince(before)[0]), "a corrupt hint restarts its first batch at index 0").toEqual(
+        new Set(paths.slice(0, 8)),
+      )
       expect(
         allCleanupRows(workdir).some(
           (row) => row.result === "cursor-reset" && typeof row.path === "string" && row.path.includes(hint),
