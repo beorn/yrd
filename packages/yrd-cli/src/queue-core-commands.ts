@@ -885,7 +885,10 @@ export async function coreQueueCommand(
           io,
           options.json,
           report,
-          `local retirement in ${authorRepo}: retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}`,
+          [
+            `local retirement in ${authorRepo}: retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}`,
+            ...report.failed.map((row) => `${row.branch}: ${row.reason}`),
+          ].join("\n"),
         )
         return report.failed.length === 0 ? 0 : 1
       }

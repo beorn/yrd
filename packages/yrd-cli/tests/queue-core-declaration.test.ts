@@ -3831,7 +3831,7 @@ describe("component-local retirement without a component queue", () => {
         "explicit reviewed component drop",
         "--submitter",
         "fixture",
-        "--json",
+        ...(mode === "publication-refused" ? [] : ["--json"]),
       ],
       run.io,
     ).finally(() => unreadable?.mockRestore())
