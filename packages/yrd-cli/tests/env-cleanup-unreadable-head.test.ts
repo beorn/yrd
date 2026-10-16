@@ -2,6 +2,7 @@
  * @failure 28836: cleanup's close-request batch takes the first ENVIRONMENT_BATCH files and skips unreadable ones
  *   without consuming them, so 8+ unreadable head files refill the batch every round and a valid later request is
  *   never consumed.
+ * @failure 29587: newer lexical head requests overtake an older ninth request; equal times need a deterministic tie.
  * @level l2
  * @consumer the queue round's post-judgment environment cleanup
  * @reach fs-walk <fixture-only: close-request and environment directories the fixture makes under the OS temp root>
@@ -61,6 +62,36 @@ async function world(): Promise<
   return { env, git, head, repo, workdir }
 }
 
+async function runRound(w: Awaited<ReturnType<typeof world>>, run: string): Promise<void> {
+  const census = vi
+    .spyOn(removely, "inspectProcessCwds")
+    .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+  const config: QueueConfig = {
+    target: { remote: "origin", branch: "main" },
+    archiveAfter: "never",
+    revertGuard: "observe",
+    ignore: [],
+    checks: [],
+    notify: [],
+    health: { stallAfterMs: 0, declared: false },
+    blob: w.head,
+  }
+  try {
+    await createEnvironmentCleanup()({
+      repo: w.repo,
+      git: w.git,
+      config,
+      workdir: w.workdir,
+      io: { cwd: w.repo, stdout: () => {}, stderr: () => {} },
+      selection: w.git.selection,
+      resolveIssue: undefined,
+      outcome: { run, log: join(w.workdir, "journal.jsonl"), merged: [] } as never,
+    })
+  } finally {
+    census.mockRestore()
+  }
+}
+
 function cleanupRows(root: string, depth = 0): readonly Record<string, unknown>[] {
   if (depth > 12) return []
   const rows: Record<string, unknown>[] = []
@@ -104,33 +135,7 @@ it("reads past unreadable head requests and consumes a valid later request in on
   // sort AFTER the eight unreadable files, or a first-ENVIRONMENT_BATCH slice
   // would fill on them even on the old code and the row would prove nothing.
   expect(listCloseRequests(w.workdir).at(-1), "the valid request is the last sorted entry").toBe(valid)
-  const log = join(w.workdir, "journal.jsonl")
-  const cleanup = createEnvironmentCleanup()
-  // The same-UID cwd census is a different refusal; certify it so the close proceeds to the success path.
-  const census = vi
-    .spyOn(removely, "inspectProcessCwds")
-    .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
-  const config: QueueConfig = {
-    target: { remote: "origin", branch: "main" },
-    archiveAfter: "never",
-    revertGuard: "observe",
-    ignore: [],
-    checks: [],
-    notify: [],
-    health: { stallAfterMs: 0, declared: false },
-    blob: w.head,
-  }
-  await cleanup({
-    repo: w.repo,
-    git: w.git,
-    config,
-    workdir: w.workdir,
-    io: { cwd: w.repo, stdout: () => {}, stderr: () => {} },
-    selection: w.git.selection,
-    resolveIssue: undefined,
-    outcome: { run: "cleanup-unreadable-head", log, merged: [] } as never,
-  })
-  census.mockRestore()
+  await runRound(w, "cleanup-unreadable-head")
 
   expect(existsSync(valid), "the valid later request is consumed in one pass").toBe(false)
   for (let index = 0; index < 8; index++) {
@@ -143,4 +148,40 @@ it("reads past unreadable head requests and consumes a valid later request in on
     rows.some((row) => row.result === "closed"),
     JSON.stringify(rows),
   ).toBe(true)
+})
+
+it.each([
+  { scenario: "oldest request beyond eight newer filenames", newerAt: "2026-10-15T00:00:01.000Z", olderFirst: true },
+  { scenario: "filename tie-break for equal request times", newerAt: "2026-10-15T00:00:00.000Z", olderFirst: false },
+])("closes one request using $scenario", async ({ newerAt, olderFirst }) => {
+  const w = await world()
+  const uid = process.getuid?.()
+  if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
+  const request = (path: string, at: string) =>
+    writeCloseRequest(w.workdir, {
+      name: path.split("/").at(-1)!,
+      path,
+      requester: "@dev/2",
+      uid,
+      at,
+      predicate: "direct-admission",
+      options: { noRehome: true },
+      head: w.head,
+    }).file
+  const older = request(w.env, "2026-10-15T00:00:00.000Z")
+  const newer: string[] = []
+  for (let index = 0; index < 8; index++) {
+    const path = join(w.repo, ".bays", `a-newer-${index}`)
+    await w.git(["worktree", "add", "--quiet", "--detach", path, "HEAD"])
+    request(path, newerAt)
+    newer.push(path)
+  }
+  // All eight newer names precede the old intent, so sorting only the selected batch cannot pass this case.
+  expect(listCloseRequests(w.workdir).at(-1)).toBe(older)
+  await runRound(w, "cleanup-request-order")
+  const expected = olderFirst ? w.env : newer[0]!
+  const closed = cleanupRows(w.workdir).filter((row) => row.result === "closed")
+  expect(closed.map((row) => row.path)).toEqual([expected])
+  expect(existsSync(closeRequestFile(w.workdir, expected))).toBe(false)
+  expect(listCloseRequests(w.workdir)).toHaveLength(8)
 })

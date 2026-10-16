@@ -194,11 +194,10 @@ async function consumeCloseRequests(
       `${staged} was left by a round that died mid-close; re-evaluated this round`,
     )
   }
-  // 28836: ENVIRONMENT_BATCH bounds READABLE requests handled. An unreadable file is named and LEFT STANDING, as
-  // before, but it takes no slot; read through the sorted list until the batch is full or the list ends.
+  // Read cheap intent metadata before choosing the oldest batch; filenames do not encode request age.
+  // ENVIRONMENT_BATCH still bounds expensive handling. Unreadable files are named and left standing without a slot.
   const readable: Array<{ file: string; request: StoredCloseRequest }> = []
   for (const file of listCloseRequests(workdir)) {
-    if (readable.length >= ENVIRONMENT_BATCH) break
     try {
       const standing = readCloseRequest(file)
       if (standing === undefined) continue
@@ -210,10 +209,15 @@ async function consumeCloseRequests(
     }
   }
   if (readable.length === 0) return { closed: 0, handled: new Set(), proofs }
+  readable.sort((a, b) => {
+    // Writers use UTC ISO times; retries retain the original intent time.
+    const age = a.request.at === b.request.at ? 0 : a.request.at < b.request.at ? -1 : 1
+    return age || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
+  })
   const inventory = await environmentInventory(registry, worktrees, workdir)
   let closed = 0
   const handled = new Set<string>()
-  for (const { file, request } of readable) {
+  for (const { file, request } of readable.slice(0, ENVIRONMENT_BATCH)) {
     handled.add(request.path)
     if (!existsSync(request.path)) {
       journal(file, request, request.path, "already-removed", `${request.path} is gone; the request is satisfied`)
