@@ -98,6 +98,7 @@ import {
   openLog,
   gitIn,
   incidentLine,
+  isAncestor,
   journalKey,
   queueName,
   resolveGitSelection,
@@ -1780,8 +1781,10 @@ export async function coreQueueCommand(
               reason: "advanced",
               detail:
                 local && head !== request.tip
-                  ? `current tip ${head} differs from requested tip ${request.tip}`
-                  : `current tip ${head} differs from recorded change tip ${change?.commit}`,
+                  ? `current tip ${head} differs from requested tip ${request.tip}; ` +
+                    `if ${head} is the tip to retire, rerun with --tip ${head}, otherwise the branch gained commits after you read it`
+                  : `current tip ${head} differs from recorded change tip ${change?.commit}` +
+                    (await advancedCure(authorGit, branch, head, change?.commit, target, targetLabel, local)),
             })
             continue
           }
@@ -6847,6 +6850,36 @@ async function instantOfCommit(git: Git, text: string): Promise<Date | undefined
     throw new Error(`commit ${commit}: git returned invalid committer timestamp ${JSON.stringify(seconds)}`)
   }
   return instant
+}
+
+/**
+ * The next step for a branch drop keeps because it moved past its recorded change tip (29579). When the target already
+ * holds the current tip, as after a fast-forward to it while verifying, nothing is lost by moving the branch back to
+ * the recorded tip, after which the same drop retires it (a `--local` one with `--tip` at that recorded tip);
+ * otherwise the branch holds work the target lacks, which lands by being submitted. An unanswerable ancestry read is
+ * named, never guessed.
+ */
+async function advancedCure(
+  git: Git,
+  branch: string,
+  head: string,
+  recorded: string | undefined,
+  target: string,
+  targetLabel: string,
+  local: boolean,
+): Promise<string> {
+  let held: boolean
+  try {
+    held = await isAncestor(git, head, target)
+  } catch (error) {
+    return `; whether ${targetLabel} holds ${head} is unknown (${error instanceof Error ? error.message : String(error)})`
+  }
+  if (!held) return `; it holds commits ${targetLabel} lacks: submit them, and drop the branch after they land`
+  return (
+    `; ${targetLabel} already holds ${head}, so nothing is lost: move the branch back with ` +
+    `git update-ref refs/heads/${branch} ${recorded} ${head}, then ` +
+    (local ? `rerun with --tip ${recorded}` : "rerun this drop")
+  )
 }
 
 function emit(io: YrdCliIO, json: boolean | undefined, data: unknown, human: string): void {

@@ -1936,7 +1936,17 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(report.kept).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ branch: "task/28791-local-only", reason: "unreached" }),
-        expect.objectContaining({ branch: "task/28791-advanced", reason: "advanced" }),
+        // 29579: a branch with work the target lacks names that cure, never a ref move.
+        expect.objectContaining({
+          branch: "task/28791-advanced",
+          reason: "advanced",
+          detail:
+            "current tip " +
+            advanced +
+            " differs from recorded change tip " +
+            saved.get("task/28791-advanced") +
+            "; it holds commits origin/main lacks: submit them, and drop the branch after they land",
+        }),
       ]),
     )
     expect((await git(["rev-parse", "refs/heads/task/28791-local-only"])).trim()).toBe(
@@ -1980,7 +1990,20 @@ describe("a queue is the selected origin branch carrying config", () => {
           branch: "task/28791-advanced",
           head: advanced,
           reason: "advanced",
-          detail: "current tip " + advanced + " differs from recorded change tip " + saved.get("task/28791-advanced"),
+          // 29579: the target already holds the tip, so the detail names the move back and the rerun.
+          detail:
+            "current tip " +
+            advanced +
+            " differs from recorded change tip " +
+            saved.get("task/28791-advanced") +
+            "; origin/main already holds " +
+            advanced +
+            ", so nothing is lost: move the branch back with git update-ref refs/heads/task/28791-advanced " +
+            saved.get("task/28791-advanced") +
+            " " +
+            advanced +
+            ", then rerun with --tip " +
+            saved.get("task/28791-advanced"),
         },
       ],
     })
@@ -2010,9 +2033,43 @@ describe("a queue is the selected origin branch carrying config", () => {
         {
           branch: "task/28791-advanced",
           reason: "advanced",
-          detail: "current tip " + advanced + " differs from requested tip " + saved.get("task/28791-advanced"),
+          detail:
+            "current tip " +
+            advanced +
+            " differs from requested tip " +
+            saved.get("task/28791-advanced") +
+            "; if " +
+            advanced +
+            " is the tip to retire, rerun with --tip " +
+            advanced +
+            ", otherwise the branch gained commits after you read it",
         },
       ],
+    })
+    // 29579: the named cure works. Moved back to its recorded tip, the branch the target already holds retires.
+    await git(["update-ref", "refs/heads/task/28791-advanced", saved.get("task/28791-advanced")!, advanced])
+    const cured = capture(repo)
+    expect(
+      await runYrdProcess(
+        [
+          "bun",
+          "yrd",
+          "drop",
+          "task/28791-advanced",
+          "--local",
+          "--tip",
+          saved.get("task/28791-advanced")!,
+          "--submitter",
+          "fixture",
+          "--json",
+        ],
+        cured.io,
+      ),
+      cured.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(cured.stdout())).toMatchObject({
+      kept: [],
+      removed: [{ branch: "task/28791-advanced", head: saved.get("task/28791-advanced") }],
     })
     // AC5: the command's journal must remain readable by the existing projection reader.
     // Custody assertions alone miss a writer that omits the required run header.
