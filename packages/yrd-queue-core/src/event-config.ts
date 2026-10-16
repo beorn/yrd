@@ -18,7 +18,7 @@ const QUEUE_KEYS = {
   checks: "supported",
   health: "supported",
   ignore: "supported",
-  issueResolver: "supported",
+  issuesProvider: "supported",
   admission: "supported",
   blob: "supported",
   notify: "supported",

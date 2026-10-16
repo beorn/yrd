@@ -125,7 +125,6 @@ it("keeps the close request standing and continues when a private store refuses 
     workdir: w.workdir,
     io: { cwd: w.repo, stdout: () => {}, stderr: () => {} },
     selection: w.git.selection,
-    resolveIssue: undefined,
     // Nothing merged in this round: the request already stands, as the merged-close filer leaves it.
     outcome: { run: "cleanup-private-store", log, merged: [] } as never,
   })

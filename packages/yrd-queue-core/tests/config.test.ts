@@ -30,16 +30,16 @@ describe("the queue declaration grammar", () => {
   ])("refuses %s in admission", (_name, declaration) => {
     expect(() => parseConfig(declaration, SOURCE)).toThrow(/admission/u)
   })
-  it("reads a host issue resolver as an argument vector", () => {
-    expect(parseConfig("issueResolver: [hh-km, bd, show, --json]\n", SOURCE).issueResolver).toEqual([
-      "hh-km",
-      "bd",
-      "show",
-      "--json",
-    ])
+  it("reads provider commands as exact argv with optional display", () => {
+    expect(
+      parseConfig('issuesProvider: {read: [other, show, "<key>"], update: [other, catchup]}\n', SOURCE).issuesProvider,
+    ).toEqual({ read: ["other", "show", "<key>"], update: ["other", "catchup"] })
+    expect(parseConfig("issuesProvider: {update: [other, catchup]}\n", SOURCE).issuesProvider).toEqual({
+      update: ["other", "catchup"],
+    })
   })
-  it.each(["[]", "''", "[hh-km, '']", "[hh-km, 42]"])("refuses an invalid issue resolver %s", (value) => {
-    expect(() => parseConfig(`issueResolver: ${value}\n`, SOURCE)).toThrow(/issueResolver: must be a non-empty argv/u)
+  it.each(["[]", "''", "[other, '']", "[other, 42]"])("names invalid provider argv %s", (value) => {
+    expect(() => parseConfig(`issuesProvider: {update: ${value}}\n`, SOURCE)).toThrow(/issuesProvider.update/u)
   })
 
   it("reads every supported field and supplies only the declared defaults", () => {

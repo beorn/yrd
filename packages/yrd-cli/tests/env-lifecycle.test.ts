@@ -39,7 +39,7 @@ import {
   requesterOf,
 } from "../src/env-close-requests.ts"
 import { workdirOf } from "../src/workdir.ts"
-import { environmentIssues, environmentProvenance } from "../src/env-cleanup-provenance.ts"
+import { environmentProvenance } from "../src/env-cleanup-provenance.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 
@@ -111,30 +111,6 @@ async function openEnvironment(cwd: string, commit: string): Promise<Readonly<{ 
 }
 
 type World = Readonly<{ git: ReturnType<typeof gitIn>; work: string }>
-
-it("cleanup unions every creating OID and canonical branch binding without inherited Refs", async () => {
-  const w = await world(":")
-  await w.git(["commit", "--quiet", "--allow-empty", "-m", "inherited target binding", "-m", "Refs: 999"])
-  const path = join(dirname(w.work), "retained")
-  const branch = "task/@i/10-yrd/27723-scope"
-  await w.git(["worktree", "add", "--quiet", "-b", branch, path, "HEAD"])
-  const tree = gitIn(path)
-  for (const issue of ["111", "112"]) {
-    await tree(["commit", "--quiet", "--allow-empty", "-m", `own binding ${issue}`, "-m", `Refs: ${issue}`])
-  }
-  const issues = await environmentIssues(
-    path,
-    tree,
-    "retained",
-    branch,
-    w.git,
-    "main",
-    createEventStore(w.work, "origin", w.git.selection),
-    async () => undefined,
-    async (raw) => raw,
-  )
-  expect(new Set(issues.issues)).toEqual(new Set(["111", "112", "@i/10-yrd/27723-scope"]))
-})
 
 it("cleanup provenance excludes inherited history and refuses incomplete or unknown HEAD evidence", async () => {
   const w = await world(":")
