@@ -573,15 +573,37 @@ it("does not publish a pin unchanged at one of several criss-cross merge bases",
   expect(await publishMovedGitlinks(w.git, w.work, bases, leftMerge)).toEqual([])
 })
 
-/** @failure A gitlink compose refusal ended without one successful notice to its submitter (25741).
+/** @failure A gitlink compose or publication refusal loses its submitter notice or remedy (25741, 29650).
  * @level l3 @consumer the submitter of a change with a diverged component pin
  */
-it("sends one failed notice for a gitlink that cannot compose", async () => {
+it.each(["compose", "capture"] as const)("sends one failed notice for a gitlink refusal (%s)", async (phase) => {
   const w = await world({ notifyNames: ["submitter"] })
   await createWorldEventQueue(w)
-  const ahead = await aheadOfSubmodule(w, "submitted-feature")
+  let ahead: string
+  let futureMain: string | undefined
+  if (phase === "compose") {
+    ahead = await aheadOfSubmodule(w, "submitted-feature")
+  } else {
+    // Composition refusals do not exercise a frozen-publication capture failure (29650).
+    // This branch contains main as parent two, so ordinary ancestry permits the unsafe fast-forward.
+    const subRoot = join(w.work, "..", "submodule-work")
+    const sub = gitIn(subRoot)
+    await sub(["checkout", "--quiet", "-b", "future-main", "main"])
+    writeFileSync(join(subRoot, "main-only.txt"), "main advances after submission\n")
+    await sub(["add", "main-only.txt"])
+    await sub(["commit", "--quiet", "-m", "future component main"])
+    futureMain = (await sub(["rev-parse", "HEAD"])).trim()
+    await sub(["checkout", "--quiet", "main"])
+    await aheadOfSubmodule(w, "submitted-feature")
+    await sub(["checkout", "--quiet", "ahead-submitted-feature"])
+    await sub(["merge", "--quiet", "--no-ff", "future-main", "-m", "merge main into component task"])
+    ahead = (await sub(["rev-parse", "HEAD"])).trim()
+    expect((await sub(["rev-parse", `${ahead}^2`])).trim()).toBe(futureMain)
+    await sub(["push", "--quiet", "origin", "ahead-submitted-feature"])
+  }
   const head = await submitGitlink(w, "task/diverged-pin", ahead)
-  await advanceSubmodule(w, "main changed after submit")
+  if (phase === "compose") await advanceSubmodule(w, "main changed after submit")
+  else await gitIn(join(w.work, "..", "submodule-work"))(["push", "--quiet", "origin", "future-main:main"])
   const noticeLog = join(dirname(w.work), "compose-refusal-notice.jsonl")
   const options: QueueRunOptions = {
     ...(await w.options()),
@@ -593,7 +615,13 @@ it("sends one failed notice for a gitlink that cannot compose", async () => {
   expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/diverged-pin"], merged: [] })
   const status = await readStatus(eventStore(w), "main", "task/diverged-pin")
   expect(status).toMatchObject({ status: "failed", commit: head })
-  expect(status.reason).toContain("gitlink-compose-refused")
+  expect(status.reason).toContain(
+    phase === "compose" ? "gitlink-compose-refused" : "from its first-parent chain",
+  )
+  if (phase === "capture") {
+    expect(status.reason).toContain(`Rebase the change's component branch onto main ${futureMain}`)
+    expect(status.reason).toContain(`new branch started at ${futureMain} so main stays the first parent`)
+  }
   expect(status.reason).toContain("submodule")
   expect(Object.values(status.notices ?? {})).toMatchObject([{ result: "delivered", to: "submitter" }])
   const notices = readFileSync(noticeLog, "utf8")
