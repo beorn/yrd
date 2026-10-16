@@ -601,7 +601,7 @@ describe("yrd queue up, the service", () => {
     ).toBe(0)
     const environment = (JSON.parse(opened.stdout()) as { path: string }).path
     const gitDir = (await gitIn(environment)(["rev-parse", "--absolute-git-dir"])).trim()
-    expect(JSON.parse(readFileSync(join(gitDir, "yrd-open.json"), "utf8")).lifetime).toBe("job")
+    expect(JSON.parse(readFileSync(join(gitDir, "yrd-open.json"), "utf8"))).toMatchObject({ lifetime: "job" })
     await gitIn(environment)(["checkout", "--quiet", branch])
     await submit(w.git, "origin", { branch, submitter: "fixture", target: { remote: "origin", branch: "main" } })
     const workdir = await workdirOf(w.git, { cwd: w.work })
@@ -634,7 +634,7 @@ describe("yrd queue up, the service", () => {
         ),
         first.stderr(),
       ).toBe(0)
-      const store = createEventStore(w.work, "origin", w.git.selection)
+      const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
       const merged = await queueCore.readStatus(store, "main", branch)
       expect(merged.status).toBe("merged")
       expect(merged.issue).toBeUndefined()
@@ -724,7 +724,7 @@ describe("yrd queue up, the service", () => {
         const swept = await retireMergedBranches({
           repo: w.work,
           git: w.git,
-          selection: w.git.selection,
+          selection: gitIn(w.work).selection,
           store,
           queue: "main",
           target: (await w.git(["rev-parse", "origin/main"])).trim(),
