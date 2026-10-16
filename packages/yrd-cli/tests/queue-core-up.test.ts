@@ -43,6 +43,7 @@ import * as gitomic from "gitomic"
 import * as removely from "removely"
 import * as gitSuperWorktree from "git-super/worktree"
 import { openEvents } from "gitomic/events"
+import { findArchiveRefFor } from "git-super/archive-ref"
 import {
   appendChangeEvent,
   changeInput,
@@ -3870,9 +3871,19 @@ describe("yrd queue up, the service", () => {
     })
   })
 
-  /** @failure An immutable Hab landing cannot check out the next gitlink, so waiting on its own HEAD parks the queue after every Yrd landing. @level l2 @consumer Hab's supervised Yrd service */
+  /** @failure A pin-move exit drains every merged environment after its heartbeat stops, or stops halfway through a branch and loses the successor's native recovery population. @level l2 @consumer Hab's supervised Yrd service @testonly none */
   it("waits for a promoted immutable landing, then exits 0 for Hab to launch it", async () => {
     const w = await gitlinkWorld()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await w.git(["config", "worktree.poolRoot", join(dirname(w.work), "environments")])
+    const ready = join(w.workdir, "provider-ready")
+    const releaseProvider = join(w.workdir, "provider-release")
+    const provider = join(w.workdir, "provider.sh")
+    writeFileSync(
+      provider,
+      ['touch "$1"', ...waitingFor('test ! -f "$2"', "promotion provider not released")].join("\n"),
+    )
+    await redeclare(w, JSON.stringify({ issuesProvider: { update: ["sh", provider, ready, releaseProvider] } }))
     const home = join(dirname(w.work), "work-landings")
     mkdirSync(home)
     const aRoot = (await w.git(["rev-parse", "main"])).trim()
@@ -3883,11 +3894,93 @@ describe("yrd queue up, the service", () => {
     symlinkSync(resolve(import.meta.dirname, "../node_modules"), join(aCli, "node_modules"), "dir")
     symlinkSync(aLanding, join(home, "current"), "dir")
     const { coreQueueCommand: fromLandingA } = await import(join(aCli, "src/queue-core-commands.ts"))
-    await submitGitlink(w, "task/gitlink-landing", w.b)
+    await gitIn(join(w.work, "submodule"))(["fetch", "--quiet", "origin", "main"])
+    const authors: { branch: string; head: string; path: string; opening: string; gitDir: string }[] = []
+    for (let index = 0; index < 3; index += 1) {
+      const branch = `task/gitlink-landing-${String(index)}`
+      await w.git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(w.work, `job-${String(index)}.txt`), `${branch}\n`)
+      await w.git(["add", `job-${String(index)}.txt`])
+      if (index === 2) await w.git(["update-index", "--cacheinfo", "160000", w.b, "submodule"])
+      await w.git(["commit", "--quiet", "-m", branch])
+      const head = (await w.git(["rev-parse", "HEAD"])).trim()
+      await w.git(["checkout", "--quiet", "main"])
+      const opened = capture(w.work)
+      expect(
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", "--bay", `gitlink-landing-${String(index)}`, "--json"],
+          opened.io,
+        ),
+        opened.stderr(),
+      ).toBe(0)
+      const { path } = JSON.parse(opened.stdout()) as { path: string }
+      await gitIn(path)(["checkout", "--quiet", branch])
+      await gitIn(path)(["submodule", "update", "--init", "--quiet"])
+      const gitDir = (await gitIn(path)(["rev-parse", "--absolute-git-dir"])).trim()
+      const opening = readFileSync(join(gitDir, "yrd-open.json"), "utf8")
+      expect(JSON.parse(opening)).toMatchObject({ lifetime: "job", bay: `gitlink-landing-${String(index)}` })
+      authors.push({ branch, head, path, gitDir, opening })
+      await submit(w.git, "origin", { branch, submitter: "fixture", target: { remote: "origin", branch: "main" } })
+    }
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const prepared = capture(w.work)
+    prepared.io.localBranchProtections = async () => ({
+      protections: ["preparation retains pending cleanup"],
+      evidence: [],
+    })
+    prepared.io.liveEnvironmentUse = async () =>
+      authors.map(({ path }) => ({ path, reason: "preparation retains pending cleanup" }))
+    const prepareStop = new AbortController()
+    const merged: string[] = []
+    expect(
+      await coreQueueCommand(
+        w.work,
+        prepared.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: prepareStop.signal,
+          afterRound: async (outcome) => {
+            expect(outcome.failed, prepared.stderr()).toEqual([])
+            expect(outcome.stuck, prepared.stderr()).toEqual([])
+            merged.push(...outcome.merged)
+            if (merged.length === 3) {
+              await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 8000 })
+              prepareStop.abort()
+            }
+          },
+        },
+        { json: true, workdir: w.workdir },
+      ),
+      prepared.stderr(),
+    ).toBe(0)
+    expect(merged.sort()).toEqual(authors.map(({ branch }) => branch).sort())
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    for (const author of authors) {
+      expect((await readStatus(store, "main", author.branch)).status).toBe("merged")
+      expect(existsSync(author.path), "preparation leaves every recorded environment recoverable").toBe(true)
+      expect((await w.git(["rev-parse", `refs/heads/${author.branch}`])).trim()).toBe(author.head)
+    }
+    writeFileSync(releaseProvider, "go")
 
     const run = capture(w.work)
     const stop = new AbortController()
     let rounds = 0
+    let heldBranch: string | undefined
+    const custodyReads: string[] = []
+    let releaseCleanup!: () => void
+    const cleanupHeld = new Promise<void>((resolve) => {
+      releaseCleanup = resolve
+    })
+    run.io.liveEnvironmentUse = async () => []
+    run.io.localBranchProtections = async ({ branch }) => {
+      custodyReads.push(branch)
+      if (heldBranch === undefined) heldBranch = branch
+      if (branch === heldBranch) await cleanupHeld
+      return { protections: [], evidence: [] }
+    }
     const service = fromLandingA(
       w.work,
       run.io,
@@ -3904,6 +3997,7 @@ describe("yrd queue up, the service", () => {
     )
     try {
       await vi.waitFor(() => expect(run.stdout()).toContain("relaunch-wait-stalled"), { timeout: 8000 })
+      await vi.waitFor(() => expect(heldBranch).toBeTypeOf("string"), { timeout: 8000 })
       const paged = JSON.parse(readFileSync(join(w.workdir, "service-health.json"), "utf8")) as {
         error?: { cause?: string; resolution?: string[] }
         facts?: { relaunchSource?: { declared: string; resolved?: string } }
@@ -3913,7 +4007,7 @@ describe("yrd queue up, the service", () => {
       expect(page).toContain(join(home, "current"))
       expect(page).not.toContain(`Check out submodule@${w.b} in ${join(aLanding, "submodule")}`)
       expect(paged.facts?.relaunchSource).toEqual({ declared: join(home, "current"), resolved: aLanding })
-      expect(rounds).toBe(1)
+      expect(rounds, "relaunch is detected before a new queue round").toBe(0)
 
       // A temporarily unreadable declared source keeps the old process alive
       // and says why; it must never fall back to A's immutable checkout.
@@ -3927,7 +4021,7 @@ describe("yrd queue up, the service", () => {
       }
       expect(missingPage.error?.cause).toContain("Source read failed")
       expect(missingPage.error?.cause).toContain(join(home, "current"))
-      expect(rounds).toBe(1)
+      expect(rounds).toBe(0)
 
       const bRoot = (await w.git(["rev-parse", "origin/main"])).trim()
       const bLanding = join(home, bRoot)
@@ -3935,6 +4029,21 @@ describe("yrd queue up, the service", () => {
       await gitIn(bLanding)(["submodule", "update", "--init", "--quiet", "--", "submodule"])
       symlinkSync(bLanding, join(home, "current.next"), "dir")
       renameSync(join(home, "current.next"), join(home, "current"))
+      await vi.waitFor(() => expect(records(run).some((record) => record.reason === "gitlink-moved")).toBe(true), {
+        timeout: 8000,
+      })
+      const held = authors.find(({ branch }) => branch === heldBranch)
+      expect(held, "the hold belongs to a real merged author").toBeDefined()
+      let exited: number | undefined
+      void service.then((code) => {
+        exited = code
+      })
+      releaseCleanup()
+      // The production failure drained for minutes; eight seconds leaves native
+      // fixture Git ample time while still rejecting an unbounded handoff.
+      await vi.waitFor(() => expect(exited, "handoff finishes after the current cleanup unit").toBe(0), {
+        timeout: 8000,
+      })
       expect(await service, run.stdout()).toBe(0)
       expect(records(run).at(-1)).toEqual({
         exitCode: 0,
@@ -3943,12 +4052,89 @@ describe("yrd queue up, the service", () => {
         reason: "gitlink-moved",
         to: w.b,
       })
-      expect(rounds).toBe(1)
+      expect(rounds).toBe(0)
+      const remaining = authors.filter(({ branch }) => branch !== heldBranch)
+      expect(existsSync(held!.path), "the active branch finishes its environment close").toBe(false)
+      expect(
+        (await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${held!.branch}`])).trim(),
+        "the active branch finishes its root retirement",
+      ).toBe("")
+      const logs = join(w.workdir, "logs")
+      const retirementRows = () =>
+        [logs, join(logs, "post-merge")].flatMap((dir) =>
+          readdirSync(dir)
+            .filter((name) => name.endsWith(".jsonl"))
+            .flatMap((name) => readRunLog(dir, name.slice(0, -".jsonl".length))),
+        )
+      const archived = retirementRows().find(
+        (row) => row.kind === "local-branch-retirement" && row.branch === held!.branch && row.outcome === "removed",
+      )
+      expect(archived?.archive).toBeTypeOf("string")
+      expect((await w.git(["rev-parse", archived!.archive as string])).trim()).toBe(held!.head)
+      const inventory = await environmentInventory(w.work, gitIn(w.work), w.workdir)
+      for (const author of remaining) {
+        expect(existsSync(author.path), "unstarted units retain their native recovery environments").toBe(true)
+        expect(inventory.rows).toContainEqual(expect.objectContaining({ path: author.path, branch: author.branch }))
+        expect(readFileSync(join(author.gitDir, "yrd-open.json"), "utf8")).toBe(author.opening)
+        expect((await w.git(["rev-parse", `refs/heads/${author.branch}`])).trim()).toBe(author.head)
+        expect(retirementRows().some((row) => row.branch === author.branch && row.outcome === "removed")).toBe(false)
+      }
+      expect(
+        [...new Set(custodyReads)],
+        "handoff does not start either remaining branch's native custody read",
+      ).toEqual([heldBranch])
+      const bCli = join(bLanding, "submodule/packages/yrd-cli")
+      symlinkSync(resolve(import.meta.dirname, "../node_modules"), join(bCli, "node_modules"), "dir")
+      const { coreQueueCommand: fromLandingB } = await import(join(bCli, "src/queue-core-commands.ts"))
+      const successor = capture(w.work)
+      successor.io.liveEnvironmentUse = async () => []
+      successor.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
+      const successorStop = new AbortController()
+      expect(
+        await fromLandingB(
+          w.work,
+          successor.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: successorStop.signal,
+            afterRound: async (outcome) => {
+              expect(outcome.merged).toEqual([])
+              await vi.waitFor(
+                async () => {
+                  for (const author of remaining) {
+                    expect(existsSync(author.path), "successor closes the remaining native environment").toBe(false)
+                    expect(
+                      (await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${author.branch}`])).trim(),
+                    ).toBe("")
+                  }
+                },
+                { timeout: 8000 },
+              )
+              successorStop.abort()
+            },
+          },
+          { env: { ...process.env, YRD_RELAUNCH_SOURCE: join(home, "current") }, json: true, workdir: w.workdir },
+        ),
+        successor.stderr(),
+      ).toBe(0)
+      for (const author of remaining) {
+        expect(allCleanupRows(w.workdir)).toContainEqual(
+          expect.objectContaining({ path: author.path, result: "closed" }),
+        )
+        // Native environment close may already retire the branch. Its exact
+        // archive is custody even when no later root-retirement row is needed.
+        const archive = findArchiveRefFor(w.work, author.branch, author.head)
+        expect(archive).toBeTypeOf("string")
+        expect((await w.git(["rev-parse", archive!])).trim()).toBe(author.head)
+      }
     } finally {
+      releaseCleanup()
       stop.abort()
       await service.catch(() => undefined)
+      census.mockRestore()
     }
-  }, 20_000)
+  }, 60_000)
 
   /** @failure A broken declared next-launch source silently selected the old mutable checkout at startup. @level l2 @consumer Hab's supervised Yrd service */
   it("reports an unreadable declared relaunch source at startup while rounds still run", async () => {
@@ -5961,6 +6147,23 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     )
     try {
       await vi.waitFor(() => expect(run.stdout()).toContain("relaunch-wait-stalled"), { timeout: 8000 })
+      const waitingAt = Date.now()
+      const writesBeforeHold = published.writes.length
+      // The checkout is deliberately unchanged for two belief windows. This
+      // checks the wait's heartbeat, separately from cleanup after exit decision.
+      await delay(2 * WINDOW)
+      const duringWait = published.writes.slice(writesBeforeHold)
+      expect(duringWait.length, "health publications continue while the checkout is unchanged").toBeGreaterThan(1)
+      const latest = duringWait.at(-1)?.document
+      for (const { document } of duringWait) {
+        expect(document.facts).toMatchObject({
+          waitingForCheckout: "submodule",
+          waitingTarget: w.b,
+          waitingCheckoutHead: w.a,
+        })
+      }
+      expect(Date.parse(String(latest?.facts?.writtenAt))).toBeGreaterThan(waitingAt)
+      expect(Date.parse(String(latest?.facts?.staleAfter))).toBeGreaterThan(Date.now())
       const sub = gitIn(join(w.work, "submodule"))
       await sub(["fetch", "--quiet", "origin", "main"])
       await sub(["checkout", "--quiet", w.b])
