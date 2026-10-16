@@ -9,7 +9,6 @@ import type { GitWorktreeStore } from "git-super/worktree"
 import {
   collectMovedGitlinks,
   drop,
-  issueFromBranchName,
   seamProcess,
   createEventStore,
   createLocalEventStore,
@@ -37,7 +36,6 @@ import {
   type QueueLocation,
   type QueueConfig,
 } from "@yrd/queue-core"
-import type { ResolvedIssue } from "./issue-resolver.ts"
 import type { LocalBranchProtectionResult, YrdCliIO } from "./types.ts"
 import { originHead } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
@@ -415,16 +413,13 @@ export async function releaseRetainedCheckouts(
         attached?.branch === undefined
           ? undefined
           : io.branchIssue === undefined
-            ? issueFromBranchName(attached.branch)
+            ? undefined
             : io.branchIssue({ branch: attached.branch })
       const archives = readArchiveRows(repository)
       const recovery =
         attached !== undefined && attached.branch === undefined
           ? archives.filter((archive) => {
-              const issue =
-                io.branchIssue === undefined
-                  ? issueFromBranchName(archive.branch)
-                  : io.branchIssue({ branch: archive.branch })
+              const issue = io.branchIssue === undefined ? undefined : io.branchIssue({ branch: archive.branch })
               return branch === undefined
                 ? issue !== undefined && identity(issue) === identity(request.issue)
                 : archive.branch === branch
@@ -437,7 +432,7 @@ export async function releaseRetainedCheckouts(
       if (attached !== undefined && attached.branch === undefined && branch === undefined && recovery.length === 0) {
         for (const [ref] of await listRefs("refs/heads/", createLocalEventStore(repository, input.selection))) {
           const name = ref.slice("refs/heads/".length)
-          const issue = io.branchIssue === undefined ? issueFromBranchName(name) : io.branchIssue({ branch: name })
+          const issue = io.branchIssue?.({ branch: name })
           if (issue !== undefined && identity(issue) === identity(request.issue)) detachedBranches.push(name)
         }
         if (detachedBranches.length > 1) {
@@ -700,6 +695,14 @@ export async function retireMergedRootAuthor(
   const withdrawn = change.status === "cancelled" && change.reason === "withdrawn"
   if ((!withdrawn && change.status !== "merged") || tip === undefined || change.tip === undefined) {
     throw new Error(`${branch}: root retirement requires an exact merged or withdrawn submission and event tip`)
+  }
+  if (!withdrawn && !(await isAncestor(git, tip, input.target))) {
+    return {
+      outcome: "kept",
+      archiveRef: archiveRefFor(branch, input.actor, new Date().toISOString().slice(0, 10)),
+      reason: "unreached",
+      detail: `exact author head ${tip} is not an ancestor of ${input.target}; kept for owner review`,
+    }
   }
   let disposition: LocalBranchRetirement["disposition"] =
     change.componentAuthors === undefined
@@ -1265,9 +1268,6 @@ type LandedCandidate = Omit<LocalBranchRetirement, "repo" | "git" | "disposition
     path: string
     landings: readonly LandingPin[]
     reason?: string
-    /** 29450: the candidate's issue is closed or dropped, so a tip with no custody is archived to origin and
-     * ended with a `dropped` event (the closed disposition) instead of being kept `unreached`. */
-    closed?: Readonly<{ store: QueueLocation; queue: string }>
   }>
 
 /** One store's origin-custody judgment, shared by explicit landing candidates and manual issue selection.
@@ -1282,7 +1282,6 @@ export function createLandedBranchRetirement(
     target: string
   }>,
 ) {
-  let remoteRefs: ReadonlyMap<string, string> | undefined
   return async (
     candidate: LandedCandidate,
   ): Promise<
@@ -1292,43 +1291,15 @@ export function createLandedBranchRetirement(
       custody?: "main" | "landing" | "origin"
     }
   > => {
-    const { repo, git, remote, selection, target } = store
-    const { path, landings, reason, closed, ...retirement } = candidate
-    const pin = landings.find((pin) => pin.path === path && pin.tip === candidate.tip)
-    let custody: string | undefined = (await isAncestor(git, candidate.tip, target)) ? target : undefined
-    let proof: { kind: "ancestry" } | { kind: "landing"; event: string; path: string; tip: string } = {
-      kind: "ancestry",
-    }
-    if (custody === undefined && pin !== undefined) {
-      // A root gitlink retains no component object. Observe custody at component origin as well.
-      remoteRefs ??= await listRefs("refs/", createEventStore(repo, remote, selection))
-      for (const [ref] of remoteRefs) {
-        const reached = await readRemoteCommit(git, remote, ref)
-        if (reached !== undefined && (await isAncestor(git, candidate.tip, reached))) {
-          custody = reached
-          proof = { kind: "landing", ...pin }
-          break
-        }
-      }
-    }
+    const { repo, git, target } = store
+    const { path: _path, landings: _landings, reason, ...retirement } = candidate
+    const custody = (await isAncestor(git, candidate.tip, target)) ? target : undefined
+    const proof = { kind: "ancestry" as const }
     if (custody === undefined) {
-      if (closed !== undefined) {
-        // work.md § Events first: a close archives, then removes, its unmerged branches. The closed
-        // disposition publishes the archive ref and the `dropped` event to origin in one write and reads
-        // both back before the compare-and-delete; a tip nobody archived is never deleted.
-        const ended = await retireLocalBranch({
-          ...retirement,
-          repo,
-          git,
-          reason: reason ?? "closed issue",
-          disposition: { kind: "closed", store: closed.store, queue: closed.queue, target },
-        })
-        return { ...ended, custody: "origin" }
-      }
       return {
         outcome: "kept",
         reason: "unreached",
-        detail: `tip has no main ancestry or origin-retained exact landing pin in ${repo}`,
+        detail: `exact branch head ${candidate.tip} is not an ancestor of target ${target}; kept for owner review`,
       }
     }
     const landed = await retireLocalBranch({
@@ -1338,42 +1309,29 @@ export function createLandedBranchRetirement(
       reason: reason ?? `landed by ${proof.kind}`,
       disposition: { kind: "landed", target: custody, proof },
     })
-    return { ...landed, custody: proof.kind === "ancestry" ? "main" : "landing" }
+    return { ...landed, custody: "main" }
   }
 }
 
-// ---------------------------------------------------------------------------
-// 29450 — closing an issue retires its branches
-//
-// work.md § Events first: "Closing an issue archives, then removes, its unmerged branches, so 'closed,
-// code left' cannot form." A close happens three ways (km bd close, merge-close, a hand edit of the file),
-// all of which end as the issue's status, so the service's round reads that status through the declared
-// resolver and retires the branches bound to closed or dropped issues through the one removal path.
-// Ruled by @cto dd209c0b (2026-10-15): the queue round is the consumer; time-based cadence; a resolver
-// failure keeps everything and is named; the delete is compare-and-delete against the archived tip.
-
-/** Issue statuses the declared resolver answers that end an issue (work.md:26: a dropped `[-]` ends it too). */
-export const CLOSED_ISSUE_STATUSES: ReadonlySet<string> = new Set(["closed", "dropped"])
-
-const CLOSED_ISSUE_SWEEP_INTERVAL_MS = 3_600_000
+// Existing post-merge population and cadence, licensed only by exact-head target ancestry.
+const MERGED_BRANCH_SWEEP_INTERVAL_MS = 3_600_000
 /** The last sweep per authoring repository in THIS process: absent means the service just started. */
-const closedIssueSweeps = new Map<string, number>()
+const mergedBranchSweeps = new Map<string, number>()
 
 /** Sweep at service start, after any round that merged, and when an hour has passed since the last sweep. */
-export function closedIssueSweepDue(input: Readonly<{ repo: string; merged: number; now: number }>): boolean {
-  const last = closedIssueSweeps.get(input.repo)
-  return last === undefined || input.merged > 0 || input.now - last >= CLOSED_ISSUE_SWEEP_INTERVAL_MS
+export function mergedBranchSweepDue(input: Readonly<{ repo: string; merged: number; now: number }>): boolean {
+  const last = mergedBranchSweeps.get(input.repo)
+  return last === undefined || input.merged > 0 || input.now - last >= MERGED_BRANCH_SWEEP_INTERVAL_MS
 }
 
-export function markClosedIssueSweep(repo: string, now: number): void {
-  closedIssueSweeps.set(repo, now)
+export function markMergedBranchSweep(repo: string, now: number): void {
+  mergedBranchSweeps.set(repo, now)
 }
 
-export type ClosedIssueRetirementRow = Readonly<{
+export type MergedBranchRetirementRow = Readonly<{
   branch: string
   head: string
   issue?: string
-  status?: string
   outcome: "removed" | "kept" | "failed"
   reason: string
   detail?: string
@@ -1384,7 +1342,7 @@ export type ClosedIssueRetirementRow = Readonly<{
   recovery?: string
 }>
 
-export type ClosedIssueRetirementReport = Readonly<{
+export type MergedBranchRetirementReport = Readonly<{
   repo: string
   /** The target commit every tip was judged against. */
   target: string
@@ -1394,24 +1352,18 @@ export type ClosedIssueRetirementReport = Readonly<{
   unnumbered: number
   /** Heads with no recorded change whose name alone carries an issue number: kept and listed, never judged (work.md:99). */
   boundByNameOnly: number
-  /** Bound to an issue the resolver did not answer with exactly one bead; each is also a kept row. */
-  unknownIssues: number
-  /** Bound to an issue that is still open. */
-  openIssues: number
-  /** Distinct closed or dropped issues that still had a branch. */
-  closedIssues: number
-  removed: readonly ClosedIssueRetirementRow[]
-  kept: readonly ClosedIssueRetirementRow[]
-  failed: readonly ClosedIssueRetirementRow[]
-  /** Set when nothing was judged — no protections reader, no resolver, or the resolver failed: every branch kept. */
+  removed: readonly MergedBranchRetirementRow[]
+  kept: readonly MergedBranchRetirementRow[]
+  failed: readonly MergedBranchRetirementRow[]
+  /** Set when the protections authority is absent: every branch kept. */
   everyBranchKept?: string
 }>
 
-export type ClosedIssueRetirementInput = Readonly<{
+export type MergedBranchRetirementInput = Readonly<{
   repo: string
   git: Git
   selection: GitSelection
-  /** The queue's event store at origin; the closed disposition publishes archive and ending through it. */
+  /** Existing queue facts used to select the existing cleanup population. */
   store: QueueLocation
   queue: string
   /** The target branch's commit at origin after this round: custody for a merged tip. */
@@ -1422,81 +1374,60 @@ export type ClosedIssueRetirementInput = Readonly<{
   date?: string
   /** The issue number a branch NAME carries, for the receipt of a branch that binds by name alone; never eligibility. */
   nameNumber: (branch: string) => string | undefined
-  /** One resolver run over every bound reference; absent when the target declares no resolver. */
-  lookupMany: ((raws: readonly string[]) => Promise<readonly (ResolvedIssue | null)[]>) | undefined
 }>
 
-/**
- * Retire the local branches bound to closed or dropped issues (29450). Each branch's tip is judged by
- * `createLandedBranchRetirement`: on main → landed (archived locally, compare-and-deleted); otherwise
- * → the closed disposition (archive and `dropped` event published to origin and read back, then
- * compare-and-deleted). A worktree-held or moved branch is kept and names why. A resolver that fails,
- * or answers no bound bead for a reference, keeps those branches: unknown is never read as closed. This
- * operation reports every failure in its rows and never throws into the merge round.
- */
-export async function retireClosedIssueBranches(
-  input: ClosedIssueRetirementInput,
-): Promise<ClosedIssueRetirementReport> {
+/** Retire existing recorded branches only when the exact current head is on target, preserving holds and archive-first custody. */
+export async function retireMergedBranches(input: MergedBranchRetirementInput): Promise<MergedBranchRetirementReport> {
   const { repo, git, selection, store, queue, target, io, log, actor } = input
   const date = input.date ?? new Date().toISOString().slice(0, 10)
-  const removed: ClosedIssueRetirementRow[] = []
-  const kept: ClosedIssueRetirementRow[] = []
-  const failed: ClosedIssueRetirementRow[] = []
+  const removed: MergedBranchRetirementRow[] = []
+  const kept: MergedBranchRetirementRow[] = []
+  const failed: MergedBranchRetirementRow[] = []
   let examined = 0
   let unnumbered = 0
   let boundByNameOnly = 0
-  let unknownIssues = 0
-  let openIssues = 0
-  const closedIssues = new Set<string>()
-  const summary = (everyBranchKept?: string): ClosedIssueRetirementReport => {
-    const report: ClosedIssueRetirementReport = {
+  const summary = (everyBranchKept?: string): MergedBranchRetirementReport => {
+    const report: MergedBranchRetirementReport = {
       repo,
       target,
       examined,
       unnumbered,
       boundByNameOnly,
-      unknownIssues,
-      openIssues,
-      closedIssues: closedIssues.size,
       removed,
       kept,
       failed,
       ...(everyBranchKept === undefined ? {} : { everyBranchKept }),
     }
     log.write({
-      kind: "closed-issue-retirement",
+      kind: "local-branch-retirement",
       scope: "summary",
       repo,
       target,
       examined,
       unnumbered,
       boundByNameOnly,
-      unknownIssues,
-      openIssues,
-      closedIssues: closedIssues.size,
       removed: removed.length,
       kept: kept.length,
       failed: failed.length,
       ...(everyBranchKept === undefined ? {} : { everyBranchKept }),
     })
     io.stderr(
-      `yrd: closed-issue sweep in ${repo} against ${target.slice(0, 12)}: examined ${examined}, closed issues ${closedIssues.size}, ` +
+      `yrd: merged-branch sweep in ${repo} against ${target.slice(0, 12)}: examined ${examined}, ` +
         `retired ${removed.length}, kept ${kept.length}, failed ${failed.length}` +
         (everyBranchKept === undefined ? "" : `; every branch kept: ${everyBranchKept}`) +
         "\n",
     )
     return report
   }
-  const record = (row: ClosedIssueRetirementRow): void => {
+  const record = (row: MergedBranchRetirementRow): void => {
     ;(row.outcome === "removed" ? removed : row.outcome === "kept" ? kept : failed).push(row)
     log.write({
-      kind: "closed-issue-retirement",
+      kind: "local-branch-retirement",
       branch: row.branch,
       head: row.head,
       outcome: row.outcome,
       reason: row.reason,
       ...(row.issue === undefined ? {} : { issue: row.issue }),
-      ...(row.status === undefined ? {} : { status: row.status }),
       ...(row.detail === undefined ? {} : { detail: row.detail }),
       ...(row.archiveRef === undefined ? {} : { archive: row.archiveRef }),
       ...(row.custody === undefined ? {} : { custody: row.custody }),
@@ -1563,45 +1494,14 @@ export async function retireClosedIssueBranches(
   if (protectionsReader === undefined) {
     return summary("no localBranchProtections reader; every branch kept")
   }
-  if (input.lookupMany === undefined) {
-    return summary("target declaration has no issueResolver; issue status unproven")
-  }
-  const raws = [...new Set(candidates.map((candidate) => candidate.raw))]
-  let resolved: ReadonlyMap<string, ResolvedIssue | null>
-  try {
-    const answers = await input.lookupMany(raws)
-    resolved = new Map(raws.map((raw, index) => [raw, answers[index] ?? null]))
-  } catch (error) {
-    return summary(`resolver failed: ${error instanceof Error ? error.message : String(error)}`)
-  }
-
   const retire = createLandedBranchRetirement({ repo, git, selection, remote: store.remote, target })
   for (const { branch, head, raw, change } of candidates) {
-    const issue = resolved.get(raw)
-    if (issue === null || issue === undefined) {
-      // @cto b023d5e2 small 3: a per-row receipt, so the resolver's gaps are visible in the first sweep's 91 rows.
-      unknownIssues++
-      record({
-        branch,
-        head,
-        outcome: "kept",
-        reason: "unknown issue",
-        detail: `the resolver answered no single bead for ${raw}`,
-      })
-      continue
-    }
-    const status = typeof issue.status === "string" ? issue.status : undefined
-    if (status === undefined || !CLOSED_ISSUE_STATUSES.has(status)) {
-      openIssues++
-      continue
-    }
-    closedIssues.add(issue.id)
+    const issue = { id: raw }
     if (change !== undefined && isOpen(change.status)) {
       record({
         branch,
         head,
         issue: issue.id,
-        status,
         outcome: "kept",
         reason: "active",
         detail: `change is ${change.status}`,
@@ -1609,20 +1509,11 @@ export async function retireClosedIssueBranches(
       continue
     }
     try {
-      // @cto b023d5e2 blocking 2: a merged change's custody is its merged event and recorded landing, never
-      // ancestry alone — the queue rebuilds branches, so a merged tip need not be an ancestor of main. The pin lets
-      // the judgment prove "landing" and the branch retires as landed, never as closed.
-      const landings =
-        change?.status === "merged" && change.commit !== undefined && change.ending !== undefined
-          ? [{ event: change.ending.id, path: "", tip: change.commit }]
-          : []
-      // @cto 9a68f296 (the residual of blocking 2): a chain that ended merged takes no second ending. The closed
-      // disposition is for a branch no landing holds; a merged change whose tip moved past its landing (no pin at
-      // the tip, no ancestry) is kept and named, never archived as closed.
+      // An ending or tree match never licenses an unmerged head.
       const merged = change?.status === "merged" ? change.commit : undefined
       const result = await retire({
         path: "",
-        landings,
+        landings: [],
         branch,
         tip: head,
         actor,
@@ -1631,7 +1522,6 @@ export async function retireClosedIssueBranches(
         date,
         log,
         protections: async () => (await protectionsReader({ repo, branch, tip: head, issue: issue.id })).protections,
-        ...(merged === undefined ? { closed: { store, queue } } : {}),
       })
       const archiveRef = result.archiveRef
       const reason =
@@ -1642,7 +1532,6 @@ export async function retireClosedIssueBranches(
         branch,
         head,
         issue: issue.id,
-        status,
         outcome: result.outcome === "removed" ? "removed" : result.outcome === "failed" ? "failed" : "kept",
         reason,
         ...(result.detail === undefined ? {} : { detail: result.detail }),
@@ -1658,7 +1547,6 @@ export async function retireClosedIssueBranches(
         branch,
         head,
         issue: issue.id,
-        status,
         outcome: "failed",
         reason: "failed",
         detail: error instanceof Error ? error.message : String(error),

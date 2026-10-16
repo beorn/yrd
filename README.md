@@ -116,13 +116,25 @@ Submission scans branch history back to its merge-base with the captured target,
 
 Later commits and branch renames retain the binding. Conflicts name both issues and commits; `--issue` must match an existing binding.
 
-The target's `.yrd.yml` may declare `issueResolver: [issue-lookup, --json]`. Yrd appends each raw binding or `--issue` value as one argument and expects JSON with a nonempty `id` string on stdout.
+The target's `.yrd.yml` may declare provider commands:
+
+```yaml
+issuesProvider:
+  read: [issues, show, "<key>", --json]
+  update: [issues, catchup, --json]
+```
+
+Issue keys are opaque. The optional `read` command substitutes each literal `<key>` argv element with the complete key as one argument. It returns JSON for display only; missing commands, invalid JSON and failed reads say `issue info unavailable`. The display bound is 10 seconds. Reads never resolve submission identity or decide cleanup.
+
+After the merge round releases its lock, Yrd attempts `update` with exactly the configured argv, then runs existing archive-first cleanup even if the provider fails. No range, merge arguments, stdin facts or merge environment facts are supplied. The provider acquires its own source commits and retry position. The update bound is 120 seconds, separate from display reads: the measured public Km command took 1.246 seconds for one closing action, so 50 actions at that whole-command cost allow about 62.3 seconds with nearly twice that margin. This bounds an attempt; it does not guarantee worst-case completion. A blocked provider leaves subsequent queue rounds independent. Each service owner has one active attempt and one coalesced pending catch-up; startup schedules one fresh catch-up. Independent foreground CLI processes retain their own lifecycle. Service disposal owns and reaps its children.
+
+Inspect `<workdir>/post-merge/*.json` and the referenced stdout/stderr logs for code/config identity, repository/queue, source merge context, argv/cwd, start/end, exit/signal and timeout. These are derived inspection artifacts: interrupted attempts are labelled on startup, and no execution or cleanup decision reads old results. Automatic retirement requires exact branch-head ancestry on the target plus current protections and exact-tip archive custody. An advanced head or equal tree with a different unmerged graph stays for owner review.
 
 `yrd drop --issue 12345` selects local branches by their recorded issue, then by the leading numeric segment of the branch's final path component. It performs no issue lookup or commit-message scan. A host can supply a pure `branchIssue({branch, recordedIssue})` callback through `runYrdExecutable` for a different naming convention.
 
 Root cleanup requires the same branch and exact current tip in a merged queue history (including adopted history), or in an origin archive ref. Active changes, advanced tips and protected branches stay. Malformed histories are reported as unreadable. The report distinguishes `landed` from `archived` custody. Root cleanup applies by default; add `--dry-run` to preview. Each removal uses the existing local archive and conditional ref deletion. For reviewed abandonment of unpublished work, `yrd drop <branch> --local --tip <full-oid>` retains its explicit exact-tip path.
 
-To include registered submodule stores in your authoring tree, preview with `yrd drop --issue 12345 --submodules --json`, then repeat with `--apply` to retire eligible local branches. This mode previews by default because it expands cleanup to component repositories; `--dry-run` makes that choice explicit. It selects `task/12345-*` and `exp/12345-*` by default, or uses the host's pure mapping callback, and does not run the issue resolver.
+To include registered submodule stores in your authoring tree, preview with `yrd drop --issue 12345 --submodules --json`, then repeat with `--apply` to retire eligible local branches. This mode previews by default because it expands cleanup to component repositories; `--dry-run` makes that choice explicit. It selects recorded opaque issue bindings or the host's explicit pure mapping callback, and does not read the issues provider.
 
 A component tip qualifies when it is an ancestor of its origin `main`, or an exact component pin recorded by a root landing event and still reachable from a component origin ref. A root gitlink alone is insufficient. Components currently target `main`; a different default branch is reported as unreadable if `main` is absent. Each report names the repositories inspected, counts target, unrelated and unnumbered branches per repository, and lists only the issue’s branches and failed stores. Missing component stores fail visibly. Apply archives each tip locally before conditional removal and checks branch movement and live holds again. Remote branches and worktrees are preserved.
 

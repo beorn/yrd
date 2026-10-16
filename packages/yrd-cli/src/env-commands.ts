@@ -56,7 +56,6 @@ import {
 } from "git-super/worktree"
 import { repositoryHere as findRepository } from "./declaration.ts"
 import { originHead } from "./queue-location.ts"
-import { issueResolver } from "./issue-resolver.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 import { envOpenRecordFromFlags, writeEnvOpenRecord } from "./env-open-record.ts"
@@ -471,7 +470,6 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
         warnUnknownNotifyEvents(`${target} (${base.slice(0, 12)})`, "env open", unknown, io),
     },
   )
-  const resolveIssue = config === undefined ? undefined : issueResolver(config, root)
   // 27147: a submodule the base declares `private = true` is left empty and uninitialized; a detached
   // environment's freshWorktree reads the declaration itself.
   let provisioned: { path: string; headSha: string; baseSha: string; adoption: ProvisionedBay["adoption"] | "detached" }
@@ -545,7 +543,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     try {
       const environmentGit = gitIn(path, process, selection)
       headSha = (await environmentGit(["rev-parse", "HEAD"])).trim()
-      const binding = await issueOf(environmentGit, branch, headSha, base, options.issue, resolveIssue)
+      const binding = await issueOf(environmentGit, branch, headSha, base, options.issue)
       if (binding === undefined) throw new Error(`no issue resolved for requested binding ${options.issue}`)
       if (binding.source !== "binding") {
         const tree = (await environmentGit(["rev-parse", `${headSha}^{tree}`])).trim()

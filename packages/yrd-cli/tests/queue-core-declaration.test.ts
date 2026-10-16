@@ -64,7 +64,6 @@ import { runYrdProcess } from "../src/cli.ts"
 import { releaseRetainedCheckouts } from "../src/branch-retirement.ts"
 import { archiveRefFor } from "git-super/archive-ref"
 import { readEnvOpenRecord } from "../src/env-open-record.ts"
-import { issueLookup, issueResolver } from "../src/issue-resolver.ts"
 import { SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { eventHistoryEntries } from "../src/watch-change.ts"
@@ -155,7 +154,15 @@ function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout
   let stderr = ""
   let stdout = ""
   return {
-    io: { color: false, cwd, stderr: (text) => void (stderr += text), stdout: (text) => void (stdout += text) },
+    io: {
+      color: false,
+      cwd,
+      stderr: (text) => void (stderr += text),
+      stdout: (text) => void (stdout += text),
+      // These custody fixtures declare their host's naming policy explicitly.
+      // Generic Yrd no longer guesses an issue from these fixture branch names.
+      branchIssue: ({ branch, recordedIssue }) => recordedIssue ?? /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1],
+    },
     stderr: () => stderr,
     stdout: () => stdout,
   }
@@ -435,75 +442,6 @@ it("refreshes local status after an event queue write in the same workdir (25626
 })
 
 describe("a queue is the selected origin branch carrying config", () => {
-  /**
-   * @failure Cleanup can mistake a cached canonical identity for an issue's current closure status.
-   * @level l1
-   * @consumer Yrd issue bindings and automatic author environment cleanup
-   */
-  it("refreshes issue status while the canonical identity cache remains stable", async () => {
-    const command = ["sh", "-c", 'printf "%s\\n" "$1" >> resolver-calls; cat issue-state.json', "resolver"]
-    const repo = await world(`issueResolver: ${JSON.stringify(command)}\n`)
-    const git = gitIn(repo)
-    const config = await readConfig(git, "HEAD", { branch: "main", remote: "origin" })
-    if (config === undefined) throw new Error("fixture lost target declaration")
-    const lookup = issueLookup(config, repo)
-    const canonical = issueResolver(config, repo)
-    if (lookup === undefined || canonical === undefined) throw new Error("fixture lost target issue resolver")
-    const id = "@km/storage/26050-full"
-    writeFileSync(join(repo, "issue-state.json"), JSON.stringify({ id, status: "open" }))
-    expect(await lookup("26050")).toEqual({ id, status: "open" })
-    expect(await canonical("26050")).toBe(id)
-    writeFileSync(join(repo, "issue-state.json"), JSON.stringify({ id, status: "closed" }))
-    expect(await canonical("26050")).toBe(id)
-    expect(readFileSync(join(repo, "resolver-calls"), "utf8").trim().split("\n")).toHaveLength(2)
-    expect(await lookup(id)).toEqual({ id, status: "closed" })
-    expect(readFileSync(join(repo, "resolver-calls"), "utf8").trim().split("\n")).toHaveLength(3)
-  })
-
-  it("refuses an option-shaped raw issue before invoking the target resolver", async () => {
-    const command = ["sh", "-c", 'touch resolver-ran; printf \'{"id":"@km/storage/26050-full"}\\n\'', "resolver"]
-    const repo = await world(`issueResolver: ${JSON.stringify(command)}\n`)
-    const git = gitIn(repo)
-    const target = (await git(["rev-parse", "HEAD"])).trim()
-    const config = await readConfig(git, target, { branch: "main", remote: "origin" })
-    if (config === undefined) throw new Error("fixture lost target issue resolver")
-    const resolve = issueResolver(config, repo)
-    if (resolve === undefined) throw new Error("fixture lost target issue resolver")
-    await expect(resolve("--repo=/x/state-model")).rejects.toThrow(/raw issue reference.*starts with '-'/u)
-    expect(existsSync(join(repo, "resolver-ran"))).toBe(false)
-  })
-
-  it("uses the target's issue resolver even when the candidate changes its declaration", async () => {
-    const targetResolver = ["sh", "-c", 'printf \'{"id":"@km/storage/26050-full"}\\n\'', "resolver"]
-    const repo = await world(`issueResolver: ${JSON.stringify(targetResolver)}\n`)
-    const git = gitIn(repo)
-    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
-    await git(["checkout", "--quiet", "-b", "task/26050"])
-    writeFileSync(join(repo, ".yrd.yml"), `issueResolver: ${JSON.stringify(["sh", "-c", "exit 81", "resolver"])}\n`)
-    await git(["add", ".yrd.yml"])
-    await git(["commit", "--quiet", "-m", "bind short\n\nRefs: 26050"])
-    await git(["commit", "--quiet", "--allow-empty", "-m", "bind full\n\nRefs: @km/storage/26050-full"])
-    const run = capture(repo)
-    expect(
-      await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--dry-run", "--json"], run.io),
-      run.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(run.stdout())).toMatchObject({ issue: "@km/storage/26050-full" })
-  })
-
-  it("refuses a missing issue with the raw reference and target resolver command", async () => {
-    const repo = await world(`issueResolver: ${JSON.stringify(["sh", "-c", "exit 31", "lookup"])}\n`)
-    const git = gitIn(repo)
-    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
-    await git(["checkout", "--quiet", "-b", "task/unknown"])
-    await git(["commit", "--quiet", "--allow-empty", "-m", "bind\n\nRefs: 26050"])
-    const run = capture(repo)
-    expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--dry-run"], run.io)).toBe(2)
-    expect(run.stderr()).toContain("26050")
-    expect(run.stderr()).toContain("exit 31")
-    expect(run.stderr()).toContain("target .yrd.yml issueResolver")
-  })
-
   it("creates and runs an event queue from a parsed plain-check declaration", async () => {
     // Literal QueueConfig fixtures omit absent optional keys. A real
     // declaration materializes some of them as undefined, and those must not
@@ -1665,7 +1603,7 @@ describe("a queue is the selected origin branch carrying config", () => {
    */
   it("drop by issue previews registered submodules without issue lookup and applies exact landed tips", async () => {
     // A configured resolver that always fails proves this mode never consults issue status.
-    const repo = await world('issueResolver: ["false"]\n')
+    const repo = await world('issuesProvider: {read: ["false"]}\n')
     const seed = await world()
     const git = gitIn(repo)
     await git([
@@ -1716,6 +1654,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       "fixture",
       "--json",
     ]
+    const fixtureIssue: NonNullable<YrdCliIO["branchIssue"]> = ({ branch, recordedIssue }) => {
+      const key = recordedIssue ?? /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
+      return key === "28988" ? "@example/28988-cleanup" : key
+    }
     type Report = {
       excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[]
       eligible: { repo: string; branch: string; head: string }[]
@@ -1725,6 +1667,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     }
     for (const flags of [[], ["--dry-run"]]) {
       const preview = capture(repo)
+      preview.io.branchIssue = fixtureIssue
       expect(await runYrdProcess([...argv, ...flags], preview.io), preview.stderr()).toBe(0)
       const result = JSON.parse(preview.stdout()) as Report
       expect(result.eligible.map((row) => row.branch).sort()).toEqual([
@@ -1746,6 +1689,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect(await refs(childGit)).toBe(childBefore)
     }
     const apply = capture(repo)
+    apply.io.branchIssue = fixtureIssue
     let moved = false
     apply.io.localBranchProtections = async (input) => {
       if (input.repo === child && input.branch === "task/28988-moved" && !moved) {
@@ -1804,8 +1748,8 @@ describe("a queue is the selected origin branch carrying config", () => {
    * @level l3
    * @consumer The expanded drop command retiring component work beyond origin/main
    */
-  it("drop by issue uses historical landing pins only with component origin custody", async () => {
-    const repo = await world('issueResolver: ["false"]\n')
+  it("drop by issue keeps historical landing pins without exact-head main ancestry", async () => {
+    const repo = await world('issuesProvider: {read: ["false"]}\n')
     const seed = await world()
     const git = gitIn(repo)
     await git([
@@ -1878,9 +1822,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       eligible: { branch: string }[]
       kept: { branch: string; reason: string }[]
     }
-    expect(report.eligible.map((row) => row.branch)).toEqual(["task/28988-recorded"])
+    expect(report.eligible).toEqual([])
     expect(report.kept).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({ branch: "task/28988-recorded", reason: "unreached" }),
         expect.objectContaining({ branch: "task/28988-pin-only", reason: "unreached" }),
         expect.objectContaining({ branch: "task/28988-old-event", reason: "unreached" }),
       ]),
@@ -1888,8 +1833,10 @@ describe("a queue is the selected origin branch carrying config", () => {
     const apply = capture(repo)
     expect(await runYrdProcess([...argv, "--apply"], apply.io), apply.stderr()).toBe(0)
     const removed = (JSON.parse(apply.stdout()) as { removed: { branch: string; archiveRef: string }[] }).removed
-    expect(removed.map((row) => row.branch)).toEqual(["task/28988-recorded"])
-    expect((await childGit(["rev-parse", removed[0]!.archiveRef])).trim()).toBe(tips.get("task/28988-recorded"))
+    expect(removed).toEqual([])
+    expect((await childGit(["rev-parse", "refs/heads/task/28988-recorded"])).trim()).toBe(
+      tips.get("task/28988-recorded"),
+    )
     for (const branch of ["task/28988-pin-only", "task/28988-old-event"]) {
       expect((await childGit(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tips.get(branch))
     }
@@ -1926,6 +1873,8 @@ describe("a queue is the selected origin branch carrying config", () => {
     const advanced = (await git(["rev-parse", "HEAD"])).trim()
     await git(["checkout", "--quiet", "main"])
     const output = capture(repo)
+    output.io.branchIssue = ({ branch, recordedIssue }) =>
+      recordedIssue ?? (saved.has(branch) && branch !== "task/manual-only" ? issue : undefined)
     expect(
       await runYrdProcess(["bun", "yrd", "drop", "--issue", issue, "--submitter", "fixture", "--json"], output.io),
       output.stderr(),
@@ -2195,7 +2144,7 @@ describe("a queue is the selected origin branch carrying config", () => {
    * @level l3 @consumer A closer previewing and applying exact root branch cleanup
    */
   it("drop by issue requires exact root custody and preserves active, held and unreadable branches", async () => {
-    const repo = await world('issueResolver: ["sh", "-c", "touch resolver-ran; exit 1"]\n')
+    const repo = await world('issuesProvider: {read: ["sh", "-c", "touch resolver-ran; exit 1"]}\n')
     const git = gitIn(repo)
     const queueTip = await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
     const tips = new Map<string, string>()
@@ -2250,8 +2199,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       }
     }
     await git(["checkout", "--quiet", "main"])
-    const args = ["bun", "yrd", "drop", "--issue", "29010", "--submitter", "fixture", "--json"]
+    const args = ["bun", "yrd", "drop", "--issue", "@example/29010-custody", "--submitter", "fixture", "--json"]
     const preview = capture(repo)
+    preview.io.branchIssue = ({ branch, recordedIssue }) =>
+      recordedIssue ?? (tips.has(branch) ? "@example/29010-custody" : undefined)
     preview.io.localBranchProtections = async ({ branch }) => ({
       protections: branch.endsWith("-held") ? ["fixture hold"] : [],
       evidence: [],
@@ -2294,6 +2245,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect((await git(["for-each-ref", "--format=%(refname)", "refs/archive/"])).trim()).toBe("")
     for (const [branch, tip] of tips) expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tip)
     const apply = capture(repo)
+    apply.io.branchIssue = preview.io.branchIssue
     apply.io.localBranchProtections = preview.io.localBranchProtections
     expect(await runYrdProcess(args, apply.io), apply.stderr()).toBe(1)
     const applied = JSON.parse(apply.stdout()) as typeof report
@@ -2305,10 +2257,8 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect((await git(["rev-parse", row.archiveRef])).trim()).toBe(tips.get(row.branch))
       expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
     }
-    // 29450: the declared resolver is consulted ONCE per run for the issue's status so a closed issue's
-    // unsubmitted branch can take the closed disposition; this resolver fails (exit 1), so nothing above
-    // changed and the failure is named in the journal rather than read as closed.
-    expect(existsSync(join(repo, "resolver-ran"))).toBe(true)
+    // Provider display never participates in retirement.
+    expect(existsSync(join(repo, "resolver-ran"))).toBe(false)
     expect(applied).not.toHaveProperty("unclassified")
   })
 
@@ -2316,7 +2266,7 @@ describe("a queue is the selected origin branch carrying config", () => {
    * @level l3 @consumer Cleanup of a branch whose old ending was adopted into the event chain
    */
   it("drop by issue accepts validated adopted root landing history", async () => {
-    const repo = await world('issueResolver: ["false"]\n')
+    const repo = await world('issuesProvider: {read: ["false"]}\n')
     const git = gitIn(repo)
     const base = (await git(["rev-parse", "HEAD"])).trim()
     const queueTip = await createQueue(repo, "main", base, new Date())
@@ -2362,7 +2312,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const output = capture(repo)
     expect(
       await runYrdProcess(
-        ["bun", "yrd", "drop", "--issue", "29010", "--apply", "--submitter", "fixture", "--json"],
+        ["bun", "yrd", "drop", "--issue", "@example/29010-custody", "--apply", "--submitter", "fixture", "--json"],
         output.io,
       ),
       output.stderr(),
@@ -2376,7 +2326,7 @@ describe("a queue is the selected origin branch carrying config", () => {
    * @level l3 @consumer Standalone repositories using nonconventional branch names
    */
   it("drop by issue uses the host's pure mapping for root and expanded cleanup", async () => {
-    const repo = await world('issueResolver: ["false"]\n')
+    const repo = await world('issuesProvider: {read: ["false"]}\n')
     const git = gitIn(repo)
     const tip = (await git(["rev-parse", "HEAD"])).trim()
     await createQueue(repo, "main", tip, new Date())
@@ -2390,7 +2340,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         "yrd",
         "drop",
         "--issue",
-        "29010",
+        "@example/29010-custody",
         "--submitter",
         "fixture",
         "--json",

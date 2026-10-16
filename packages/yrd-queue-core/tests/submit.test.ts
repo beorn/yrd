@@ -16,7 +16,6 @@ import {
   inspectSubmit,
   issueOf,
   issueBindingsOf,
-  normalizeIssueReference,
   listChangeHistories,
   lookupRunIndex,
   queueFormat,
@@ -733,7 +732,7 @@ describe("event submit", () => {
       commit: binding,
     })
     expect(await issueOf(w.git, "task/plain", target, target)).toBeUndefined()
-    expect(await issueOf(w.git, "task/123-label", target, target)).toEqual({ issue: "123", source: "legacy-branch" })
+    expect(await issueOf(w.git, "task/123-label", target, target)).toBeUndefined()
     expect(await issueOf(w.git, "task/123-label", target, target, "requested-issue")).toEqual({
       issue: "requested-issue",
       source: "declared",
@@ -746,31 +745,21 @@ describe("event submit", () => {
     await expect(issueOf(failed, "task/123-label", head, target)).rejects.toThrow("missing-binding-object")
   })
 
-  /** @failure Two spellings of one issue make submit refuse after an environment bind commit.
-   * @level l2 @consumer Yrd submit and its opened change record
+  /** @failure Provider identity policy changes an opaque submission key.
+   * @level l2 @consumer Yrd submit and opened change record @testonly none
    */
-  it("submits one canonical issue when branch history uses a short id and a full path", async () => {
+  it("preserves a declared issue key verbatim without a provider", async () => {
     const w = await world()
-    await branchWithCommit(w, "task/26050", "change.txt")
-    await w.git(["checkout", "--quiet", "task/26050"])
-    await w.git(["commit", "--quiet", "--allow-empty", "-m", "bind\n\nRefs: 26050"])
-    await w.git(["commit", "--quiet", "--allow-empty", "-m", "work\n\nRefs: @km/storage/26050-full"])
-    const canonical = "@km/storage/26050-full"
-    const admit = vi.fn(async () => ({ kind: "admit" as const }))
+    await branchWithCommit(w, "task/opaque", "change.txt")
+    const key = "/different/vault/@opaque/key.md"
     const submitted = await submit(w.git, "origin", {
-      branch: "task/26050",
+      branch: "task/opaque",
       submitter: "author",
       target: { remote: "origin", branch: "main" },
-      admit,
-      resolveIssue: async (raw) => {
-        if (raw === "26050" || raw === canonical) return canonical
-        throw new Error(`unknown issue ${raw}`)
-      },
+      issue: key,
     })
-    expect(submitted.issue?.issue).toBe(canonical)
-    expect(admit).toHaveBeenCalledWith(canonical, "task/26050", submitted.head, submitted.targetHead)
-    expect(submitted.admission).toEqual({ kind: "admitted" })
-    expect((await readStatus(store(w), "main", "task/26050")).issue).toBe(canonical)
+    expect(submitted.issue?.issue).toBe(key)
+    expect((await readStatus(store(w), "main", "task/opaque")).issue).toBe(key)
   })
 
   /** @failure Admission drops an unparsed issue link when commit uses Refs without colon (27041).
@@ -861,24 +850,6 @@ describe("event submit", () => {
   /** @failure An absolute vault path and a vault-relative bead reference refuse as conflicting bindings (25719).
    * @level l2 @consumer Yrd submit and its opened change record
    */
-  it("submits one canonical issue when branch history uses absolute vault path and vault-relative spellings (25719)", async () => {
-    const w = await world()
-    const branch = "task/25488-delivery"
-    await branchWithCommit(w, branch, "change.txt")
-    await w.git(["checkout", "--quiet", branch])
-    const canonical =
-      "@ag/hab/25488-a-services-designed-relaunch-can-page-health-not-measured-when-the-probe-reads-the-runner-that-just-exited"
-    await w.git(["commit", "--quiet", "--allow-empty", "-m", `first\n\nRefs: /hh/pm/${canonical}.md`])
-    await w.git(["commit", "--quiet", "--allow-empty", "-m", `second\n\nRefs: ${canonical}`])
-    const submitted = await submit(w.git, "origin", {
-      branch,
-      submitter: "author",
-      target: { remote: "origin", branch: "main" },
-    })
-    expect(submitted.issue?.issue).toBe(canonical)
-    expect((await readStatus(store(w), "main", branch)).issue).toBe(canonical)
-  })
-
   it("refusal for conflicting issue bindings says which trailer to fix (25719)", async () => {
     const w = await world()
     await branchWithCommit(w, "task/conflict", "change.txt")
@@ -920,33 +891,6 @@ describe("event submit", () => {
       expect(error.message).toContain("Follow-up: @ag/hab/25489-follow-up")
     },
   )
-
-  it("normalizes issue reference forms (25719)", () => {
-    expect(normalizeIssueReference("/hh/pm/@ag/hab/25488-foo.md")).toBe("@ag/hab/25488-foo")
-    expect(normalizeIssueReference("./@ag/hab/25488-foo.md")).toBe("@ag/hab/25488-foo")
-    expect(normalizeIssueReference("@ag/hab/25488-foo.md")).toBe("@ag/hab/25488-foo")
-    expect(normalizeIssueReference("@ag/hab/25488-foo")).toBe("@ag/hab/25488-foo")
-    expect(normalizeIssueReference("/repo/pm/@scope/leaf")).toBe("@scope/leaf")
-    expect(normalizeIssueReference("25488")).toBe("25488")
-    expect(normalizeIssueReference("canonical-issue")).toBe("canonical-issue")
-  })
-
-  it("names both canonical issues for a real conflict and refuses resolver failure", async () => {
-    const w = await world()
-    await branchWithCommit(w, "task/two-issues", "change.txt")
-    await w.git(["checkout", "--quiet", "task/two-issues"])
-    await w.git(["commit", "--quiet", "--allow-empty", "-m", "first\n\nRefs: 26050"])
-    await w.git(["commit", "--quiet", "--allow-empty", "-m", "second\n\nRefs: 26051"])
-    const head = (await w.git(["rev-parse", "HEAD"])).trim()
-    await expect(
-      issueOf(w.git, "task/two-issues", head, w.target, undefined, async (raw) => `@km/storage/${raw}-full`),
-    ).rejects.toThrow(/@km\/storage\/26050-full.*@km\/storage\/26051-full/u)
-    await expect(
-      issueOf(w.git, "task/two-issues", head, w.target, undefined, async () => {
-        throw new Error("lookup unavailable")
-      }),
-    ).rejects.toThrow(/26050.*lookup unavailable/u)
-  })
 
   /** @failure Binding conflicts publish work or a declared issue overrides explicit history.
    * @level l2 @consumer Yrd submit and dry run

@@ -145,8 +145,8 @@ export type QueueConfig = Readonly<{
   queueRoot?: "tilde"
   /** Whole-branch Bun.Glob patterns that suppress unsubmitted drafts. */
   ignore: readonly string[]
-  /** Target-owned command that resolves a raw issue reference to its canonical identity. */
-  issueResolver?: readonly string[]
+  /** Optional provider commands; read is display only, update owns its own catch-up. */
+  issuesProvider?: Readonly<{ read?: readonly string[]; update?: readonly string[] }>
   /** Target-owned pre-submit policy command. Exit 1 refuses; failures to judge warn. */
   admission?: Readonly<{ run: string; timeoutMs: number }>
   checks: readonly CheckSpec[]
@@ -249,7 +249,7 @@ export function parseConfig(
   const setup = optionalString(declared, "setup")
   const derive = optionalString(declared, "derive")
   const teardown = optionalString(declared, "teardown")
-  const issueResolver = readIssueResolver(declared.issueResolver)
+  const issuesProvider = readIssuesProvider(declared.issuesProvider)
   const admission = readAdmission(declared.admission)
   const queueRoot = readQueueRoot(declared["queue-root"])
   return {
@@ -260,7 +260,7 @@ export function parseConfig(
     checks: readChecks(declared.checks),
     health: readHealth(declared.health),
     ignore: readIgnore(declared.ignore),
-    ...(issueResolver === undefined ? {} : { issueResolver }),
+    ...(issuesProvider === undefined ? {} : { issuesProvider }),
     ...(admission === undefined ? {} : { admission }),
     notify,
     setup,
@@ -525,7 +525,7 @@ const TOP_KEYS = [
   "derive",
   "health",
   "ignore",
-  "issueResolver",
+  "issuesProvider",
   "setup",
   "teardown",
   "notify",
@@ -546,16 +546,27 @@ function readAdmission(value: unknown): QueueConfig["admission"] {
   return { run: value.run, timeoutMs: value.timeoutMs as number }
 }
 
-function readIssueResolver(value: unknown): readonly string[] | undefined {
+function readIssuesProvider(value: unknown): QueueConfig["issuesProvider"] {
   if (value === undefined) return undefined
-  if (
-    !Array.isArray(value) ||
-    value.length === 0 ||
-    value.some((part) => typeof part !== "string" || part === "" || /[\r\n\0]/.test(part))
-  ) {
-    throw new Error(".yrd.yml issueResolver: must be a non-empty argv list of single-line strings")
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(".yrd.yml issuesProvider: must be a mapping of read/update argv")
   }
-  return value as string[]
+  const provider = value as Record<string, unknown>
+  onlyKeys(provider, ["read", "update"], ".yrd.yml issuesProvider")
+  const result: { read?: readonly string[]; update?: readonly string[] } = {}
+  for (const key of ["read", "update"] as const) {
+    const argv = provider[key]
+    if (argv === undefined) continue
+    if (
+      !Array.isArray(argv) ||
+      argv.length === 0 ||
+      argv.some((part) => typeof part !== "string" || part === "" || /[\r\n\0]/.test(part))
+    ) {
+      throw new Error(`.yrd.yml issuesProvider.${key}: must be a non-empty argv list of single-line strings`)
+    }
+    result[key] = argv as string[]
+  }
+  return result
 }
 
 /**

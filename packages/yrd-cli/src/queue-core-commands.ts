@@ -32,16 +32,16 @@ import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import { readCommitSubmodules } from "git-super/commit-graph"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
-import { issueLookup, issueLookupMany, issueResolver } from "./issue-resolver.ts"
+import { readIssueDisplay } from "./issue-resolver.ts"
+import { createPostMerge } from "./post-merge.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup } from "./env-cleanup.ts"
 import {
-  CLOSED_ISSUE_STATUSES,
   captureMergedComponentAuthors,
-  closedIssueSweepDue,
+  mergedBranchSweepDue,
   createLandedBranchRetirement,
-  markClosedIssueSweep,
-  retireClosedIssueBranches,
+  markMergedBranchSweep,
+  retireMergedBranches,
   retireMergedComponentAuthors,
   retireMergedRootAuthor,
   releaseRetainedCheckouts,
@@ -62,11 +62,9 @@ import {
   claimWorktrees,
   directMergeLine,
   drop,
-  issueFromBranchName,
   seamProcess,
   initial,
   evolve,
-  normalizeIssueReference,
   retireLocalBranch,
   pauseLine,
   eventDirectMergeCommits,
@@ -267,11 +265,6 @@ function issueOutput(io: YrdCliIO, branch: string, resolution: IssueResolution |
   if (resolution === undefined) {
     io.stderr(`yrd: WARNING: ${branch} has no issue link; no explicit issue binding was found\n`)
     return {}
-  }
-  if (resolution.source === "legacy-branch") {
-    io.stderr(
-      `yrd: legacy branch-name fallback: ${branch} -> ${resolution.issue}; no explicit issue binding was found\n`,
-    )
   }
   return {
     issue: resolution.issue,
@@ -918,7 +911,6 @@ export async function coreQueueCommand(
       throw new Error(`${config.target.remote}#${config.target.branch} classified ${String(unreachable)}`)
     }
   }
-  const resolveIssue = issueResolver(config, repo, env)
   const workdir = options.workdir ?? (await workdirOf(git))
   const cleanupEnvironments = createEnvironmentCleanup()
   mkdirSync(workdir, { recursive: true })
@@ -982,6 +974,176 @@ export async function coreQueueCommand(
   }>
   type RetryExhaustedRound = Readonly<{ kind: "retry-exhausted"; error: QueueRunEventRetryExhausted }>
   type LegacyOverrideRound = Readonly<{ kind: "legacy-override-present"; error: LegacyOverridePresent }>
+  type CleanupOutcome = Pick<QueueRunOutcome, "run" | "log" | "base" | "merged" | "target">
+  const cleanupAfterRound = async (
+    outcome: CleanupOutcome,
+    declared: CapturedDeclaration,
+    render: (record: LogRecord) => void,
+  ): Promise<void> => {
+    const config = declared.config
+    const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
+    // A merged bay must close before its branch is judged for retirement.
+    // The round is already durable and its flock released.
+    const retirementLog: Parameters<typeof retireLocalBranch>[0]["log"] = {
+      write(record) {
+        const row = { ...record, run: outcome.run, at: new Date().toISOString() }
+        appendFileSync(outcome.log, `${JSON.stringify(row)}\n`)
+        render(row)
+        return row
+      },
+    }
+    const authorGit = gitIn(authorRepo, undefined, selection, { env })
+    const componentAuthors: Awaited<ReturnType<typeof captureMergedComponentAuthors>>[number][] = []
+    if (outcome.merged.length > 0) {
+      try {
+        // Capture native identities before cleanup can destroy their checkout metadata.
+        await authorGit(["fetch", "--no-tags", await remoteUrl(git, config.target.remote), outcome.target])
+        for (const branch of outcome.merged) {
+          const change = await readStatus(eventStore, config.target.branch, branch)
+          componentAuthors.push(
+            ...(await captureMergedComponentAuthors({
+              repo: authorRepo,
+              git: authorGit,
+              selection,
+              env,
+              branch,
+              change,
+              base: outcome.base,
+              target: outcome.target,
+              log: retirementLog,
+            })),
+          )
+        }
+      } catch (error) {
+        retirementLog.write({
+          kind: "warning",
+          scope: "local-branch-retirement",
+          reason: `component capture kept: ${String(error)}`,
+        })
+      }
+    }
+    const proofs = await cleanupEnvironments({
+      repo,
+      git,
+      config,
+      workdir,
+      outcome,
+      io,
+      env,
+      selection,
+    })
+    await retireMergedComponentAuthors({
+      authors: componentAuthors,
+      proofs,
+      selection,
+      env,
+      actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
+      io,
+      log: retirementLog,
+      store: eventStore,
+      queue: config.target.branch,
+    })
+    if (outcome.merged.length > 0) {
+      try {
+        for (const branch of outcome.merged) {
+          try {
+            const change = await readStatus(eventStore, config.target.branch, branch)
+            await retireMergedRootAuthor({
+              repo: authorRepo,
+              git: authorGit,
+              actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
+              branch,
+              change,
+              base: outcome.base,
+              target: outcome.target,
+              io,
+              log: retirementLog,
+              store: eventStore,
+              queue: config.target.branch,
+            })
+          } catch (error) {
+            retirementLog.write({
+              kind: "warning",
+              branch,
+              scope: "local-branch-retirement",
+              reason: String(error),
+            })
+          }
+        }
+      } catch (error) {
+        // The merge is durable; a housekeeping failure cannot undo its result.
+        retirementLog.write({ kind: "warning", scope: "local-branch-retirement", reason: String(error) })
+      }
+    }
+    // The round ALSO drains its own raw output, one ROUND_REMOVAL_BATCH per
+    // round (28499, @cto 2026-10-10T22:53Z), beside cleanupEnvironments: both
+    // are post-judgment disposal. A disposal step must never stop the merge
+    // line (@cto 2026-10-10T23:16Z): the sweep reports every failure on stderr
+    // and in its row and RETURNS, so the round's outcome stands and the service
+    // keeps running instead of exiting into Hab's restart budget.
+    await sweepRoundOutputInRound({ workdir, now: new Date() })
+    // Preserve the existing cleanup population and service cadence; eligibility is Git-only.
+    if (request.command === "up") {
+      const now = Date.now()
+      if (mergedBranchSweepDue({ repo: authorRepo, merged: outcome.merged.length, now })) {
+        try {
+          await retireMergedBranches({
+            repo: authorRepo,
+            git: authorGit,
+            selection,
+            store: eventStore,
+            queue: config.target.branch,
+            target: outcome.target,
+            io,
+            log: retirementLog,
+            actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
+            nameNumber: (branch) => io.branchIssue?.({ branch }),
+          })
+        } catch (error) {
+          retirementLog.write({
+            kind: "warning",
+            scope: "local-branch-retirement",
+            reason: `merged-branch sweep failed; every branch kept: ${String(error)}`,
+          })
+        } finally {
+          markMergedBranchSweep(authorRepo, now)
+        }
+      }
+    }
+  }
+
+  let roundCleanup: ((merged: readonly string[]) => Promise<void>) | undefined
+  let startupCatchup = request.command === "up"
+  const codeIdentity = "error" in sourceAtLoad ? `unavailable: ${sourceAtLoad.error}` : sourceAtLoad.sha
+  const postMergeStop = new AbortController()
+  const postMergeSignal =
+    request.command === "up"
+      ? request.stop === undefined
+        ? postMergeStop.signal
+        : AbortSignal.any([request.stop, postMergeStop.signal])
+      : undefined
+  await using postMerge =
+    request.command === "up" || request.command === "run" || request.command === "merge"
+      ? createPostMerge({
+          workdir,
+          cwd: repo,
+          env,
+          stop: postMergeSignal,
+          report: (message) => io.stderr("yrd: " + message + "\n"),
+          cleanup: async (context: {
+            code: string
+            config: string
+            repo: string
+            queue: string
+            target: string
+            base?: string
+            merged: readonly string[]
+            update?: readonly string[]
+            updateDue?: boolean
+            cleanup: (merged: readonly string[]) => Promise<void>
+          }) => context.cleanup(context.merged),
+        })
+      : undefined
   const oneRound = async (
     declared: CapturedDeclaration,
     only?: Change,
@@ -1003,144 +1165,8 @@ export async function coreQueueCommand(
         options.log,
         options.populateReference,
       )
-      const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
       outcome = await queueRun({
         ...baseOptions,
-        afterRun: async (outcome) => {
-          // A merged bay must close before its branch is judged for retirement.
-          // Append to this round's journal while queueRun still owns its finish.
-          const retirementLog: Parameters<typeof retireLocalBranch>[0]["log"] = {
-            write(record) {
-              const row = { ...record, run: outcome.run, at: new Date().toISOString() }
-              appendFileSync(outcome.log, `${JSON.stringify(row)}\n`)
-              baseOptions.render(row)
-              onRecord?.(row)
-              return row
-            },
-          }
-          const authorGit = gitIn(authorRepo, undefined, selection, { env })
-          const componentAuthors: Awaited<ReturnType<typeof captureMergedComponentAuthors>>[number][] = []
-          if (outcome.merged.length > 0) {
-            try {
-              // Capture native identities before cleanup can destroy their checkout metadata.
-              await authorGit(["fetch", "--no-tags", await remoteUrl(git, config.target.remote), outcome.target])
-              for (const branch of outcome.merged) {
-                const change = await readStatus(eventStore, config.target.branch, branch)
-                componentAuthors.push(
-                  ...(await captureMergedComponentAuthors({
-                    repo: authorRepo,
-                    git: authorGit,
-                    selection,
-                    env,
-                    branch,
-                    change,
-                    base: outcome.base,
-                    target: outcome.target,
-                    log: retirementLog,
-                  })),
-                )
-              }
-            } catch (error) {
-              retirementLog.write({
-                kind: "warning",
-                scope: "local-branch-retirement",
-                reason: `component capture kept: ${String(error)}`,
-              })
-            }
-          }
-          const proofs = await cleanupEnvironments({
-            repo,
-            git,
-            config,
-            workdir,
-            outcome,
-            io,
-            env,
-            selection,
-            resolveIssue,
-          })
-          await retireMergedComponentAuthors({
-            authors: componentAuthors,
-            proofs,
-            selection,
-            env,
-            actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
-            io,
-            log: retirementLog,
-            store: eventStore,
-            queue: config.target.branch,
-          })
-          if (outcome.merged.length > 0) {
-            try {
-              for (const branch of outcome.merged) {
-                try {
-                  const change = await readStatus(eventStore, config.target.branch, branch)
-                  await retireMergedRootAuthor({
-                    repo: authorRepo,
-                    git: authorGit,
-                    actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
-                    branch,
-                    change,
-                    base: outcome.base,
-                    target: outcome.target,
-                    io,
-                    log: retirementLog,
-                    store: eventStore,
-                    queue: config.target.branch,
-                  })
-                } catch (error) {
-                  retirementLog.write({
-                    kind: "warning",
-                    branch,
-                    scope: "local-branch-retirement",
-                    reason: String(error),
-                  })
-                }
-              }
-            } catch (error) {
-              // The merge is durable; a housekeeping failure cannot undo its result.
-              retirementLog.write({ kind: "warning", scope: "local-branch-retirement", reason: String(error) })
-            }
-          }
-          // The round ALSO drains its own raw output, one ROUND_REMOVAL_BATCH per
-          // round (28499, @cto 2026-10-10T22:53Z), beside cleanupEnvironments: both
-          // are post-judgment disposal. A disposal step must never stop the merge
-          // line (@cto 2026-10-10T23:16Z): the sweep reports every failure on stderr
-          // and in its row and RETURNS, so the round's outcome stands and the service
-          // keeps running instead of exiting into Hab's restart budget.
-          await sweepRoundOutputInRound({ workdir, now: new Date() })
-          // 29450: the service's round is where a close becomes a retirement (work.md § Events first;
-          // @cto dd209c0b). Only the service sweeps, by time: at its start, after a round that merged,
-          // and hourly. Like every disposal step here it reports and RETURNS; it never stops the line.
-          if (request.command === "up") {
-            const now = Date.now()
-            if (closedIssueSweepDue({ repo: authorRepo, merged: outcome.merged.length, now })) {
-              try {
-                await retireClosedIssueBranches({
-                  repo: authorRepo,
-                  git: authorGit,
-                  selection,
-                  store: eventStore,
-                  queue: config.target.branch,
-                  target: outcome.target,
-                  io,
-                  log: retirementLog,
-                  actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
-                  nameNumber: (branch) => issueFromBranchName(branch),
-                  lookupMany: issueLookupMany(config, authorRepo, env),
-                })
-              } catch (error) {
-                retirementLog.write({
-                  kind: "warning",
-                  scope: "closed-issue-retirement",
-                  reason: `closed-issue sweep failed; every branch kept: ${String(error)}`,
-                })
-              } finally {
-                markClosedIssueSweep(authorRepo, now)
-              }
-            }
-          }
-        },
         ...(onRecord === undefined
           ? {}
           : {
@@ -1157,6 +1183,7 @@ export async function coreQueueCommand(
         ...(stopAtMs === undefined ? {} : { stopAtMs }),
         ...(noCheck === undefined ? {} : { noCheck }),
       })
+      roundCleanup = (merged) => cleanupAfterRound({ ...outcome, merged }, declared, baseOptions.render)
     } catch (error) {
       // Cleanup used to run outside this catch. Keep its original process
       // failure path: the round judged, so reporting stuck() would be false.
@@ -1415,9 +1442,29 @@ export async function coreQueueCommand(
           await invalidateStatusSnapshot()
         }
       }
+      if (outcome !== undefined && !("kind" in outcome)) {
+        const cleanup = roundCleanup
+        lock.release()
+        lock = null
+        if (cleanup !== undefined) {
+          postMerge?.nudge({
+            code: codeIdentity,
+            config: declared.config.blob,
+            repo,
+            queue: targetLabel,
+            target: outcome.target,
+            base: outcome.base,
+            merged: outcome.merged,
+            update: declared.config.issuesProvider?.update,
+            updateDue: outcome.merged.length > 0 || startupCatchup,
+            cleanup,
+          })
+        }
+      }
+      if (outcome !== undefined && !("kind" in outcome)) startupCatchup = false
       return outcome === undefined ? 2 : "kind" in outcome ? outcome : { declared, outcome }
     } finally {
-      lock.release()
+      lock?.release()
     }
   }
 
@@ -1528,17 +1575,11 @@ export async function coreQueueCommand(
         throw new Error(`${NAMED[request.command]} requires the authoring repository as cwd`)
       }
       const authorGit = gitIn(authorRepo, undefined, selection, { env })
-      const issueIdentity = (value: string): string => {
-        const normalized = normalizeIssueReference(value)
-        return /^#?(\d+)$/u.exec(normalized)?.[1] ?? issueFromBranchName(normalized) ?? normalized
-      }
+      const issueIdentity = (value: string): string => value
       const mode =
         "Root issue cleanup applies by default using exact origin custody; --submodules previews because it expands to component repositories."
       const branchIssue = (branch: string, recordedIssue?: string): string | undefined => {
-        const mapped =
-          io.branchIssue === undefined
-            ? (recordedIssue ?? issueFromBranchName(branch))
-            : io.branchIssue({ branch, recordedIssue })
+        const mapped = io.branchIssue === undefined ? recordedIssue : io.branchIssue({ branch, recordedIssue })
         return mapped === undefined ? undefined : issueIdentity(mapped)
       }
       if (request.command === "drop-local" && request.releaseCheckout) {
@@ -1588,11 +1629,8 @@ export async function coreQueueCommand(
         }
       }
       if (request.command === "drop-issue" && request.submodules) {
-        const issue = normalizeIssueReference(request.issue)
-        const numeric = issueIdentity(issue)
-        if (io.branchIssue === undefined && !/^\d+$/u.test(numeric)) {
-          throw new Error(`drop --submodules needs a numeric issue or a path ending in <number>-<slug>: ${issue}`)
-        }
+        const issue = request.issue
+
         const eventStore = createEventStore(authorRepo, await remoteUrl(git, config.target.remote), selection)
         const reading = await readEventQueueWithChanges(eventStore, config.target.branch)
         const landings: { event: string; path: string; tip: string }[] = []
@@ -1660,7 +1698,7 @@ export async function coreQueueCommand(
                 io.branchIssue !== undefined || /^(task|exp)\//u.test(branch)
                   ? branchIssue(branch, path === "" ? reading.histories.get(branch)?.state.issue : undefined)
                   : undefined
-              if (branch === targetBranch || bound !== numeric) {
+              if (branch === targetBranch || bound !== issue) {
                 if (branch === targetBranch) counts.target++
                 else if (bound === undefined) {
                   counts.unnumbered++
@@ -1769,7 +1807,7 @@ export async function coreQueueCommand(
         )
         return failed.length === 0 ? 0 : 1
       }
-      const issue = request.issue === undefined ? undefined : normalizeIssueReference(request.issue)
+      const issue = request.issue === undefined ? undefined : request.issue
       if (local && (request.branch === config.target.branch || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(request.tip))) {
         throw new Error("drop --local requires a non-target branch and a full expected commit oid")
       }
@@ -1817,27 +1855,6 @@ export async function coreQueueCommand(
       let excludedUnrelated = 0
       const unnumbered: { branch: string; head: string }[] = []
       const dryRun = !local && request.dryRun === true
-      // 29450: when the issue itself is closed or dropped, a never-submitted branch takes the closed
-      // disposition (archive and `dropped` event published to origin and read back) instead of staying
-      // `unreached`. An unprovable status keeps today's behaviour and is named in the journal.
-      let issueEnded: string | undefined
-      if (!local && issue !== undefined) {
-        const lookup = issueLookup(config, authorRepo, env)
-        if (lookup !== undefined) {
-          try {
-            const resolved = await lookup(issue)
-            if (typeof resolved.status === "string" && CLOSED_ISSUE_STATUSES.has(resolved.status)) {
-              issueEnded = resolved.status
-            }
-          } catch (error) {
-            log.write({
-              kind: "warning",
-              scope: "closed-issue-retirement",
-              reason: `issue ${issue}: status unproven, unsubmitted branches stay unreached: ${String(error)}`,
-            })
-          }
-        }
-      }
       try {
         // Inventory once. The date and actor occupy exactly two segments; branch names may contain slashes.
         const archives = local ? new Map<string, string>() : await listRefs("refs/archive/", eventStore)
@@ -1917,8 +1934,6 @@ export async function coreQueueCommand(
               }
             } else if (archive !== undefined) {
               disposition = { kind: "archived", target: head, ref: archive[0] }
-            } else if (issueEnded !== undefined) {
-              disposition = { kind: "closed", store: eventStore, queue: config.target.branch, target }
             } else {
               kept.push({
                 ...row,
@@ -2255,7 +2270,6 @@ export async function coreQueueCommand(
               io,
               env,
               selection,
-              resolveIssue,
             })
             for (const branch of retired) {
               if ((await refAt(authorGit, `refs/heads/${branch}`)) === undefined) {
@@ -2379,7 +2393,7 @@ export async function coreQueueCommand(
         if (request.branch !== undefined) throw new Error("--gitlink does not take a branch operand")
         if (request.issue === undefined) throw new Error("--gitlink needs --issue <id>")
         if (options.populateReference !== true) throw new Error("--gitlink needs the queue-owned clone")
-        const canonicalIssue = resolveIssue === undefined ? request.issue : await resolveIssue(request.issue)
+        const canonicalIssue = request.issue
         const prepared = await preparePinCarrier({
           git,
           repo,
@@ -2395,7 +2409,6 @@ export async function coreQueueCommand(
           expectedTargetHead: captured.oid,
           ...(fetchedQueue === undefined ? {} : { fetchedQueueRefs: fetchedQueue }),
           issue: canonicalIssue,
-          resolveIssue,
           admit,
         }
         if (request.dryRun === true) {
@@ -2482,7 +2495,6 @@ export async function coreQueueCommand(
         expectedTargetHead: captured.oid,
         ...(fetchedQueue === undefined ? {} : { fetchedQueueRefs: fetchedQueue }),
         ...(request.issue === undefined ? {} : { issue: request.issue }),
-        resolveIssue,
         admit,
       }
       // Operator and stuck stops accept submits (the andon, operator 2026-09-16).
@@ -2648,7 +2660,6 @@ export async function coreQueueCommand(
           submitter: request.submitter,
           target: { branch: config.target.branch, remote },
           ...(request.issue === undefined ? {} : { issue: request.issue }),
-          resolveIssue,
         })
         // The stop the submit was accepted under is not echoed here: this
         // command does not wait for it to lift, and the stop that still stands
@@ -2729,7 +2740,7 @@ export async function coreQueueCommand(
       // declaration.
       const interval = (request.intervalSeconds ?? 15) * 1000
       // Read through a call each time: the signal flips while the loop runs.
-      const stopped = (): boolean => request.stop?.aborted === true
+      const stopped = (): boolean => request.stop?.aborted === true || postMergeStop.signal.aborted
       // The supervisor declares the tree its NEXT launch will load. An absent
       // declaration preserves the mutable-checkout contract of 24515; a
       // present but unreadable declaration never falls back to that checkout.
@@ -3554,6 +3565,7 @@ export async function coreQueueCommand(
         // handler while the first publish is pending.
         offTerminate()
         startupAbort.abort()
+        postMergeStop.abort()
         if (beat !== undefined) clearInterval(beat)
         const intent = readUnitIntent("stop", options.env ?? process.env, writer.startedAt)
         const signal = received ?? "SIGTERM"
@@ -3572,8 +3584,18 @@ export async function coreQueueCommand(
           stated = graceful
           persistHealth(graceful)
         }
-        if (publisher.owns) void publisher.publish(stoppedRunnerClaim()).finally(() => terminate.reraise(signal))
-        else terminate.reraise(signal)
+        // The signal's exit must await the existing Process owner: detached
+        // provider children would otherwise survive the supervisor's restart.
+        void Promise.all([
+          postMerge?.[Symbol.asyncDispose](),
+          publisher.owns ? publisher.publish(stoppedRunnerClaim()) : undefined,
+        ]).then(
+          () => terminate.reraise(signal),
+          (error) => {
+            io.stderr(`yrd: graceful post-merge disposal failed before ${signal}: ${String(error)}\n`)
+            terminate.reraise(signal)
+          },
+        )
       })
       try {
         writeHealth(lineDocument(lastStop, 0))
@@ -3591,6 +3613,43 @@ export async function coreQueueCommand(
           })
           if (stopped() || startupAbort.signal.aborted) return 0
           await publisher.publish(runnerClaim())
+        }
+        // One fresh startup catch-up, independent of every old attempt artifact.
+        // Provider position is its own; cleanup reads native Git facts and holds.
+        if (startupCatchup) {
+          postMerge?.recover()
+          const declared = await declaration()
+          if (declared !== undefined) {
+            const startupLog = openLog(join(workdir, "logs"))
+            startupLog.write({
+              kind: "run",
+              command: "post-merge startup",
+              config: declared.config.blob,
+              target: targetLabel,
+            })
+            postMerge?.nudge({
+              code: codeIdentity,
+              config: declared.config.blob,
+              repo,
+              queue: targetLabel,
+              target: declared.oid,
+              base: declared.oid,
+              merged: [],
+              update: declared.config.issuesProvider?.update,
+              cleanup: async (merged) => {
+                try {
+                  await cleanupAfterRound(
+                    { run: startupLog.id, log: startupLog.path, base: declared.oid, target: declared.oid, merged },
+                    declared,
+                    () => {},
+                  )
+                } finally {
+                  startupLog.finish()
+                }
+              },
+            })
+            startupCatchup = false
+          }
         }
         // THE HEARTBEAT (24523 D6): one timer for the whole loop, restating
         // the last document through rounds, idle sleeps and a stopped line.
@@ -4794,6 +4853,15 @@ export async function coreQueueCommand(
                 .map((row) => ({ ...row, queue: config.target.branch, events: [] }))
             : []
         const histories = [...changeHistories, ...directHistories]
+        // Start display reads independently. The queue result is emitted before
+        // waiting for this optional decoration; no decision consumes its payload.
+        const displayCommand = config.issuesProvider?.read
+        const displayReads =
+          displayCommand === undefined
+            ? []
+            : [...new Set(histories.flatMap((row) => (row.issue === undefined ? [] : [row.issue])))].map(
+                async (key) => ({ key, display: await readIssueDisplay(displayCommand, key, repo, env) }),
+              )
         const scope =
           request.all === true
             ? `Read all event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and ${archivedChangesPrefix(config.target.branch)}, and direct target commits at ${config.target.remote}; draft branches are outside this reading.`
@@ -4889,6 +4957,13 @@ export async function coreQueueCommand(
                 })
                 .join("\n"),
         )
+        for (const { key, display } of await Promise.all(displayReads)) {
+          io.stderr(
+            display.available
+              ? `yrd: issue info ${key}: ${JSON.stringify(display.data)}\n`
+              : `yrd: ${display.reason}\n`,
+          )
+        }
         return 0
       }
     }

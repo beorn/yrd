@@ -600,11 +600,11 @@ describe("yrd env open prepares the retained environment", () => {
     expect(readFileSync(join(bay, "setup-head.txt"), "utf8")).toBe(`${head}\n`)
   })
 
-  it("writes the target resolver's canonical issue in a fresh binding commit", async () => {
+  it("binds the opaque issue without invoking a failing display provider", async () => {
     const w = await world("true")
     writeFileSync(
       join(w.work, ".yrd.yml"),
-      `issueResolver: ${JSON.stringify(["sh", "-c", 'printf \'{"id":"@km/storage/%s-full"}\\n\' "$1"', "resolver"])}\n`,
+      `issuesProvider: {read: ${JSON.stringify(["sh", "-c", "exit 99", "display", "<key>"])}}\n`,
     )
     await w.git(["add", ".yrd.yml"])
     await w.git(["commit", "--quiet", "-m", "declare issue resolver"])
@@ -615,9 +615,7 @@ describe("yrd env open prepares the retained environment", () => {
       run.stderr(),
     ).toBe(0)
     const opened = gitIn(join(w.work, ".bays", "canonical"))
-    expect((await opened(["log", "-1", "--format=%(trailers:key=Refs,valueonly)"])).trim()).toBe(
-      "@km/storage/26050-full",
-    )
+    expect((await opened(["log", "-1", "--format=%(trailers:key=Refs,valueonly)"])).trim()).toBe("26050")
   })
 
   it("refuses a conflicting binding before setup and retains the actual environment", async () => {

@@ -161,7 +161,6 @@ it("names the private-store refusal by class and the real verify route in the sw
     workdir,
     io: { cwd: repo, stdout: () => {}, stderr: () => {} },
     selection: git.selection,
-    resolveIssue: undefined,
     outcome: { run: "sweep-private-class", log, merged: [], target: head } as never,
   })
 
@@ -203,7 +202,6 @@ it("keeps a standing close request when the refusal's own class arrives on the f
     workdir,
     io: { cwd: repo, stdout: () => {}, stderr: () => {} },
     selection: git.selection,
-    resolveIssue: undefined,
     outcome: { run: "sweep-private-request", log, merged: [], target: head } as never,
   })
 
