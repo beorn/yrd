@@ -1028,7 +1028,7 @@ export async function coreQueueCommand(
         })
       }
     }
-    // Once environment cleanup begins, finish its component and root retirement.
+    // Once environment cleanup begins, finish it and its component retirement.
     // A handoff before it begins leaves the native rows for startup catch-up.
     if (!postMergeSignal?.aborted) {
       const proofs = await cleanupEnvironments({
@@ -1054,9 +1054,37 @@ export async function coreQueueCommand(
       })
     }
     if (outcome.merged.length > 0) {
+      let stopInventoryRead = false
+      let rowHoldingBranches: Set<string> | undefined
+      const skippedRoots: string[] = []
       try {
         for (const branch of outcome.merged) {
           try {
+            if (postMergeSignal?.aborted) {
+              if (!stopInventoryRead) {
+                stopInventoryRead = true
+                try {
+                  const inventory = await environmentInventory(authorRepo, authorGit, workdir)
+                  rowHoldingBranches = new Set(
+                    inventory.rows.flatMap((row) => (row.branch === undefined ? [] : [row.branch])),
+                  )
+                } catch (error) {
+                  const reason = `stop-time environment inventory unavailable in ${authorRepo} (workdir ${workdir}): ${String(error)}; running remaining root retirement checks`
+                  retirementLog.write({ kind: "warning", scope: "local-branch-retirement", reason })
+                  io.stderr(`yrd: ${reason}\n`)
+                }
+              }
+              if (rowHoldingBranches?.has(branch)) {
+                skippedRoots.push(branch)
+                retirementLog.write({
+                  kind: "warning",
+                  branch,
+                  scope: "local-branch-retirement",
+                  reason: "root retirement skipped during shutdown; left to startup catch-up",
+                })
+                continue
+              }
+            }
             const change = await readStatus(eventStore, config.target.branch, branch)
             await retireMergedRootAuthor({
               repo: authorRepo,
@@ -1083,6 +1111,11 @@ export async function coreQueueCommand(
       } catch (error) {
         // The merge is durable; a housekeeping failure cannot undo its result.
         retirementLog.write({ kind: "warning", scope: "local-branch-retirement", reason: String(error) })
+      }
+      if (skippedRoots.length > 0) {
+        io.stderr(
+          `yrd: ${skippedRoots.length} root retirements left to startup catch-up: ${JSON.stringify(skippedRoots.slice(0, 3))}\n`,
+        )
       }
     }
     // The round ALSO drains its own raw output, one ROUND_REMOVAL_BATCH per

@@ -4034,9 +4034,13 @@ describe("yrd queue up, the service", () => {
           )
           .toBe(true)
       }
-      expect
-        .soft(run.stderr(), "close report names the row-holding branches left to startup catch-up")
-        .toContain("startup catch-up")
+      const skippedStartup = run
+        .stderr()
+        .split("\n")
+        .filter((line) => line.includes("root retirements left to startup catch-up"))
+      expect(skippedStartup, "startup-only cleanup reports its skipped roots once").toHaveLength(1)
+      expect(skippedStartup[0]).toContain("3 root retirements")
+      for (const author of authors) expect(skippedStartup[0]).toContain(author.branch)
       const dropped = prepared
         .stderr()
         .split("\n")
@@ -4154,12 +4158,26 @@ describe("yrd queue up, the service", () => {
       expect(rowBefore.rows.some((row) => row.branch === noRow.branch)).toBe(false)
       expect(rowBefore.rows).toContainEqual(expect.objectContaining({ path: rowHeld.path, branch: rowHeld.branch }))
       let roundCaptureStarted = false
-      const roundHeld = new Promise<void>((resolve) => {
-        releaseRoundCapture = resolve
+      let startupCaptureStarted = false
+      let releaseStartupCapture!: () => void
+      let releaseMixedCapture!: () => void
+      const startupHeld = new Promise<void>((resolve) => {
+        releaseStartupCapture = resolve
       })
+      const roundHeld = new Promise<void>((resolve) => {
+        releaseMixedCapture = resolve
+      })
+      releaseRoundCapture = () => {
+        releaseStartupCapture()
+        releaseMixedCapture()
+      }
       const readRoundStatus = queueCore.readStatus
       const roundRead = vi.spyOn(queueCore, "readStatus").mockImplementation(async (...args) => {
         const state = await readRoundStatus(...args)
+        if (!startupCaptureStarted && args[2] === remaining[0]!.branch && state.status === "merged") {
+          startupCaptureStarted = true
+          await startupHeld
+        }
         if (!roundCaptureStarted && args[2] === noRow.branch && state.status === "merged") {
           roundCaptureStarted = true
           await roundHeld
@@ -4178,7 +4196,8 @@ describe("yrd queue up, the service", () => {
         return { protections: branch === noRow.branch ? [] : ["native recovery environment remains"], evidence: [] }
       }
       const mixedStop = new AbortController()
-      let mixedRound: QueueRunOutcome | undefined
+      const mixedRounds: QueueRunOutcome[] = []
+      const mixedMerged = new Set<string>()
       const mixedService = fromLandingB(
         w.work,
         mixedRun.io,
@@ -4186,27 +4205,49 @@ describe("yrd queue up, the service", () => {
           command: "up",
           intervalSeconds: 0,
           stop: mixedStop.signal,
-          afterRound: (outcome: QueueRunOutcome) => {
-            mixedRound = outcome
+          afterRound: async (outcome: QueueRunOutcome) => {
+            if (!outcome.merged.some((branch) => mixed.some((item) => item.branch === branch))) return
+            mixedRounds.push(outcome)
+            for (const branch of outcome.merged) mixedMerged.add(branch)
+            if (!mixed.every(({ branch }) => mixedMerged.has(branch))) return
+            try {
+              expect(startupCaptureStarted, "startup capture holds cleanup while both real rounds merge").toBe(true)
+              releaseStartupCapture()
+              await vi.waitFor(
+                () => expect(roundCaptureStarted, "the coalesced round attempt reaches capture").toBe(true),
+                { timeout: 8000 },
+              )
+            } finally {
+              mixedStop.abort()
+              releaseRoundCapture?.()
+            }
           },
         },
         { env: { ...process.env, YRD_RELAUNCH_SOURCE: join(home, "current") }, json: true, workdir: w.workdir },
       )
-      try {
-        await vi.waitFor(
-          () => expect(roundCaptureStarted, "the actual merged round reaches component capture").toBe(true),
-          { timeout: 8000 },
-        )
-      } finally {
-        mixedStop.abort()
-        releaseRoundCapture?.()
-      }
       expect(await mixedService, mixedRun.stderr()).toBe(0)
-      expect(new Set(mixedRound?.merged), "the actual round merged both native submissions").toEqual(
+      expect(mixedMerged, "both native submissions merged in actual queue rounds").toEqual(
         new Set(mixed.map(({ branch }) => branch)),
       )
+      expect(mixedRounds).toHaveLength(2)
+      const mixedAttempts = readdirSync(join(w.workdir, "post-merge"))
+        .filter((name) => name.endsWith(".json"))
+        .map(
+          (name) =>
+            JSON.parse(readFileSync(join(w.workdir, "post-merge", name), "utf8")) as { merged: readonly string[] },
+        )
+      expect(
+        mixedAttempts.some((attempt) => mixed.every(({ branch }) => attempt.merged.includes(branch))),
+        "the pending round attempt carries both actual merges",
+      ).toBe(true)
+      const roundCleanupHeaders = readdirSync(startupRetirement)
+        .filter((name) => name.endsWith(".jsonl"))
+        .flatMap((name) => readRunLog(startupRetirement, name.slice(0, -".jsonl".length)))
+      expect(
+        roundCleanupHeaders.some((entry) => entry.kind === "run" && entry.queueRun === mixedRounds.at(-1)!.run),
+        "cleanup names the newest actual queue run",
+      ).toBe(true)
       roundRead.mockRestore()
-      expect(mixedRound).toBeDefined()
       expect(
         (await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${noRow.branch}`])).trim(),
         "the no-row merged branch retires whole after stop",
