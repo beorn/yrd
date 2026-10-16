@@ -1,0 +1,254 @@
+/**
+ * `yrd issues <verb>` — the one reader of a project's issues declaration (design `issues-interface` rev 6 § 4–§ 6,
+ * @cto ruling 0e9e794e). It finds the project, reads `issues.yml` from one pinned commit of `main`, and runs the
+ * provider argv declared for the verb. It holds no issue semantics: the provider's JSON is passed back whole.
+ *
+ * Never a clone, a fetch or a working-tree read: the declaration in force is the one committed on `main`.
+ */
+import { realpathSync } from "node:fs"
+import { isAbsolute } from "node:path"
+import { fileURLToPath } from "node:url"
+import { cleanGitEnvironment, createProcess } from "@yrd/process"
+// Gitomic only through Yrd's one configured git seam (gitomic-boundary.test.ts): scrubbed env, bounded calls.
+import { createLegacyBackend, openReader } from "@yrd/queue-core"
+import {
+  ISSUES_CLOSE_REASONS,
+  ISSUES_CODES,
+  ISSUES_DECLARATION_PATH,
+  ISSUES_VERBS,
+  ISSUES_VERB_NAMES,
+  ISSUES_WRITE_VERBS,
+  IssuesDeclarationError,
+  isIssuesVerb,
+  parseIssuesDeclaration,
+  substituteArgv,
+  type IssuesCode,
+  type IssuesVerb,
+} from "./declaration.ts"
+
+export type IssuesEnvelope = Readonly<{
+  declaration: Readonly<{ repository: string; commit: string; path: typeof ISSUES_DECLARATION_PATH }>
+  verb: IssuesVerb
+  result: unknown
+}>
+
+/** Exit 1: refused or failed with a named cause. Exit 2: the request itself is malformed. */
+export type IssuesFailure = Readonly<{ ok: false; exitCode: 1 | 2; code: IssuesCode; message: string }>
+
+export type IssuesOutcome = Readonly<{ ok: true; envelope: IssuesEnvelope }> | IssuesFailure
+
+export type RunIssuesVerbOptions = Readonly<{
+  verb: string
+  /** The verb's positional operands, in {@link ISSUES_VERBS} order. */
+  args: readonly string[]
+  /** The replay key; required by every write verb. */
+  id?: string
+  /** The project root; absent, the toplevel of `cwd`'s repository. */
+  projectRoot?: string
+  /** The caller's directory: where discovery starts and where the provider runs. */
+  cwd: string
+  /** The provider's environment, inherited whole. Defaults to this process's. */
+  env?: NodeJS.ProcessEnv
+  /** Kill the provider after this long and fail with {@link ISSUES_CODES.providerTimedOut}. */
+  timeoutMs?: number
+  /** Where the provider's stderr passes through. Defaults to this process's stderr. */
+  stderr?: (text: string) => void
+}>
+
+function fail(exitCode: 1 | 2, code: IssuesCode, subject: string, detail: string): IssuesFailure {
+  return { ok: false, exitCode, code, message: `${code}: ${subject}: ${detail}` }
+}
+
+function commandText(argv: readonly string[]): string {
+  return argv.map((word) => (word === "" || /[\s"'`$\\]/u.test(word) ? JSON.stringify(word) : word)).join(" ")
+}
+
+/** Validate the request before any git read: a malformed call is exit 2 whatever the declaration says. */
+function checkRequest(
+  options: RunIssuesVerbOptions,
+): IssuesFailure | Readonly<{ ok: true; values: Readonly<Record<string, string>> }> {
+  const { verb } = options
+  if (!isIssuesVerb(verb)) {
+    return fail(2, ISSUES_CODES.badArguments, verb, `not a verb; the verbs are ${ISSUES_VERB_NAMES.join(", ")}`)
+  }
+  const operands: readonly string[] = ISSUES_VERBS[verb]
+  if (options.args.length !== operands.length) {
+    return fail(
+      2,
+      ISSUES_CODES.badArguments,
+      verb,
+      `takes ${operands.length === 0 ? "no operands" : operands.map((name) => `<${name}>`).join(" ")}, got ${options.args.length}`,
+    )
+  }
+  const values: Record<string, string> = {}
+  operands.forEach((name, index) => {
+    values[name] = options.args[index] as string
+  })
+  if (verb === "close" && !(ISSUES_CLOSE_REASONS as readonly string[]).includes(values.reason as string)) {
+    return fail(
+      2,
+      ISSUES_CODES.badArguments,
+      `close ${JSON.stringify(values.reason)}`,
+      `reason must be ${ISSUES_CLOSE_REASONS.join(" or ")}`,
+    )
+  }
+  if (ISSUES_WRITE_VERBS.has(verb)) {
+    if (options.id === undefined || options.id === "") {
+      return fail(2, ISSUES_CODES.badArguments, verb, "--id <id> is required: the replay key the provider dedupes on")
+    }
+    values.id = options.id
+  }
+  return { ok: true, values }
+}
+
+async function git(
+  args: readonly string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>> {
+  await using process = createProcess({ cwd, env: { ...cleanGitEnvironment(env), GIT_TERMINAL_PROMPT: "0" } })
+  const result = await process.run({ argv: ["git", ...args], cwd, timeoutMs: 30_000 })
+  return { exitCode: result.exitCode, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
+}
+
+function sameDirectory(left: string, right: string): boolean {
+  try {
+    return realpathSync(left) === realpathSync(right)
+  } catch {
+    // silent-fallback-allow: a path that cannot be resolved is not the same directory; the caller refuses loudly.
+    return false
+  }
+}
+
+/** True when `path` is itself a repository: a bare one's git dir, or a non-bare one's toplevel. */
+async function isRepositoryAt(path: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+  const bare = await git(["rev-parse", "--is-bare-repository", "--absolute-git-dir"], path, env)
+  if (bare.exitCode !== 0) return false
+  const [isBare, gitDir] = bare.stdout.split("\n")
+  if (isBare === "true") return gitDir !== undefined && sameDirectory(gitDir, path)
+  const top = await git(["rev-parse", "--show-toplevel"], path, env)
+  return top.exitCode === 0 && sameDirectory(top.stdout, path)
+}
+
+/** The repository to read: the root's origin when that origin is local, else the root itself. */
+async function repositoryToRead(root: string, env: NodeJS.ProcessEnv): Promise<IssuesFailure | string> {
+  const origin = await git(["config", "--get", "remote.origin.url"], root, env)
+  // `git config --get` exits 1 for an unset key: no origin, so the root is the repository.
+  if (origin.exitCode === 1 && origin.stdout === "") return root
+  if (origin.exitCode !== 0) {
+    return fail(1, ISSUES_CODES.notARepository, root, `git config --get remote.origin.url failed: ${origin.stderr}`)
+  }
+  const url = origin.stdout
+  let local: string | undefined
+  if (url.startsWith("file://")) local = fileURLToPath(url)
+  else if (isAbsolute(url)) local = url
+  if (local === undefined) return root
+  if (!(await isRepositoryAt(local, env))) {
+    return fail(
+      1,
+      ISSUES_CODES.originNotARepository,
+      root,
+      `origin ${JSON.stringify(url)} names a local path that is not a git repository`,
+    )
+  }
+  return local
+}
+
+/** Run one verb end to end and return the envelope or a named failure. Never throws for a provider's fault. */
+export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<IssuesOutcome> {
+  const request = checkRequest(options)
+  if (!request.ok) return request
+  const verb = options.verb as IssuesVerb
+  const env = options.env ?? process.env
+  const writeStderr = options.stderr ?? ((text: string) => void process.stderr.write(text))
+
+  let root = options.projectRoot
+  if (root === undefined) {
+    const top = await git(["rev-parse", "--show-toplevel"], options.cwd, env)
+    if (top.exitCode !== 0 || top.stdout === "") {
+      return fail(1, ISSUES_CODES.notARepository, options.cwd, `not inside a git repository; ${top.stderr}`)
+    }
+    root = top.stdout
+  } else if (!(await isRepositoryAt(root, env))) {
+    return fail(1, ISSUES_CODES.notARepository, root, "--project-root is not the toplevel of a git repository")
+  }
+  const repository = await repositoryToRead(root, env)
+  if (typeof repository !== "string") return repository
+
+  let commit: string
+  let text: string | undefined
+  try {
+    const reader = await openReader({ repo: repository, ref: "main", backend: createLegacyBackend("git", env) })
+    commit = await reader.head()
+    text = await reader.at(commit).get(ISSUES_DECLARATION_PATH)
+  } catch (error) {
+    return fail(
+      1,
+      ISSUES_CODES.noMain,
+      repository,
+      `cannot read main: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  const where = `${repository}@${commit}:${ISSUES_DECLARATION_PATH}`
+  if (text === undefined) return fail(1, ISSUES_CODES.declarationMissing, where, "absent")
+
+  let declared: readonly string[] | undefined
+  try {
+    declared = parseIssuesDeclaration(text, where)[verb]
+  } catch (error) {
+    if (error instanceof IssuesDeclarationError) {
+      return { ok: false, exitCode: 1, code: error.code, message: error.message }
+    }
+    throw error
+  }
+  if (declared === undefined) {
+    return fail(1, ISSUES_CODES.unsupported, verb, `${verb} is not declared in ${where} (unsupported)`)
+  }
+
+  const argv = substituteArgv(declared, request.values)
+  const command = commandText(declared)
+  const decoder = new TextDecoder()
+  await using provider = createProcess({ cwd: options.cwd, env })
+  let result: Awaited<ReturnType<typeof provider.run>>
+  try {
+    result = await provider.run({
+      argv,
+      cwd: options.cwd,
+      env,
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      onOutput: ({ stream, chunk }) => {
+        if (stream === "stderr") writeStderr(decoder.decode(chunk, { stream: true }))
+      },
+    })
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code === "ENOENT") {
+      return fail(1, ISSUES_CODES.providerMissing, `${verb} ${command}`, `command ${JSON.stringify(argv[0])} not found`)
+    }
+    return fail(
+      1,
+      ISSUES_CODES.providerFailed,
+      `${verb} ${command}`,
+      `could not start: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  if (result.timedOut) {
+    return fail(1, ISSUES_CODES.providerTimedOut, `${verb} ${command}`, `killed after ${options.timeoutMs} ms`)
+  }
+  if (result.exitCode !== 0 || result.signal !== null || result.stalled === true) {
+    const how = result.signal === null ? `exit ${result.exitCode}` : `signal ${result.signal}`
+    return fail(1, ISSUES_CODES.providerFailed, `${verb} ${command}`, `provider ended with ${how}`)
+  }
+  if (result.outputTruncation !== undefined) {
+    return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "exit 0 but stdout overflowed its capture")
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(result.stdout)
+  } catch {
+    return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "exit 0 but stdout is not JSON")
+  }
+  return {
+    ok: true,
+    envelope: { declaration: { repository, commit, path: ISSUES_DECLARATION_PATH }, verb, result: parsed },
+  }
+}

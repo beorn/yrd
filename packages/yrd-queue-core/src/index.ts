@@ -124,6 +124,8 @@ export type { Incident } from "./incident.ts"
 export {
   configValue,
   createEventStore,
+  createLegacyBackend,
+  openReader,
   executableFor,
   selectionFor,
   gitIn,
