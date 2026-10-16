@@ -39,10 +39,7 @@ import { createEnvironmentCleanup } from "./env-cleanup.ts"
 import { environmentInventory } from "./env-commands.ts"
 import {
   captureMergedComponentAuthors,
-  mergedBranchSweepDue,
   createLandedBranchRetirement,
-  markMergedBranchSweep,
-  retireMergedBranches,
   retireMergedComponentAuthors,
   retireMergedRootAuthor,
   releaseRetainedCheckouts,
@@ -1090,34 +1087,6 @@ export async function coreQueueCommand(
     // and in its row and RETURNS, so the round's outcome stands and the service
     // keeps running instead of exiting into Hab's restart budget.
     await sweepRoundOutputInRound({ workdir, now: new Date() })
-    // Preserve the existing cleanup population and service cadence; eligibility is Git-only.
-    if (request.command === "up") {
-      const now = Date.now()
-      if (mergedBranchSweepDue({ repo: authorRepo, merged: outcome.merged.length, now })) {
-        try {
-          await retireMergedBranches({
-            repo: authorRepo,
-            git: authorGit,
-            selection,
-            store: eventStore,
-            queue: config.target.branch,
-            target: outcome.target,
-            io,
-            log: retirementLog,
-            actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
-            nameNumber: (branch) => io.branchIssue?.({ branch }),
-          })
-        } catch (error) {
-          retirementLog.write({
-            kind: "warning",
-            scope: "local-branch-retirement",
-            reason: `merged-branch sweep failed; every branch kept: ${String(error)}`,
-          })
-        } finally {
-          markMergedBranchSweep(authorRepo, now)
-        }
-      }
-    }
   }
 
   let roundCleanup: ((merged: readonly string[]) => Promise<void>) | undefined
