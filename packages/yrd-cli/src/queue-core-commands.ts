@@ -997,6 +997,7 @@ export async function coreQueueCommand(
         // Capture native identities before cleanup can destroy their checkout metadata.
         await authorGit(["fetch", "--no-tags", await remoteUrl(git, config.target.remote), outcome.target])
         for (const branch of outcome.merged) {
+          if (postMergeSignal?.aborted) break
           const change = await readStatus(eventStore, config.target.branch, branch)
           let base = outcome.base
           if (change.componentAuthors?.length) {
@@ -1027,27 +1028,31 @@ export async function coreQueueCommand(
         })
       }
     }
-    const proofs = await cleanupEnvironments({
-      repo,
-      git,
-      config,
-      workdir,
-      outcome,
-      io,
-      env,
-      selection,
-    })
-    await retireMergedComponentAuthors({
-      authors: componentAuthors,
-      proofs,
-      selection,
-      env,
-      actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
-      io,
-      log: retirementLog,
-      store: eventStore,
-      queue: config.target.branch,
-    })
+    // Once environment cleanup begins, finish its component and root retirement.
+    // A handoff before it begins leaves the native rows for startup catch-up.
+    if (!postMergeSignal?.aborted) {
+      const proofs = await cleanupEnvironments({
+        repo,
+        git,
+        config,
+        workdir,
+        outcome,
+        io,
+        env,
+        selection,
+      })
+      await retireMergedComponentAuthors({
+        authors: componentAuthors,
+        proofs,
+        selection,
+        env,
+        actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
+        io,
+        log: retirementLog,
+        store: eventStore,
+        queue: config.target.branch,
+      })
+    }
     if (outcome.merged.length > 0) {
       try {
         for (const branch of outcome.merged) {
@@ -4001,6 +4006,7 @@ export async function coreQueueCommand(
         if (stopped() && publisher.owns && publisher.conflict === undefined) {
           await publisher.publish(stoppedRunnerClaim())
         }
+        postMergeStop.abort()
       }
     }
     case "list": {
