@@ -3783,6 +3783,14 @@ describe("drop --local --release-checkout", () => {
     const spy = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue(permitted)
     return { spy, permitted }
   }
+  async function credentialOrigin(repo: string) {
+    const git = gitIn(repo)
+    const remote = (await git(["remote", "get-url", "origin"])).trim()
+    const credential = "https://fixture-user:fixture-secret@repo.invalid/retained.git"
+    await git(["config", `url.${remote}.insteadOf`, credential])
+    await git(["remote", "set-url", "origin", credential])
+    return credential
+  }
   // Explicit release must prove both host authorities are connected; ordinary
   // drop fixtures do not exercise the missing-reader boundary.
   it.each(["liveEnvironmentUse", "localBranchProtections"] as const)(
@@ -3894,6 +3902,8 @@ describe("drop --local --release-checkout", () => {
   // than a live branch or a premature ending event, must make that retry possible.
   it("publishes exactly one ending when retrying after root retirement", async () => {
     const fixture = await releaseWorld()
+    fixture.argv.push("--queue", `${fixture.repo}#main`)
+    await credentialOrigin(fixture.repo)
     const { spy } = await permitCensus()
     const remote = gitIn(join(dirname(fixture.repo), "remote.git"))
     try {
@@ -3901,6 +3911,8 @@ describe("drop --local --release-checkout", () => {
       const first = releaseCapture(fixture.repo)
       expect(await runYrdProcess([...fixture.argv, "--apply"], first.io), first.stdout() + first.stderr()).toBe(1)
       const partial = JSON.parse(first.stdout()) as ReleaseReport
+      expect(first.stdout()).not.toContain("fixture-secret")
+      expect(first.stdout()).not.toContain("fixture-user")
       expect(partial.removed).toHaveLength(1)
       expect(partial.failed).toHaveLength(1)
       expect(await fixture.git(["for-each-ref", `refs/heads/${fixture.branch}`])).toBe("")
@@ -4020,10 +4032,12 @@ describe("drop --local --release-checkout", () => {
   )
   it("previews by default, then retains dirty/private/index/lease/lock bytes with own-remote custody and one root ending", async () => {
     const fixture = await releaseWorld(true)
+    fixture.argv.push("--queue", `${fixture.repo}#main`)
     const { spy } = await permitCensus()
     try {
       const before = new Map<string, string>()
       for (const path of fixture.checkoutFiles.keys()) {
+        await credentialOrigin(path)
         before.set(
           path,
           await gitIn(path)(["--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=all"]),
@@ -4033,7 +4047,13 @@ describe("drop --local --release-checkout", () => {
         const preview = releaseCapture(fixture.repo)
         expect(await runYrdProcess([...fixture.argv, ...flags], preview.io), preview.stderr()).toBe(0)
         const report = JSON.parse(preview.stdout()) as ReleaseReport
+        expect(preview.stdout()).not.toContain("fixture-secret")
+        expect(preview.stdout()).not.toContain("fixture-user")
         expect(report.eligible, JSON.stringify(report) + preview.stderr()).toHaveLength(2)
+        expect(report.eligible.map((row) => row.remote)).toEqual([
+          "https://repo.invalid/retained.git",
+          "https://repo.invalid/retained.git",
+        ])
         expect(report.removed).toEqual([])
         expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
         expect((await listChanges(createEventStore(fixture.repo, "origin", fixture.git.selection), "main")).size).toBe(
@@ -4061,6 +4081,8 @@ describe("drop --local --release-checkout", () => {
       }
       expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(0)
       const report = JSON.parse(applied.stdout()) as ReleaseReport
+      expect(applied.stdout()).not.toContain("fixture-secret")
+      expect(applied.stdout()).not.toContain("fixture-user")
       expect(report.removed).toHaveLength(2)
       expect(report.failed).toEqual([])
       // Portable Yrd must retain the host's non-blocking evidence in its JSON receipt;
@@ -4093,8 +4115,10 @@ describe("drop --local --release-checkout", () => {
       ).histories.get(fixture.branch)!.events
       expect(events.filter((event) => event.type === "cancelled")).toHaveLength(1)
       const ending = events.find((event) => event.type === "cancelled")!
+      expect(ending.content).not.toContain("fixture-secret")
+      expect(ending.content).not.toContain("fixture-user")
       for (const row of report.removed) {
-        for (const value of [row.repo, row.head, row.archiveRef]) expect(ending.content).toContain(value)
+        for (const value of [row.repo, row.head, row.archiveRef, row.remote]) expect(ending.content).toContain(value)
       }
     } finally {
       spy.mockRestore()
@@ -4126,6 +4150,9 @@ describe("drop --local --release-checkout", () => {
         }
         output.io.localBranchProtections = async () => {
           reads++
+          if (kind === "host") {
+            throw new Error("live lease or host hold: https://fixture-user:fixture-secret@repo.invalid/retained.git")
+          }
           if (kind === "failed retirement" && reads === 4) {
             const lock = (await fixture.git(["rev-parse", "--git-path", `refs/heads/${fixture.branch}.lock`])).trim()
             retirementLock = join(fixture.repo, lock)
@@ -4135,7 +4162,7 @@ describe("drop --local --release-checkout", () => {
             expect(await fixture.git(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")).toBe("")
           }
           return {
-            protections: kind === "host" || (kind === "late entrant" && reads > 3) ? ["live lease or host hold"] : [],
+            protections: kind === "late entrant" && reads > 3 ? ["live lease or host hold"] : [],
             evidence: [],
           }
         }
@@ -4143,6 +4170,8 @@ describe("drop --local --release-checkout", () => {
           kind === "failed retirement" ? 1 : 0,
         )
         const report = JSON.parse(output.stdout()) as ReleaseReport
+        expect(output.stdout()).not.toContain("fixture-secret")
+        expect(output.stdout()).not.toContain("fixture-user")
         expect(report.removed).toEqual([])
         expect(kind === "failed retirement" ? report.failed : report.kept).toHaveLength(1)
         expect(kind === "failed retirement" ? report.kept : report.failed).toEqual([])

@@ -69,6 +69,9 @@ export async function releaseRetainedCheckouts(
   }>,
 ) {
   const { request, io } = input
+  // Transport keeps the configured URL; receipts and diagnostics never retain
+  // its userinfo. Match URLs within error text as well as standalone origins.
+  const publicText = (value: string) => value.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s]*@/giu, "$1")
   type Row = {
     repo: string
     path: string
@@ -94,11 +97,11 @@ export async function releaseRetainedCheckouts(
     path: "",
     branch: request.branch,
     head: request.tip,
-    remote: rootStore.remote,
+    remote: publicText(rootStore.remote),
     archiveRef: archiveRefFor(request.branch, request.by, date),
     reason: request.reason,
   }
-  type Candidate = { row: Row; checkout: string; git: Git; retired: boolean; detached: boolean }
+  type Candidate = { row: Row; remote: string; checkout: string; git: Git; retired: boolean; detached: boolean }
   const candidates: Candidate[] = []
   const readGit = (repo: string) => gitIn(repo, undefined, input.selection, { env: input.env })
   const overlaps = (root: string, path: string) => {
@@ -132,7 +135,8 @@ export async function releaseRetainedCheckouts(
       issue: request.issue,
       retainedCheckout: checkout,
     })
-    for (const row of result.evidence) {
+    for (const item of result.evidence) {
+      const row = { ...item, reason: publicText(item.reason) }
       if (!evidence.some((seen) => seen.kind === row.kind && seen.path === row.path && seen.reason === row.reason)) {
         evidence.push(row)
       }
@@ -285,6 +289,7 @@ export async function releaseRetainedCheckouts(
         const current = await refAt(git, `refs/heads/${selectedBranch}`)
         const retired =
           attached !== undefined && attached.branch === undefined && current === undefined && archive !== undefined
+        const remote = path === "" ? rootStore.remote : await remoteUrl(git, "origin")
         const row: Row =
           path === ""
             ? rootRow
@@ -293,7 +298,7 @@ export async function releaseRetainedCheckouts(
                 path,
                 branch: selectedBranch,
                 head: commit,
-                remote: await remoteUrl(git, "origin"),
+                remote: publicText(remote),
                 archiveRef: archiveRefFor(selectedBranch, request.by, date),
                 reason: request.reason,
               }
@@ -308,11 +313,12 @@ export async function releaseRetainedCheckouts(
             detail: `attached checkout does not match exact recorded pin ${commit}`,
           })
         } else {
-          if (retired && (await readRemoteCommit(git, row.remote, row.archiveRef)) !== commit) {
+          if (retired && (await readRemoteCommit(git, remote, row.archiveRef)) !== commit) {
             throw new Error(`${repository}: archive ${row.archiveRef} lacks exact remote custody at ${commit}`)
           }
           candidates.push({
             row,
+            remote,
             checkout: realpathSync(repository),
             git,
             retired,
@@ -361,7 +367,7 @@ export async function releaseRetainedCheckouts(
         reasons = [String(cause)]
       }
       await verify(candidate, before)
-      if (reasons.length > 0) kept.push({ ...candidate.row, reason: "held", detail: reasons.join("; ") })
+      if (reasons.length > 0) kept.push({ ...candidate.row, reason: "held", detail: publicText(reasons.join("; ")) })
     }
     if (kept.length > 0) return report
     if (!request.apply) {
@@ -370,7 +376,7 @@ export async function releaseRetainedCheckouts(
       return report
     }
     const content = [
-      request.reason,
+      publicText(request.reason),
       ...[...candidates]
         .sort((a, b) => a.row.path.localeCompare(b.row.path))
         .map(
@@ -383,10 +389,10 @@ export async function releaseRetainedCheckouts(
       alreadyRetired.push(...candidates.map((candidate) => candidate.row))
       return report
     }
-    for (const { row } of candidates) {
+    for (const { row, remote } of candidates) {
       const archive = ensureArchiveRef(row.repo, row.archiveRef, row.head)
       if (!archive.ok) throw new Error(archive.reason)
-      const store = createEventStore(row.repo, row.remote, input.selection)
+      const store = createEventStore(row.repo, remote, input.selection)
       const previous = (await listRefs(row.archiveRef, store)).get(row.archiveRef)
       if (previous !== undefined && previous !== row.head) {
         throw new Error(`${row.repo}: origin archive holds ${previous}, not ${row.head}`)
@@ -395,9 +401,9 @@ export async function releaseRetainedCheckouts(
       await store.backend.publish(
         row.repo,
         [{ ref: row.archiveRef, expect: previous ?? "0".repeat(row.head.length), oid: row.head }],
-        row.remote,
+        remote,
       )
-      if ((await readRemoteCommit(readGit(row.repo), row.remote, row.archiveRef)) !== row.head) {
+      if ((await readRemoteCommit(readGit(row.repo), remote, row.archiveRef)) !== row.head) {
         throw new Error(`${row.repo}: archive custody did not read back; local refs kept`)
       }
     }
@@ -436,7 +442,7 @@ export async function releaseRetainedCheckouts(
         const reasons = await protect(candidate)
         await verify(candidate, before)
         if (reasons.length > 0) {
-          kept.push({ ...row, reason: "held", detail: reasons.join("; ") })
+          kept.push({ ...row, reason: "held", detail: publicText(reasons.join("; ")) })
           break
         }
         const store = createGitWorktreeStore({ repo: row.repo, gitProcess: seamProcess(candidate.git, row.repo) })
@@ -454,7 +460,7 @@ export async function releaseRetainedCheckouts(
           log: input.log,
           protections: async () => {
             const reasons = await protect(candidate)
-            if ((await readRemoteCommit(candidate.git, row.remote, row.archiveRef)) !== row.head) {
+            if ((await readRemoteCommit(candidate.git, candidate.remote, row.archiveRef)) !== row.head) {
               return [...reasons, "origin archive custody changed"]
             }
             await verify(candidate, before)
@@ -465,7 +471,7 @@ export async function releaseRetainedCheckouts(
         if (result.outcome !== "removed") {
           await reattach()
           const destination = result.outcome === "failed" ? failed : kept
-          destination.push({ ...row, reason: result.reason, detail: result.detail ?? result.reason })
+          destination.push({ ...row, reason: result.reason, detail: publicText(result.detail ?? result.reason) })
         } else {
           original = undefined
           removed.push(row)
@@ -478,7 +484,7 @@ export async function releaseRetainedCheckouts(
         } catch (restoreError) {
           detail += `; ${String(restoreError)}`
         }
-        failed.push({ ...row, reason: "failed", detail })
+        failed.push({ ...row, reason: "failed", detail: publicText(detail) })
       }
       if (kept.length > 0 || failed.length > 0) break
     }
@@ -493,7 +499,7 @@ export async function releaseRetainedCheckouts(
       })
     }
   } catch (cause) {
-    failed.push({ ...rootRow, reason: "failed", detail: String(cause) })
+    failed.push({ ...rootRow, reason: "failed", detail: publicText(String(cause)) })
   }
   return report
 }
