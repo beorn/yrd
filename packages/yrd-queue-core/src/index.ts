@@ -220,9 +220,7 @@ export {
   submit,
   issueOf,
   issueCandidatesOf,
-  issueFromBranchName,
   issueBindingsOf,
-  normalizeIssueReference,
 } from "./submit.ts"
 export { pinCarrierName, preparePinCarrier } from "./pin-carrier.ts"
 export type { PinCarrierPin, PreparedPinCarrier } from "./pin-carrier.ts"
@@ -232,7 +230,6 @@ export type {
   AdmissionVerdict,
   IssueCandidate,
   IssueResolution,
-  IssueResolver,
   Submitted,
   Prepared,
   SubmitGitlink,

@@ -270,8 +270,6 @@ export type SubmitRequest = Readonly<{
   fetchedQueueRefs?: ReadonlyMap<string, string>
   submitter: string
   issue?: string
-  /** Host-owned issue identity. A configured resolver must either return one canonical issue or throw. */
-  resolveIssue?: IssueResolver
   /** Target-owned process policy. The host runs it; core only interprets its verdict. */
   admit?: (issue: string, branch: string, head: string, targetHead: string) => Promise<AdmissionVerdict>
 }>
@@ -289,11 +287,9 @@ export type AdmissionOutcome = Readonly<
   | { kind: "cannot-judge"; reason: string }
 >
 
-export type IssueResolver = (raw: string) => Promise<string>
-
 export type IssueResolution = Readonly<{
   issue: string
-  source: "binding" | "declared" | "legacy-branch"
+  source: "binding" | "declared"
   /** The first explicit binding's carrying commit, when source is binding. */
   commit?: string
 }>
@@ -841,7 +837,7 @@ async function admitSubmitAtHead(
       `${request.branch} at ${head} has no common base with ${targetName(request.target)}; found no merge base, expected ${targetHead}. Start a change from that target; ${bound}`,
     )
   }
-  const issue = await issueOf(git, request.branch, head, targetHead, request.issue, request.resolveIssue)
+  const issue = await issueOf(git, request.branch, head, targetHead, request.issue)
   // 27147: after issue admission, before composition or any publication.
   await refuseMovedPrivateGitlinks(
     git,
@@ -1481,16 +1477,9 @@ async function submitEvent(
  * The first explicit Refs/Resolves binding in branch history wins. The
  * merge-base and all target ancestry are excluded; neither later work nor a
  * branch rename loses the binding. Conflicting explicit/declared issues refuse.
- * An unbound branch may use a declaration or the reported legacy name fallback.
+ * An unbound branch may use an explicit declaration; branch names never decode issue keys.
  */
-export type IssueCandidate = Readonly<
-  { issue: string; source: "binding"; commit: string; trailer?: string } | { issue: string; source: "legacy-branch" }
->
-
-/** The existing branch-name mapping, shared by submission and explicit issue cleanup. */
-export function issueFromBranchName(branch: string): string | undefined {
-  return /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
-}
+export type IssueCandidate = Readonly<{ issue: string; source: "binding"; commit: string; trailer?: string }>
 
 /**
  * Read a branch's unresolved binding candidates in Git's history order.
@@ -1523,9 +1512,7 @@ export async function issueCandidatesOf(
       ...(candidate.trailer === undefined ? {} : { trailer: candidate.trailer }),
     })
   }
-  if (candidates.length > 0) return candidates
-  const legacy = issueFromBranchName(branch)
-  return legacy === undefined ? [] : [{ issue: legacy, source: "legacy-branch" }]
+  return candidates
 }
 
 export async function issueOf(
@@ -1534,7 +1521,6 @@ export async function issueOf(
   head: string,
   targetHead: string,
   declared?: string,
-  resolveIssue?: IssueResolver,
 ): Promise<IssueResolution | undefined> {
   if (
     declared !== undefined &&
@@ -1548,7 +1534,7 @@ export async function issueOf(
   let binding: IssueResolution | undefined
   for (const candidate of candidates) {
     if (candidate.source !== "binding") continue
-    const issue = await canonicalIssue(candidate.issue, branch, resolveIssue)
+    const issue = candidate.issue
     const commit = candidate.commit
     if (binding === undefined) binding = { issue, source: "binding", commit }
     else if (binding.issue !== issue) {
@@ -1562,7 +1548,7 @@ export async function issueOf(
     }
   }
   if (binding !== undefined) {
-    const canonicalDeclared = declared === undefined ? undefined : await canonicalIssue(declared, branch, resolveIssue)
+    const canonicalDeclared = declared === undefined ? undefined : declared
     if (canonicalDeclared !== undefined && canonicalDeclared !== binding.issue) {
       throw new Error(
         `declared issue ${canonicalDeclared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}; fix trailer at ${binding.commit}`,
@@ -1570,11 +1556,8 @@ export async function issueOf(
     }
     return binding
   }
-  if (declared !== undefined) return { issue: await canonicalIssue(declared, branch, resolveIssue), source: "declared" }
-  const legacy = candidates.find((candidate) => candidate.source === "legacy-branch")
-  return legacy === undefined
-    ? undefined
-    : { issue: await canonicalIssue(legacy.issue, branch, resolveIssue), source: "legacy-branch" }
+  if (declared !== undefined) return { issue: declared, source: "declared" }
+  return undefined
 }
 
 /** Read all explicit bindings through the submit decoder, preserving Git's commit order. */
@@ -1582,7 +1565,6 @@ export async function* issueBindingsOf(
   git: Git,
   revisions: readonly string[],
   branch: string,
-  resolveIssue?: IssueResolver,
 ): AsyncGenerator<Readonly<{ issue: string; commit: string; trailer?: string }>, void> {
   // NUL separates each commit, Git trailer values, body and keyed trailers.
   // The body fallback accepts colonless Refs/Resolves while excluding subjects.
@@ -1651,51 +1633,10 @@ export async function* issueBindingsOf(
         )
       }
       yield {
-        issue: await canonicalIssue(issue, branch, resolveIssue),
+        issue: issue,
         commit,
         ...(candidate.trailer === undefined ? {} : { trailer: candidate.trailer }),
       }
     }
   }
-}
-
-async function canonicalIssue(raw: string, branch: string, resolveIssue?: IssueResolver): Promise<string> {
-  const normalized = normalizeIssueReference(raw)
-  if (resolveIssue === undefined) return normalized
-  let resolved: string
-  try {
-    resolved = await resolveIssue(normalized)
-  } catch (cause) {
-    throw new Error(`cannot resolve issue ${JSON.stringify(raw)} for ${branch}: ${String(cause)}`, { cause })
-  }
-  if (
-    typeof resolved !== "string" ||
-    resolved.trim() === "" ||
-    resolved !== resolved.trim() ||
-    /[\u0000-\u001f\u007f]/u.test(resolved)
-  ) {
-    throw new Error(`issue resolver returned no single-line canonical issue for ${JSON.stringify(raw)} on ${branch}`)
-  }
-  return normalizeIssueReference(resolved)
-}
-
-/**
- * Normalize a bead reference spelling before resolution and comparison.
- *
- * An absolute path under the vault root (e.g. `/hh/pm/@ag/hab/25488-...`),
- * a trailing `.md`, and the vault-relative path (`@ag/hab/25488-...`) all
- * name one issue (25719).
- */
-export function normalizeIssueReference(raw: string): string {
-  let issue = raw.trim()
-  if (issue.endsWith(".md")) {
-    issue = issue.slice(0, -3)
-  }
-  const atIndex = issue.indexOf("/@")
-  if (atIndex >= 0) {
-    issue = issue.slice(atIndex + 1)
-  } else if (issue.startsWith("./@")) {
-    issue = issue.slice(2)
-  }
-  return issue
 }

@@ -41,7 +41,7 @@ import {
   type EnvCloseRequest,
   type StoredCloseRequest,
 } from "./env-close-requests.ts"
-import { environmentIssues, environmentProvenance } from "./env-cleanup-provenance.ts"
+import { environmentProvenance } from "./env-cleanup-provenance.ts"
 import {
   mergedCloseKeepReason,
   readEnvOpenRecord,
@@ -49,20 +49,17 @@ import {
   type EnvOpenRecordRead,
 } from "./env-open-record.ts"
 import { repositoryHere } from "./declaration.ts"
-import { issueLookup, type ResolvedIssue } from "./issue-resolver.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import type { WorktreeRemovalProof } from "./branch-retirement.ts"
 
 type CachedEnvironment = {
   paths: { path: string; optional: boolean }[]
   branches: readonly string[]
-  issues?: readonly string[]
   bindingKey?: string
   expensiveKey?: string
   verdict?: string
   hold?: string | null
   busy?: string
-  statuses: Map<string, string>
 }
 
 /**
@@ -70,7 +67,7 @@ type CachedEnvironment = {
  * environments, so the first pass over the fleet's whole registry is sliced
  * across rounds instead of exceeding the 27723 cost bar (30 s, 400 spawns) in
  * one of them: the registry holds hundreds of rows, and each costs several Git
- * calls plus an issue-status lookup. `cursor` is where the next round resumes,
+ * calls. `cursor` is where the next round resumes,
  * so progress is guaranteed even when a row keeps failing its cheap checks.
  *
  * Measured 2026-10-06 against the delivered fleet registry: a 16-row round took
@@ -566,7 +563,7 @@ async function fileTerminalCloseRequests(
  * Read external uses once per round before filing; failure keeps automatic
  * candidates with a named reason. Explicit close intent keeps its own lifecycle.
  * Held/standing, busy, dirty and custody checks still protect terminal jobs;
- * the general sweep also requires ended issues and merged work.
+ * the general sweep also requires exact-head ancestry on target.
  * Regressions in tests/queue-core-up.test.ts:
  * - a declared seat cwd survives cleanup without a process holder
  * - a newly opened environment survives cleanup inside the grace window and becomes eligible after it
@@ -643,7 +640,6 @@ async function cleanupEnvironments(
     io: YrdCliIO
     env?: NodeJS.ProcessEnv
     selection: GitSelection
-    resolveIssue: ((raw: string) => Promise<string>) | undefined
   }>,
   cache: Map<string, CachedEnvironment>,
   progress: CleanupProgress,
@@ -849,32 +845,7 @@ async function cleanupEnvironments(
   const requests = await consumeCloseRequests({ workdir, registry, worktrees: registryGit, io, outcome })
   proofs.push(...requests.proofs)
   closed += requests.closed
-  const lookup = issueLookup(config, repo, input.env)
-  const statuses = new Map<string, Promise<ResolvedIssue>>()
-  let lookups = 0
-  /** Sweep eligibility: bound issue is ended (`closed` or `dropped`, 21122 P3). */
-  const requireClosed = async (id: string, entry: CachedEnvironment, fresh = false): Promise<void> => {
-    let pending = fresh ? undefined : statuses.get(id)
-    if (pending === undefined) {
-      lookups++
-      pending = (async () => {
-        if (lookup === undefined) {
-          throw new Error(`issue ${id}: target declaration has no issueResolver; closure unproven`)
-        }
-        return lookup(id)
-      })()
-    }
-    if (!fresh) statuses.set(id, pending)
-    const issue = await pending
-    const status = JSON.stringify(issue)
-    if (entry.statuses.get(id) !== status) {
-      entry.expensiveKey = undefined
-      entry.statuses.set(id, status)
-    }
-    if (issue.id !== id || (issue.status !== "closed" && issue.status !== "dropped")) {
-      throw new Error(`issue ${id}: configured lookup returned ${status}; closure unproven`)
-    }
-  }
+  const lookups = 0
   const startedAt = Date.now()
   // The hint is read once per process, before the first offset. A hint that
   // cannot be trusted starts the sweep at index 0 and is NAMED, never silently
@@ -924,7 +895,7 @@ async function cleanupEnvironments(
       }
       let entry = cache.get(row.path)
       if (entry === undefined) {
-        entry = { paths: [], branches: [], statuses: new Map() }
+        entry = { paths: [], branches: [] }
         cache.set(row.path, entry)
       }
       const holder = busy(row.path, snapshot)
@@ -970,29 +941,10 @@ async function cleanupEnvironments(
           ),
         ])
       const key = await bindingKey()
-      if (entry.issues === undefined || entry.bindingKey !== key) {
-        const bindings = await environmentIssues(
-          row.path,
-          treeGit,
-          row.name,
-          row.branch,
-          git,
-          config.target.branch,
-          store,
-          async (branch) => (await historyOf(branch)).history,
-          input.resolveIssue ??
-            (async (raw) => {
-              if (lookup === undefined) throw new Error(`issue ${raw}: target declaration has no issueResolver`)
-              return (await lookup(raw)).id
-            }),
-        )
-        entry.issues = bindings.issues
-        entry.branches = bindings.branches
-        entry.bindingKey = await bindingKey()
+      if (entry.bindingKey !== key) {
+        entry.bindingKey = key
         entry.expensiveKey = undefined
       }
-      const issues = entry.issues
-      for (const issue of issues) await requireClosed(issue, entry)
       if (holder !== undefined) throw new Error(holder)
       const expensiveKey = (): string =>
         JSON.stringify([
@@ -1032,7 +984,6 @@ async function cleanupEnvironments(
       }
       const freshHolder = busy(row.path, await census())
       if (freshHolder !== undefined) throw new Error(freshHolder)
-      for (const issue of issues) await requireClosed(issue, entry, true)
       const current = (await environmentInventory(registry, registryGit, workdir)).rows.find(
         (entry) => entry.path === row.path,
       )

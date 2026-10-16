@@ -1,12 +1,5 @@
 import { resolve } from "node:path"
-import {
-  changesRef,
-  enumerateChangeSegments,
-  issueBindingsOf,
-  normalizeIssueReference,
-  readBranchHistory,
-  type Git,
-} from "@yrd/queue-core"
+import type { Git } from "@yrd/queue-core"
 import { readReflogEntries } from "git-super"
 
 /** Root-only evidence: created OIDs themselves, plus every recorded branch join. */
@@ -90,85 +83,4 @@ export async function environmentProvenance(
   const head = (await git(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
   if (lastOid !== head) throw new Error(`environment ${cwd}: HEAD reflog ${path} does not end at current HEAD ${head}`)
   return { commits: [...commits], branches: [...branches] }
-}
-
-/** The complete root binding union; each recorded author span is decoded independently. */
-export async function environmentIssues(
-  cwd: string,
-  git: Git,
-  name: string,
-  currentBranch: string | undefined,
-  queueGit: Git,
-  queue: string,
-  store: Parameters<typeof readBranchHistory>[0],
-  historyOf: (branch: string) => Promise<Awaited<ReturnType<typeof readBranchHistory>>["history"]>,
-  resolveIssue: (raw: string) => Promise<string>,
-): Promise<Readonly<{ issues: readonly string[]; branches: readonly string[] }>> {
-  const provenance = await environmentProvenance(cwd, git, currentBranch)
-  const issues = new Set<string>()
-  const add = async (raw: string): Promise<void> => {
-    issues.add(normalizeIssueReference(await resolveIssue(normalizeIssueReference(raw))))
-  }
-  for (const label of [name, ...provenance.branches]) {
-    const normalized = normalizeIssueReference(label)
-    if (normalized.startsWith("@")) await add(normalized)
-    else {
-      const leaf = label.split("/").at(-1) ?? label
-      const issue = /^(\d+)(?:-|$)/u.exec(leaf)?.[1]
-      if (issue !== undefined) await add(issue)
-    }
-  }
-  // --no-walk reads these OIDs themselves. Multiple ^! ranges would subtract
-  // one another's parents and could drop an earlier creating commit's binding.
-  if (provenance.commits.length > 0) {
-    for await (const binding of issueBindingsOf(
-      git,
-      ["--no-walk=unsorted", ...provenance.commits],
-      name,
-      resolveIssue,
-    )) {
-      issues.add(binding.issue)
-    }
-  }
-  const spans = new Set<string>()
-  for (const branch of provenance.branches) {
-    let history: Awaited<ReturnType<typeof historyOf>>
-    try {
-      history = await historyOf(branch)
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error)
-      throw new Error(`${cwd}: change chain ${text}`)
-    }
-    if (history === undefined) continue
-    for (const segment of enumerateChangeSegments(history.events, changesRef(queue, branch), store.repo)) {
-      if (segment.state.issue !== undefined) await add(segment.state.issue)
-      for (const event of segment.events) {
-        if (event.type !== "verifying") continue
-        const candidate = event.props.find(([key]) => key === "Commit")?.[1]
-        if (candidate === undefined || !event.links.includes(candidate)) {
-          throw new Error(`${cwd}: verifying event ${event.id} has no kept candidate`)
-        }
-        const parents = (await queueGit(["rev-list", "--parents", "-n", "1", candidate])).trim().split(/\s+/u)
-        const target = parents[1]
-        const head = parents[2]
-        if (parents.length !== 3 || target === undefined || head === undefined) {
-          throw new Error(`${cwd}: candidate ${candidate} does not keep exactly [target, head] parents`)
-        }
-        const span = `${target} ${head}`
-        if (spans.has(span)) continue
-        spans.add(span)
-        const base = (await queueGit(["merge-base", target, head])).trim()
-        if (base === "") throw new Error(`${cwd}: candidate ${candidate} has no author merge base`)
-        for await (const binding of issueBindingsOf(
-          queueGit,
-          [`${base}..${head}`, `^${target}`],
-          branch,
-          resolveIssue,
-        )) {
-          issues.add(binding.issue)
-        }
-      }
-    }
-  }
-  return { issues: [...issues], branches: provenance.branches }
 }
