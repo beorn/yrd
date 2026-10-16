@@ -3936,12 +3936,28 @@ describe("drop --local --release-checkout", () => {
           const remote = (await gitIn(repo)(["remote", "get-url", "origin"])).trim()
           expect(await gitIn(repo)(["ls-remote", remote, `refs/archive/*/*/${branch}`])).toContain(tip)
         }
-        return []
+        return {
+          protections: [],
+          evidence: [
+            { kind: "malformed-lease", path: join(repo, ".agent-lease.json"), reason: "fixture malformed lease" },
+          ],
+        } as never
       }
       expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(0)
       const report = JSON.parse(applied.stdout()) as ReleaseReport
       expect(report.removed).toHaveLength(2)
       expect(report.failed).toEqual([])
+      // Portable Yrd must retain the host's non-blocking evidence in its JSON receipt;
+      // host integration owns parsing the actual lease bytes.
+      expect((report as unknown as { evidence: unknown[] }).evidence).toEqual(
+        expect.arrayContaining(
+          [...fixture.checkoutFiles.keys()].map((repo) => ({
+            kind: "malformed-lease",
+            path: join(repo, ".agent-lease.json"),
+            reason: "fixture malformed lease",
+          })),
+        ),
+      )
       for (const row of report.removed) {
         const read = gitIn(row.repo)
         expect(await read(["for-each-ref", `refs/heads/${row.branch}`])).toBe("")
