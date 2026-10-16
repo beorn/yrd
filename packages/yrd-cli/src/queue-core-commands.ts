@@ -1537,7 +1537,7 @@ export async function coreQueueCommand(
             io,
             options.json,
             report,
-            `checkout release in ${authorRepo}: eligible ${report.eligible.length}, retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}; ${report.apply ? "applied" : "preview; use --apply"}\n` +
+            `checkout release in ${authorRepo}: eligible ${report.eligible.length}, retired ${report.removed.length}, already retired ${report.alreadyRetired.length}, kept ${report.kept.length}, failed ${report.failed.length}; ${report.apply ? "applied" : "preview; use --apply"}\n` +
               [...report.eligible, ...report.removed, ...report.kept, ...report.failed]
                 .map(
                   (row) =>

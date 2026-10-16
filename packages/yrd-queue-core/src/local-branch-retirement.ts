@@ -49,7 +49,7 @@ export type LocalBranchRetirementResult = Readonly<{
  */
 export async function retireLocalBranch(input: LocalBranchRetirement): Promise<LocalBranchRetirementResult> {
   const { repo, git, branch, tip, actor, issue, reason, date, disposition } = input
-  const archiveRef = archiveRefFor(branch, actor, date)
+  const archiveRef = disposition.kind === "archived" ? disposition.ref : archiveRefFor(branch, actor, date)
   const store = createGitWorktreeStore({ repo, gitProcess: seamProcess(git, repo) })
   type Kept = { code: "held" | "moved" | "unreached" | "advanced"; detail: string }
   let firstProtectionRead = true
