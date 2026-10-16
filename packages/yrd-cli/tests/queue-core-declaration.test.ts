@@ -3859,7 +3859,7 @@ describe("drop --local --release-checkout", () => {
         const report = JSON.parse(output.stdout()) as ReleaseReport
         expect(report.removed).toEqual([])
         expect(report.kept).toHaveLength(1)
-        expect(report.kept[0].detail).toMatch(
+        expect(report.kept[0]?.detail).toMatch(
           kind === "moved"
             ? /tip|moved/
             : kind === "cwd"
