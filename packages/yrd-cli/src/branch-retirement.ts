@@ -59,8 +59,9 @@ async function publishRetirementArchive(
   if (!archive.ok) throw new Error(archive.reason)
   const store = createEventStore(repo, remote, selection)
   const previous = (await listRefs(archiveRef, store)).get(archiveRef)
-  if (previous !== undefined && previous !== tip)
+  if (previous !== undefined && previous !== tip) {
     throw new Error(`${repo}: origin archive holds ${previous}, not ${tip}`)
+  }
   if (store.backend.publish === undefined) throw new Error(`${repo}: Gitomic backend lacks archive publication`)
   await store.backend.publish(repo, [{ ref: archiveRef, expect: previous ?? "0".repeat(tip.length), oid: tip }], remote)
   if ((await readRemoteCommit(git, remote, archiveRef)) !== tip) {
@@ -110,8 +111,9 @@ export async function retireComponentLocalBranch(
     const archiveRef = archiveRefFor(request.branch, request.by, date)
     try {
       const observedTip = await refAt(git, `refs/heads/${request.branch}`)
-      if (observedTip === undefined)
+      if (observedTip === undefined) {
         throw new Error(`${repo}: refs/heads/${request.branch} is absent; nothing was removed`)
+      }
       const merged = await isAncestor(git, request.tip, target)
       const protections = async (): Promise<readonly string[]> => {
         const host =

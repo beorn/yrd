@@ -3713,6 +3713,9 @@ describe("component-local retirement without a component queue", () => {
     "merged",
     "unmerged",
     "held",
+    "checked-out",
+    "publication-refused",
+    "archive-readback-lost",
     "root-retired",
     "advanced",
     "protection-error",
@@ -3740,7 +3743,13 @@ describe("component-local retirement without a component queue", () => {
     await createQueue(root, "main", rootTip, new Date())
     const branch = "task/28824-component"
     const baseTip = (await git(["rev-parse", "HEAD"])).trim()
-    if (mode === "unmerged" || mode === "advanced" || mode === "archive-collision") {
+    if (
+      mode === "unmerged" ||
+      mode === "advanced" ||
+      mode === "archive-collision" ||
+      mode === "publication-refused" ||
+      mode === "archive-readback-lost"
+    ) {
       await git(["checkout", "--quiet", "-b", branch])
       writeFileSync(join(child, "private.txt"), "reviewed unmerged work\n")
       await git(["add", "private.txt"])
@@ -3762,6 +3771,22 @@ describe("component-local retirement without a component queue", () => {
     const tip = mode === "advanced" ? baseTip : actualTip
     const collisionRef = archiveRefFor(branch, "fixture", new Date().toISOString().slice(0, 10))
     if (mode === "archive-collision") await git(["push", "--quiet", "origin", baseTip + ":" + collisionRef])
+    if (mode === "checked-out") await git(["checkout", "--quiet", branch])
+    if (mode === "publication-refused" || mode === "archive-readback-lost") {
+      const hook = join(
+        dirname(seed),
+        "remote.git",
+        "hooks",
+        mode === "publication-refused" ? "pre-receive" : "post-receive",
+      )
+      writeFileSync(
+        hook,
+        mode === "publication-refused"
+          ? "#!/bin/sh\necho 'fixture refuses archive publication' >&2\nexit 1\n"
+          : '#!/bin/sh\nwhile read old new ref; do\ncase "$ref" in refs/archive/*) git update-ref -d "$ref" "$new" ;; esac\ndone\n',
+      )
+      chmodSync(hook, 0o755)
+    }
     if (mode === "root-retired") {
       const rootBranch = "task/28824-root-already-retired"
       await rootGit(["branch", rootBranch])
@@ -3784,8 +3809,9 @@ describe("component-local retirement without a component queue", () => {
     const unreadable =
       mode === "unreadable-declaration"
         ? vi.spyOn(fs, "lstatSync").mockImplementation((path, options) => {
-            if (String(path) === join(child, ".yrd.yml"))
+            if (String(path) === join(child, ".yrd.yml")) {
               throw Object.assign(new Error("EACCES: declaration authority is unreadable"), { code: "EACCES" })
+            }
             return nativeLstat(path, options)
           })
         : undefined
@@ -3812,17 +3838,24 @@ describe("component-local retirement without a component queue", () => {
     const failure =
       mode === "protection-error" ||
       mode === "archive-collision" ||
+      mode === "publication-refused" ||
+      mode === "archive-readback-lost" ||
       mode === "malformed-declaration" ||
       mode === "unreadable-declaration"
     if (failure) {
       expect(exit).not.toBe(0)
       expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(actualTip)
       expect(run.stdout() + run.stderr()).toContain(child)
-      if (mode === "protection-error")
+      if (mode === "protection-error") {
         expect(run.stdout() + run.stderr()).toContain("host protection authority unavailable")
+      }
       if (mode === "unreadable-declaration") expect(run.stderr()).toContain("EACCES")
-      if (mode === "archive-collision")
+      if (mode === "archive-collision") {
         expect((await git(["ls-remote", "origin", collisionRef])).split("\t")[0]).toBe(baseTip)
+      }
+      if (mode === "publication-refused")
+        expect(run.stdout() + run.stderr()).toContain("fixture refuses archive publication")
+      if (mode === "archive-readback-lost") expect(run.stdout() + run.stderr()).toContain("read back")
       if (mode === "malformed-declaration" || mode === "unreadable-declaration") return
     } else expect(exit, run.stderr()).toBe(0)
     if (!failure) {
@@ -3832,7 +3865,7 @@ describe("component-local retirement without a component queue", () => {
         failed: unknown[]
       }
       expect(report.failed).toEqual([])
-      if (mode === "held" || mode === "advanced") {
+      if (mode === "held" || mode === "advanced" || mode === "checked-out") {
         expect(report.removed).toEqual([])
         expect(report.kept).toEqual([expect.objectContaining({ branch, head: actualTip })])
         expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(actualTip)
@@ -3860,10 +3893,11 @@ describe("component-local retirement without a component queue", () => {
     expect(records).toContainEqual(
       expect.objectContaining({ kind: "local-branch-retirement", repo: child, branch, head: tip }),
     )
-    if (failure)
+    if (failure) {
       expect(records).toContainEqual(
         expect.objectContaining({ kind: "local-branch-retirement", repo: child, branch, outcome: "failed" }),
       )
+    }
   })
 })
 
