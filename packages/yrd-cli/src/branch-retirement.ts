@@ -128,7 +128,10 @@ export async function releaseRetainedCheckouts(
       }
       if (overlaps(checkout, use.path) || overlaps(use.path, checkout)) return [`live use: ${use.reason} (${use.path})`]
     }
-    const result = await io.localBranchProtections!({
+    if (io.localBranchProtections === undefined) {
+      throw new Error("release-checkout requires the localBranchProtections authority reader")
+    }
+    const result = await io.localBranchProtections({
       repo: row.repo,
       branch: row.branch,
       tip: row.head,
@@ -446,8 +449,9 @@ export async function releaseRetainedCheckouts(
           break
         }
         const store = createGitWorktreeStore({ repo: row.repo, gitProcess: seamProcess(candidate.git, row.repo) })
-        if (!candidate.detached)
+        if (!candidate.detached) {
           original = await store.detachAt(candidate.checkout, row.head, `refs/heads/${row.branch}`)
+        }
         const result = await retireLocalBranch({
           repo: row.repo,
           git: candidate.git,
