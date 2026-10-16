@@ -3815,7 +3815,7 @@ describe("yrd queue up, the service", () => {
     })
   })
 
-  /** @failure A relaunch starts environment cleanup after a stopped capture, skips root protection reads, or abandons a bounded cleanup attempt after environment close has begun. @level l2 @consumer Hab's supervised Yrd service @testonly none */
+  /** @failure A stopped relaunch rechecks row-holding roots instead of leaving them to startup catch-up, or abandons whole retirement of the branch whose environment closed. @level l2 @consumer Hab's supervised Yrd service @testonly none */
   it("waits for a promoted immutable landing, then exits 0 for Hab to launch it", async () => {
     const w = await gitlinkWorld()
     await w.git(["config", "yrd.workdir", w.workdir])
@@ -3916,6 +3916,8 @@ describe("yrd queue up, the service", () => {
     const custodyReads: string[] = []
     let releaseCleanup!: () => void
     let releaseEnvironment: (() => void) | undefined
+    let releaseRoundCapture: (() => void) | undefined
+    let restoreRoundCapture = () => {}
     const cleanupHeld = new Promise<void>((resolve) => {
       releaseCleanup = resolve
     })
@@ -3997,12 +3999,9 @@ describe("yrd queue up, the service", () => {
       releaseCleanup()
       // The production failure drained for minutes; eight seconds leaves native
       // fixture Git ample time while still rejecting an unbounded handoff.
-      await vi.waitFor(
-        () => expect(exited, "handoff finishes after a stopped capture and root protection checks").toBe(0),
-        {
-          timeout: 8000,
-        },
-      )
+      await vi.waitFor(() => expect(exited, "handoff skips stopped row-holding root retirement").toBe(0), {
+        timeout: 8000,
+      })
       expect(await service, run.stdout()).toBe(0)
       expect(records(run).at(-1)).toEqual({
         exitCode: 0,
@@ -4022,10 +4021,22 @@ describe("yrd queue up, the service", () => {
       }
       expect(listCloseRequests(w.workdir), "a capture-stopped attempt files no close requests").toEqual([])
       expect(allCleanupRows(w.workdir).filter((row) => row.result === "filed")).toEqual([])
-      expect(
-        [...new Set(custodyReads)].sort(),
-        "root retirement visits protections for every in-flight branch even after capture stops",
-      ).toEqual(authors.map(({ branch }) => branch).sort())
+      expect.soft(custodyReads, "a stopped all-row startup must not begin any root retirement").toEqual([])
+      const startupRetirement = join(w.workdir, "logs", "post-merge")
+      const startupRows = readdirSync(startupRetirement)
+        .filter((name) => name.endsWith(".jsonl"))
+        .flatMap((name) => readRunLog(startupRetirement, name.slice(0, -".jsonl".length)))
+      for (const author of authors) {
+        expect
+          .soft(
+            startupRows.some((row) => row.branch === author.branch && /startup catch-up/i.test(String(row.reason))),
+            `skipped row-holding branch ${author.branch} is named for startup catch-up`,
+          )
+          .toBe(true)
+      }
+      expect
+        .soft(run.stderr(), "close report names the row-holding branches left to startup catch-up")
+        .toContain("startup catch-up")
       const dropped = prepared
         .stderr()
         .split("\n")
@@ -4096,13 +4107,177 @@ describe("yrd queue up, the service", () => {
         expect(readFileSync(join(author.gitDir, "yrd-open.json"), "utf8")).toBe(author.opening)
         expect((await w.git(["rev-parse", `refs/heads/${author.branch}`])).trim()).toBe(author.head)
       }
+      expect
+        .soft(
+          [...new Set(successorCustody)].sort(),
+          "the stopped attempt completes the no-row branch without rechecking the row-holding roots",
+        )
+        .toEqual(closed.map(({ branch }) => branch).sort())
+      const successorRows = readdirSync(startupRetirement)
+        .filter((name) => name.endsWith(".jsonl"))
+        .flatMap((name) => readRunLog(startupRetirement, name.slice(0, -".jsonl".length)))
+      for (const author of remaining) {
+        expect
+          .soft(
+            successorRows.some((row) => row.branch === author.branch && /startup catch-up/i.test(String(row.reason))),
+            `remaining branch ${author.branch} stays named and rediscoverable`,
+          )
+          .toBe(true)
+      }
+      // This is a real newly merged ROUND, not startup's inventory population.
+      const mixed: { branch: string; head: string; path?: string; opening?: string; gitDir?: string }[] = []
+      for (const withRow of [false, true]) {
+        const branch = `task/stop-mixed-${withRow ? "row" : "no-row"}`
+        await w.git(["checkout", "--quiet", "-b", branch, "origin/main"])
+        writeFileSync(join(w.work, `${basename(branch)}.txt`), `${branch}\n`)
+        await w.git(["add", `${basename(branch)}.txt`])
+        await w.git(["commit", "--quiet", "-m", branch])
+        const head = (await w.git(["rev-parse", "HEAD"])).trim()
+        await w.git(["checkout", "--quiet", "main"])
+        if (withRow) {
+          const opened = capture(w.work)
+          expect(
+            await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "stop-mixed-row", "--json"], opened.io),
+            opened.stderr(),
+          ).toBe(0)
+          const { path } = JSON.parse(opened.stdout()) as { path: string }
+          await gitIn(path)(["checkout", "--quiet", branch])
+          await gitIn(path)(["submodule", "update", "--init", "--quiet"])
+          const gitDir = (await gitIn(path)(["rev-parse", "--absolute-git-dir"])).trim()
+          mixed.push({ branch, head, path, gitDir, opening: readFileSync(join(gitDir, "yrd-open.json"), "utf8") })
+        } else mixed.push({ branch, head })
+        await submit(w.git, "origin", { branch, submitter: "fixture", target: { remote: "origin", branch: "main" } })
+      }
+      const noRow = mixed[0]!,
+        rowHeld = mixed[1]!
+      const rowBefore = await environmentInventory(w.work, gitIn(w.work), w.workdir)
+      expect(rowBefore.rows.some((row) => row.branch === noRow.branch)).toBe(false)
+      expect(rowBefore.rows).toContainEqual(expect.objectContaining({ path: rowHeld.path, branch: rowHeld.branch }))
+      let roundCaptureStarted = false
+      const roundHeld = new Promise<void>((resolve) => {
+        releaseRoundCapture = resolve
+      })
+      const readRoundStatus = queueCore.readStatus
+      const roundRead = vi.spyOn(queueCore, "readStatus").mockImplementation(async (...args) => {
+        const state = await readRoundStatus(...args)
+        if (!roundCaptureStarted && args[2] === noRow.branch && state.status === "merged") {
+          roundCaptureStarted = true
+          await roundHeld
+        }
+        return state
+      })
+      restoreRoundCapture = () => roundRead.mockRestore()
+      const mixedRun = capture(w.work)
+      mixedRun.io.liveEnvironmentUse = async () => [
+        ...remaining.map(({ path }) => ({ path, reason: "prior recovery row" })),
+        { path: rowHeld.path!, reason: "mixed round recovery row" },
+      ]
+      const mixedCustody: string[] = []
+      mixedRun.io.localBranchProtections = async ({ branch }) => {
+        mixedCustody.push(branch)
+        return { protections: branch === noRow.branch ? [] : ["native recovery environment remains"], evidence: [] }
+      }
+      const mixedStop = new AbortController()
+      let mixedRound: QueueRunOutcome | undefined
+      const mixedService = fromLandingB(
+        w.work,
+        mixedRun.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: mixedStop.signal,
+          afterRound: (outcome: QueueRunOutcome) => {
+            mixedRound = outcome
+          },
+        },
+        { env: { ...process.env, YRD_RELAUNCH_SOURCE: join(home, "current") }, json: true, workdir: w.workdir },
+      )
+      try {
+        await vi.waitFor(
+          () => expect(roundCaptureStarted, "the actual merged round reaches component capture").toBe(true),
+          { timeout: 8000 },
+        )
+      } finally {
+        mixedStop.abort()
+        releaseRoundCapture?.()
+      }
+      expect(await mixedService, mixedRun.stderr()).toBe(0)
+      expect(new Set(mixedRound?.merged), "the actual round merged both native submissions").toEqual(
+        new Set(mixed.map(({ branch }) => branch)),
+      )
+      roundRead.mockRestore()
+      expect(mixedRound).toBeDefined()
       expect(
-        [...new Set(successorCustody)].sort(),
-        "a started attempt completes root retirement for every in-flight branch",
-      ).toEqual(authors.map(({ branch }) => branch).sort())
+        (await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${noRow.branch}`])).trim(),
+        "the no-row merged branch retires whole after stop",
+      ).toBe("")
+      const noRowArchive = findArchiveRefFor(w.work, noRow.branch, noRow.head)
+      expect(noRowArchive).toBeTypeOf("string")
+      expect((await w.git(["rev-parse", noRowArchive!])).trim()).toBe(noRow.head)
+      expect(existsSync(rowHeld.path!), "the row-holding round branch stays recoverable").toBe(true)
+      expect(readFileSync(join(rowHeld.gitDir!, "yrd-open.json"), "utf8")).toBe(rowHeld.opening)
+      expect((await w.git(["rev-parse", `refs/heads/${rowHeld.branch}`])).trim()).toBe(rowHeld.head)
+      expect
+        .soft(
+          mixedCustody.filter((branch) => branch === rowHeld.branch),
+          "the actual stopped ROUND skips row-holding native root retirement",
+        )
+        .toEqual([])
+      const mixedJournalRows = readdirSync(startupRetirement)
+        .filter((name) => name.endsWith(".jsonl"))
+        .flatMap((name) => readRunLog(startupRetirement, name.slice(0, -".jsonl".length)))
+      expect
+        .soft(
+          mixedJournalRows.some(
+            (entry) => entry.branch === rowHeld.branch && /startup catch-up/i.test(String(entry.reason)),
+          ),
+          "actual round skip names its recoverable branch",
+        )
+        .toBe(true)
+      const recovered = capture(w.work)
+      recovered.io.liveEnvironmentUse = async () =>
+        remaining.map(({ path }) => ({ path, reason: "prior recovery row" }))
+      recovered.io.localBranchProtections = async ({ branch, retainedCheckout }) => ({
+        protections: remaining.some((author) => author.branch === branch && retainedCheckout !== author.path)
+          ? ["prior recovery row"]
+          : [],
+        evidence: [],
+      })
+      const recoverStop = new AbortController()
+      expect(
+        await fromLandingB(
+          w.work,
+          recovered.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: recoverStop.signal,
+            afterRound: async (outcome: QueueRunOutcome) => {
+              expect(outcome.merged).toEqual([])
+              await vi.waitFor(
+                () =>
+                  expect(
+                    existsSync(rowHeld.path!),
+                    "successor re-derives and closes the mixed round's retained row",
+                  ).toBe(false),
+                { timeout: 8000 },
+              )
+              recoverStop.abort()
+            },
+          },
+          { env: { ...process.env, YRD_RELAUNCH_SOURCE: join(home, "current") }, json: true, workdir: w.workdir },
+        ),
+        recovered.stderr(),
+      ).toBe(0)
+      expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${rowHeld.branch}`])).trim()).toBe("")
+      const recoveredArchive = findArchiveRefFor(w.work, rowHeld.branch, rowHeld.head)
+      expect(recoveredArchive).toBeTypeOf("string")
+      expect((await w.git(["rev-parse", recoveredArchive!])).trim()).toBe(rowHeld.head)
     } finally {
       releaseCleanup()
       releaseEnvironment?.()
+      releaseRoundCapture?.()
+      restoreRoundCapture()
       captureRead.mockRestore()
       stop.abort()
       await service.catch(() => undefined)
