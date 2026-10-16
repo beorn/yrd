@@ -130,19 +130,13 @@ After the merge round releases its lock, Yrd attempts `update` with exactly the 
 
 Inspect `<workdir>/post-merge/*.json` and the referenced stdout/stderr logs for code/config identity, repository/queue, source merge context, argv/cwd, start/end, exit/signal and timeout. These are derived inspection artifacts: interrupted attempts are labelled on startup, and no execution or cleanup decision reads old results. Automatic retirement requires exact branch-head ancestry on the target plus current protections and exact-tip archive custody. An advanced head or equal tree with a different unmerged graph stays for owner review.
 
-`yrd drop --issue 12345` selects local branches by their recorded issue, then by the leading numeric segment of the branch's final path component. It performs no issue lookup or commit-message scan. A host can supply a pure `branchIssue({branch, recordedIssue})` callback through `runYrdExecutable` for a different naming convention.
+`yrd drop --issue 12345` selects local branches by their recorded opaque issue or the host's explicit pure mapping callback. It performs no issue lookup or commit-message scan. A host can supply that `branchIssue({branch, recordedIssue})` callback through `runYrdExecutable`.
 
 Root cleanup requires the same branch and exact current tip in a merged queue history (including adopted history), or in an origin archive ref. Active changes, advanced tips and protected branches stay. Malformed histories are reported as unreadable. The report distinguishes `landed` from `archived` custody. Root cleanup applies by default; add `--dry-run` to preview. Each removal uses the existing local archive and conditional ref deletion. For reviewed abandonment of unpublished work, `yrd drop <branch> --local --tip <full-oid>` retains its explicit exact-tip path.
 
 To include registered submodule stores in your authoring tree, preview with `yrd drop --issue 12345 --submodules --json`, then repeat with `--apply` to retire eligible local branches. This mode previews by default because it expands cleanup to component repositories; `--dry-run` makes that choice explicit. It selects recorded opaque issue bindings or the host's explicit pure mapping callback, and does not read the issues provider.
 
-A component tip qualifies when it is an ancestor of its origin `main`, or an exact component pin recorded by a root landing event and still reachable from a component origin ref. A root gitlink alone is insufficient. Components currently target `main`; a different default branch is reported as unreadable if `main` is absent. Each report names the repositories inspected, counts target, unrelated and unnumbered branches per repository, and lists only the issue’s branches and failed stores. Missing component stores fail visibly. Apply archives each tip locally before conditional removal and checks branch movement and live holds again. Remote branches and worktrees are preserved.
-
-Yrd compares those IDs and writes the canonical ID in new environment and pin-only binding commits. The candidate's declaration cannot change this rule for its own submission.
-
-A missing issue, failed command, timeout or invalid result refuses and names the raw reference and target command.
-
-Only unbound legacy branches may fall back to their leading numeric issue segment. Live and dry-run submission report that fallback. Git publication starts after binding validation.
+A component tip qualifies when its exact branch head is an ancestor of its origin `main`. A retained pin or root gitlink alone is insufficient. Components currently target `main`; a different default branch is reported as unreadable if `main` is absent. Each report names the repositories inspected, counts target, unrelated and unnumbered branches per repository, and lists only the issue’s branches and failed stores. Missing component stores fail visibly. Apply archives each tip locally before conditional removal and checks branch movement and live holds again. Remote branches and worktrees are preserved.
 
 Close reads teardown from the environment's current commit and refuses dirty, locked, unregistered or out-of-root paths. Failed teardown preserves the environment.
 

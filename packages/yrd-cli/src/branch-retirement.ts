@@ -697,12 +697,27 @@ export async function retireMergedRootAuthor(
     throw new Error(`${branch}: root retirement requires an exact merged or withdrawn submission and event tip`)
   }
   if (!withdrawn && !(await isAncestor(git, tip, input.target))) {
-    return {
+    const result = {
       outcome: "kept",
       archiveRef: archiveRefFor(branch, input.actor, new Date().toISOString().slice(0, 10)),
       reason: "unreached",
       detail: `exact author head ${tip} is not an ancestor of ${input.target}; kept for owner review`,
-    }
+    } as const
+    log.write({
+      kind: "local-branch-retirement",
+      repo,
+      branch,
+      head: tip,
+      actor: input.actor,
+      owner: change.submitter,
+      issue: change.issue,
+      archive: result.archiveRef,
+      reason: result.reason,
+      detail: result.detail,
+      outcome: result.outcome,
+    })
+    input.io.stderr(`yrd: ${branch}@${tip} kept: ${result.detail}\n`)
+    return result
   }
   let disposition: LocalBranchRetirement["disposition"] =
     change.componentAuthors === undefined
@@ -952,7 +967,7 @@ async function captureAuthorRelease(
               proofs: proof === undefined ? [] : [proof],
             })
             const root = await retireMergedRootAuthor({ ...captured, target: freshTarget, actor })
-            if (root.outcome !== "removed") {
+            if (root.outcome !== "removed" && !(root.outcome === "kept" && root.reason === "unreached")) {
               input.io.stderr(
                 `yrd: ${branch}@${tip} ${root.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept after release"}: ${root.detail ?? root.reason}\n`,
               )
@@ -1348,9 +1363,9 @@ export type MergedBranchRetirementReport = Readonly<{
   target: string
   /** Local `task/*` and `exp/*` heads other than the target branch. */
   examined: number
-  /** Heads with no recorded change and no issue number in their name. */
+  /** Heads with no recorded issue binding or mapped issue number. */
   unnumbered: number
-  /** Heads with no recorded change whose name alone carries an issue number: kept and listed, never judged (work.md:99). */
+  /** Heads whose name alone maps to an issue number; informational, never retirement eligibility. */
   boundByNameOnly: number
   removed: readonly MergedBranchRetirementRow[]
   kept: readonly MergedBranchRetirementRow[]
@@ -1438,7 +1453,7 @@ export async function retireMergedBranches(input: MergedBranchRetirementInput): 
   // Inventory: the local heads and the queue's recorded changes, read once.
   const heads = await listRefs("refs/heads/", createLocalEventStore(repo, selection))
   const reading = await readEventQueueWithChanges(store, queue)
-  type Candidate = { branch: string; head: string; raw: string; change: EventChange | undefined }
+  type Candidate = { branch: string; head: string; raw: string | undefined; change: EventChange | undefined }
   const candidates: Candidate[] = []
   for (const [ref, head] of heads) {
     const branch = ref.slice("refs/heads/".length)
@@ -1463,10 +1478,7 @@ export async function retireMergedBranches(input: MergedBranchRetirementInput): 
       record({ branch, head, outcome: "kept", reason: "unreadable", detail: change.diagnostic })
       continue
     }
-    // @cto bbec7bb5 (work.md:99): eligibility comes from the canonical binding only — the recorded change's issue.
-    // A branch that binds by its name alone is kept and listed; binding it through its commits' Refs trailers is
-    // the named follow-up (the reader 29113 uses is not in yrd's io today). A person's `drop --issue` keeps its
-    // explicit argument: naming the issue is not a name match.
+    // Issue metadata only describes this population; exact ancestry and native custody license retirement.
     const raw = change?.issue
     if (raw === undefined) {
       const named = input.nameNumber(branch)
@@ -1474,15 +1486,7 @@ export async function retireMergedBranches(input: MergedBranchRetirementInput): 
         unnumbered++
       } else {
         boundByNameOnly++
-        record({
-          branch,
-          head,
-          outcome: "kept",
-          reason: "bound by name only",
-          detail: `issue ${named} from the branch name; no recorded change binds this branch`,
-        })
       }
-      continue
     }
     candidates.push({ branch, head, raw, change })
   }

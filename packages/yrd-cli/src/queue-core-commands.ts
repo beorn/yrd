@@ -36,6 +36,7 @@ import { readIssueDisplay } from "./issue-resolver.ts"
 import { createPostMerge } from "./post-merge.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup } from "./env-cleanup.ts"
+import { environmentInventory } from "./env-commands.ts"
 import {
   captureMergedComponentAuthors,
   mergedBranchSweepDue,
@@ -1000,6 +1001,13 @@ export async function coreQueueCommand(
         await authorGit(["fetch", "--no-tags", await remoteUrl(git, config.target.remote), outcome.target])
         for (const branch of outcome.merged) {
           const change = await readStatus(eventStore, config.target.branch, branch)
+          let base = outcome.base
+          if (change.componentAuthors?.length) {
+            if (change.merge === undefined) throw new Error(`${branch}: merged history has no component landing commit`)
+            const parent = await refAt(authorGit, `${change.merge}^1`)
+            if (parent === undefined) throw new Error(`${branch}: landing ${change.merge} has no readable parent`)
+            base = parent
+          }
           componentAuthors.push(
             ...(await captureMergedComponentAuthors({
               repo: authorRepo,
@@ -1008,7 +1016,7 @@ export async function coreQueueCommand(
               env,
               branch,
               change,
-              base: outcome.base,
+              base,
               target: outcome.target,
               log: retirementLog,
             })),
@@ -3614,43 +3622,6 @@ export async function coreQueueCommand(
           if (stopped() || startupAbort.signal.aborted) return 0
           await publisher.publish(runnerClaim())
         }
-        // One fresh startup catch-up, independent of every old attempt artifact.
-        // Provider position is its own; cleanup reads native Git facts and holds.
-        if (startupCatchup) {
-          postMerge?.recover()
-          const declared = await declaration()
-          if (declared !== undefined) {
-            const startupLog = openLog(join(workdir, "logs"))
-            startupLog.write({
-              kind: "run",
-              command: "post-merge startup",
-              config: declared.config.blob,
-              target: targetLabel,
-            })
-            postMerge?.nudge({
-              code: codeIdentity,
-              config: declared.config.blob,
-              repo,
-              queue: targetLabel,
-              target: declared.oid,
-              base: declared.oid,
-              merged: [],
-              update: declared.config.issuesProvider?.update,
-              cleanup: async (merged) => {
-                try {
-                  await cleanupAfterRound(
-                    { run: startupLog.id, log: startupLog.path, base: declared.oid, target: declared.oid, merged },
-                    declared,
-                    () => {},
-                  )
-                } finally {
-                  startupLog.finish()
-                }
-              },
-            })
-            startupCatchup = false
-          }
-        }
         // THE HEARTBEAT (24523 D6): one timer for the whole loop, restating
         // the last document through rounds, idle sleeps and a stopped line.
         let nextRunnerBeat = Date.now() + runnerBeatMs
@@ -3765,6 +3736,74 @@ export async function coreQueueCommand(
               )
               if (stopped()) return 0
               continue
+            }
+          }
+          // One fresh startup catch-up, after the existing run-index precondition.
+          // Provider position is its own; cleanup reads native Git facts and holds.
+          if (startupCatchup) {
+            postMerge?.recover()
+            const declared = await declaration()
+            if (declared !== undefined) {
+              // Housekeeping evidence is not a queue round; keep it outside the round reader's population.
+              const startupLog = openLog(join(workdir, "logs", "post-merge"))
+              startupLog.write({
+                kind: "run",
+                command: "post-merge startup",
+                config: declared.config.blob,
+                target: targetLabel,
+              })
+              const merged: string[] = []
+              const recoveryWarning = (branch: string | undefined, cause: unknown): void => {
+                const reason = `startup terminal cleanup recovery unavailable: ${String(cause)}`
+                startupLog.write({ kind: "warning", branch, scope: "local-branch-retirement", reason })
+                io.stderr(`yrd: ${branch === undefined ? targetLabel : branch}: ${reason}\n`)
+              }
+              try {
+                const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
+                const authorGit = gitIn(authorRepo, undefined, selection, { env })
+                const inventory = await environmentInventory(authorRepo, authorGit, workdir)
+                const branches = new Set(
+                  inventory.rows.flatMap((row) => (row.branch === undefined ? [] : [row.branch])),
+                )
+                for (const branch of branches) {
+                  try {
+                    const { history } = await readBranchHistory(eventStore, declared.config.target.branch, branch)
+                    if (history?.state.status !== "merged") continue
+                    if (history.state.commit === undefined || history.state.tip === undefined) {
+                      throw new Error("merged history has no exact submitted head and event tip")
+                    }
+                    merged.push(branch)
+                  } catch (cause) {
+                    // delete-fallback-allow: merged only loses unproved terminal candidates; worktrees is independently allocated and claimed in the exclusive check case, unreachable from this up loop.
+                    recoveryWarning(branch, cause)
+                  }
+                }
+              } catch (cause) {
+                // delete-fallback-allow: merged only loses unproved terminal candidates; worktrees is independently allocated and claimed in the exclusive check case, unreachable from this up loop.
+                recoveryWarning(undefined, cause)
+              }
+              postMerge?.nudge({
+                code: codeIdentity,
+                config: declared.config.blob,
+                repo,
+                queue: targetLabel,
+                target: declared.oid,
+                base: declared.oid,
+                merged,
+                update: declared.config.issuesProvider?.update,
+                cleanup: async (merged) => {
+                  try {
+                    await cleanupAfterRound(
+                      { run: startupLog.id, log: startupLog.path, base: declared.oid, target: declared.oid, merged },
+                      declared,
+                      () => {},
+                    )
+                  } finally {
+                    startupLog.finish()
+                  }
+                },
+              })
+              startupCatchup = false
             }
           }
           // The declaration again under the lock, as the target holds it now: a

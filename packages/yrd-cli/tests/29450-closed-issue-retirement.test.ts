@@ -18,12 +18,18 @@ import {
   listChanges,
   readConfig,
   readEventQueue,
+  readStatus,
   type LocalBranchRetirement,
   type LogRecord,
 } from "@yrd/queue-core"
 import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
-import { mergedBranchSweepDue, markMergedBranchSweep, retireMergedBranches } from "../src/branch-retirement.ts"
+import {
+  mergedBranchSweepDue,
+  markMergedBranchSweep,
+  retireMergedBranches,
+  retireMergedRootAuthor,
+} from "../src/branch-retirement.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -72,7 +78,7 @@ async function recordChange(
   repo: string,
   branch: string,
   tip: string,
-  issue: string,
+  issue: string | undefined,
   ending?: "merged" | "withdrawn",
 ): Promise<void> {
   const git = gitIn(repo)
@@ -132,6 +138,53 @@ async function sweep(repo: string, protections?: YrdCliIO["localBranchProtection
 const idle: NonNullable<YrdCliIO["localBranchProtections"]> = async () => ({ protections: [], evidence: [] })
 
 describe("automatic retirement is licensed by exact-head ancestry", () => {
+  /**
+   * @failure An issue-less merged source outside task/exp stays silently when its graph is not on target.
+   * @level l2
+   * @consumer the owner who must receive the named KEEP flag without optional issue metadata
+   * @testonly none
+   */
+  it("flags an issue-less non-task graph-only source kept for owner review", async () => {
+    const repo = await world()
+    const git = gitIn(repo)
+    const branch = "repair/rebuilt"
+    const target = (await git(["rev-parse", "origin/main"])).trim()
+    await git(["checkout", "--quiet", "-b", branch, "main"])
+    await git(["commit", "--quiet", "--allow-empty", "-m", "graph-only source"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    expect((await git(["rev-parse", `${head}^{tree}`])).trim()).toBe(
+      (await git(["rev-parse", `${target}^{tree}`])).trim(),
+    )
+    await recordChange(repo, branch, head, undefined, "merged")
+    const store = createEventStore(repo, "origin", git.selection)
+    const change = await readStatus(store, "main", branch)
+    expect(change.issue).toBeUndefined()
+    const out = capture(repo)
+    const { rows, log } = collector()
+    const result = await retireMergedRootAuthor({
+      repo,
+      git,
+      branch,
+      change,
+      base: target,
+      target,
+      actor: "fixture",
+      io: { ...out.io, localBranchProtections: idle },
+      log,
+      store,
+      queue: "main",
+    })
+    expect(result).toMatchObject({ outcome: "kept", reason: "unreached" })
+    expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
+    expect((await git(["for-each-ref", "--format=%(refname)", "refs/archive/"])).trim()).toBe("")
+    expect(rows).toContainEqual(
+      expect.objectContaining({ kind: "local-branch-retirement", branch, head, outcome: "kept", reason: "unreached" }),
+    )
+    expect(out.stderr()).toContain(`${branch}@${head}`)
+    expect(out.stderr()).toContain("owner review")
+  })
+
   it("archives and removes an ancestor while keeping the unmerged/graph-only population", async () => {
     const repo = await world()
     const merged = await branchFor(repo, "task/29100-merged", "opaque-key")

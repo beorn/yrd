@@ -92,6 +92,7 @@ import { resolveQueueLocation } from "../src/queue-location.ts"
 import { transientPushRetry } from "../../yrd-queue-core/src/transient-push.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
+import { retireMergedBranches } from "../src/branch-retirement.ts"
 
 // A mutable facade, so a test can catch each health document at the rename
 // that publishes it. Every call passes through to the real filesystem.
@@ -569,6 +570,199 @@ async function gitlinkVectorWorld(
 
 describe("yrd queue up, the service", () => {
   /**
+   * @failure Restart forgets terminal cleanup after a durable merge interrupted its provider attempt,
+   *          or the ordinary sweep skips its issue-less released author ref or crosses namespace custody.
+   * @level l2
+   * @consumer the author whose fresh recorded job must close after service restart
+   * @testonly none
+   */
+  it("startup recovers terminal cleanup for a fresh recorded job merged before interruption", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    const ready = join(w.workdir, "provider-ready")
+    const release = join(w.workdir, "provider-release")
+    const provider = join(w.workdir, "provider.sh")
+    const script = ['touch "$1"', ...waitingFor('test ! -f "$2"', "restart fixture provider was not released")].join(
+      "\n",
+    )
+    writeFileSync(provider, script)
+    await redeclare(w, JSON.stringify({ setup: ":", issuesProvider: { update: ["sh", provider, ready, release] } }))
+    const branch = "task/restart-job"
+    await w.git(["checkout", "--quiet", "-b", branch, "main"])
+    writeFileSync(join(w.work, "work.txt"), "merged job\n")
+    await w.git(["add", "work.txt"])
+    await w.git(["commit", "--quiet", "-m", "job without issue metadata"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "restart-job", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = (JSON.parse(opened.stdout()) as { path: string }).path
+    const gitDir = (await gitIn(environment)(["rev-parse", "--absolute-git-dir"])).trim()
+    expect(JSON.parse(readFileSync(join(gitDir, "yrd-open.json"), "utf8")).lifetime).toBe("job")
+    await gitIn(environment)(["checkout", "--quiet", branch])
+    await submit(w.git, "origin", { branch, submitter: "fixture", target: { remote: "origin", branch: "main" } })
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue({
+      complete: true,
+      unreadable: [],
+      mechanism: "proc",
+      rows: [],
+    })
+    try {
+      const stop = new AbortController()
+      const first = capture(w.work)
+      first.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
+      first.io.liveEnvironmentUse = async () => []
+      expect(
+        await coreQueueCommand(
+          w.work,
+          first.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async (outcome) => {
+              await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 30_000 })
+              expect(outcome.merged).toEqual([branch])
+              stop.abort()
+            },
+          },
+          { json: true, workdir },
+        ),
+        first.stderr(),
+      ).toBe(0)
+      const store = createEventStore(w.work, "origin", w.git.selection)
+      const merged = await queueCore.readStatus(store, "main", branch)
+      expect(merged.status).toBe("merged")
+      expect(merged.issue).toBeUndefined()
+      expect(existsSync(environment), "merge is durable while its pending cleanup is interrupted").toBe(true)
+      writeFileSync(release, "go")
+      const restarted = capture(w.work)
+      let holdAuthor = true
+      restarted.io.localBranchProtections = async () => ({
+        protections: holdAuthor ? ["fixture author hold"] : [],
+        evidence: [],
+      })
+      restarted.io.liveEnvironmentUse = async () => []
+      const stopRestart = new AbortController()
+      expect(
+        await coreQueueCommand(
+          w.work,
+          restarted.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stopRestart.signal,
+            afterRound: async (outcome) => {
+              expect(outcome.merged, "restart merges no new change").toEqual([])
+              await waitForEnvironmentCleanup(workdir, outcome.run)
+              stopRestart.abort()
+            },
+          },
+          { json: true, workdir },
+        ),
+        restarted.stderr(),
+      ).toBe(0)
+      await w.git(["fetch", "--quiet", "origin", "main"])
+      expect(await w.git(["merge-base", "--is-ancestor", head, "origin/main"])).toBe("")
+      expect(existsSync(environment), restarted.stderr()).toBe(false)
+      expect(allCleanupRows(workdir).some((row) => row.path === environment && row.result === "filed")).toBe(true)
+      expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim(), "hold retains the released author ref").toBe(
+        head,
+      )
+      const logs = join(workdir, "logs")
+      const heldRows = [logs, join(logs, "post-merge")].flatMap((dir) =>
+        readdirSync(dir)
+          .filter((name) => name.endsWith(".jsonl"))
+          .flatMap((name) => readRunLog(dir, name.slice(0, -".jsonl".length))),
+      )
+      expect(heldRows).toContainEqual(
+        expect.objectContaining({
+          kind: "local-branch-retirement",
+          branch,
+          head,
+          outcome: "kept",
+          detail: "fixture author hold",
+        }),
+      )
+      const outside = "release/owner-retained"
+      await w.git(["checkout", "--quiet", "-b", outside, "origin/main"])
+      await w.git(["commit", "--quiet", "--allow-empty", "-m", "outside Yrd namespace"])
+      const outsideHead = (await w.git(["rev-parse", "HEAD"])).trim()
+      await submit(w.git, "origin", {
+        branch: outside,
+        submitter: "fixture",
+        target: { remote: "origin", branch: "main" },
+      })
+      await w.git(["checkout", "--quiet", "main"])
+      const outsideMerge = capture(w.work)
+      outsideMerge.io.localBranchProtections = restarted.io.localBranchProtections
+      expect(
+        await coreQueueCommand(
+          w.work,
+          outsideMerge.io,
+          {
+            command: "merge",
+            branch: outside,
+            submitter: "fixture",
+          },
+          { json: true, workdir },
+        ),
+        outsideMerge.stderr(),
+      ).toBe(0)
+      expect((await queueCore.readStatus(store, "main", outside)).status).toBe("merged")
+      await w.git(["fetch", "--quiet", "origin", "main"])
+      // This issue-less task ref is in the existing ordinary sweep population.
+      // The environment is gone; no startup history scan is needed to recover it.
+      holdAuthor = false
+      const sweepLog = queueCore.openLog(logs)
+      try {
+        sweepLog.write({ kind: "run", command: "fixture ordinary branch sweep" })
+        const swept = await retireMergedBranches({
+          repo: w.work,
+          git: w.git,
+          selection: w.git.selection,
+          store,
+          queue: "main",
+          target: (await w.git(["rev-parse", "origin/main"])).trim(),
+          io: restarted.io,
+          log: sweepLog,
+          actor: "fixture",
+          nameNumber: () => undefined,
+        })
+        expect(swept.failed).toEqual([])
+        const removed = swept.removed.find((row) => row.branch === branch)
+        expect(removed).toMatchObject({ branch, head })
+        expect(removed?.archiveRef).toBeTypeOf("string")
+        expect((await w.git(["rev-parse", removed!.archiveRef!])).trim()).toBe(head)
+        expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe("")
+        expect(readRunLog(logs, sweepLog.id)).toContainEqual(
+          expect.objectContaining({
+            kind: "local-branch-retirement",
+            branch,
+            head,
+            outcome: "removed",
+            archive: removed!.archiveRef,
+          }),
+        )
+        expect(
+          (await w.git(["rev-parse", `refs/heads/${outside}`])).trim(),
+          "namespace custody preserves the merged release ref",
+        ).toBe(outsideHead)
+        expect([...swept.removed, ...swept.kept, ...swept.failed].some((row) => row.branch === outside)).toBe(false)
+      } finally {
+        sweepLog.finish()
+      }
+    } finally {
+      writeFileSync(release, "go")
+      census.mockRestore()
+    }
+  }, 120_000)
+
+  /**
    * @failure An external declared use has no process cwd holder between
    *          commands, so automatic cleanup destroys its environment.
    * @level l2
@@ -607,7 +801,7 @@ describe("yrd queue up, the service", () => {
       const missingChild = join(alias, "not-created", "working")
       const missingOther = join(dirname(path), "retired-work", "not-created")
       const addresses = [join(path, "working"), path, alias, missingChild, sibling]
-      for (const [index, address] of addresses.entries()) {
+      for (const address of addresses) {
         uses.mockResolvedValue([
           { path: address, reason: "declared working directory" },
           ...(address === sibling ? [{ path: missingOther, reason: "retired declared working directory" }] : []),
@@ -615,12 +809,22 @@ describe("yrd queue up, the service", () => {
         const stop = new AbortController()
         const run = capture(w.work)
         run.io.liveEnvironmentUse = uses
+        const completedBefore = allCleanupRows(workdir).filter((row) => typeof row.remaining === "number").length
+        const readsBefore = uses.mock.calls.length
         try {
           expect(
             await coreQueueCommand(
               w.work,
               run.io,
-              { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+              {
+                command: "up",
+                intervalSeconds: 0,
+                stop: stop.signal,
+                afterRound: async (outcome) => {
+                  await waitForEnvironmentCleanup(workdir, outcome.run)
+                  stop.abort()
+                },
+              },
               { json: true, workdir },
             ),
             run.stderr(),
@@ -629,7 +833,11 @@ describe("yrd queue up, the service", () => {
           expect(existsSync(path), run.stderr()).toBe(protects)
           if (protects) expect(run.stderr()).toContain("live use: declared working directory")
           else expect(run.stderr()).toContain("native retained removal proof accepted")
-          expect(uses).toHaveBeenCalledTimes(index + 1)
+          const completed = allCleanupRows(workdir).filter((row) => typeof row.remaining === "number")
+          expect(completed.length - completedBefore, "startup and round cleanup both complete").toBe(2)
+          expect(uses.mock.calls.length - readsBefore, "one live-use read per completed nonempty cleanup").toBe(
+            completed.filter((row) => row.result !== "none").length - completedBefore,
+          )
         } finally {
           stop.abort()
         }
@@ -1187,7 +1395,8 @@ describe("yrd queue up, the service", () => {
             command: "up",
             intervalSeconds: 0,
             stop: stop.signal,
-            afterRound: () => {
+            afterRound: async (outcome) => {
+              await waitForEnvironmentCleanup(workdir, outcome.run)
               rounds++
               if (rounds === 2) stop.abort()
             },
@@ -5079,6 +5288,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
       }
       const originalBackend = gitomic.createShellBackend
       let moves = 0
+      let moving = Promise.resolve()
       using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
         const backend = originalBackend(options)
         const fetch = backend.fetchRefs
@@ -5087,19 +5297,31 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
           ...backend,
           fetchRefs: async (...args: Parameters<typeof fetch>) => {
             const [, refs] = args
-            if (moves < moveLimit && refs.includes(tips[0]!.ref)) {
-              if (fault === "unrelated-error") throw new Error("unrelated inventory read failure")
-              const tip = tips[moves % tips.length]!
-              const forward = Math.floor(moves / tips.length) % 2 === 0
-              await w.git([
-                "--git-dir",
-                remote,
-                "update-ref",
-                tip.ref,
-                forward ? tip.after : tip.before,
-                forward ? tip.before : tip.after,
-              ])
-              moves++
+            // Cleanup and a round can acquire refs concurrently. Only the fixture's
+            // native move injector is serial: two callers must not reuse one CAS turn.
+            const previous = moving
+            let releaseMove!: () => void
+            moving = new Promise<void>((resolve) => {
+              releaseMove = resolve
+            })
+            await previous
+            try {
+              if (moves < moveLimit && refs.includes(tips[0]!.ref)) {
+                if (fault === "unrelated-error") throw new Error("unrelated inventory read failure")
+                const tip = tips[moves % tips.length]!
+                const forward = Math.floor(moves / tips.length) % 2 === 0
+                await w.git([
+                  "--git-dir",
+                  remote,
+                  "update-ref",
+                  tip.ref,
+                  forward ? tip.after : tip.before,
+                  forward ? tip.before : tip.after,
+                ])
+                moves++
+              }
+            } finally {
+              releaseMove()
             }
             return fetch(...args)
           },
