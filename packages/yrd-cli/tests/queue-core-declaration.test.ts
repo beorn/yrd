@@ -3701,6 +3701,129 @@ describe("a queue is the selected origin branch carrying config", () => {
  * @consumer Authors retaining dirty checkouts while dropping reviewed exact tips (29600).
  * Existing issue-drop tests preserve attached branches; they cannot exercise opt-in detach or one-root custody.
  */
+/**
+ * @failure Component-local cleanup refuses a missing queue declaration and strands work after its root retires.
+ * @level l2: public CLI, real declared root, real absorbed submodule and independent local remotes.
+ * @consumer Component owners and branch-triage exact-tip local retirement.
+ * Existing no-config coverage has no declared parent, so it cannot observe this regression.
+ */
+describe("component-local retirement without a component queue", () => {
+  it.each(["merged", "unmerged", "held", "root-retired"] as const)(
+    "retires exact %s component work through the declared root's existing log",
+    async (mode) => {
+      const root = await world("{}\n")
+      const rootGit = gitIn(root)
+      const seed = await world()
+      await rootGit([
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        join(dirname(seed), "remote.git"),
+        "modules/child",
+      ])
+      const child = join(root, "modules/child")
+      const git = gitIn(child)
+      await rootGit(["commit", "--quiet", "-am", "record component"])
+      await rootGit(["push", "--quiet", "origin", "main"])
+      const rootTip = (await rootGit(["rev-parse", "HEAD"])).trim()
+      await createQueue(root, "main", rootTip, new Date())
+      const branch = "task/28824-component"
+      if (mode === "unmerged") {
+        await git(["checkout", "--quiet", "-b", branch])
+        writeFileSync(join(child, "private.txt"), "reviewed unmerged work\n")
+        await git(["add", "private.txt"])
+        await git([
+          "-c",
+          "user.name=fixture",
+          "-c",
+          "user.email=fixture@test.invalid",
+          "commit",
+          "--quiet",
+          "-m",
+          "unmerged component work",
+        ])
+        await git(["checkout", "--quiet", "main"])
+      } else {
+        await git(["branch", branch])
+      }
+      const tip = (await git(["rev-parse", "refs/heads/" + branch])).trim()
+      if (mode === "root-retired") {
+        const rootBranch = "task/28824-root-already-retired"
+        await rootGit(["branch", rootBranch])
+        const prior = capture(root)
+        expect(
+          await runYrdProcess(
+            ["bun", "yrd", "drop", rootBranch, "--local", "--tip", rootTip, "--submitter", "fixture", "--json"],
+            prior.io,
+          ),
+          prior.stderr(),
+        ).toBe(0)
+        expect((await rootGit(["for-each-ref", "--format=%(objectname)", "refs/heads/" + rootBranch])).trim()).toBe("")
+      }
+      const run = capture(child)
+      run.io.localBranchProtections = async () => ({
+        protections: mode === "held" ? ["fixture owner hold"] : [],
+        evidence: [],
+      })
+      const exit = await runYrdProcess(
+        [
+          "bun",
+          "yrd",
+          "drop",
+          branch,
+          "--local",
+          "--tip",
+          tip,
+          "--issue",
+          "28824",
+          "--reason",
+          "explicit reviewed component drop",
+          "--submitter",
+          "fixture",
+          "--json",
+        ],
+        run.io,
+      )
+      expect(exit, run.stderr()).toBe(0)
+      const report = JSON.parse(run.stdout()) as {
+        removed: { branch: string; head: string; archiveRef: string }[]
+        kept: { branch: string }[]
+        failed: unknown[]
+      }
+      expect(report.failed).toEqual([])
+      if (mode === "held") {
+        expect(report.removed).toEqual([])
+        expect(report.kept).toEqual([expect.objectContaining({ branch })])
+        expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(tip)
+      } else {
+        expect(report.removed).toEqual([expect.objectContaining({ branch, head: tip })])
+        const archive = report.removed[0]?.archiveRef
+        expect(archive).toMatch(/^refs\/archive\//u)
+        expect((await git(["rev-parse", archive as string])).trim()).toBe(tip)
+        expect((await git(["for-each-ref", "--format=%(objectname)", "refs/heads/" + branch])).trim()).toBe("")
+        if (mode === "unmerged")
+          expect((await git(["ls-remote", "origin", archive as string])).split("\t")[0]).toBe(tip)
+      }
+      expect((await git(["ls-remote", "origin", "refs/yrd/*"])).trim()).toBe("")
+      const logs = join(await workdirOf(rootGit), "logs")
+      const records = readdirSync(logs)
+        .filter((name) => name.endsWith(".jsonl"))
+        .flatMap((name) =>
+          readFileSync(join(logs, name), "utf8")
+            .trim()
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => JSON.parse(line) as { kind?: string; repo?: string; branch?: string; head?: string }),
+        )
+      expect(records).toContainEqual(
+        expect.objectContaining({ kind: "local-branch-retirement", repo: child, branch, head: tip }),
+      )
+    },
+  )
+})
+
 describe("drop --local --release-checkout", () => {
   function releaseCapture(repo: string) {
     const output = capture(repo)
