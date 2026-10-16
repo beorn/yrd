@@ -1575,8 +1575,9 @@ describe("yrd queue up, the service", () => {
               command: "up",
               intervalSeconds: 0,
               stop: stop.signal,
-              afterRound: (outcome) => {
+              afterRound: async (outcome) => {
                 merged = outcome.merged
+                await waitForEnvironmentCleanup(workdir, outcome.run)
                 stop.abort()
               },
             },
