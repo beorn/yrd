@@ -290,12 +290,10 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
   })
 
   it("a row names its issue", async () => {
-    // § The change: "the convention is `<issue>-<slug>`"; § Commands:
-    // `queue list` shows the issue. A branch that carries one has to reach
-    // the row, because the issue is how the queue's table joins the bead
-    // table.
+    // An explicit issue binding reaches the row, so the queue's table can
+    // join the bead table without inferring an issue from the branch name.
     const { repo } = await boundaryRepository({ exit: 0 })
-    const { branch } = await submitOneCommit(repo, "24058-derived")
+    const { branch } = await submitOneCommit(repo, "24058-derived", "derived-state work\n\nRefs: 24058")
 
     const { rows, result } = await changesListed(repo)
     const row = rowFor(rows, branch, result.report)

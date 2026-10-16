@@ -1191,7 +1191,27 @@ export async function coreQueueCommand(
         ...(stopAtMs === undefined ? {} : { stopAtMs }),
         ...(noCheck === undefined ? {} : { noCheck }),
       })
-      roundCleanup = (merged) => cleanupAfterRound({ ...outcome, merged }, declared, baseOptions.render)
+      roundCleanup = async (merged) => {
+        // The queue journal is complete. Housekeeping owns a separate log,
+        // just like startup catch-up, so later cleanup cannot stale its projection.
+        const cleanupLog = openLog(join(workdir, "logs", "post-merge"))
+        cleanupLog.write({
+          kind: "run",
+          command: "post-merge cleanup",
+          config: declared.config.blob,
+          target: targetLabel,
+          queueRun: outcome.run,
+        })
+        try {
+          await cleanupAfterRound(
+            { ...outcome, run: cleanupLog.id, log: cleanupLog.path, merged },
+            declared,
+            baseOptions.render,
+          )
+        } finally {
+          cleanupLog.finish()
+        }
+      }
     } catch (error) {
       // Cleanup used to run outside this catch. Keep its original process
       // failure path: the round judged, so reporting stuck() would be false.

@@ -8,7 +8,16 @@
  * @testonly none
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -238,7 +247,10 @@ it.each(["topic", "main", "default", "new-default"] as const)(
     )
     expect((await childGit(["rev-parse", "refs/heads/unrelated/same-tip"])).trim()).toBe(tip)
     expect((await untouched(["rev-parse", `refs/heads/${authorBranch}`])).trim()).toBe(untouchedTip)
-    const records = readRunLog(join(outcome.log, ".."), outcome.run)
+    const cleanupLogs = join(outcome.log, "..", "post-merge")
+    const records = readdirSync(cleanupLogs)
+      .filter((name) => name.endsWith(".jsonl"))
+      .flatMap((name) => readRunLog(cleanupLogs, name.slice(0, -".jsonl".length)))
     const retirement = records.find(
       (row) => row.kind === "local-branch-retirement" && row.branch === authorBranch && row.head === tip,
     )

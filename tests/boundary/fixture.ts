@@ -132,13 +132,13 @@ async function openAuthorEnvironment(repo: string, branch: string, commit: strin
 }
 
 /** One commit on top of the target, authored in a real worktree and submitted through Yrd. */
-export async function submitOneCommit(repo: string, bay: string): Promise<Change> {
+export async function submitOneCommit(repo: string, bay: string, message?: string): Promise<Change> {
   const branch = `task/${bay}`
   const bayPath = await openAuthorEnvironment(repo, branch, await targetTip(repo))
 
   await writeFile(join(bayPath, `${bay}.txt`), `${bay}\n`)
   await git(bayPath, "add", `${bay}.txt`)
-  await git(bayPath, "commit", "-qm", `${bay}: one commit`)
+  await git(bayPath, "commit", "-qm", message ?? `${bay}: one commit`)
   const headSha = await git(bayPath, "rev-parse", "HEAD")
 
   // Standing IN the Bay, exactly as an author does.

@@ -59,7 +59,7 @@
  * result is nobody's, so only the stuck case below reads it.
  */
 import { readdir, readFile, stat } from "node:fs/promises"
-import { basename, dirname } from "node:path"
+import { basename, dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   boundaryRepository,
@@ -425,7 +425,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       const { origin, repo } = await boundaryRepository({ exit: 0, hooks: true })
 
       const run = await queueRunOnce(repo)
-      const { records } = await logOfQueueRun(run)
+      const { path, records } = await logOfQueueRun(run)
 
       // An honest zero: one run record, saying the queue run ran and what it read
       // the queue from. "I found nothing" and "I never looked" must not be the
@@ -448,6 +448,22 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
         }),
         expect.objectContaining({ kind: "observation", subject: "branch-list-omissions", count: 0, branches: [] }),
         expect.objectContaining({ kind: "observation", subject: "line", waiting: 0 }),
+      ])
+      // Post-merge cleanup has its own journal; the completed queue log stays immutable.
+      const cleanupDirectory = join(dirname(path), "post-merge")
+      const cleanupLogs = (await readdir(cleanupDirectory)).filter((name) => name.endsWith(".jsonl"))
+      const cleanupRecords = (
+        await Promise.all(cleanupLogs.map((name) => readFile(join(cleanupDirectory, name), "utf8")))
+      ).flatMap((text) =>
+        text
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as LogRecord),
+      )
+      expect(
+        cleanupRecords.filter((record) => record.scope === "environment-cleanup"),
+        run.report,
+      ).toEqual([
         // Environment cleanup reports even an empty registry: it names the registry it read and
         // the roots it looked under, so "found none" differs from "never ran" (27723, @cto 2026-10-06).
         expect.objectContaining({

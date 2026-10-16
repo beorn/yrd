@@ -135,7 +135,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
     const { repo, origin } = await boundaryRepository({ exit: 0 })
     await addYrdRemote(repo, origin)
     const branch = "24099-dry"
-    const head = await commitOnBranch(repo, branch)
+    const head = await commitOnBranch(repo, branch, "dry-run work\n\nRefs: 24099")
     const before = await refs(origin)
 
     const dry = await runYrd(repo, "queue", "submit", branch, "--dry-run", "--json")
