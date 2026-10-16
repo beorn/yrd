@@ -615,9 +615,7 @@ it.each(["compose", "capture"] as const)("sends one failed notice for a gitlink 
   expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/diverged-pin"], merged: [] })
   const status = await readStatus(eventStore(w), "main", "task/diverged-pin")
   expect(status).toMatchObject({ status: "failed", commit: head })
-  expect(status.reason).toContain(
-    phase === "compose" ? "gitlink-compose-refused" : "from its first-parent chain",
-  )
+  expect(status.reason).toContain(phase === "compose" ? "gitlink-compose-refused" : "from its first-parent chain")
   if (phase === "capture") {
     expect(status.reason).toContain(`Rebase the change's component branch onto main ${futureMain}`)
     expect(status.reason).toContain(`new branch started at ${futureMain} so main stays the first parent`)
