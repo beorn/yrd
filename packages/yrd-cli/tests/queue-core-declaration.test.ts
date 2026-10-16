@@ -3699,6 +3699,12 @@ describe("a queue is the selected origin branch carrying config", () => {
  * Existing issue-drop tests preserve attached branches; they cannot exercise opt-in detach or one-root custody.
  */
 describe("drop --local --release-checkout", () => {
+  function releaseCapture(repo: string) {
+    const output = capture(repo)
+    output.io.liveEnvironmentUse = async () => []
+    output.io.localBranchProtections = async () => []
+    return output
+  }
   type ReleaseReport = Awaited<ReturnType<typeof releaseRetainedCheckouts>>
   async function releaseWorld(component = false) {
     const repo = await world("{}\n")
@@ -3774,6 +3780,28 @@ describe("drop --local --release-checkout", () => {
     const spy = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue(permitted)
     return { spy, permitted }
   }
+  // Explicit release must prove both host authorities are connected; ordinary
+  // drop fixtures do not exercise the missing-reader boundary.
+  it.each(["liveEnvironmentUse", "localBranchProtections"] as const)(
+    "refuses release without the %s authority reader",
+    async (reader) => {
+      const fixture = await releaseWorld()
+      const { spy } = await permitCensus()
+      try {
+        const output = releaseCapture(fixture.repo)
+        delete output.io[reader]
+        expect(await runYrdProcess([...fixture.argv, "--apply"], output.io)).toBe(1)
+        const report = JSON.parse(output.stdout()) as ReleaseReport
+        expect(report.failed[0]?.detail).toContain(reader)
+        expect(report.removed).toEqual([])
+        expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+        expect(await fixture.git(["for-each-ref", "refs/archive/"])).toBe("")
+      } finally {
+        spy.mockRestore()
+      }
+    },
+    30_000,
+  )
   // Accepted recovery contract: a real partial ref-deletion failure must remain
   // resumable through the same CLI, with exactly one final custody event.
   // The earlier golden path and single-checkout refusals never partially retire.
@@ -3785,7 +3813,7 @@ describe("drop --local --release-checkout", () => {
       try {
         const target = failedRepo === "root" ? fixture.repo : fixture.child!
         let lock: string | undefined
-        const first = capture(fixture.repo)
+        const first = releaseCapture(fixture.repo)
         first.io.localBranchProtections = async ({ repo }) => {
           if (repo === target && (await gitIn(repo)(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")) === "") {
             lock = join(
@@ -3818,7 +3846,7 @@ describe("drop --local --release-checkout", () => {
             failedRepo === "wrong archive" ? archive : extra,
             failedRepo === "wrong archive" ? wrong : archivedTip,
           ])
-          const refused = capture(fixture.repo)
+          const refused = releaseCapture(fixture.repo)
           expect(
             await runYrdProcess([...fixture.argv, "--apply"], refused.io),
             refused.stdout() + refused.stderr(),
@@ -3828,7 +3856,7 @@ describe("drop --local --release-checkout", () => {
           if (failedRepo === "wrong archive") await childGit(["update-ref", archive, archivedTip, wrong])
           else await childGit(["update-ref", "-d", extra, archivedTip])
         }
-        const retry = capture(fixture.repo)
+        const retry = releaseCapture(fixture.repo)
         expect(await runYrdProcess([...fixture.argv, "--apply"], retry.io), retry.stderr()).toBe(0)
         const completed = JSON.parse(retry.stdout()) as ReleaseReport
         expect(completed.failed).toEqual([])
@@ -3844,7 +3872,7 @@ describe("drop --local --release-checkout", () => {
         expect(history.events.filter((event) => event.type === "cancelled")).toHaveLength(1)
         if (failedRepo === "child") {
           const control = await releaseWorld(true)
-          const oneShot = capture(control.repo)
+          const oneShot = releaseCapture(control.repo)
           expect(
             await runYrdProcess([...control.argv, "--apply"], oneShot.io),
             oneShot.stdout() + oneShot.stderr(),
@@ -3864,7 +3892,7 @@ describe("drop --local --release-checkout", () => {
           )
         }
         const eventTip = await fixture.git(["ls-remote", "origin", `refs/yrd/main/changes/${fixture.branch}`])
-        const replay = capture(fixture.repo)
+        const replay = releaseCapture(fixture.repo)
         expect(await runYrdProcess([...fixture.argv, "--apply"], replay.io), replay.stdout() + replay.stderr()).toBe(0)
         expect(await fixture.git(["ls-remote", "origin", `refs/yrd/main/changes/${fixture.branch}`])).toBe(eventTip)
         expect((JSON.parse(replay.stdout()) as ReleaseReport).failed).toEqual([])
@@ -3886,7 +3914,7 @@ describe("drop --local --release-checkout", () => {
         )
       }
       for (const flags of [[], ["--dry-run"]]) {
-        const preview = capture(fixture.repo)
+        const preview = releaseCapture(fixture.repo)
         expect(await runYrdProcess([...fixture.argv, ...flags], preview.io), preview.stderr()).toBe(0)
         const report = JSON.parse(preview.stdout()) as ReleaseReport
         expect(report.eligible, JSON.stringify(report) + preview.stderr()).toHaveLength(2)
@@ -3897,7 +3925,7 @@ describe("drop --local --release-checkout", () => {
         )
         expect(await fixture.git(["for-each-ref", "refs/archive/"])).toBe("")
       }
-      const applied = capture(fixture.repo)
+      const applied = releaseCapture(fixture.repo)
       applied.io.localBranchProtections = async ({ repo, branch, tip, retainedCheckout }) => {
         expect(retainedCheckout).toBe(repo)
         // Archive custody precedes deletion; the one root ending follows the complete release.
@@ -3946,7 +3974,7 @@ describe("drop --local --release-checkout", () => {
       const fixture = await releaseWorld()
       const { spy, permitted } = await permitCensus()
       try {
-        const output = capture(fixture.repo)
+        const output = releaseCapture(fixture.repo)
         let reads = 0
         if (kind === "moved") {
           fixture.argv[fixture.argv.indexOf("--tip") + 1] = (await fixture.git(["rev-parse", "main"])).trim()

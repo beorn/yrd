@@ -182,6 +182,9 @@ export async function releaseRetainedCheckouts(
     )
   }
   try {
+    for (const reader of ["liveEnvironmentUse", "localBranchProtections"] as const) {
+      if (io[reader] === undefined) throw new Error(`release-checkout requires the ${reader} authority reader`)
+    }
     const actual = await refAt(input.git, `refs/heads/${request.branch}`)
     if (actual !== undefined && actual !== request.tip) {
       kept.push({
@@ -242,8 +245,9 @@ export async function releaseRetainedCheckouts(
                 : archive.branch === branch
             })
           : []
-      if (recovery.length > 1)
+      if (recovery.length > 1) {
         throw new Error(`${repository}: ambiguous archive custody: ${recovery.map((row) => row.ref).join(", ")}`)
+      }
       if (
         branch !== undefined ||
         recovery.length > 0 ||
@@ -252,11 +256,13 @@ export async function releaseRetainedCheckouts(
         const selectedBranch = branch ?? attached?.branch ?? recovery[0]?.branch
         if (selectedBranch === undefined) throw new Error(`${repository}: selected attached branch became unreadable`)
         const custody = archives.filter((archive) => archive.branch === selectedBranch)
-        if (custody.length > 1)
+        if (custody.length > 1) {
           throw new Error(`${repository}: ambiguous archive custody: ${custody.map((row) => row.ref).join(", ")}`)
+        }
         const archive = custody[0]
-        if (archive !== undefined && archive.tip !== commit)
+        if (archive !== undefined && archive.tip !== commit) {
           throw new Error(`${repository}: archive ${archive.ref} holds ${archive.tip}, not pinned tip ${commit}`)
+        }
         const current = await refAt(git, `refs/heads/${selectedBranch}`)
         const retired =
           attached !== undefined && attached.branch === undefined && current === undefined && archive !== undefined
@@ -280,8 +286,9 @@ export async function releaseRetainedCheckouts(
             detail: `attached checkout does not match exact recorded pin ${commit}`,
           })
         } else {
-          if (retired && (await readRemoteCommit(git, row.remote, row.archiveRef)) !== commit)
+          if (retired && (await readRemoteCommit(git, row.remote, row.archiveRef)) !== commit) {
             throw new Error(`${repository}: archive ${row.archiveRef} lacks exact remote custody at ${commit}`)
+          }
           candidates.push({ row, checkout: realpathSync(repository), git, retired })
         }
       } else {
@@ -389,7 +396,7 @@ export async function releaseRetainedCheckouts(
           break
         }
         const store = createGitWorktreeStore({ repo: row.repo, gitProcess: seamProcess(candidate.git, row.repo) })
-        original = await store.detachAt(candidate.checkout, row.head)
+        original = await store.detachAt(candidate.checkout, row.head, `refs/heads/${row.branch}`)
         const result = await retireLocalBranch({
           repo: row.repo,
           git: candidate.git,
