@@ -204,7 +204,21 @@ function cleanupRows(root: string): readonly Record<string, unknown>[] {
 /** Observe the asynchronous round cleanup before a fixture stops its service. */
 async function waitForEnvironmentCleanup(workdir: string, run: string): Promise<void> {
   await vi.waitFor(
-    () => expect(allCleanupRows(workdir).some((row) => row.run === run && row.registry !== undefined)).toBe(true),
+    () => {
+      const dir = join(workdir, "logs", "post-merge")
+      const cleanupRuns = new Set(
+        (existsSync(dir) ? readdirSync(dir) : [])
+          .filter((name) => name.endsWith(".jsonl"))
+          .map((name) => name.slice(0, -".jsonl".length))
+          .filter((id) => readRunLog(dir, id).some((row) => row.kind === "run" && row.queueRun === run)),
+      )
+      expect(
+        allCleanupRows(workdir).some(
+          (row) => cleanupRuns.has(String(row.run)) && row.registry !== undefined && typeof row.remaining === "number",
+        ),
+        `completed cleanup linked to queue run ${run}`,
+      ).toBe(true)
+    },
     { timeout: 30_000 },
   )
 }
