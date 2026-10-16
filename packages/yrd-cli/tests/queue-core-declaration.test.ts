@@ -3840,8 +3840,8 @@ describe("drop --local --release-checkout", () => {
       spy.mockRestore()
     }
   }, 60_000)
-  it.each(["moved", "cwd", "delegation", "declared", "host", "late entrant"])(
-    "keeps %s and restores an attached checkout after late refusal",
+  it.each(["moved", "cwd", "delegation", "declared", "host", "late entrant", "failed retirement"])(
+    "reports %s and restores an attached checkout after unsuccessful retirement",
     async (kind) => {
       const fixture = await releaseWorld()
       const { spy, permitted } = await permitCensus()
@@ -3865,16 +3865,23 @@ describe("drop --local --release-checkout", () => {
         }
         output.io.localBranchProtections = async () => {
           reads++
+          if (kind === "failed retirement" && reads === 4) {
+            const lock = (await fixture.git(["rev-parse", "--git-path", `refs/heads/${fixture.branch}.lock`])).trim()
+            writeFileSync(join(fixture.repo, lock), "fixture competing ref transaction\n")
+          }
           if (kind === "late entrant" && reads === 4) {
             expect(await fixture.git(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")).toBe("")
           }
           return kind === "host" || (kind === "late entrant" && reads > 3) ? ["live lease or host hold"] : []
         }
-        expect(await runYrdProcess([...fixture.argv, "--apply"], output.io), output.stderr()).toBe(0)
+        expect(await runYrdProcess([...fixture.argv, "--apply"], output.io), output.stderr()).toBe(
+          kind === "failed retirement" ? 1 : 0,
+        )
         const report = JSON.parse(output.stdout()) as ReleaseReport
         expect(report.removed).toEqual([])
-        expect(report.kept).toHaveLength(1)
-        expect(report.kept[0]?.detail).toMatch(
+        expect(kind === "failed retirement" ? report.failed : report.kept).toHaveLength(1)
+        expect(kind === "failed retirement" ? report.kept : report.failed).toEqual([])
+        expect((kind === "failed retirement" ? report.failed : report.kept)[0]?.detail).toMatch(
           kind === "moved"
             ? /tip|moved/
             : kind === "cwd"
@@ -3883,7 +3890,9 @@ describe("drop --local --release-checkout", () => {
                 ? /census|delegation/
                 : kind === "declared"
                   ? /declared live owner/
-                  : /live lease or host hold/,
+                  : kind === "failed retirement"
+                    ? /lock|already exists/
+                    : /live lease or host hold/,
         )
         expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
         expect((await fixture.git(["rev-parse", `refs/heads/${fixture.branch}`])).trim()).toBe(fixture.tip)

@@ -374,7 +374,8 @@ export async function releaseRetainedCheckouts(
         if (result.outcome !== "removed") {
           await candidate.git(["symbolic-ref", "HEAD", original.branch])
           original = undefined
-          kept.push({ ...row, reason: result.reason, detail: result.detail ?? result.reason })
+          const destination = result.outcome === "failed" ? failed : kept
+          destination.push({ ...row, reason: result.reason, detail: result.detail ?? result.reason })
         } else removed.push(row)
         await verify(candidate, before)
       } catch (cause) {
