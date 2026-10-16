@@ -3660,21 +3660,36 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(error.message).not.toContain("is older than")
   })
 
-  it("refuses a selected branch with no config, names that branch, and names the cure", async () => {
-    const repo = await world()
-    const run = capture(repo)
+  it.each(["list", "drop-local", "drop-issue"] as const)(
+    "refuses %s on a selected branch with no config and names the cure",
+    async (command) => {
+      const repo = await world()
+      const run = capture(repo)
 
-    const exit = await coreQueueCommand(repo, run.io, { command: "list" }, { queue: "main" })
+      const request =
+        command === "list"
+          ? { command }
+          : command === "drop-local"
+            ? { command, branch: "task/29600", tip: "a".repeat(40), by: "tester", issue: "29600" }
+            : { command, issue: "29600", by: "tester" }
+      const exit = await coreQueueCommand(repo, run.io, request, { queue: "main" })
 
-    expect(exit).toBe(2)
-    expect(run.stderr()).toContain("queue list needs a queue")
-    expect(run.stderr()).toContain("origin/main carries no .yrd.yml")
-    // The cure holds for both conditions this refusal cannot tell apart: an
-    // addressed miss (re-address it) and a repository that never declared a
-    // queue at all (a submodule's is its superproject's, not its own).
-    expect(run.stderr()).toContain("--queue <repo>#<branch>")
-    expect(run.stderr()).toContain("superproject")
-  })
+      expect(exit).toBe(2)
+      expect(run.stderr()).toContain("needs a queue")
+      expect(run.stderr()).toContain("origin/main carries no .yrd.yml")
+      // The cure holds for both conditions this refusal cannot tell apart: an
+      // addressed miss (re-address it) and a repository that never declared a
+      // queue at all (a submodule's is its superproject's, not its own).
+      expect(run.stderr()).toContain("--queue <repo>#<branch>")
+      expect(run.stderr()).toContain("superproject")
+      if (command !== "list") {
+        expect(run.stderr()).toContain(
+          "yrd drop <root-branch> --local --tip <root-tip> --issue <issue> --reason <why> --release-checkout --submodules",
+        )
+        expect(run.stderr()).toContain("preview")
+      }
+    },
+  )
 })
 
 /**

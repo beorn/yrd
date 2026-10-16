@@ -712,7 +712,12 @@ export async function coreQueueCommand(
         "The queue's config lives on the queue branch itself. Point at a different one with " +
         "--queue <repo>#<branch>, or, if this repository is a submodule with none of its own, " +
         "the superproject that vendors it gates the change instead, by checking the gitlink, " +
-        "not a declaration here.\n",
+        "not a declaration here.\n" +
+        (request.command === "drop-local" || request.command === "drop-issue"
+          ? "For retained-checkout cleanup, run from that superproject: " +
+            "yrd drop <root-branch> --local --tip <root-tip> --issue <issue> --reason <why> --release-checkout --submodules. " +
+            "This is a preview; use the root branch and its exact tip, review the receipt, then repeat with --apply.\n"
+          : ""),
     )
     return 2
   }
