@@ -128,7 +128,7 @@ export async function releaseRetainedCheckouts(
       ) {
         throw new Error("live environment-use reader needs absolute paths and nonempty reasons")
       }
-      if (overlaps(checkout, use.path) || overlaps(use.path, checkout)) return [`live use: ${use.reason} (${use.path})`]
+      if (overlaps(checkout, use.path)) return [`live use: ${use.reason} (${use.path})`]
     }
     if (io.localBranchProtections === undefined) {
       throw new Error("release-checkout requires the localBranchProtections authority reader")

@@ -4157,17 +4157,47 @@ describe("drop --local --release-checkout", () => {
       spy.mockRestore()
     }
   }, 60_000)
-  it.each([
-    "moved",
-    "cwd",
-    "delegation",
-    "declared",
-    "host",
-    "preview host",
-    "failed host",
-    "late entrant",
-    "failed retirement",
-  ])(
+  // The existing declared-holder case covered equality only. A container cwd
+  // must not hold descendant checkouts, while a real root use holds the batch.
+  it.each(["ancestor", "equal", "inside"] as const)(
+    "scopes a declared %s cwd to the retained checkout",
+    async (kind) => {
+      const fixture = await releaseWorld(true)
+      const { spy } = await permitCensus()
+      try {
+        const output = releaseCapture(fixture.repo)
+        const path =
+          kind === "ancestor" ? dirname(fixture.repo) : kind === "equal" ? fixture.repo : join(fixture.repo, "work")
+        output.io.liveEnvironmentUse = async () => [{ path, reason: "declared live owner" }]
+        expect(await runYrdProcess([...fixture.argv, "--apply"], output.io), output.stderr()).toBe(0)
+        const report = JSON.parse(output.stdout()) as ReleaseReport
+        expect(report.failed).toEqual([])
+        if (kind === "ancestor") {
+          expect(report.kept).toEqual([])
+          expect(report.removed).toHaveLength(2)
+          for (const row of report.removed) {
+            const git = gitIn(row.repo)
+            expect(await git(["for-each-ref", `refs/heads/${row.branch}`])).toBe("")
+            expect(await git(["ls-remote", "origin", row.archiveRef])).toContain(`${row.head}\t${row.archiveRef}`)
+          }
+        } else {
+          expect(report.removed).toEqual([])
+          expect(report.kept).toContainEqual(expect.objectContaining({ repo: fixture.repo, reason: "held" }))
+          for (const repo of [fixture.repo, fixture.child!]) {
+            expect((await gitIn(repo)(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+            expect(await gitIn(repo)(["for-each-ref", "refs/archive/"])).toBe("")
+          }
+        }
+        for (const files of fixture.checkoutFiles.values()) {
+          expect([readFileSync(files.lease), readFileSync(files.lock), readFileSync(files.index)]).toEqual(files.bytes)
+        }
+      } finally {
+        spy.mockRestore()
+      }
+    },
+    30_000,
+  )
+  it.each(["moved", "cwd", "delegation", "host", "preview host", "failed host", "late entrant", "failed retirement"])(
     "reports %s and preserves a recoverable checkout after unsuccessful retirement",
     async (kind) => {
       const fixture = await releaseWorld()
@@ -4195,9 +4225,6 @@ describe("drop --local --release-checkout", () => {
         }
         if (kind === "delegation") {
           spy.mockResolvedValue({ ...permitted, coverage: { ...permitted.coverage, complete: false } })
-        }
-        if (kind === "declared") {
-          output.io.liveEnvironmentUse = async () => [{ path: fixture.repo, reason: "declared live owner" }]
         }
         output.io.localBranchProtections = async () => {
           reads++
@@ -4234,11 +4261,9 @@ describe("drop --local --release-checkout", () => {
               ? /CWD/
               : kind === "delegation"
                 ? /census|delegation/
-                : kind === "declared"
-                  ? /declared live owner/
-                  : kind === "failed retirement"
-                    ? /lock|already exists/
-                    : /live lease or host hold/,
+                : kind === "failed retirement"
+                  ? /lock|already exists/
+                  : /live lease or host hold/,
         )
         expect((await fixture.git(["rev-parse", `refs/heads/${fixture.branch}`])).trim()).toBe(fixture.tip)
         if (kind === "failed retirement") {
