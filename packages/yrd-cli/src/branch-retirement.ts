@@ -39,6 +39,18 @@ import { originHead } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
 import { admitEnvironmentClose } from "./env-close-holders.ts"
 
+/** Host holds for one branch during ordinary cleanup, honouring the standalone declaration:
+ * `null` is a repository with no host, which has no host holds to report. A host that never
+ * wired its reader cannot reach here, because the field is required (#29648). Explicit
+ * retained-checkout release does not use this and refuses `null` outright. */
+export async function localBranchHolds(
+  reader: YrdCliIO["localBranchProtections"],
+  input: Parameters<NonNullable<YrdCliIO["localBranchProtections"]>>[0],
+): Promise<readonly string[]> {
+  if (reader === null) return []
+  return (await reader(input)).protections
+}
+
 /** The existing per-repository custody step, shared by component drops and retained checkout release. */
 async function publishRetirementArchive(
   input: Readonly<{
@@ -117,9 +129,12 @@ export async function retireComponentLocalBranch(
       }
       const merged = await isAncestor(git, request.tip, target)
       const protections = async (): Promise<readonly string[]> => {
-        const host =
-          (await io.localBranchProtections?.({ repo, branch: request.branch, tip: request.tip, issue: request.issue }))
-            ?.protections ?? []
+        const host = await localBranchHolds(io.localBranchProtections, {
+          repo,
+          branch: request.branch,
+          tip: request.tip,
+          issue: request.issue,
+        })
         if (!merged && (await readRemoteCommit(git, remote, archiveRef)) !== request.tip) {
           throw new Error(`${repo}: archive custody changed before conditional removal`)
         }
@@ -146,14 +161,12 @@ export async function retireComponentLocalBranch(
           ...retirement,
           dryRun: true,
           protections: async () =>
-            (
-              await io.localBranchProtections?.({
-                repo,
-                branch: request.branch,
-                tip: request.tip,
-                issue: request.issue,
-              })
-            )?.protections ?? [],
+            localBranchHolds(io.localBranchProtections, {
+              repo,
+              branch: request.branch,
+              tip: request.tip,
+              issue: request.issue,
+            }),
         })
         if (preview.outcome !== "eligible") result = preview
         else {
@@ -293,7 +306,7 @@ export async function releaseRetainedCheckouts(
       }
       if (overlaps(checkout, use.path)) return [`live use: ${use.reason} (${use.path})`]
     }
-    if (io.localBranchProtections === undefined) {
+    if (io.localBranchProtections === null) {
       throw new Error("release-checkout requires the localBranchProtections authority reader")
     }
     const result = await io.localBranchProtections({
@@ -360,8 +373,14 @@ export async function releaseRetainedCheckouts(
     )
   }
   try {
-    for (const reader of ["liveEnvironmentUse", "localBranchProtections"] as const) {
-      if (io[reader] === undefined) throw new Error(`release-checkout requires the ${reader} authority reader`)
+    // Release needs both authorities connected. They say "not connected" differently:
+    // liveEnvironmentUse is optional and absent, while localBranchProtections is required
+    // and declares a host-less repository as null — which release still refuses (#29648).
+    if (io.liveEnvironmentUse === undefined) {
+      throw new Error("release-checkout requires the liveEnvironmentUse authority reader")
+    }
+    if (io.localBranchProtections === null) {
+      throw new Error("release-checkout requires the localBranchProtections authority reader")
     }
     const rootStore = createEventStore(input.repo, await remoteUrl(input.git, input.remote), input.selection)
     rootRow.remote = publicText(rootStore.remote)
@@ -762,7 +781,7 @@ export async function retireMergedRootAuthor(
       ) {
         throw new Error(`${branch}@${tip}: origin archive custody changed before root retirement`)
       }
-      return (await input.io.localBranchProtections?.({ repo, branch, tip, issue: change.issue }))?.protections ?? []
+      return localBranchHolds(input.io.localBranchProtections, { repo, branch, tip, issue: change.issue })
     },
     // Attributed submissions have a separate proven component judgment; the old root-only
     // warning remains correct only for submissions that recorded no component authors.
@@ -1231,22 +1250,18 @@ export async function retireMergedComponentAuthors(
             throw new Error(`root author ${author.rootBranch} advanced since capture`)
           }
           return [
-            ...((
-              await input.io.localBranchProtections?.({
-                repo,
-                branch: author.branch,
-                tip: author.tip,
-                issue: author.issue,
-              })
-            )?.protections ?? []),
-            ...((
-              await input.io.localBranchProtections?.({
-                repo: author.rootCommonDirectory,
-                branch: author.rootBranch,
-                tip: author.rootTip,
-                issue: author.issue,
-              })
-            )?.protections ?? []),
+            ...(await localBranchHolds(input.io.localBranchProtections, {
+              repo,
+              branch: author.branch,
+              tip: author.tip,
+              issue: author.issue,
+            })),
+            ...(await localBranchHolds(input.io.localBranchProtections, {
+              repo: author.rootCommonDirectory,
+              branch: author.rootBranch,
+              tip: author.rootTip,
+              issue: author.issue,
+            })),
           ]
         },
       })

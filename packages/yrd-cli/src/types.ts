@@ -55,10 +55,15 @@ export type YrdCliIO = {
   /** Pure syntactic issue mapping for branch cleanup; never performs external lookups. */
   branchIssue?: (input: Readonly<{ branch: string; recordedIssue?: string }>) => string | undefined
   /** Fresh host holds, leases and live/dirty work associated with this exact local branch.
-   * Rejections preserve the branch; ordinary cleanup permits a standalone repository with no host callback.
-   * Explicit retained-checkout release requires the callback and records its non-blocking evidence.
+   * Rejections preserve the branch. `null` declares a standalone repository with no host:
+   * ordinary cleanup then reports no host holds, as it always has, and explicit
+   * retained-checkout release refuses, exactly as an absent callback made it refuse.
+   * Required rather than optional so that a host which forgot to wire its reader cannot
+   * be read as a repository that has none — those were the same absent value (#29648).
    */
-  localBranchProtections?: (
-    input: Readonly<{ repo: string; branch: string; tip: string; issue?: string; retainedCheckout?: string }>,
-  ) => Promise<LocalBranchProtectionResult>
+  localBranchProtections:
+    | ((
+        input: Readonly<{ repo: string; branch: string; tip: string; issue?: string; retainedCheckout?: string }>,
+      ) => Promise<LocalBranchProtectionResult>)
+    | null
 }

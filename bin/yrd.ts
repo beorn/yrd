@@ -8,4 +8,7 @@
 
 import { runYrdExecutable } from "../packages/yrd-cli/src/cli.ts"
 
-await runYrdExecutable()
+// This bin is the standalone repository case: there is no host to ask about branch holds,
+// so it says so in one visible line rather than leaving the reader absent. An embedder that
+// HAS a host must pass its reader here; it can no longer forget and look like this (#29648).
+await runYrdExecutable({ localBranchProtections: null })

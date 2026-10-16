@@ -40,6 +40,7 @@ import { environmentInventory } from "./env-commands.ts"
 import {
   captureMergedComponentAuthors,
   createLandedBranchRetirement,
+  localBranchHolds,
   retireMergedComponentAuthors,
   retireMergedRootAuthor,
   releaseRetainedCheckouts,
@@ -1768,8 +1769,7 @@ export async function coreQueueCommand(
                   dryRun: !request.apply,
                   log,
                   protections: async () =>
-                    (await io.localBranchProtections?.({ repo: repository, branch, tip: head, issue }))?.protections ??
-                    [],
+                    localBranchHolds(io.localBranchProtections, { repo: repository, branch, tip: head, issue }),
                 })
                 const output = {
                   ...row,
@@ -1991,8 +1991,7 @@ export async function coreQueueCommand(
             dryRun,
             log,
             protections: async () =>
-              (await io.localBranchProtections?.({ repo: authorRepo, branch, tip: head, issue: bound }))?.protections ??
-              [],
+              localBranchHolds(io.localBranchProtections, { repo: authorRepo, branch, tip: head, issue: bound }),
             disposition,
           })
           const output = {
@@ -2057,7 +2056,7 @@ export async function coreQueueCommand(
         by: request.by,
         ...(request.retire === undefined ? {} : { retire: request.retire }),
         protections: async (tip, issue) =>
-          (await io.localBranchProtections?.({ repo, branch: request.branch, tip, issue }))?.protections ?? [],
+          localBranchHolds(io.localBranchProtections, { repo, branch: request.branch, tip, issue }),
         ...(request.reason === undefined ? {} : { note: request.reason }),
         ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
       })
@@ -2263,7 +2262,7 @@ export async function coreQueueCommand(
           by: request.by,
           target: config.target,
           protections: async (tip, issue) =>
-            (await io.localBranchProtections?.({ repo, branch: request.branch, tip, issue }))?.protections ?? [],
+            localBranchHolds(io.localBranchProtections, { repo, branch: request.branch, tip, issue }),
           ...(request.reason === undefined ? {} : { reason: request.reason }),
           ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
         })
