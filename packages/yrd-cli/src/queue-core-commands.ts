@@ -991,16 +991,13 @@ export async function coreQueueCommand(
       },
     }
     const authorGit = gitIn(authorRepo, undefined, selection, { env })
-    // A handoff can yield only between whole branch units: closing its
-    // environment must not remove the successor's discovery row before its
-    // component and root retirement have run.
-    for (const branch of outcome.merged.length > 0 ? outcome.merged : [undefined]) {
-      if (postMergeSignal?.aborted) return
-      const componentAuthors: Awaited<ReturnType<typeof captureMergedComponentAuthors>>[number][] = []
-      if (branch !== undefined) {
-        try {
-          // Capture native identities before cleanup can destroy their checkout metadata.
-          await authorGit(["fetch", "--no-tags", await remoteUrl(git, config.target.remote), outcome.target])
+    const componentAuthors: Awaited<ReturnType<typeof captureMergedComponentAuthors>>[number][] = []
+    if (outcome.merged.length > 0) {
+      try {
+        // Capture native identities before cleanup can destroy their checkout metadata.
+        await authorGit(["fetch", "--no-tags", await remoteUrl(git, config.target.remote), outcome.target])
+        for (const branch of outcome.merged) {
+          if (postMergeSignal?.aborted) break
           const change = await readStatus(eventStore, config.target.branch, branch)
           let base = outcome.base
           if (change.componentAuthors?.length) {
@@ -1022,21 +1019,24 @@ export async function coreQueueCommand(
               log: retirementLog,
             })),
           )
-        } catch (error) {
-          retirementLog.write({
-            kind: "warning",
-            branch,
-            scope: "local-branch-retirement",
-            reason: `component capture kept: ${String(error)}`,
-          })
         }
+      } catch (error) {
+        retirementLog.write({
+          kind: "warning",
+          scope: "local-branch-retirement",
+          reason: `component capture kept: ${String(error)}`,
+        })
       }
+    }
+    // Once environment cleanup begins, finish its component and root retirement.
+    // A handoff before it begins leaves the native rows for startup catch-up.
+    if (!postMergeSignal?.aborted) {
       const proofs = await cleanupEnvironments({
         repo,
         git,
         config,
         workdir,
-        outcome: branch === undefined ? outcome : { ...outcome, merged: [branch] },
+        outcome,
         io,
         env,
         selection,
@@ -1052,34 +1052,39 @@ export async function coreQueueCommand(
         store: eventStore,
         queue: config.target.branch,
       })
-      if (branch !== undefined) {
-        try {
-          const change = await readStatus(eventStore, config.target.branch, branch)
-          await retireMergedRootAuthor({
-            repo: authorRepo,
-            git: authorGit,
-            actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
-            branch,
-            change,
-            base: outcome.base,
-            target: outcome.target,
-            io,
-            log: retirementLog,
-            store: eventStore,
-            queue: config.target.branch,
-          })
-        } catch (error) {
-          // The merge is durable; a housekeeping failure cannot undo its result.
-          retirementLog.write({
-            kind: "warning",
-            branch,
-            scope: "local-branch-retirement",
-            reason: String(error),
-          })
+    }
+    if (outcome.merged.length > 0) {
+      try {
+        for (const branch of outcome.merged) {
+          try {
+            const change = await readStatus(eventStore, config.target.branch, branch)
+            await retireMergedRootAuthor({
+              repo: authorRepo,
+              git: authorGit,
+              actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
+              branch,
+              change,
+              base: outcome.base,
+              target: outcome.target,
+              io,
+              log: retirementLog,
+              store: eventStore,
+              queue: config.target.branch,
+            })
+          } catch (error) {
+            retirementLog.write({
+              kind: "warning",
+              branch,
+              scope: "local-branch-retirement",
+              reason: String(error),
+            })
+          }
         }
+      } catch (error) {
+        // The merge is durable; a housekeeping failure cannot undo its result.
+        retirementLog.write({ kind: "warning", scope: "local-branch-retirement", reason: String(error) })
       }
     }
-    if (postMergeSignal?.aborted) return
     // The round ALSO drains its own raw output, one ROUND_REMOVAL_BATCH per
     // round (28499, @cto 2026-10-10T22:53Z), beside cleanupEnvironments: both
     // are post-judgment disposal. A disposal step must never stop the merge

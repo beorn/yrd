@@ -77,6 +77,14 @@ export function createPostMerge<C extends Context>(
   let pending: C | undefined
   let active: Promise<void> | undefined
   let closing = false
+  const dropPending = (): void => {
+    if (pending === undefined) return
+    options.report(
+      JSON.stringify(pending.merged) +
+        ": pending post-merge attempt dropped during shutdown; startup catch-up handles remaining environment rows; branches without rows need branch triage",
+    )
+    pending = undefined
+  }
   const attempt = async (context: C): Promise<void> => {
     const id = new Date().toISOString().replaceAll(":", "-") + "-" + randomUUID()
     const path = join(directory, id + ".json")
@@ -167,7 +175,7 @@ export function createPostMerge<C extends Context>(
       pending = undefined
       await attempt(next)
     }
-    if (options.stop?.aborted) pending = undefined
+    if (options.stop?.aborted) dropPending()
   }
   const start = (): void => {
     active = pump()
@@ -196,7 +204,7 @@ export function createPostMerge<C extends Context>(
   const close = async (): Promise<void> => {
     closing = true
     if (options.stop !== undefined) {
-      pending = undefined
+      dropPending()
       await process.close()
     }
     await drain()

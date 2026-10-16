@@ -42,61 +42,95 @@ const context = {
   target: "merge-oid",
   merged: ["task/one"],
 }
-it.each([false, true])("coalesces catch-up and honors current provider configuration (removed=%s)", async (removed) => {
-  const root = world()
-  const ready = join(root, "ready")
-  const release = join(root, "release")
-  const argv = [
-    "sh",
-    "-c",
-    'touch "$1"; while ! test -f "$2"; do sleep .05; done; echo failure >&2; exit 7',
-    "provider",
-    ready,
-    release,
-  ]
-  const cleaned: string[] = []
-  const errors: string[] = []
-  await using runner = createPostMerge({
-    workdir: root,
-    cwd: root,
-    cleanup: async (c) => {
-      cleaned.push(c.target)
-    },
-    report: (s) => errors.push(s),
-  })
-  runner.nudge({ ...context, update: argv })
-  await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 10000 })
-  runner.nudge({ ...context, target: "second", update: ["sh", "-c", "printf caught-up"] })
-  runner.nudge({
-    ...context,
-    target: "third",
-    update: removed ? undefined : ["sh", "-c", "printf caught-up"],
-    updateDue: false,
-  })
-  expect(cleaned).toEqual([])
-  writeFileSync(release, "go")
-  await runner[Symbol.asyncDispose]()
-  expect(cleaned).toEqual(["merge-oid", "third"])
-  const results = readdirSync(join(root, "post-merge"))
-    .filter((n) => n.endsWith(".json"))
-    .map((n) => attemptAt(join(root, "post-merge", n)))
-    .sort((a, b) => (a.target === "merge-oid" ? -1 : b.target === "merge-oid" ? 1 : 0))
-  expect(results.map((r) => r.exitCode)).toEqual([7, removed ? undefined : 0])
-  expect(results[0]).toMatchObject({
-    code: "code-oid",
-    config: "config-oid",
-    queue: "origin#main",
-    target: "merge-oid",
-    argv,
-    cwd: root,
-    status: "failed",
-    timedOut: false,
-    signal: null,
-  })
-  expect(readFileSync(results[0]!.stderr, "utf8")).toContain("failure")
-  expect(readFileSync(results[1]!.stdout, "utf8")).toBe(removed ? "" : "caught-up")
-  expect(errors.join(" ")).toContain("exit 7")
-})
+/** @failure Stop silently drops coalesced merged branch names, so branch triage cannot recover pending cleanup. @level l2 @consumer Yrd service handoff @testonly none */
+it.each([
+  { removed: false, ending: "drain" },
+  { removed: true, ending: "drain" },
+  { removed: false, ending: "stop" },
+  { removed: false, ending: "close" },
+] as const)(
+  "coalesces catch-up and honors current provider configuration (removed=$removed, ending=$ending)",
+  async ({ removed, ending }) => {
+    const root = world()
+    const ready = join(root, "ready")
+    const release = join(root, "release")
+    const argv = [
+      "sh",
+      "-c",
+      'touch "$1"; while ! test -f "$2"; do sleep .05; done; echo failure >&2; exit 7',
+      "provider",
+      ready,
+      release,
+    ]
+    const cleaned: string[] = []
+    const completed: string[] = []
+    const errors: string[] = []
+    const stop = new AbortController()
+    await using runner = createPostMerge({
+      workdir: root,
+      cwd: root,
+      ...(ending === "drain" ? {} : { stop: stop.signal }),
+      cleanup: async (c) => {
+        cleaned.push(c.target)
+        await Promise.resolve()
+        if (ending === "stop") stop.abort()
+        completed.push(c.target)
+      },
+      report: (s) => errors.push(s),
+    })
+    runner.nudge({ ...context, update: argv })
+    await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 10000 })
+    runner.nudge({ ...context, target: "second", merged: ["task/two"], update: ["sh", "-c", "printf caught-up"] })
+    runner.nudge({
+      ...context,
+      target: "third",
+      merged: ["task/three", "task/two"],
+      update: removed ? undefined : ["sh", "-c", "printf caught-up"],
+      updateDue: false,
+    })
+    expect(cleaned).toEqual([])
+    if (ending !== "close") writeFileSync(release, "go")
+    if (ending === "stop") {
+      await vi.waitFor(() => expect(completed).toEqual(["merge-oid"]), { timeout: 10000 })
+      // Observe pump's stop reporting before invoking close, which has its own
+      // pending-context drop path. Both must report one coalesced set of names.
+      await vi.waitFor(
+        () => expect(errors.filter((line) => line.includes("task/two") || line.includes("task/three"))).toHaveLength(1),
+        { timeout: 1500 },
+      )
+    }
+    await runner[Symbol.asyncDispose]()
+    if (ending !== "drain") {
+      expect(cleaned, "pending cleanup does not run after handoff").toEqual(["merge-oid"])
+      expect(completed, "active cleanup finishes before disposal returns").toEqual(["merge-oid"])
+      const dropped = errors.filter((line) => line.includes("task/two") || line.includes("task/three"))
+      expect(dropped, "one report identifies the coalesced pending branches").toHaveLength(1)
+      expect(dropped[0]).toContain("task/two")
+      expect(dropped[0]).toContain("task/three")
+      return
+    }
+    expect(cleaned).toEqual(["merge-oid", "third"])
+    const results = readdirSync(join(root, "post-merge"))
+      .filter((n) => n.endsWith(".json"))
+      .map((n) => attemptAt(join(root, "post-merge", n)))
+      .sort((a, b) => (a.target === "merge-oid" ? -1 : b.target === "merge-oid" ? 1 : 0))
+    expect(results.map((r) => r.exitCode)).toEqual([7, removed ? undefined : 0])
+    expect(results[0]).toMatchObject({
+      code: "code-oid",
+      config: "config-oid",
+      queue: "origin#main",
+      target: "merge-oid",
+      argv,
+      cwd: root,
+      status: "failed",
+      timedOut: false,
+      signal: null,
+    })
+    expect(readFileSync(results[0]!.stderr, "utf8")).toContain("failure")
+    expect(readFileSync(results[1]!.stdout, "utf8")).toBe(removed ? "" : "caught-up")
+    expect(errors.join(" ")).toContain("exit 7")
+  },
+)
 it("labels interrupted evidence and starts a fresh catch-up without consulting old output", async () => {
   const root = world()
   const cleaned: string[] = []
