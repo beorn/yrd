@@ -4124,11 +4124,12 @@ describe("drop --local --release-checkout", () => {
       spy.mockRestore()
     }
   }, 60_000)
-  it.each(["moved", "cwd", "delegation", "declared", "host", "late entrant", "failed retirement"])(
+  it.each(["moved", "cwd", "delegation", "declared", "host", "failed host", "late entrant", "failed retirement"])(
     "reports %s and preserves a recoverable checkout after unsuccessful retirement",
     async (kind) => {
       const fixture = await releaseWorld()
       const { spy, permitted } = await permitCensus()
+      const failed = kind === "failed retirement" || kind === "failed host"
       try {
         const output = releaseCapture(fixture.repo)
         let reads = 0
@@ -4150,7 +4151,7 @@ describe("drop --local --release-checkout", () => {
         }
         output.io.localBranchProtections = async () => {
           reads++
-          if (kind === "host") {
+          if (kind === "host" || (kind === "failed host" && reads === 4)) {
             throw new Error("live lease or host hold: https://fixture-user:fixture-secret@repo.invalid/retained.git")
           }
           if (kind === "failed retirement" && reads === 4) {
@@ -4166,16 +4167,14 @@ describe("drop --local --release-checkout", () => {
             evidence: [],
           }
         }
-        expect(await runYrdProcess([...fixture.argv, "--apply"], output.io), output.stderr()).toBe(
-          kind === "failed retirement" ? 1 : 0,
-        )
+        expect(await runYrdProcess([...fixture.argv, "--apply"], output.io), output.stderr()).toBe(failed ? 1 : 0)
         const report = JSON.parse(output.stdout()) as ReleaseReport
         expect(output.stdout()).not.toContain("fixture-secret")
         expect(output.stdout()).not.toContain("fixture-user")
         expect(report.removed).toEqual([])
-        expect(kind === "failed retirement" ? report.failed : report.kept).toHaveLength(1)
-        expect(kind === "failed retirement" ? report.kept : report.failed).toEqual([])
-        expect((kind === "failed retirement" ? report.failed : report.kept)[0]?.detail).toMatch(
+        expect(failed ? report.failed : report.kept).toHaveLength(1)
+        expect(failed ? report.kept : report.failed).toEqual([])
+        expect((failed ? report.failed : report.kept)[0]?.detail).toMatch(
           kind === "moved"
             ? /tip|moved/
             : kind === "cwd"

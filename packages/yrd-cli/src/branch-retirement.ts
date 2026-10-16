@@ -99,7 +99,7 @@ export async function releaseRetainedCheckouts(
     head: request.tip,
     remote: publicText(rootStore.remote),
     archiveRef: archiveRefFor(request.branch, request.by, date),
-    reason: request.reason,
+    reason: publicText(request.reason),
   }
   type Candidate = { row: Row; remote: string; checkout: string; git: Git; retired: boolean; detached: boolean }
   const candidates: Candidate[] = []
@@ -303,7 +303,7 @@ export async function releaseRetainedCheckouts(
                 head: commit,
                 remote: publicText(remote),
                 archiveRef: archiveRefFor(selectedBranch, request.by, date),
-                reason: request.reason,
+                reason: publicText(request.reason),
               }
         if (archive !== undefined) row.archiveRef = archive.ref
         if (
@@ -475,7 +475,11 @@ export async function releaseRetainedCheckouts(
         if (result.outcome !== "removed") {
           await reattach()
           const destination = result.outcome === "failed" ? failed : kept
-          destination.push({ ...row, reason: result.reason, detail: publicText(result.detail ?? result.reason) })
+          destination.push({
+            ...row,
+            reason: publicText(result.reason),
+            detail: publicText(result.detail ?? result.reason),
+          })
         } else {
           original = undefined
           removed.push(row)
