@@ -852,7 +852,12 @@ export async function coreQueueCommand(
       const skew = RUNS_THE_DECLARATION.has(request.command)
         ? ""
         : formatDeclarationSkewCure(targetLabel, NAMED[request.command])
-      throw new Error(`the declaration at ${targetLabel} cannot be read: ${detail}${skew}`, { cause: error })
+      throw new Error(
+        `the declaration at ${targetLabel} cannot be read: ${detail}${skew} Repository: ${repo}; caller: ${io.cwd ?? repo}.`,
+        {
+          cause: error,
+        },
+      )
     }
     if (declared === undefined) return undefined
     return { config: declared, oid, ...(fetched === undefined ? {} : { fetched }) }

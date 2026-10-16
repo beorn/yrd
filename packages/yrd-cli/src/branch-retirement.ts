@@ -108,31 +108,34 @@ export async function retireComponentLocalBranch(
     log.write({ kind: "run", command: "drop --local", target: `origin/${queue}`, config: config.blob })
     const date = new Date().toISOString().slice(0, 10)
     const archiveRef = archiveRefFor(request.branch, request.by, date)
-    const merged = await isAncestor(git, request.tip, target)
-    const protections = async (): Promise<readonly string[]> => {
-      const host =
-        (await io.localBranchProtections?.({ repo, branch: request.branch, tip: request.tip, issue: request.issue }))
-          ?.protections ?? []
-      if (!merged && (await readRemoteCommit(git, remote, archiveRef)) !== request.tip) {
-        throw new Error(`${repo}: archive custody changed before conditional removal`)
-      }
-      return host
-    }
-    const retirement = {
-      repo,
-      git,
-      branch: request.branch,
-      tip: request.tip,
-      actor: request.by,
-      issue: request.issue,
-      reason: request.reason ?? "explicit local branch cleanup",
-      date,
-      log,
-      disposition: merged
-        ? { kind: "merged" as const, base: target, target }
-        : { kind: "archived" as const, target: request.tip, ref: archiveRef },
-    }
     try {
+      const observedTip = await refAt(git, `refs/heads/${request.branch}`)
+      if (observedTip === undefined)
+        throw new Error(`${repo}: refs/heads/${request.branch} is absent; nothing was removed`)
+      const merged = await isAncestor(git, request.tip, target)
+      const protections = async (): Promise<readonly string[]> => {
+        const host =
+          (await io.localBranchProtections?.({ repo, branch: request.branch, tip: request.tip, issue: request.issue }))
+            ?.protections ?? []
+        if (!merged && (await readRemoteCommit(git, remote, archiveRef)) !== request.tip) {
+          throw new Error(`${repo}: archive custody changed before conditional removal`)
+        }
+        return host
+      }
+      const retirement = {
+        repo,
+        git,
+        branch: request.branch,
+        tip: request.tip,
+        actor: request.by,
+        issue: request.issue,
+        reason: request.reason ?? "explicit local branch cleanup",
+        date,
+        log,
+        disposition: merged
+          ? { kind: "merged" as const, base: target, target }
+          : { kind: "archived" as const, target: request.tip, ref: archiveRef },
+      }
       let result: LocalBranchRetirementResult
       if (!merged) {
         // The same policy's existing preview checks native and host protections before custody is written.
@@ -157,9 +160,9 @@ export async function retireComponentLocalBranch(
       } else result = await retireLocalBranch({ ...retirement, protections })
       const row = {
         branch: request.branch,
-        head: request.tip,
+        head: observedTip,
         archiveRef: result.archiveRef,
-        reason: result.reason,
+        reason: result.outcome === "failed" ? `${repo}: ${result.reason}` : result.reason,
         detail: result.detail,
       }
       return {
@@ -167,6 +170,20 @@ export async function retireComponentLocalBranch(
         kept: result.outcome === "kept" ? [row] : [],
         failed: result.outcome === "failed" ? [row] : [],
       }
+    } catch (cause) {
+      const reason = `${repo}: ${cause instanceof Error ? cause.message : String(cause)}`
+      log.write({
+        kind: "local-branch-retirement",
+        repo,
+        branch: request.branch,
+        head: request.tip,
+        actor: request.by,
+        issue: request.issue,
+        archive: archiveRef,
+        reason,
+        outcome: "failed",
+      })
+      return { removed: [], kept: [], failed: [{ branch: request.branch, head: request.tip, archiveRef, reason }] }
     } finally {
       log.finish()
     }

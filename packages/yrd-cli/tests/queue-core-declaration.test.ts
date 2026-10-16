@@ -62,6 +62,7 @@ import {
 } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { releaseRetainedCheckouts } from "../src/branch-retirement.ts"
+import { archiveRefFor } from "git-super/archive-ref"
 import { readEnvOpenRecord } from "../src/env-open-record.ts"
 import { issueLookup, issueResolver } from "../src/issue-resolver.ts"
 import { SERVICE } from "../src/queue-health.ts"
@@ -3708,95 +3709,133 @@ describe("a queue is the selected origin branch carrying config", () => {
  * Existing no-config coverage has no declared parent, so it cannot observe this regression.
  */
 describe("component-local retirement without a component queue", () => {
-  it.each(["merged", "unmerged", "held", "root-retired"] as const)(
-    "retires exact %s component work through the declared root's existing log",
-    async (mode) => {
-      const root = await world("{}\n")
-      const rootGit = gitIn(root)
-      const seed = await world()
-      await rootGit([
+  it.each([
+    "merged",
+    "unmerged",
+    "held",
+    "root-retired",
+    "advanced",
+    "protection-error",
+    "archive-collision",
+    "malformed-declaration",
+    "unreadable-declaration",
+  ] as const)("retires exact %s component work through the declared root's existing log", async (mode) => {
+    const root = await world("{}\n")
+    const rootGit = gitIn(root)
+    const seed = await world(mode === "malformed-declaration" ? "checks: [\n" : undefined)
+    await rootGit([
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "--quiet",
+      join(dirname(seed), "remote.git"),
+      "modules/child",
+    ])
+    const child = join(root, "modules/child")
+    const git = gitIn(child)
+    await rootGit(["commit", "--quiet", "-am", "record component"])
+    await rootGit(["push", "--quiet", "origin", "main"])
+    const rootTip = (await rootGit(["rev-parse", "HEAD"])).trim()
+    await createQueue(root, "main", rootTip, new Date())
+    const branch = "task/28824-component"
+    const baseTip = (await git(["rev-parse", "HEAD"])).trim()
+    if (mode === "unmerged" || mode === "advanced" || mode === "archive-collision") {
+      await git(["checkout", "--quiet", "-b", branch])
+      writeFileSync(join(child, "private.txt"), "reviewed unmerged work\n")
+      await git(["add", "private.txt"])
+      await git([
         "-c",
-        "protocol.file.allow=always",
-        "submodule",
-        "add",
+        "user.name=fixture",
+        "-c",
+        "user.email=fixture@test.invalid",
+        "commit",
         "--quiet",
-        join(dirname(seed), "remote.git"),
-        "modules/child",
+        "-m",
+        "unmerged component work",
       ])
-      const child = join(root, "modules/child")
-      const git = gitIn(child)
-      await rootGit(["commit", "--quiet", "-am", "record component"])
-      await rootGit(["push", "--quiet", "origin", "main"])
-      const rootTip = (await rootGit(["rev-parse", "HEAD"])).trim()
-      await createQueue(root, "main", rootTip, new Date())
-      const branch = "task/28824-component"
-      if (mode === "unmerged") {
-        await git(["checkout", "--quiet", "-b", branch])
-        writeFileSync(join(child, "private.txt"), "reviewed unmerged work\n")
-        await git(["add", "private.txt"])
-        await git([
-          "-c",
-          "user.name=fixture",
-          "-c",
-          "user.email=fixture@test.invalid",
-          "commit",
-          "--quiet",
-          "-m",
-          "unmerged component work",
-        ])
-        await git(["checkout", "--quiet", "main"])
-      } else {
-        await git(["branch", branch])
-      }
-      const tip = (await git(["rev-parse", "refs/heads/" + branch])).trim()
-      if (mode === "root-retired") {
-        const rootBranch = "task/28824-root-already-retired"
-        await rootGit(["branch", rootBranch])
-        const prior = capture(root)
-        expect(
-          await runYrdProcess(
-            ["bun", "yrd", "drop", rootBranch, "--local", "--tip", rootTip, "--submitter", "fixture", "--json"],
-            prior.io,
-          ),
-          prior.stderr(),
-        ).toBe(0)
-        expect((await rootGit(["for-each-ref", "--format=%(objectname)", "refs/heads/" + rootBranch])).trim()).toBe("")
-      }
-      const run = capture(child)
-      run.io.localBranchProtections = async () => ({
-        protections: mode === "held" ? ["fixture owner hold"] : [],
-        evidence: [],
-      })
-      const exit = await runYrdProcess(
-        [
-          "bun",
-          "yrd",
-          "drop",
-          branch,
-          "--local",
-          "--tip",
-          tip,
-          "--issue",
-          "28824",
-          "--reason",
-          "explicit reviewed component drop",
-          "--submitter",
-          "fixture",
-          "--json",
-        ],
-        run.io,
-      )
-      expect(exit, run.stderr()).toBe(0)
+      await git(["checkout", "--quiet", "main"])
+    } else {
+      await git(["branch", branch])
+    }
+    const actualTip = (await git(["rev-parse", "refs/heads/" + branch])).trim()
+    const tip = mode === "advanced" ? baseTip : actualTip
+    const collisionRef = archiveRefFor(branch, "fixture", new Date().toISOString().slice(0, 10))
+    if (mode === "archive-collision") await git(["push", "--quiet", "origin", baseTip + ":" + collisionRef])
+    if (mode === "root-retired") {
+      const rootBranch = "task/28824-root-already-retired"
+      await rootGit(["branch", rootBranch])
+      const prior = capture(root)
+      expect(
+        await runYrdProcess(
+          ["bun", "yrd", "drop", rootBranch, "--local", "--tip", rootTip, "--submitter", "fixture", "--json"],
+          prior.io,
+        ),
+        prior.stderr(),
+      ).toBe(0)
+      expect((await rootGit(["for-each-ref", "--format=%(objectname)", "refs/heads/" + rootBranch])).trim()).toBe("")
+    }
+    const run = capture(child)
+    run.io.localBranchProtections = async () => {
+      if (mode === "protection-error") throw new Error("host protection authority unavailable")
+      return { protections: mode === "held" ? ["fixture owner hold"] : [], evidence: [] }
+    }
+    const nativeLstat = fs.lstatSync
+    const unreadable =
+      mode === "unreadable-declaration"
+        ? vi.spyOn(fs, "lstatSync").mockImplementation((path, options) => {
+            if (String(path) === join(child, ".yrd.yml"))
+              throw Object.assign(new Error("EACCES: declaration authority is unreadable"), { code: "EACCES" })
+            return nativeLstat(path, options)
+          })
+        : undefined
+    if (mode === "unreadable-declaration") writeFileSync(join(child, ".yrd.yml"), "{}\n")
+    const exit = await runYrdProcess(
+      [
+        "bun",
+        "yrd",
+        "drop",
+        branch,
+        "--local",
+        "--tip",
+        tip,
+        "--issue",
+        "28824",
+        "--reason",
+        "explicit reviewed component drop",
+        "--submitter",
+        "fixture",
+        "--json",
+      ],
+      run.io,
+    ).finally(() => unreadable?.mockRestore())
+    const failure =
+      mode === "protection-error" ||
+      mode === "archive-collision" ||
+      mode === "malformed-declaration" ||
+      mode === "unreadable-declaration"
+    if (failure) {
+      expect(exit).not.toBe(0)
+      expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(actualTip)
+      expect(run.stdout() + run.stderr()).toContain(child)
+      if (mode === "protection-error")
+        expect(run.stdout() + run.stderr()).toContain("host protection authority unavailable")
+      if (mode === "unreadable-declaration") expect(run.stderr()).toContain("EACCES")
+      if (mode === "archive-collision")
+        expect((await git(["ls-remote", "origin", collisionRef])).split("\t")[0]).toBe(baseTip)
+      if (mode === "malformed-declaration" || mode === "unreadable-declaration") return
+    } else expect(exit, run.stderr()).toBe(0)
+    if (!failure) {
       const report = JSON.parse(run.stdout()) as {
         removed: { branch: string; head: string; archiveRef: string }[]
         kept: { branch: string }[]
         failed: unknown[]
       }
       expect(report.failed).toEqual([])
-      if (mode === "held") {
+      if (mode === "held" || mode === "advanced") {
         expect(report.removed).toEqual([])
-        expect(report.kept).toEqual([expect.objectContaining({ branch })])
-        expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(tip)
+        expect(report.kept).toEqual([expect.objectContaining({ branch, head: actualTip })])
+        expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(actualTip)
       } else {
         expect(report.removed).toEqual([expect.objectContaining({ branch, head: tip })])
         const archive = report.removed[0]?.archiveRef
@@ -3804,25 +3843,28 @@ describe("component-local retirement without a component queue", () => {
         if (typeof archive !== "string") throw new Error("removed component result has no archive ref")
         expect((await git(["rev-parse", archive])).trim()).toBe(tip)
         expect((await git(["for-each-ref", "--format=%(objectname)", "refs/heads/" + branch])).trim()).toBe("")
-        if (mode === "unmerged")
-          expect((await git(["ls-remote", "origin", archive])).split("\t")[0]).toBe(tip)
+        if (mode === "unmerged") expect((await git(["ls-remote", "origin", archive])).split("\t")[0]).toBe(tip)
       }
-      expect((await git(["ls-remote", "origin", "refs/yrd/*"])).trim()).toBe("")
-      const logs = join(await workdirOf(rootGit), "logs")
-      const records = readdirSync(logs)
-        .filter((name) => name.endsWith(".jsonl"))
-        .flatMap((name) =>
-          readFileSync(join(logs, name), "utf8")
-            .trim()
-            .split("\n")
-            .filter(Boolean)
-            .map((line) => JSON.parse(line) as { kind?: string; repo?: string; branch?: string; head?: string }),
-        )
-      expect(records).toContainEqual(
-        expect.objectContaining({ kind: "local-branch-retirement", repo: child, branch, head: tip }),
+    }
+    expect((await git(["ls-remote", "origin", "refs/yrd/*"])).trim()).toBe("")
+    const logs = join(await workdirOf(rootGit), "logs")
+    const records = readdirSync(logs)
+      .filter((name) => name.endsWith(".jsonl"))
+      .flatMap((name) =>
+        readFileSync(join(logs, name), "utf8")
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as { kind?: string; repo?: string; branch?: string; head?: string }),
       )
-    },
-  )
+    expect(records).toContainEqual(
+      expect.objectContaining({ kind: "local-branch-retirement", repo: child, branch, head: tip }),
+    )
+    if (failure)
+      expect(records).toContainEqual(
+        expect.objectContaining({ kind: "local-branch-retirement", repo: child, branch, outcome: "failed" }),
+      )
+  })
 })
 
 describe("drop --local --release-checkout", () => {
