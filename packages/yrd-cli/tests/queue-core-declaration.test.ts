@@ -61,6 +61,7 @@ import {
   readEventListing,
 } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import type { releaseRetainedCheckouts } from "../src/branch-retirement.ts"
 import { readEnvOpenRecord } from "../src/env-open-record.ts"
 import { issueLookup, issueResolver } from "../src/issue-resolver.ts"
 import { SERVICE } from "../src/queue-health.ts"
@@ -3683,6 +3684,7 @@ describe("a queue is the selected origin branch carrying config", () => {
  * Existing issue-drop tests preserve attached branches; they cannot exercise opt-in detach or one-root custody.
  */
 describe("drop --local --release-checkout", () => {
+  type ReleaseReport = Awaited<ReturnType<typeof releaseRetainedCheckouts>>
   async function releaseWorld(component = false) {
     const repo = await world("{}\n")
     const git = gitIn(repo)
@@ -3771,7 +3773,7 @@ describe("drop --local --release-checkout", () => {
       for (const flags of [[], ["--dry-run"]]) {
         const preview = capture(fixture.repo)
         expect(await runYrdProcess([...fixture.argv, ...flags], preview.io), preview.stderr()).toBe(0)
-        const report = JSON.parse(preview.stdout())
+        const report = JSON.parse(preview.stdout()) as ReleaseReport
         expect(report.eligible, JSON.stringify(report) + preview.stderr()).toHaveLength(2)
         expect(report.removed).toEqual([])
         expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
@@ -3794,7 +3796,7 @@ describe("drop --local --release-checkout", () => {
         return []
       }
       expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(0)
-      const report = JSON.parse(applied.stdout())
+      const report = JSON.parse(applied.stdout()) as ReleaseReport
       expect(report.removed).toHaveLength(2)
       expect(report.failed).toEqual([])
       for (const row of report.removed) {
@@ -3854,7 +3856,7 @@ describe("drop --local --release-checkout", () => {
           return kind === "host" || (kind === "late entrant" && reads > 3) ? ["live lease or host hold"] : []
         }
         expect(await runYrdProcess([...fixture.argv, "--apply"], output.io), output.stderr()).toBe(0)
-        const report = JSON.parse(output.stdout())
+        const report = JSON.parse(output.stdout()) as ReleaseReport
         expect(report.removed).toEqual([])
         expect(report.kept).toHaveLength(1)
         expect(report.kept[0].detail).toMatch(
