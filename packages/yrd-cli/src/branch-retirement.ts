@@ -98,7 +98,7 @@ export async function releaseRetainedCheckouts(
     archiveRef: archiveRefFor(request.branch, request.by, date),
     reason: request.reason,
   }
-  type Candidate = { row: Row; checkout: string; git: Git; retired: boolean }
+  type Candidate = { row: Row; checkout: string; git: Git; retired: boolean; detached: boolean }
   const candidates: Candidate[] = []
   const readGit = (repo: string) => gitIn(repo, undefined, input.selection, { env: input.env })
   const overlaps = (root: string, path: string) => {
@@ -205,11 +205,12 @@ export async function releaseRetainedCheckouts(
     if (bound.history?.state.issue !== undefined && identity(bound.history.state.issue) !== identity(request.issue)) {
       throw new Error(`recorded issue ${bound.history.state.issue} differs from requested ${request.issue}`)
     }
-    const roots = (await registeredWorktrees(input.git)).filter(
-      (row) =>
-        row.head === request.tip &&
-        (row.branch === request.branch || (actual === undefined && row.branch === undefined)),
-    )
+    const registrations = await registeredWorktrees(input.git)
+    const attachedRoots = registrations.filter((row) => row.head === request.tip && row.branch === request.branch)
+    const roots =
+      attachedRoots.length > 0
+        ? attachedRoots
+        : registrations.filter((row) => row.head === request.tip && row.branch === undefined)
     const root = roots[0]
     if (roots.length !== 1 || root === undefined) {
       throw new Error(`expected one retained checkout for ${request.branch}@${request.tip}; found ${roots.length}`)
@@ -254,12 +255,24 @@ export async function releaseRetainedCheckouts(
       if (recovery.length > 1) {
         throw new Error(`${repository}: ambiguous archive custody: ${recovery.map((row) => row.ref).join(", ")}`)
       }
+      const detachedBranches: string[] = []
+      if (attached !== undefined && attached.branch === undefined && branch === undefined && recovery.length === 0) {
+        for (const [ref] of await listRefs("refs/heads/", createLocalEventStore(repository, input.selection))) {
+          const name = ref.slice("refs/heads/".length)
+          const issue = io.branchIssue === undefined ? issueFromBranchName(name) : io.branchIssue({ branch: name })
+          if (issue !== undefined && identity(issue) === identity(request.issue)) detachedBranches.push(name)
+        }
+        if (detachedBranches.length > 1) {
+          throw new Error(`${repository}: ambiguous detached checkout branches: ${detachedBranches.join(", ")}`)
+        }
+      }
       if (
         branch !== undefined ||
         recovery.length > 0 ||
+        detachedBranches.length > 0 ||
         (mappedIssue !== undefined && identity(mappedIssue) === identity(request.issue))
       ) {
-        const selectedBranch = branch ?? attached?.branch ?? recovery[0]?.branch
+        const selectedBranch = branch ?? attached?.branch ?? recovery[0]?.branch ?? detachedBranches[0]
         if (selectedBranch === undefined) throw new Error(`${repository}: selected attached branch became unreadable`)
         const custody = archives.filter((archive) => archive.branch === selectedBranch)
         if (custody.length > 1) {
@@ -285,7 +298,10 @@ export async function releaseRetainedCheckouts(
                 reason: request.reason,
               }
         if (archive !== undefined) row.archiveRef = archive.ref
-        if (attached?.head !== commit || (!retired && (attached.branch !== selectedBranch || current !== commit))) {
+        if (
+          attached?.head !== commit ||
+          (!retired && ((attached.branch !== undefined && attached.branch !== selectedBranch) || current !== commit))
+        ) {
           kept.push({
             ...row,
             reason: "moved",
@@ -295,7 +311,13 @@ export async function releaseRetainedCheckouts(
           if (retired && (await readRemoteCommit(git, row.remote, row.archiveRef)) !== commit) {
             throw new Error(`${repository}: archive ${row.archiveRef} lacks exact remote custody at ${commit}`)
           }
-          candidates.push({ row, checkout: realpathSync(repository), git, retired })
+          candidates.push({
+            row,
+            checkout: realpathSync(repository),
+            git,
+            retired,
+            detached: attached.branch === undefined,
+          })
         }
       } else {
         excluded.push({ repo: repository, path, reason: "no current attached branch mapping to the requested issue" })
@@ -357,15 +379,9 @@ export async function releaseRetainedCheckouts(
         ),
     ].join("\n")
     const endingId = bound.history?.state.ending?.id
-    if (endingId !== undefined) {
-      const ending = bound.history?.events.find((event) => event.id === endingId)
-      if (ending?.content !== content) {
-        throw new Error("existing ending has no identical repository custody receipt; refs kept")
-      }
-      if (candidates.every((candidate) => candidate.retired)) {
-        alreadyRetired.push(...candidates.map((candidate) => candidate.row))
-        return report
-      }
+    if (endingId !== undefined && candidates.every((candidate) => candidate.retired)) {
+      alreadyRetired.push(...candidates.map((candidate) => candidate.row))
+      return report
     }
     for (const { row } of candidates) {
       const archive = ensureArchiveRef(row.repo, row.archiveRef, row.head)
@@ -394,6 +410,28 @@ export async function releaseRetainedCheckouts(
       const before = snapshots.get(candidate)
       if (before === undefined) throw new Error(`${candidate.checkout}: expected retained-checkout snapshot is missing`)
       let original: { branch: string; tip: string } | undefined
+      const reattach = async () => {
+        const restore = original
+        original = undefined
+        if (restore === undefined) return
+        const head = await refAt(candidate.git, "HEAD")
+        if (head !== restore.tip) {
+          throw new Error(
+            `${candidate.checkout}: HEAD advanced to ${head ?? "absent"}; retained without reattachment; expected ${restore.tip}`,
+          )
+        }
+        try {
+          await candidate.git(
+            ["update-ref", "--stdin"],
+            `start\nverify ${restore.branch} ${restore.tip}\nsymref-update HEAD ${restore.branch} oid ${restore.tip}\nprepare\ncommit\n`,
+          )
+        } catch (cause) {
+          const current = await refAt(candidate.git, "HEAD")
+          throw new Error(
+            `${candidate.checkout}: could not reattach ${restore.branch}; HEAD ${current ?? "absent"} preserved; resolve the competing writer and retry the same release command: ${String(cause)}`,
+          )
+        }
+      }
       try {
         const reasons = await protect(candidate)
         await verify(candidate, before)
@@ -402,7 +440,8 @@ export async function releaseRetainedCheckouts(
           break
         }
         const store = createGitWorktreeStore({ repo: row.repo, gitProcess: seamProcess(candidate.git, row.repo) })
-        original = await store.detachAt(candidate.checkout, row.head, `refs/heads/${row.branch}`)
+        if (!candidate.detached)
+          original = await store.detachAt(candidate.checkout, row.head, `refs/heads/${row.branch}`)
         const result = await retireLocalBranch({
           repo: row.repo,
           git: candidate.git,
@@ -424,17 +463,22 @@ export async function releaseRetainedCheckouts(
           disposition: { kind: "archived", target: row.head, ref: row.archiveRef },
         })
         if (result.outcome !== "removed") {
-          await candidate.git(["symbolic-ref", "HEAD", original.branch])
-          original = undefined
+          await reattach()
           const destination = result.outcome === "failed" ? failed : kept
           destination.push({ ...row, reason: result.reason, detail: result.detail ?? result.reason })
-        } else removed.push(row)
+        } else {
+          original = undefined
+          removed.push(row)
+        }
         await verify(candidate, before)
       } catch (cause) {
-        if (original !== undefined && (await refAt(candidate.git, original.branch)) !== undefined) {
-          await candidate.git(["symbolic-ref", "HEAD", original.branch])
+        let detail = String(cause)
+        try {
+          await reattach()
+        } catch (restoreError) {
+          detail += `; ${String(restoreError)}`
         }
-        failed.push({ ...row, reason: "failed", detail: String(cause) })
+        failed.push({ ...row, reason: "failed", detail })
       }
       if (kept.length > 0 || failed.length > 0) break
     }

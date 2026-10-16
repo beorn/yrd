@@ -3808,6 +3808,117 @@ describe("drop --local --release-checkout", () => {
   // Accepted recovery contract: a real partial ref-deletion failure must remain
   // resumable through the same CLI, with exactly one final custody event.
   // The earlier golden path and single-checkout refusals never partially retire.
+  it.each(["root", "child"])(
+    "resumes an already detached %s with its branch still present",
+    async (kind) => {
+      const fixture = await releaseWorld(kind === "child")
+      const { spy } = await permitCensus()
+      try {
+        const repo = kind === "root" ? fixture.repo : fixture.child!
+        const git = gitIn(repo)
+        const tip = (await git(["rev-parse", "HEAD"])).trim()
+        await git(["update-ref", "--no-deref", "HEAD", tip, tip])
+        if (kind === "child") {
+          const ambiguous = releaseCapture(fixture.repo)
+          expect(await runYrdProcess(fixture.argv, ambiguous.io)).toBe(1)
+          expect((JSON.parse(ambiguous.stdout()) as ReleaseReport).failed[0]?.detail).toContain("ambiguous")
+          await git(["branch", "-m", "task/29600-unselected", "task/29601-unselected"])
+        }
+        const preview = releaseCapture(fixture.repo)
+        expect(await runYrdProcess(fixture.argv, preview.io), preview.stdout() + preview.stderr()).toBe(0)
+        expect((JSON.parse(preview.stdout()) as ReleaseReport).eligible).toHaveLength(kind === "child" ? 2 : 1)
+        expect(await git(["for-each-ref", "refs/archive/"])).toBe("")
+        const applied = releaseCapture(fixture.repo)
+        expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stdout() + applied.stderr()).toBe(
+          0,
+        )
+        expect((JSON.parse(applied.stdout()) as ReleaseReport).removed).toHaveLength(kind === "child" ? 2 : 1)
+        expect((await git(["rev-parse", "HEAD"])).trim()).toBe(tip)
+        expect(await git(["for-each-ref", `refs/heads/${fixture.branch}`])).toBe("")
+      } finally {
+        spy.mockRestore()
+      }
+    },
+    30_000,
+  )
+  // A late hold must not orphan work committed after detachment; a failed
+  // reattachment must leave a same-command retry after the competing lock clears.
+  it.each(["advanced HEAD", "reattach lock"])(
+    "preserves recovery after %s during retirement",
+    async (kind) => {
+      const fixture = await releaseWorld()
+      const { spy } = await permitCensus()
+      try {
+        let advanced: string | undefined
+        let lock: string | undefined
+        let reads = 0
+        const first = releaseCapture(fixture.repo)
+        first.io.localBranchProtections = async () => {
+          if (++reads === 4) {
+            if (kind === "advanced HEAD") {
+              const tree = (await fixture.git(["rev-parse", "HEAD^{tree}"])).trim()
+              advanced = (
+                await fixture.git(["commit-tree", tree, "-p", fixture.tip, "-m", "late author commit"])
+              ).trim()
+              await fixture.git(["update-ref", "HEAD", advanced, fixture.tip])
+            } else {
+              lock = join((await fixture.git(["rev-parse", "--absolute-git-dir"])).trim(), "HEAD.lock")
+              writeFileSync(lock, "fixture competing HEAD writer\n")
+            }
+          }
+          return { protections: reads >= 4 ? ["late holder"] : [], evidence: [] }
+        }
+        expect(await runYrdProcess([...fixture.argv, "--apply"], first.io)).toBe(1)
+        const report = JSON.parse(first.stdout()) as ReleaseReport
+        expect(report.failed).toHaveLength(1)
+        expect((await fixture.git(["rev-parse", `refs/heads/${fixture.branch}`])).trim()).toBe(fixture.tip)
+        expect(await fixture.git(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")).toBe("")
+        if (kind === "advanced HEAD") {
+          expect((await fixture.git(["rev-parse", "HEAD"])).trim()).toBe(advanced)
+          expect(report.failed[0]?.detail).toContain(advanced)
+        } else {
+          expect(report.failed[0]?.detail).toContain("reattach")
+          expect(report.failed[0]?.detail).toContain("retry")
+          unlinkSync(lock!)
+          const retry = releaseCapture(fixture.repo)
+          expect(await runYrdProcess([...fixture.argv, "--apply"], retry.io), retry.stdout() + retry.stderr()).toBe(0)
+          expect((JSON.parse(retry.stdout()) as ReleaseReport).removed).toHaveLength(1)
+        }
+      } finally {
+        spy.mockRestore()
+      }
+    },
+    30_000,
+  )
+  // Root deletion can finish before event publication fails. The archive, rather
+  // than a live branch or a premature ending event, must make that retry possible.
+  it("publishes exactly one ending when retrying after root retirement", async () => {
+    const fixture = await releaseWorld()
+    const { spy } = await permitCensus()
+    const remote = gitIn(join(dirname(fixture.repo), "remote.git"))
+    try {
+      await remote(["config", "receive.hideRefs", `refs/yrd/main/changes/${fixture.branch}`])
+      const first = releaseCapture(fixture.repo)
+      expect(await runYrdProcess([...fixture.argv, "--apply"], first.io), first.stdout() + first.stderr()).toBe(1)
+      const partial = JSON.parse(first.stdout()) as ReleaseReport
+      expect(partial.removed).toHaveLength(1)
+      expect(partial.failed).toHaveLength(1)
+      expect(await fixture.git(["for-each-ref", `refs/heads/${fixture.branch}`])).toBe("")
+      expect(await remote(["for-each-ref", `refs/yrd/main/changes/${fixture.branch}`])).toBe("")
+      await remote(["config", "--unset", "receive.hideRefs"])
+      const retry = releaseCapture(fixture.repo)
+      expect(await runYrdProcess([...fixture.argv, "--apply"], retry.io), retry.stdout() + retry.stderr()).toBe(0)
+      const completed = JSON.parse(retry.stdout()) as ReleaseReport
+      expect(completed.alreadyRetired).toHaveLength(1)
+      expect(completed.removed).toEqual([])
+      const history = (
+        await readEventQueueWithChanges(createEventStore(fixture.repo, "origin", fixture.git.selection), "main")
+      ).histories.get(fixture.branch)!
+      expect(history.events.filter((event) => event.type === "cancelled")).toHaveLength(1)
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
   it.each(["child", "root", "wrong archive", "ambiguous archive"])(
     "resumes after %s deletion fails and completed replay writes nothing",
     async (failedRepo) => {
@@ -3896,7 +4007,9 @@ describe("drop --local --release-checkout", () => {
         }
         const eventTip = await fixture.git(["ls-remote", "origin", `refs/yrd/main/changes/${fixture.branch}`])
         const replay = releaseCapture(fixture.repo)
-        expect(await runYrdProcess([...fixture.argv, "--apply"], replay.io), replay.stdout() + replay.stderr()).toBe(0)
+        const replayArgs = [...fixture.argv, "--apply"]
+        replayArgs[replayArgs.indexOf("--reason") + 1] = "completed replay must not rewrite the prior receipt"
+        expect(await runYrdProcess(replayArgs, replay.io), replay.stdout() + replay.stderr()).toBe(0)
         expect(await fixture.git(["ls-remote", "origin", `refs/yrd/main/changes/${fixture.branch}`])).toBe(eventTip)
         expect((JSON.parse(replay.stdout()) as ReleaseReport).failed).toEqual([])
       } finally {
@@ -3988,13 +4101,14 @@ describe("drop --local --release-checkout", () => {
     }
   }, 60_000)
   it.each(["moved", "cwd", "delegation", "declared", "host", "late entrant", "failed retirement"])(
-    "reports %s and restores an attached checkout after unsuccessful retirement",
+    "reports %s and preserves a recoverable checkout after unsuccessful retirement",
     async (kind) => {
       const fixture = await releaseWorld()
       const { spy, permitted } = await permitCensus()
       try {
         const output = releaseCapture(fixture.repo)
         let reads = 0
+        let retirementLock: string | undefined
         if (kind === "moved") {
           fixture.argv[fixture.argv.indexOf("--tip") + 1] = (await fixture.git(["rev-parse", "main"])).trim()
         }
@@ -4014,7 +4128,8 @@ describe("drop --local --release-checkout", () => {
           reads++
           if (kind === "failed retirement" && reads === 4) {
             const lock = (await fixture.git(["rev-parse", "--git-path", `refs/heads/${fixture.branch}.lock`])).trim()
-            writeFileSync(join(fixture.repo, lock), "fixture competing ref transaction\n")
+            retirementLock = join(fixture.repo, lock)
+            writeFileSync(retirementLock, "fixture competing ref transaction\n")
           }
           if (kind === "late entrant" && reads === 4) {
             expect(await fixture.git(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")).toBe("")
@@ -4044,8 +4159,17 @@ describe("drop --local --release-checkout", () => {
                     ? /lock|already exists/
                     : /live lease or host hold/,
         )
-        expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
         expect((await fixture.git(["rev-parse", `refs/heads/${fixture.branch}`])).trim()).toBe(fixture.tip)
+        if (kind === "failed retirement") {
+          // Reattachment cannot verify a branch owned by another ref writer.
+          // The detached pinned checkout remains recoverable through the same command.
+          expect(await fixture.git(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")).toBe("")
+          expect(report.failed[0]?.detail).toContain("retry")
+          unlinkSync(retirementLock!)
+          const retry = releaseCapture(fixture.repo)
+          expect(await runYrdProcess([...fixture.argv, "--apply"], retry.io), retry.stdout() + retry.stderr()).toBe(0)
+          expect((JSON.parse(retry.stdout()) as ReleaseReport).removed).toHaveLength(1)
+        } else expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
         for (const files of fixture.checkoutFiles.values()) {
           expect([readFileSync(files.lease), readFileSync(files.lock), readFileSync(files.index)]).toEqual(files.bytes)
         }
