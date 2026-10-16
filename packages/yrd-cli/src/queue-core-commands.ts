@@ -44,6 +44,7 @@ import {
   retireClosedIssueBranches,
   retireMergedComponentAuthors,
   retireMergedRootAuthor,
+  releaseRetainedCheckouts,
 } from "./branch-retirement.ts"
 import { sweepRoundOutputInRound } from "./log-retention.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
@@ -443,6 +444,10 @@ export type CoreQueueCommand =
     }>
   | Readonly<{
       command: "drop-local"
+      releaseCheckout?: boolean
+      submodules?: boolean
+      dryRun?: boolean
+      apply?: boolean
       branch: string
       tip: string
       issue?: string
@@ -707,7 +712,12 @@ export async function coreQueueCommand(
         "The queue's config lives on the queue branch itself. Point at a different one with " +
         "--queue <repo>#<branch>, or, if this repository is a submodule with none of its own, " +
         "the superproject that vendors it gates the change instead, by checking the gitlink, " +
-        "not a declaration here.\n",
+        "not a declaration here.\n" +
+        (request.command === "drop-local" || request.command === "drop-issue"
+          ? "For retained-checkout cleanup, run from that superproject: " +
+            "yrd drop <root-branch> --local --tip <root-tip> --issue <issue> --reason <why> --release-checkout --submodules. " +
+            "This is a preview; use the root branch and its exact tip, review the receipt, then repeat with --apply.\n"
+          : ""),
     )
     return 2
   }
@@ -904,7 +914,7 @@ export async function coreQueueCommand(
     request.command === "withdraw" ||
     request.command === "drop" ||
     (request.command === "drop-issue" && (request.submodules ? request.apply : !request.dryRun)) ||
-    request.command === "drop-local" ||
+    (request.command === "drop-local" && (!request.releaseCheckout || request.apply)) ||
     request.command === "ignore" ||
     request.command === "unignore" ||
     request.command === "merge" ||
@@ -1494,6 +1504,52 @@ export async function coreQueueCommand(
             : io.branchIssue({ branch, recordedIssue })
         return mapped === undefined ? undefined : issueIdentity(mapped)
       }
+      if (request.command === "drop-local" && request.releaseCheckout) {
+        if (
+          !request.issue?.trim() ||
+          !request.reason?.trim() ||
+          !request.by.trim() ||
+          request.branch === config.target.branch ||
+          !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(request.tip)
+        ) {
+          throw new Error(
+            "drop --release-checkout requires a non-target branch, exact full tip, actor, issue and reason",
+          )
+        }
+        if (request.apply && request.dryRun) throw new Error("choose --dry-run or --apply")
+        const log = openLog(join(workdir, "logs"))
+        log.write({ kind: "run", command: "drop --local --release-checkout", target: targetLabel, config: config.blob })
+        log.write({ kind: "queue", queue: targetLabel })
+        try {
+          const report = await releaseRetainedCheckouts({
+            repo: authorRepo,
+            git: authorGit,
+            selection,
+            env,
+            io,
+            log,
+            queue: config.target.branch,
+            remote: config.target.remote,
+            issueIdentity,
+            request: { ...request, issue: request.issue, reason: request.reason },
+          })
+          emit(
+            io,
+            options.json,
+            report,
+            `checkout release in ${authorRepo}: eligible ${report.eligible.length}, retired ${report.removed.length}, already retired ${report.alreadyRetired.length}, kept ${report.kept.length}, failed ${report.failed.length}; ${report.apply ? "applied" : "preview; use --apply"}\n` +
+              [...report.eligible, ...report.removed, ...report.kept, ...report.failed]
+                .map(
+                  (row) =>
+                    `${row.repo} ${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`,
+                )
+                .join("\n"),
+          )
+          return report.failed.length === 0 ? 0 : 1
+        } finally {
+          log.finish()
+        }
+      }
       if (request.command === "drop-issue" && request.submodules) {
         const issue = normalizeIssueReference(request.issue)
         const numeric = issueIdentity(issue)
@@ -1601,8 +1657,9 @@ export async function coreQueueCommand(
                   date: new Date().toISOString().slice(0, 10),
                   dryRun: !request.apply,
                   log,
-                  protections: () =>
-                    io.localBranchProtections?.({ repo: repository, branch, tip: head, issue }) ?? Promise.resolve([]),
+                  protections: async () =>
+                    (await io.localBranchProtections?.({ repo: repository, branch, tip: head, issue }))?.protections ??
+                    [],
                 })
                 const output = {
                   ...row,
@@ -1846,8 +1903,9 @@ export async function coreQueueCommand(
             date: new Date().toISOString().slice(0, 10),
             dryRun,
             log,
-            protections: () =>
-              io.localBranchProtections?.({ repo: authorRepo, branch, tip: head, issue: bound }) ?? Promise.resolve([]),
+            protections: async () =>
+              (await io.localBranchProtections?.({ repo: authorRepo, branch, tip: head, issue: bound }))?.protections ??
+              [],
             disposition,
           })
           const output = {
@@ -1911,8 +1969,8 @@ export async function coreQueueCommand(
         branch: request.branch,
         by: request.by,
         ...(request.retire === undefined ? {} : { retire: request.retire }),
-        protections: (tip, issue) =>
-          io.localBranchProtections?.({ repo, branch: request.branch, tip, issue }) ?? Promise.resolve([]),
+        protections: async (tip, issue) =>
+          (await io.localBranchProtections?.({ repo, branch: request.branch, tip, issue }))?.protections ?? [],
         ...(request.reason === undefined ? {} : { note: request.reason }),
         ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
       })
@@ -2117,8 +2175,8 @@ export async function coreQueueCommand(
           branch: request.branch,
           by: request.by,
           target: config.target,
-          protections: (tip, issue) =>
-            io.localBranchProtections?.({ repo, branch: request.branch, tip, issue }) ?? Promise.resolve([]),
+          protections: async (tip, issue) =>
+            (await io.localBranchProtections?.({ repo, branch: request.branch, tip, issue }))?.protections ?? [],
           ...(request.reason === undefined ? {} : { reason: request.reason }),
           ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
         })

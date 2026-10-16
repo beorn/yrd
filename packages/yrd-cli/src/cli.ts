@@ -240,6 +240,7 @@ function buildProgram(
     options: PauseOptions & {
       issue?: string
       local?: boolean
+      releaseCheckout?: boolean
       retire?: boolean
       tip?: string
       submodules?: boolean
@@ -272,18 +273,39 @@ function buildProgram(
     }
     if (
       (options.submodules || options.dryRun || options.apply) &&
-      (command !== "drop" || options.issue === undefined || options.local)
+      (command !== "drop" || options.issue === undefined || (options.local && !options.releaseCheckout))
     ) {
       throw new Error("--submodules, --dry-run and --apply require drop --issue <id>")
     }
     if (options.dryRun && options.apply) throw new Error("choose --dry-run or --apply")
+    if (
+      options.releaseCheckout &&
+      (command !== "drop" || !options.local || !options.issue?.trim() || !options.reason?.trim())
+    ) {
+      throw new Error(
+        "--release-checkout requires drop --local <branch> --tip <full-commit> --issue <id> --reason <why>",
+      )
+    }
     let subject:
       | { command: "withdraw" | "drop"; branch: string; retire?: Readonly<{ tip: string }> }
       | { command: "drop-issue"; issue: string; submodules?: boolean; apply?: boolean; dryRun?: boolean }
-      | { command: "drop-local"; branch: string; tip: string; issue?: string }
+      | {
+          command: "drop-local"
+          branch: string
+          tip: string
+          issue?: string
+          releaseCheckout?: boolean
+          submodules?: boolean
+          dryRun?: boolean
+          apply?: boolean
+        }
     if (command === "drop" && options.local === true && branch !== undefined && options.tip !== undefined) {
       subject = {
         command: "drop-local",
+        releaseCheckout: options.releaseCheckout,
+        submodules: options.submodules,
+        dryRun: options.dryRun,
+        apply: options.apply,
         branch,
         tip: options.tip,
         ...(options.issue === undefined ? {} : { issue: options.issue }),
@@ -1349,6 +1371,10 @@ function buildProgram(
         "end a change, or archive and retire local branches; root issue cleanup applies by default using exact origin custody; --submodules previews because it expands to component repositories",
       )
       .option("--local", "archive and retire only the named local branch; requires --tip")
+      .option(
+        "--release-checkout",
+        "retain checkout bytes and detach its exact branch; requires --local, --tip, --issue and --reason; preview unless --apply",
+      )
       .option(
         "--retire",
         "archive and retire an already-ended origin branch without changing its ending; requires --tip and --reason",

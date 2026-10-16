@@ -905,7 +905,7 @@ process.exit(result.exitCode)
         await w.git(["update-ref", `refs/heads/${branch}`, next, tip])
         moved = true
       }
-      return []
+      return { protections: [], evidence: [] }
     }
     await expect(
       coreQueueCommand(

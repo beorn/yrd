@@ -154,7 +154,7 @@ async function sweep(
     queue: "main",
     target,
     // The host's protections reader is present by default; one row removes it on purpose.
-    io: { ...out.io, localBranchProtections: async () => [], ...options.io },
+    io: { ...out.io, localBranchProtections: async () => ({ protections: [], evidence: [] }), ...options.io },
     log,
     actor: "yrd",
     nameNumber: numberOf,
@@ -418,7 +418,7 @@ describe("29450 closing an issue retires its branches", () => {
             if (branch === "task/29106-moves" && ++reads === 2) {
               await git(["update-ref", "refs/heads/task/29106-moves", moved])
             }
-            return []
+            return { protections: [], evidence: [] }
           },
         },
       },

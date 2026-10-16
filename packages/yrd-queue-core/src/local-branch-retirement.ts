@@ -42,6 +42,15 @@ export type LocalBranchRetirementResult = Readonly<{
   detail?: string
 }>
 
+type Kept = { code: "held" | "moved" | "unreached" | "advanced"; detail: string }
+
+/** An observed protection is a kept result; unreadable authority still fails. */
+class RetirementKept extends Error {
+  constructor(readonly protection: Kept) {
+    super(protection.detail)
+  }
+}
+
 /** One policy for local retirement; git-super owns archive/ref mechanics.
  * Unmerged closed work first publishes its archive and ending to origin; a
  * closed tip already in the target is archived locally without a queue write.
@@ -49,9 +58,8 @@ export type LocalBranchRetirementResult = Readonly<{
  */
 export async function retireLocalBranch(input: LocalBranchRetirement): Promise<LocalBranchRetirementResult> {
   const { repo, git, branch, tip, actor, issue, reason, date, disposition } = input
-  const archiveRef = archiveRefFor(branch, actor, date)
+  const archiveRef = disposition.kind === "archived" ? disposition.ref : archiveRefFor(branch, actor, date)
   const store = createGitWorktreeStore({ repo, gitProcess: seamProcess(git, repo) })
-  type Kept = { code: "held" | "moved" | "unreached" | "advanced"; detail: string }
   let firstProtectionRead = true
   let completedArchive: string | undefined
   const protection = async (): Promise<Kept | undefined> => {
@@ -156,11 +164,29 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
         detail: `already retired: ${completedArchive} holds ${tip}; this run deleted no ref`,
       }
     } else {
-      await store.removeArchivedBranch({ branch, tip, archiveRef })
+      await store.removeArchivedBranch({
+        branch,
+        tip,
+        archiveRef,
+        beforeRemove: async () => {
+          const held = await protection()
+          if (held !== undefined) throw new RetirementKept(held)
+        },
+      })
       result = { outcome: "removed", archiveRef, reason }
     }
   } catch (error) {
-    result = { outcome: "failed", archiveRef, reason: error instanceof Error ? error.message : String(error) }
+    if (error instanceof RetirementKept) {
+      const kept = error.protection
+      result = {
+        outcome: "kept",
+        archiveRef,
+        reason: disposition.kind === "landed" || disposition.kind === "archived" ? kept.code : kept.detail,
+        detail: kept.detail,
+      }
+    } else {
+      result = { outcome: "failed", archiveRef, reason: error instanceof Error ? error.message : String(error) }
+    }
   }
   // A failed journal write must propagate, never relabel an already removed ref as kept.
   input.log.write({

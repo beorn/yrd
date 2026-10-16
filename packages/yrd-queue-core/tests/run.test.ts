@@ -357,8 +357,19 @@ it("local retirement keeps protected tips and preserves custody before removing 
   protections = []
   let protectionReads = 0
   expect(
-    await retireLocalBranch({ ...input, protections: async () => (++protectionReads === 1 ? [] : ["lease acquired"]) }),
+    await retireLocalBranch({ ...input, protections: async () => (++protectionReads <= 2 ? [] : ["lease acquired"]) }),
   ).toMatchObject({ outcome: "kept", reason: "lease acquired" })
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(w.target)
+  protectionReads = 0
+  expect(
+    await retireLocalBranch({
+      ...input,
+      protections: async () => {
+        if (++protectionReads > 2) throw new Error("lease authority unreadable under lock")
+        return []
+      },
+    }),
+  ).toMatchObject({ outcome: "failed", reason: "lease authority unreadable under lock" })
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(w.target)
   const merged = await retireLocalBranch(input)
   expect(merged.outcome).toBe("removed")
@@ -444,6 +455,7 @@ it("local retirement keeps protected tips and preserves custody before removing 
   expect(rows.filter((row) => row.kind === "local-branch-retirement").map((row) => row.outcome)).toEqual([
     "kept",
     "kept",
+    "failed",
     "removed",
     "removed",
     "kept",

@@ -32,6 +32,11 @@
  */
 export type YrdCliExitCode = 0 | 1 | 2 | 3 | 4
 
+export type LocalBranchProtectionResult = Readonly<{
+  protections: readonly string[]
+  evidence: readonly Readonly<{ kind: "malformed-lease"; path: string; reason: string }>[]
+}>
+
 export type YrdCliIO = {
   stdout(text: string): void
   stderr(text: string): void
@@ -45,14 +50,15 @@ export type YrdCliIO = {
   columns?: number
   /** Read current external uses once per cleanup round. Paths are absolute;
    * reasons are opaque text. An unavailable reader preserves automatic
-   * candidates, while an absent reader supplies no external protection. */
+   * candidates. Ordinary cleanup permits an absent reader; explicit retained-checkout release requires it. */
   liveEnvironmentUse?: () => Promise<readonly Readonly<{ path: string; reason: string }>[]>
   /** Pure syntactic issue mapping for branch cleanup; never performs external lookups. */
   branchIssue?: (input: Readonly<{ branch: string; recordedIssue?: string }>) => string | undefined
   /** Fresh host holds, leases and live/dirty work associated with this exact local branch.
-   * Rejections preserve the branch; no host callback means a standalone repository with no host policy.
+   * Rejections preserve the branch; ordinary cleanup permits a standalone repository with no host callback.
+   * Explicit retained-checkout release requires the callback and records its non-blocking evidence.
    */
   localBranchProtections?: (
-    input: Readonly<{ repo: string; branch: string; tip: string; issue?: string }>,
-  ) => Promise<readonly string[]>
+    input: Readonly<{ repo: string; branch: string; tip: string; issue?: string; retainedCheckout?: string }>,
+  ) => Promise<LocalBranchProtectionResult>
 }
