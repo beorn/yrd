@@ -3853,8 +3853,9 @@ describe("component-local retirement without a component queue", () => {
       if (mode === "archive-collision") {
         expect((await git(["ls-remote", "origin", collisionRef])).split("\t")[0]).toBe(baseTip)
       }
-      if (mode === "publication-refused")
+      if (mode === "publication-refused") {
         expect(run.stdout() + run.stderr()).toContain("fixture refuses archive publication")
+      }
       if (mode === "archive-readback-lost") expect(run.stdout() + run.stderr()).toContain("read back")
       if (mode === "malformed-declaration" || mode === "unreadable-declaration") return
     } else expect(exit, run.stderr()).toBe(0)
