@@ -91,13 +91,12 @@ export async function releaseRetainedCheckouts(
   const evidence: LocalBranchProtectionResult["evidence"][number][] = []
   const identity = input.issueIdentity
   const date = new Date().toISOString().slice(0, 10)
-  const rootStore = createEventStore(input.repo, await remoteUrl(input.git, input.remote), input.selection)
   const rootRow: Row = {
     repo: input.repo,
     path: "",
     branch: request.branch,
     head: request.tip,
-    remote: publicText(rootStore.remote),
+    remote: publicText(input.remote),
     archiveRef: archiveRefFor(request.branch, request.by, date),
     reason: publicText(request.reason),
   }
@@ -111,7 +110,10 @@ export async function releaseRetainedCheckouts(
   const protect = async ({ row, checkout }: Candidate): Promise<readonly string[]> => {
     const admission = await admitEnvironmentClose(checkout, io)
     if (admission.kind !== "admitted") return [`needs-delegation: ${admission.refusal}`]
-    const uses: unknown = (await io.liveEnvironmentUse?.()) ?? []
+    if (io.liveEnvironmentUse === undefined) {
+      throw new Error("release-checkout requires the liveEnvironmentUse authority reader")
+    }
+    const uses: unknown = await io.liveEnvironmentUse()
     if (!Array.isArray(uses)) throw new Error("live environment-use reader did not return an array")
     for (const use of uses as readonly unknown[]) {
       if (
@@ -198,6 +200,8 @@ export async function releaseRetainedCheckouts(
     for (const reader of ["liveEnvironmentUse", "localBranchProtections"] as const) {
       if (io[reader] === undefined) throw new Error(`release-checkout requires the ${reader} authority reader`)
     }
+    const rootStore = createEventStore(input.repo, await remoteUrl(input.git, input.remote), input.selection)
+    rootRow.remote = publicText(rootStore.remote)
     const actual = await refAt(input.git, `refs/heads/${request.branch}`)
     if (actual !== undefined && actual !== request.tip) {
       kept.push({
@@ -363,16 +367,16 @@ export async function releaseRetainedCheckouts(
     for (const candidate of candidates) {
       const before = await receipt(candidate)
       snapshots.set(candidate, before)
-      let reasons: readonly string[]
+      let reasons: readonly string[] = []
       try {
         reasons = candidate.retired ? [] : await protect(candidate)
       } catch (cause) {
-        reasons = [String(cause)]
+        failed.push({ ...candidate.row, reason: "failed", detail: publicText(String(cause)) })
       }
       await verify(candidate, before)
       if (reasons.length > 0) kept.push({ ...candidate.row, reason: "held", detail: publicText(reasons.join("; ")) })
     }
-    if (kept.length > 0) return report
+    if (kept.length > 0 || failed.length > 0) return report
     if (!request.apply) {
       eligible.push(...candidates.filter((candidate) => !candidate.retired).map((candidate) => candidate.row))
       alreadyRetired.push(...candidates.filter((candidate) => candidate.retired).map((candidate) => candidate.row))
@@ -473,7 +477,11 @@ export async function releaseRetainedCheckouts(
           disposition: { kind: "archived", target: row.head, ref: row.archiveRef },
         })
         if (result.outcome !== "removed") {
-          await reattach()
+          try {
+            await reattach()
+          } catch (cause) {
+            throw new Error(`${result.reason}: ${result.detail ?? result.reason}; ${String(cause)}`, { cause })
+          }
           const destination = result.outcome === "failed" ? failed : kept
           destination.push({
             ...row,

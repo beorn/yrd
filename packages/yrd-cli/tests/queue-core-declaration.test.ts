@@ -61,7 +61,7 @@ import {
   readEventListing,
 } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
-import type { releaseRetainedCheckouts } from "../src/branch-retirement.ts"
+import { releaseRetainedCheckouts } from "../src/branch-retirement.ts"
 import { readEnvOpenRecord } from "../src/env-open-record.ts"
 import { issueLookup, issueResolver } from "../src/issue-resolver.ts"
 import { SERVICE } from "../src/queue-health.ts"
@@ -3793,17 +3793,20 @@ describe("drop --local --release-checkout", () => {
   }
   // Explicit release must prove both host authorities are connected; ordinary
   // drop fixtures do not exercise the missing-reader boundary.
-  it.each(["liveEnvironmentUse", "localBranchProtections"] as const)(
+  it.each(["liveEnvironmentUse", "localBranchProtections", "empty liveEnvironmentUse"] as const)(
     "refuses release without the %s authority reader",
     async (reader) => {
       const fixture = await releaseWorld()
       const { spy } = await permitCensus()
       try {
         const output = releaseCapture(fixture.repo)
-        delete output.io[reader]
+        if (reader === "empty liveEnvironmentUse") output.io.liveEnvironmentUse = vi.fn().mockResolvedValue(undefined)
+        else delete output.io[reader]
         expect(await runYrdProcess([...fixture.argv, "--apply"], output.io)).toBe(1)
         const report = JSON.parse(output.stdout()) as ReleaseReport
-        expect(report.failed[0]?.detail).toContain(reader)
+        expect(report.failed[0]?.detail).toContain(
+          reader === "empty liveEnvironmentUse" ? "did not return an array" : reader,
+        )
         expect(report.removed).toEqual([])
         expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
         expect(await fixture.git(["for-each-ref", "refs/archive/"])).toBe("")
@@ -3813,6 +3816,33 @@ describe("drop --local --release-checkout", () => {
     },
     30_000,
   )
+  /** @failure An origin lookup error escapes the release receipt and exposes transport credentials.
+   * @level l2 @consumer releaseRetainedCheckouts callers, including the CLI
+   * Setup fails before the existing CLI holder fixtures reach their diagnostic boundary.
+   */
+  it("redacts a failed origin lookup before constructing the event store", async () => {
+    const fixture = await releaseWorld()
+    const output = releaseCapture(fixture.repo)
+    const report = await releaseRetainedCheckouts({
+      repo: fixture.repo,
+      git: async () => {
+        throw new Error("remote lookup failed: https://fixture-user:fixture-secret@repo.invalid/retained.git")
+      },
+      selection: fixture.git.selection,
+      io: output.io,
+      log: { write: vi.fn() },
+      queue: "main",
+      remote: "origin",
+      issueIdentity: (value) => value,
+      request: { branch: fixture.branch, tip: fixture.tip, issue: "29600", reason: "retain checkout", by: "fixture" },
+    })
+    expect(report.failed).toHaveLength(1)
+    expect(report.failed[0]?.detail).toContain("remote lookup failed: https://repo.invalid/retained.git")
+    expect(JSON.stringify(report)).not.toContain("fixture-secret")
+    expect(JSON.stringify(report)).not.toContain("fixture-user")
+    expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+    expect(await fixture.git(["for-each-ref", "refs/archive/"])).toBe("")
+  })
   // Accepted recovery contract: a real partial ref-deletion failure must remain
   // resumable through the same CLI, with exactly one final custody event.
   // The earlier golden path and single-checkout refusals never partially retire.
@@ -3879,6 +3909,9 @@ describe("drop --local --release-checkout", () => {
         expect(await runYrdProcess([...fixture.argv, "--apply"], first.io)).toBe(1)
         const report = JSON.parse(first.stdout()) as ReleaseReport
         expect(report.failed).toHaveLength(1)
+        expect(report.failed[0]?.detail).toContain(
+          kind === "advanced HEAD" ? "retained checkout receipt changed" : "late holder",
+        )
         expect((await fixture.git(["rev-parse", `refs/heads/${fixture.branch}`])).trim()).toBe(fixture.tip)
         expect(await fixture.git(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")).toBe("")
         if (kind === "advanced HEAD") {
@@ -4124,12 +4157,29 @@ describe("drop --local --release-checkout", () => {
       spy.mockRestore()
     }
   }, 60_000)
-  it.each(["moved", "cwd", "delegation", "declared", "host", "failed host", "late entrant", "failed retirement"])(
+  it.each([
+    "moved",
+    "cwd",
+    "delegation",
+    "declared",
+    "host",
+    "preview host",
+    "failed host",
+    "late entrant",
+    "failed retirement",
+  ])(
     "reports %s and preserves a recoverable checkout after unsuccessful retirement",
     async (kind) => {
       const fixture = await releaseWorld()
       const { spy, permitted } = await permitCensus()
-      const failed = kind === "failed retirement" || kind === "failed host"
+      // Native CWD admission throws a refusal; every thrown protection read is
+      // failed, while declared and returned holder reasons remain kept.
+      const failed =
+        kind === "cwd" ||
+        kind === "failed retirement" ||
+        kind === "failed host" ||
+        kind === "host" ||
+        kind === "preview host"
       try {
         const output = releaseCapture(fixture.repo)
         let reads = 0
@@ -4151,7 +4201,7 @@ describe("drop --local --release-checkout", () => {
         }
         output.io.localBranchProtections = async () => {
           reads++
-          if (kind === "host" || (kind === "failed host" && reads === 4)) {
+          if (kind === "host" || kind === "preview host" || (kind === "failed host" && reads === 4)) {
             throw new Error("live lease or host hold: https://fixture-user:fixture-secret@repo.invalid/retained.git")
           }
           if (kind === "failed retirement" && reads === 4) {
@@ -4167,7 +4217,10 @@ describe("drop --local --release-checkout", () => {
             evidence: [],
           }
         }
-        expect(await runYrdProcess([...fixture.argv, "--apply"], output.io), output.stderr()).toBe(failed ? 1 : 0)
+        expect(
+          await runYrdProcess([...fixture.argv, ...(kind === "preview host" ? [] : ["--apply"])], output.io),
+          output.stderr(),
+        ).toBe(failed ? 1 : 0)
         const report = JSON.parse(output.stdout()) as ReleaseReport
         expect(output.stdout()).not.toContain("fixture-secret")
         expect(output.stdout()).not.toContain("fixture-user")
