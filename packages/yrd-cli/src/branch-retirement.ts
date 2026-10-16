@@ -38,7 +38,7 @@ import {
   type QueueConfig,
 } from "@yrd/queue-core"
 import type { ResolvedIssue } from "./issue-resolver.ts"
-import type { YrdCliIO } from "./types.ts"
+import type { LocalBranchProtectionResult, YrdCliIO } from "./types.ts"
 import { originHead } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
 import { admitEnvironmentClose } from "./env-close-holders.ts"
@@ -85,6 +85,7 @@ export async function releaseRetainedCheckouts(
     kept: Row[] = [],
     failed: Row[] = []
   const excluded: { repo: string; path: string; reason: string }[] = []
+  const evidence: LocalBranchProtectionResult["evidence"][number][] = []
   const identity = input.issueIdentity
   const date = new Date().toISOString().slice(0, 10)
   const rootStore = createEventStore(input.repo, await remoteUrl(input.git, input.remote), input.selection)
@@ -124,15 +125,19 @@ export async function releaseRetainedCheckouts(
       }
       if (overlaps(checkout, use.path) || overlaps(use.path, checkout)) return [`live use: ${use.reason} (${use.path})`]
     }
-    return (
-      (await io.localBranchProtections?.({
-        repo: row.repo,
-        branch: row.branch,
-        tip: row.head,
-        issue: request.issue,
-        retainedCheckout: checkout,
-      })) ?? []
-    )
+    const result = await io.localBranchProtections!({
+      repo: row.repo,
+      branch: row.branch,
+      tip: row.head,
+      issue: request.issue,
+      retainedCheckout: checkout,
+    })
+    for (const row of result.evidence) {
+      if (!evidence.some((seen) => seen.kind === row.kind && seen.path === row.path && seen.reason === row.reason)) {
+        evidence.push(row)
+      }
+    }
+    return result.protections
   }
   const hash = (path: string): string | null => {
     try {
@@ -165,6 +170,7 @@ export async function releaseRetainedCheckouts(
     kept,
     failed,
     excluded,
+    evidence,
     receipts,
   }
   const verify = async (candidate: Candidate, before: Awaited<ReturnType<typeof receipt>>) => {
@@ -515,7 +521,7 @@ export async function retireMergedRootAuthor(
       ) {
         throw new Error(`${branch}@${tip}: origin archive custody changed before root retirement`)
       }
-      return (await input.io.localBranchProtections?.({ repo, branch, tip, issue: change.issue })) ?? []
+      return (await input.io.localBranchProtections?.({ repo, branch, tip, issue: change.issue }))?.protections ?? []
     },
     // Attributed submissions have a separate proven component judgment; the old root-only
     // warning remains correct only for submissions that recorded no component authors.
@@ -984,18 +990,22 @@ export async function retireMergedComponentAuthors(
             throw new Error(`root author ${author.rootBranch} advanced since capture`)
           }
           return [
-            ...((await input.io.localBranchProtections?.({
-              repo,
-              branch: author.branch,
-              tip: author.tip,
-              issue: author.issue,
-            })) ?? []),
-            ...((await input.io.localBranchProtections?.({
-              repo: author.rootCommonDirectory,
-              branch: author.rootBranch,
-              tip: author.rootTip,
-              issue: author.issue,
-            })) ?? []),
+            ...((
+              await input.io.localBranchProtections?.({
+                repo,
+                branch: author.branch,
+                tip: author.tip,
+                issue: author.issue,
+              })
+            )?.protections ?? []),
+            ...((
+              await input.io.localBranchProtections?.({
+                repo: author.rootCommonDirectory,
+                branch: author.rootBranch,
+                tip: author.rootTip,
+                issue: author.issue,
+              })
+            )?.protections ?? []),
           ]
         },
       })
@@ -1395,7 +1405,7 @@ export async function retireClosedIssueBranches(
         issue: issue.id,
         date,
         log,
-        protections: () => protectionsReader({ repo, branch, tip: head, issue: issue.id }),
+        protections: async () => (await protectionsReader({ repo, branch, tip: head, issue: issue.id })).protections,
         ...(merged === undefined ? { closed: { store, queue } } : {}),
       })
       const archiveRef = result.archiveRef

@@ -297,7 +297,8 @@ it.each(["released", "held", "advanced", "failed"] as const)(
       expectedHead = (await authorGit(["rev-parse", "HEAD"])).trim()
     }
     const closed = capture(w.work)
-    if (mode === "held") closed.io.localBranchProtections = async () => ["fixture external hold"]
+    if (mode === "held")
+      closed.io.localBranchProtections = async () => ({ protections: ["fixture external hold"], evidence: [] })
     if (mode === "failed") {
       // Release admission succeeds before capture, then loses certification before removal.
       const observed = await realProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })

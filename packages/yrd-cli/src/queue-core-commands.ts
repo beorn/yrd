@@ -1657,8 +1657,9 @@ export async function coreQueueCommand(
                   date: new Date().toISOString().slice(0, 10),
                   dryRun: !request.apply,
                   log,
-                  protections: () =>
-                    io.localBranchProtections?.({ repo: repository, branch, tip: head, issue }) ?? Promise.resolve([]),
+                  protections: async () =>
+                    (await io.localBranchProtections?.({ repo: repository, branch, tip: head, issue }))?.protections ??
+                    [],
                 })
                 const output = {
                   ...row,
@@ -1902,8 +1903,9 @@ export async function coreQueueCommand(
             date: new Date().toISOString().slice(0, 10),
             dryRun,
             log,
-            protections: () =>
-              io.localBranchProtections?.({ repo: authorRepo, branch, tip: head, issue: bound }) ?? Promise.resolve([]),
+            protections: async () =>
+              (await io.localBranchProtections?.({ repo: authorRepo, branch, tip: head, issue: bound }))?.protections ??
+              [],
             disposition,
           })
           const output = {
@@ -1967,8 +1969,8 @@ export async function coreQueueCommand(
         branch: request.branch,
         by: request.by,
         ...(request.retire === undefined ? {} : { retire: request.retire }),
-        protections: (tip, issue) =>
-          io.localBranchProtections?.({ repo, branch: request.branch, tip, issue }) ?? Promise.resolve([]),
+        protections: async (tip, issue) =>
+          (await io.localBranchProtections?.({ repo, branch: request.branch, tip, issue }))?.protections ?? [],
         ...(request.reason === undefined ? {} : { note: request.reason }),
         ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
       })
@@ -2173,8 +2175,8 @@ export async function coreQueueCommand(
           branch: request.branch,
           by: request.by,
           target: config.target,
-          protections: (tip, issue) =>
-            io.localBranchProtections?.({ repo, branch: request.branch, tip, issue }) ?? Promise.resolve([]),
+          protections: async (tip, issue) =>
+            (await io.localBranchProtections?.({ repo, branch: request.branch, tip, issue }))?.protections ?? [],
           ...(request.reason === undefined ? {} : { reason: request.reason }),
           ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
         })

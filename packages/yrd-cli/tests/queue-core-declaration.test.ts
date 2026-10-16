@@ -1751,7 +1751,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         moved = true
         await childGit(["update-ref", "refs/heads/task/28988-moved", unique, landed])
       }
-      return []
+      return { protections: [], evidence: [] }
     }
     expect(await runYrdProcess([...argv, "--apply"], apply.io), apply.stderr()).toBe(0)
     const result = JSON.parse(apply.stdout()) as Report
@@ -2251,7 +2251,10 @@ describe("a queue is the selected origin branch carrying config", () => {
     await git(["checkout", "--quiet", "main"])
     const args = ["bun", "yrd", "drop", "--issue", "29010", "--submitter", "fixture", "--json"]
     const preview = capture(repo)
-    preview.io.localBranchProtections = async ({ branch }) => (branch.endsWith("-held") ? ["fixture hold"] : [])
+    preview.io.localBranchProtections = async ({ branch }) => ({
+      protections: branch.endsWith("-held") ? ["fixture hold"] : [],
+      evidence: [],
+    })
     expect(await runYrdProcess([...args, "--dry-run"], preview.io), preview.stderr()).toBe(1)
     const report = JSON.parse(preview.stdout()) as {
       apply: boolean
@@ -3702,7 +3705,7 @@ describe("drop --local --release-checkout", () => {
   function releaseCapture(repo: string) {
     const output = capture(repo)
     output.io.liveEnvironmentUse = async () => []
-    output.io.localBranchProtections = async () => []
+    output.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
     return output
   }
   type ReleaseReport = Awaited<ReturnType<typeof releaseRetainedCheckouts>>
@@ -3822,7 +3825,7 @@ describe("drop --local --release-checkout", () => {
             )
             writeFileSync(lock, "fixture competing ref transaction\n")
           }
-          return []
+          return { protections: [], evidence: [] }
         }
         expect(await runYrdProcess([...fixture.argv, "--apply"], first.io), first.stderr()).toBe(1)
         const partial = JSON.parse(first.stdout()) as ReleaseReport
@@ -3941,7 +3944,7 @@ describe("drop --local --release-checkout", () => {
           evidence: [
             { kind: "malformed-lease", path: join(repo, ".agent-lease.json"), reason: "fixture malformed lease" },
           ],
-        } as never
+        }
       }
       expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(0)
       const report = JSON.parse(applied.stdout()) as ReleaseReport
@@ -3949,7 +3952,7 @@ describe("drop --local --release-checkout", () => {
       expect(report.failed).toEqual([])
       // Portable Yrd must retain the host's non-blocking evidence in its JSON receipt;
       // host integration owns parsing the actual lease bytes.
-      expect((report as unknown as { evidence: unknown[] }).evidence).toEqual(
+      expect(report.evidence).toEqual(
         expect.arrayContaining(
           [...fixture.checkoutFiles.keys()].map((repo) => ({
             kind: "malformed-lease",
@@ -4016,7 +4019,10 @@ describe("drop --local --release-checkout", () => {
           if (kind === "late entrant" && reads === 4) {
             expect(await fixture.git(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")).toBe("")
           }
-          return kind === "host" || (kind === "late entrant" && reads > 3) ? ["live lease or host hold"] : []
+          return {
+            protections: kind === "host" || (kind === "late entrant" && reads > 3) ? ["live lease or host hold"] : [],
+            evidence: [],
+          }
         }
         expect(await runYrdProcess([...fixture.argv, "--apply"], output.io), output.stderr()).toBe(
           kind === "failed retirement" ? 1 : 0,
