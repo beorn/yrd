@@ -3716,6 +3716,9 @@ describe("component-local retirement without a component queue", () => {
     "checked-out",
     "publication-refused",
     "archive-readback-lost",
+    "prior-day-archive",
+    "own-declared-selected-other",
+    "own-malformed-selected-other",
     "root-retired",
     "advanced",
     "protection-error",
@@ -3725,7 +3728,14 @@ describe("component-local retirement without a component queue", () => {
   ] as const)("retires exact %s component work through the declared root's existing log", async (mode) => {
     const root = await world("{}\n")
     const rootGit = gitIn(root)
-    const seed = await world(mode === "malformed-declaration" ? "checks: [\n" : undefined)
+    const ownSelectedOther = mode === "own-declared-selected-other" || mode === "own-malformed-selected-other"
+    const seed = await world(
+      mode === "malformed-declaration" || mode === "own-malformed-selected-other"
+        ? "checks: [\n"
+        : mode === "own-declared-selected-other"
+          ? "{}\n"
+          : undefined,
+    )
     await rootGit([
       "-c",
       "protocol.file.allow=always",
@@ -3748,7 +3758,8 @@ describe("component-local retirement without a component queue", () => {
       mode === "advanced" ||
       mode === "archive-collision" ||
       mode === "publication-refused" ||
-      mode === "archive-readback-lost"
+      mode === "archive-readback-lost" ||
+      mode === "prior-day-archive"
     ) {
       await git(["checkout", "--quiet", "-b", branch])
       writeFileSync(join(child, "private.txt"), "reviewed unmerged work\n")
@@ -3770,6 +3781,12 @@ describe("component-local retirement without a component queue", () => {
     const actualTip = (await git(["rev-parse", "refs/heads/" + branch])).trim()
     const tip = mode === "advanced" ? baseTip : actualTip
     const collisionRef = archiveRefFor(branch, "fixture", new Date().toISOString().slice(0, 10))
+    const priorRef = archiveRefFor(branch, "fixture", new Date(Date.now() - 86_400_000).toISOString().slice(0, 10))
+    if (mode === "prior-day-archive") {
+      // Previous-day custody survived a kept/failed deletion; retry must reuse its exact name.
+      await git(["update-ref", priorRef, tip])
+      await git(["push", "--quiet", "origin", tip + ":" + priorRef])
+    }
     if (mode === "archive-collision") await git(["push", "--quiet", "origin", baseTip + ":" + collisionRef])
     if (mode === "checked-out") await git(["checkout", "--quiet", branch])
     if (mode === "publication-refused" || mode === "archive-readback-lost") {
@@ -3801,6 +3818,8 @@ describe("component-local retirement without a component queue", () => {
       expect((await rootGit(["for-each-ref", "--format=%(objectname)", "refs/heads/" + rootBranch])).trim()).toBe("")
     }
     const run = capture(child)
+    const selectedOther = ownSelectedOther ? await world() : undefined
+    if (ownSelectedOther) unlinkSync(join(child, ".yrd.yml"))
     run.io.localBranchProtections = async () => {
       if (mode === "protection-error") throw new Error("host protection authority unavailable")
       return { protections: mode === "held" ? ["fixture owner hold"] : [], evidence: [] }
@@ -3832,6 +3851,7 @@ describe("component-local retirement without a component queue", () => {
         "--submitter",
         "fixture",
         ...(mode === "publication-refused" ? [] : ["--json"]),
+        ...(selectedOther === undefined ? [] : ["--queue", `${join(dirname(selectedOther), "remote.git")}#main`]),
       ],
       run.io,
     ).finally(() => unreadable?.mockRestore())
@@ -3841,7 +3861,8 @@ describe("component-local retirement without a component queue", () => {
       mode === "publication-refused" ||
       mode === "archive-readback-lost" ||
       mode === "malformed-declaration" ||
-      mode === "unreadable-declaration"
+      mode === "unreadable-declaration" ||
+      ownSelectedOther
     if (failure) {
       expect(exit).not.toBe(0)
       expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(actualTip)
@@ -3857,6 +3878,9 @@ describe("component-local retirement without a component queue", () => {
         expect(run.stdout() + run.stderr()).toContain("fixture refuses archive publication")
       }
       if (mode === "archive-readback-lost") expect(run.stdout() + run.stderr()).toContain("read back")
+      if (mode === "own-declared-selected-other") expect(run.stderr()).toContain("own origin target declares")
+      if (mode === "own-malformed-selected-other") expect(run.stderr()).toContain("does not parse")
+      if (ownSelectedOther) return
       if (mode === "malformed-declaration" || mode === "unreadable-declaration") return
     } else expect(exit, run.stderr()).toBe(0)
     if (!failure) {
@@ -3876,6 +3900,11 @@ describe("component-local retirement without a component queue", () => {
         expect(archive).toMatch(/^refs\/archive\//u)
         if (typeof archive !== "string") throw new Error("removed component result has no archive ref")
         expect((await git(["rev-parse", archive])).trim()).toBe(tip)
+        if (mode === "prior-day-archive") {
+          expect(archive).toBe(priorRef)
+          expect((await git(["for-each-ref", "--format=%(refname)", "refs/archive/"])).trim()).toBe(priorRef)
+          expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim()).toBe(`${tip}\t${priorRef}`)
+        }
         expect((await git(["for-each-ref", "--format=%(objectname)", "refs/heads/" + branch])).trim()).toBe("")
         if (mode === "unmerged") expect((await git(["ls-remote", "origin", archive])).split("\t")[0]).toBe(tip)
       }

@@ -1,6 +1,6 @@
 import { lstatSync, readFileSync, realpathSync } from "node:fs"
 import { createHash } from "node:crypto"
-import { archiveRefFor, ensureArchiveRef, readArchiveRows } from "git-super/archive-ref"
+import { archiveRefFor, ensureArchiveRef, findArchiveRefFor, readArchiveRows } from "git-super/archive-ref"
 import { readCommitSubmodules } from "git-super/commit-graph"
 import { createGitWorktreeStore } from "git-super/worktree"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
@@ -105,11 +105,16 @@ export async function retireComponentLocalBranch(
     const remote = await remoteUrl(git, "origin")
     const target = await readRemoteCommit(git, remote, `refs/heads/${targetBranch}`)
     if (target === undefined) throw new Error(`${repo}: target origin/${targetBranch} is absent`)
+    if ((await readConfig(git, target, { remote, branch: targetBranch })) !== undefined) {
+      throw new Error(`${repo}: own origin target declares .yrd.yml; run local retirement against that queue`)
+    }
     const log = openLog(join(await workdirOf(ownerGit, { cwd: owner, env }), "logs"))
     log.write({ kind: "run", command: "drop --local", target: `origin/${queue}`, config: config.blob })
     const date = new Date().toISOString().slice(0, 10)
-    const archiveRef = archiveRefFor(request.branch, request.by, date)
+    let attemptedArchive: string | undefined
     try {
+      const archiveRef =
+        findArchiveRefFor(repo, request.branch, request.tip) ?? archiveRefFor(request.branch, request.by, date)
       const observedTip = await refAt(git, `refs/heads/${request.branch}`)
       if (observedTip === undefined) {
         throw new Error(`${repo}: refs/heads/${request.branch} is absent; nothing was removed`)
@@ -156,6 +161,7 @@ export async function retireComponentLocalBranch(
         })
         if (preview.outcome !== "eligible") result = preview
         else {
+          attemptedArchive = archiveRef
           await publishRetirementArchive({ repo, git, selection, remote, archiveRef, tip: request.tip })
           result = await retireLocalBranch({ ...retirement, protections })
         }
@@ -181,11 +187,22 @@ export async function retireComponentLocalBranch(
         head: request.tip,
         actor: request.by,
         issue: request.issue,
-        archive: archiveRef,
+        ...(attemptedArchive === undefined ? {} : { archive: attemptedArchive }),
         reason,
         outcome: "failed",
       })
-      return { removed: [], kept: [], failed: [{ branch: request.branch, head: request.tip, archiveRef, reason }] }
+      return {
+        removed: [],
+        kept: [],
+        failed: [
+          {
+            branch: request.branch,
+            head: request.tip,
+            ...(attemptedArchive === undefined ? {} : { archiveRef: attemptedArchive }),
+            reason,
+          },
+        ],
+      }
     } finally {
       log.finish()
     }
