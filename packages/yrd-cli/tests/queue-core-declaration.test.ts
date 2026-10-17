@@ -3680,6 +3680,7 @@ describe("component-local retirement without a component queue", () => {
     "own-declared-selected-other",
     "own-malformed-selected-other",
     "root-retired",
+    "zero-tip",
     "advanced",
     "protection-error",
     "standalone",
@@ -3741,6 +3742,34 @@ describe("component-local retirement without a component queue", () => {
       await git(["branch", branch])
     }
     const actualTip = (await git(["rev-parse", "refs/heads/" + branch])).trim()
+    if (mode === "zero-tip") {
+      // Diagnostic scope #29721: distinguish absent-root selection from a live
+      // child ref's expected-tip mismatch without permitting either removal.
+      const rootRef = () => rootGit(["for-each-ref", "--format=%(objectname)", "refs/heads/" + branch])
+      const childRef = () => git(["rev-parse", "refs/heads/" + branch])
+      expect((await rootRef()).trim()).toBe("")
+      expect((await childRef()).trim()).toBe(actualTip)
+      const args = ["bun", "yrd", "drop", branch, "--local", "--tip", "0".repeat(40), "--json"]
+      const rootRun = capture(root)
+      const rootExit = await runYrdProcess(args, rootRun.io)
+      const childRun = capture(child)
+      const childExit = await runYrdProcess(args, childRun.io)
+      expect({ root: (await rootRef()).trim(), child: (await childRef()).trim() }).toEqual({
+        root: "",
+        child: actualTip,
+      })
+      expect({
+        rootExit,
+        rootOutput: rootRun.stdout() + rootRun.stderr(),
+        childExit,
+        childOutput: childRun.stdout() + childRun.stderr(),
+      }).toMatchObject({
+        rootExit: 2,
+        rootOutput: expect.stringContaining(`refs/heads/${branch} is absent`),
+        childOutput: expect.stringMatching(/advanced|tip.*(?:mismatch|changed)|expected.*(?:tip|commit)/i),
+      })
+      return
+    }
     const tip = mode === "advanced" ? baseTip : actualTip
     const collisionRef = archiveRefFor(branch, "fixture", new Date().toISOString().slice(0, 10))
     const priorRef = archiveRefFor(branch, "fixture", new Date(Date.now() - 86_400_000).toISOString().slice(0, 10))
