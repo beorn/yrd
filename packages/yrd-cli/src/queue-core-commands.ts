@@ -33,6 +33,7 @@ import { readCommitSubmodules } from "git-super/commit-graph"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
 import { readIssueDisplay } from "./issue-resolver.ts"
+import { formatYrdCommand } from "./command-format.ts"
 import { createPostMerge } from "./post-merge.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup, type ClosedEnvironment } from "./env-cleanup.ts"
@@ -710,18 +711,54 @@ export async function coreQueueCommand(
    * so an addressed miss and a repository that never declared one at all
    * produce the identical call. The cure below is worded to hold for both.
    */
-  const noQueueOnTarget = (ref: string): YrdCliExitCode => {
+  const noQueueOnTarget = async (ref: string): Promise<YrdCliExitCode> => {
+    let cleanup = ""
+    if (request.command === "drop-local" || request.command === "drop-issue") {
+      cleanup = "For retained-checkout cleanup, run from the superproject that vendors it.\n"
+      const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd())
+      if (authorRepo !== undefined) {
+        let owner: string | undefined
+        try {
+          const authorGit = gitIn(authorRepo, undefined, selection, { env })
+          owner = (await authorGit(["rev-parse", "--show-superproject-working-tree"])).trim()
+        } catch (cause) {
+          cleanup =
+            `For retained-checkout cleanup, cannot read the author superproject at ${authorRepo}: ${cause instanceof Error ? cause.message : String(cause)}. ` +
+            "Run from the superproject that vendors it.\n"
+        }
+        if (owner !== undefined) {
+          const root = owner === "" ? authorRepo : owner
+          const ownBranch = owner === "" && request.command === "drop-local"
+          const command = formatYrdCommand(
+            io,
+            [
+              "drop",
+              ownBranch ? request.branch : "<root-branch>",
+              "--local",
+              "--tip",
+              ownBranch ? request.tip : "<root-tip>",
+              "--issue",
+              request.issue ?? "<issue>",
+              "--reason",
+              request.reason ?? "<why>",
+              "--release-checkout",
+              "--submodules",
+            ],
+            root,
+          )
+          cleanup =
+            `For retained-checkout cleanup, preview from the author repository's owning root: ${command}\n` +
+            "Use the root branch and its exact tip, review the receipt, then repeat with --apply.\n"
+        }
+      }
+    }
     io.stderr(
       `yrd: ${NAMED[request.command]} needs a queue, and ${ref} carries no .yrd.yml. ` +
         "The queue's config lives on the queue branch itself. Point at a different one with " +
         "--queue <repo>#<branch>, or, if this repository is a submodule with none of its own, " +
         "the superproject that vendors it gates the change instead, by checking the gitlink, " +
         `not a declaration here. Repository: ${repo}.\n` +
-        (request.command === "drop-local" || request.command === "drop-issue"
-          ? "For retained-checkout cleanup, run from that superproject: " +
-            "yrd drop <root-branch> --local --tip <root-tip> --issue <issue> --reason <why> --release-checkout --submodules. " +
-            "This is a preview; use the root branch and its exact tip, review the receipt, then repeat with --apply.\n"
-          : ""),
+        cleanup,
     )
     return 2
   }
@@ -896,7 +933,7 @@ export async function coreQueueCommand(
         return report.failed.length === 0 ? 0 : 1
       }
     }
-    return noQueueOnTarget(targetLabel)
+    return await noQueueOnTarget(targetLabel)
   }
   const config = captured.config
   const eventStore = createEventStore(repo, config.target.remote, selection, git.backend)
@@ -2378,7 +2415,11 @@ export async function coreQueueCommand(
         return 0
       } catch (error) {
         if (error instanceof NothingToWithdraw) {
-          io.stderr(`yrd: ${error.message}\n`)
+          const remedy =
+            error.ended === true
+              ? `; retire it with: ${formatYrdCommand(io, ["drop", request.branch, "--retire", "--tip", "<observed-full-oid>", "--reason", "<why>", "--queue", formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))], io.cwd ?? globalThis.process.cwd())}`
+              : ""
+          io.stderr(`yrd: ${error.message}${remedy}\n`)
           return 1
         }
         throw error

@@ -1,4 +1,5 @@
 /** Operator-facing facts from the event queue pause. */
+import { shellQuote } from "git-super/shell-command"
 import { changeName, type Change } from "./refs.ts"
 
 export type PauseKind = "paused" | "resumed"
@@ -77,8 +78,8 @@ export function pauseLine(record: PauseRecord): string {
  * because that one act needs the selector.
  */
 export function liftLine(pause: PauseRecord, remote: string, queue: string): string {
-  const selector = (remote === "origin" ? queue : `${remote}#${queue}`).replaceAll("'", "'\\''")
-  const resume = `yrd queue resume --queue '${selector}' --reason '<text>'`
+  const selector = remote === "origin" ? queue : `${remote}#${queue}`
+  const resume = `yrd queue resume --queue ${shellQuote(selector)} --reason ${shellQuote("<text>")}`
   if (pause.cause === "maintenance") {
     return `submit after resume; the person who set this maintenance stop lifts it with ${resume}`
   }
