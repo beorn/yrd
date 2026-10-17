@@ -9,6 +9,7 @@ import {
   enumerateChangeSegments,
   readBranchHistory,
   readIssueEffect,
+  isAncestor,
   trailer,
   type AppliedIssueEffect,
   type GitRunner,
@@ -137,14 +138,16 @@ async function closeMergedIssues(
       if (mergedEvent === undefined || mergeSha === undefined) {
         throw new Error(`${branch}: merged segment ${segment.opened} has no actual merged event or merge SHA`)
       }
-      const historicalBase = segment.events.findLast(
-        (event) => event.id !== mergedEvent.id && trailer(event, "Base") !== undefined,
-      )
-      const base =
-        historicalBase === undefined
-          ? (await input.git(["rev-parse", `${mergeSha}^1`])).trim()
-          : (trailer(historicalBase, "Base") as string)
-      if (base === "") throw new Error(`${branch}@${mergeSha}: actual merged commit has no provable historical base`)
+      const observed = trailer(mergedEvent, "Reason") === `observed on target at ${mergeSha}`
+      if (observed && !(await isAncestor(input.git, segment.head, mergeSha))) {
+        throw new Error(
+          `${branch}@${mergeSha}: submitted head ${segment.head} is not an ancestor of its observed delivery`,
+        )
+      }
+      const phase = segment.events.findLast((event) => event.type === "merging" && trailer(event, "Base") !== undefined)
+      const base = observed ? trailer(mergedEvent, "Base") : phase === undefined ? undefined : trailer(phase, "Base")
+      if (base === undefined || base === "")
+        throw new Error(`${branch}@${mergeSha}: actual merged commit has no provable historical base`)
       const rawCommitterTime = (await input.git(["show", "-s", "--format=%cI", mergeSha])).trim()
       if (rawCommitterTime === "" || Number.isNaN(Date.parse(rawCommitterTime))) {
         throw new Error(`${branch}@${mergeSha}: actual merge committer time is unreadable`)
@@ -163,7 +166,11 @@ async function closeMergedIssues(
           )
         }
       }
-      const refs = closingReferencesOf(input.git, [`${base}..${mergeSha}`], branch)
+      const references = async function* () {
+        yield* closingReferencesOf(input.git, [`${base}..${observed ? segment.head : mergeSha}`], branch)
+        if (observed && mergeSha !== segment.head) yield* closingReferencesOf(input.git, ["-1", mergeSha], branch)
+      }
+      const refs = references()
       for await (const reference of refs) {
         if (input.stop?.aborted) return outcomes
         const resolved = await runIssuesVerb({

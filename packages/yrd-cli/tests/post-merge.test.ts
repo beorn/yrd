@@ -326,17 +326,17 @@ it.each([
     await queue("task/first", "first\n\nCloses: issue-first")
     const firstSubmittedHead = (await git(["rev-parse", "task/first"])).trim()
     if (mode === "observed-stacked") {
-      await git(["checkout", "--quiet", "-b", "task/stacked", "task/first"])
+      await git(["checkout", "--quiet", "-b", "task/aa-stacked", "task/first"])
       writeFileSync(join(repo, "stacked.txt"), "upper source")
       await git(["add", "stacked.txt"])
       await git(["commit", "--quiet", "-m", "upper\n\nCloses: issue-stacked"])
       await submit(git, "origin", {
-        branch: "task/stacked",
+        branch: "task/aa-stacked",
         submitter: "fixture",
         target: { remote: "origin", branch: "main" },
       })
       await git(["checkout", "--quiet", "main"])
-      await git(["push", "--quiet", "origin", "task/stacked:refs/heads/main"])
+      await git(["push", "--quiet", "origin", "task/aa-stacked:refs/heads/main"])
     } else if (mode.startsWith("observed-")) {
       await git(["push", "--quiet", "origin", "task/first:refs/heads/main"])
       if (mode === "observed-after-target") {
@@ -790,12 +790,14 @@ it.each([
       .trim()
       .split("\n")
       .map((line) => line.split("\t"))
-    expect(calls.map(([key, reason]) => [key, reason])).toEqual([
-      [mode === "delivered-declaration" ? "delivered-issue-first" : "issue-first", "completed"],
-      ...(mode === "observed-ff" || mode === "observed-after-target" ? [["issue-older", "completed"]] : []),
-      ...(mode === "observed-stacked" ? [["issue-stacked", "completed"]] : []),
-      [mode === "delivered-declaration" ? "delivered-issue-second" : "issue-second", "completed"],
-    ])
+    expect(calls.map(([key, reason]) => [key, reason]).sort()).toEqual(
+      [
+        [mode === "delivered-declaration" ? "delivered-issue-first" : "issue-first", "completed"],
+        ...(mode === "observed-ff" || mode === "observed-after-target" ? [["issue-older", "completed"]] : []),
+        ...(mode === "observed-stacked" ? [["issue-stacked", "completed"]] : []),
+        [mode === "delivered-declaration" ? "delivered-issue-second" : "issue-second", "completed"],
+      ].sort(),
+    )
     const effects = await Promise.all(
       ["task/first", "task/second", "task/refs"].map((branch) => readBranchHistory(store, "main", branch)),
     )

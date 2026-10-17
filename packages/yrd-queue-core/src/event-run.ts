@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { dirname, join } from "node:path"
 import { readCommitSubmodules } from "git-super/commit-graph"
-import { Conflict, PublicationRejected, RetriesExhausted, openEvents } from "./git.ts"
+import { Conflict, PublicationRejected, RetriesExhausted, openEvents, trailer } from "./git.ts"
 import {
   isTransientPushHold,
   matchTransientPush5xx,
@@ -1278,8 +1278,35 @@ export async function eventQueueRun(
       entry[1].status !== "merged" && entry[1].commit !== undefined && entry[1].tip !== undefined,
   )
   const offTarget = await offTheTarget(git, [...new Set(observable.map(([, change]) => change.commit))], target)
-  for (const [branch, change] of observable) {
-    if (offTarget.has(change.commit)) continue
+  const onTarget = observable.filter(([, change]) => !offTarget.has(change.commit))
+  // An ancestor excludes fewer target commits than its descendant. Record lower
+  // stacked changes first, independent of branch names or commit timestamps.
+  const ordered = await Promise.all(
+    onTarget.map(async (entry) => {
+      const count =
+        onTarget.length < 2 ? "0" : (await git(["rev-list", "--count", `${entry[1].commit}..${target}`])).trim()
+      const distance = Number(count)
+      if (count === "" || !Number.isSafeInteger(distance) || distance < 0) {
+        throw new Error(
+          `${entry[0]}@${entry[1].commit}: invalid target distance to ${target}: ${JSON.stringify(count)}`,
+        )
+      }
+      return { entry, distance }
+    }),
+  )
+  ordered.sort((left, right) => right.distance - left.distance)
+  const recordedMergePoints = new Set<string>()
+  for (const history of ordered.length === 0 ? [] : histories.values()) {
+    for (const event of history.events) {
+      if (event.type !== "merged") continue
+      const point = trailer(event, "Commit")
+      if (point === undefined) throw new Error(`validated merged event ${event.id} has no Commit`)
+      recordedMergePoints.add(point)
+    }
+  }
+  for (const {
+    entry: [branch, change],
+  } of ordered) {
     const row = (
       await git([
         "rev-list",
@@ -1295,7 +1322,15 @@ export async function eventQueueRun(
       ?.trim()
       .split(/\s+/u)
       .filter((sha) => sha !== "")
-    const merge = row?.[0] ?? change.commit
+    const merge = row?.[1] === change.commit ? change.commit : (row?.[0] ?? change.commit)
+    const opened = histories
+      .get(branch)
+      ?.events.findLast((event) => event.type === "opened" && trailer(event, "Commit") === change.commit)
+    let sourceBase = opened === undefined ? undefined : trailer(opened, "Base")
+    if (sourceBase !== undefined) {
+      const introduced = (await git(["rev-list", "--topo-order", `${sourceBase}..${change.commit}`])).trim().split("\n")
+      sourceBase = introduced.find((point) => recordedMergePoints.has(point)) ?? sourceBase
+    }
     const selectedTip = change.tip
     try {
       const landedGitlinks = (await readCommitSubmodules(seamProcess(git, options.repo), options.repo, merge)).map(
@@ -1305,6 +1340,7 @@ export async function eventQueueRun(
         type: "merged",
         at: new Date(),
         commit: merge,
+        ...(sourceBase === undefined ? {} : { base: sourceBase }),
         landedGitlinks,
         reason: `observed on target at ${merge}`,
         title: `merged ${branch}`,
@@ -1317,6 +1353,7 @@ export async function eventQueueRun(
         )
       }
       changes.set(branch, ended)
+      recordedMergePoints.add(merge)
       observedMerged.push(branch)
       await tell(branch, "merged", written)
       log.write({

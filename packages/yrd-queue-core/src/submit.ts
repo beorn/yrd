@@ -1233,6 +1233,7 @@ async function submitEvent(
     const branchAt = selected.branchTip
     const input = changeInput("opened", {
       queueTip: ops.queue.tip,
+      base: inspected.targetHead,
       at: new Date(),
       commit: head,
       by: request.submitter,
