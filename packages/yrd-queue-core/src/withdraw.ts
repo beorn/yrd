@@ -1,5 +1,6 @@
 /** End an open event change, then retire its remote branch without delaying the ending. */
 import { archiveRefFor, ensureArchiveRef } from "git-super/archive-ref"
+import { shellQuote } from "git-super/shell-command"
 import { deleteCandidateRefsForShas } from "./candidate-refs.ts"
 import { changeInput, changesRef, decide, isOpen, project, queueFormat, queueRef, readEventQueue } from "./events.ts"
 import { readEventChain } from "./event-read.ts"
@@ -25,7 +26,14 @@ export type WithdrawnChange = Readonly<{
   retirementError?: string
 }>
 export type Withdrawn = Readonly<{ branch: string; queue: string; withdrawn: readonly WithdrawnChange[] }>
-export class NothingToWithdraw extends Error {}
+export class NothingToWithdraw extends Error {
+  constructor(
+    message?: string,
+    readonly ended?: true,
+  ) {
+    super(message)
+  }
+}
 
 export async function withdraw(git: Git, remote: string, request: WithdrawRequest): Promise<Withdrawn> {
   const root = (await git(["rev-parse", "--show-toplevel"])).trim()
@@ -44,8 +52,8 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
   if (!isOpen(state.status)) {
     // Withdrawal ends open work; terminal retirement preserves its existing ending.
     throw new NothingToWithdraw(
-      `${request.branch} on ${queue}: already ended ${state.status} at ${state.ending?.id ?? tip}; ` +
-        `retire it with: yrd drop ${request.branch} --retire --tip <observed-full-oid> --reason <why>`,
+      `${request.branch} on ${queue}: already ended ${state.status} at ${state.ending?.id ?? tip}`,
+      true,
     )
   }
   if (state.status === "merging") {
@@ -94,7 +102,7 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
       if (!custody.ok) throw new Error(custody.reason)
       // The local protected archive also keeps this object after environment closure.
       // Reusing the original name preserves the change and its issue binding on submit.
-      recovery = `git branch '${request.branch.replaceAll("'", "'\\''")}' ${head}`
+      recovery = `git branch ${shellQuote(request.branch)} ${head}`
     }
     await retireOriginBranch(store, {
       branch: request.branch,

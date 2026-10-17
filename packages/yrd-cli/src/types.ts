@@ -44,6 +44,10 @@ export type YrdCliIO = {
    * the nearest directory above it in the same repository, is the repository:
    * no command takes a repository operand and none resolves an alias. */
   cwd?: string
+  /** Render Yrd argv in an absolute repository cwd as a POSIX shell command.
+   * Pure display only: hosts preserve their entrypoint and authority readers.
+   * Absent, the CLI prints standalone Yrd with an explicit cwd. */
+  formatYrdCommand?: (argv: readonly string[], cwd: string) => string
   /** Human output may carry colour. Tests and pipes say no. */
   color?: boolean
   /** The terminal's width in cells, for the pages that lay out to it; absent, they assume 120. */

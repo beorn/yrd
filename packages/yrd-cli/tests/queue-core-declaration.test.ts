@@ -3647,9 +3647,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect(run.stderr()).toContain("--queue <repo>#<branch>")
       expect(run.stderr()).toContain("superproject")
       if (command !== "list") {
-        expect(run.stderr()).toContain(
-          "yrd drop <root-branch> --local --tip <root-tip> --issue <issue> --reason <why> --release-checkout --submodules",
-        )
+        expect(run.stderr()).toContain("'--release-checkout' '--submodules'")
         expect(run.stderr()).toContain("preview")
       }
     },
@@ -3982,6 +3980,75 @@ describe("drop --local --release-checkout", () => {
     ]
     return { repo, git, branch, tip, child, checkoutFiles, argv }
   }
+  // 29721: queue clones do not identify an author's root. Existing release
+  // effect tests start at the right root and cannot detect a misdirected hint.
+  it.each(["child", "standalone", "outside", "unreadable"] as const)(
+    "release hint selects the author root from %s cwd",
+    async (context) => {
+      const component = context === "child" ? await releaseWorld(true) : undefined
+      const queueRepo = component?.child ?? (await world())
+      const outside =
+        context === "outside" || context === "unreadable" ? outsideRepositoryRoot("yrd-release-hint-") : undefined
+      if (outside !== undefined) roots.push(outside)
+      if (context === "unreadable") {
+        writeFileSync(join(outside!, ".git"), `gitdir: ${join(outside!, "missing-gitdir")}\n`)
+      }
+      const author = context === "child" ? component!.repo : context === "standalone" ? await world() : undefined
+      const output = capture(outside ?? (context === "standalone" ? author! : queueRepo))
+      const exit = await coreQueueCommand(
+        queueRepo,
+        output.io,
+        {
+          command: "drop-local",
+          branch: "task/29600-retained",
+          tip: "a".repeat(40),
+          by: "fixture",
+          issue: "29600",
+          reason: "retain checkout",
+          releaseCheckout: true,
+        },
+        { queue: "main" },
+      )
+      expect(exit, output.stderr()).toBe(2)
+      const hint = output.stderr().split("For retained-checkout cleanup, ")[1]
+      expect(hint, output.stderr()).toBeDefined()
+      if (context === "unreadable") {
+        expect(hint).toContain(`cannot read the author superproject at ${outside}`)
+        expect(hint).toContain("gitfile does not point to a valid repository")
+        expect(hint).not.toContain("&& yrd")
+      } else if (author === undefined) {
+        expect(hint).not.toContain("&& yrd")
+        expect(hint).not.toContain(queueRepo)
+        expect(hint).toContain("superproject that vendors it")
+      } else {
+        expect(hint).toContain(`cd '${author}' && yrd`)
+        expect(hint).toContain("preview")
+        const unfilled = capture(author)
+        expect(
+          await runYrdProcess(
+            [
+              process.execPath,
+              "yrd",
+              "drop",
+              "<root-branch>",
+              "--local",
+              "--tip",
+              "<root-tip>",
+              "--issue",
+              "29600",
+              "--reason",
+              "retain checkout",
+              "--release-checkout",
+            ],
+            unfilled.io,
+          ),
+          unfilled.stderr(),
+        ).toBe(2)
+        expect(unfilled.stderr()).toContain("replace --tip <root-tip>")
+      }
+    },
+  )
+
   async function credentialOrigin(repo: string) {
     const git = gitIn(repo)
     const remote = (await git(["remote", "get-url", "origin"])).trim()

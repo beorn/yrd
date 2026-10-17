@@ -112,7 +112,7 @@ describe("yrd submit refusal when queue carries an unreadable event shape (#2681
     const res = await yrd(w.work, "submit", "task/future-skew", "--submitter", "@dev/13")
     expect(res.exitCode, res.report).toBe(2)
     expect(res.stderr, res.report).toContain("this CLI is older than the queue's writer")
-    expect(res.stderr, res.report).toContain("@in main -- bun yrd submit task/future-skew --submitter @dev/13")
+    expect(res.stderr, res.report).toContain("@in main -- bun yrd 'submit' 'task/future-skew' '--submitter' '@dev/13'")
   })
 
   it("diagnoses version skew and names the command to run from main when merge-fenced writer fails validation", async () => {
@@ -149,6 +149,8 @@ describe("yrd submit refusal when queue carries an unreadable event shape (#2681
     const res = await yrd(w.work, "submit", "task/fence-skew", "--submitter", "@dev/13", "--dry-run")
     expect(res.exitCode, res.report).toBe(2)
     expect(res.stderr, res.report).toContain("this CLI is older than the queue's writer")
-    expect(res.stderr, res.report).toContain("@in main -- bun yrd submit task/fence-skew --submitter @dev/13 --dry-run")
+    expect(res.stderr, res.report).toContain(
+      "@in main -- bun yrd 'submit' 'task/fence-skew' '--submitter' '@dev/13' '--dry-run'",
+    )
   })
 })

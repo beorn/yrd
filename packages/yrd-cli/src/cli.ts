@@ -28,6 +28,7 @@
  * real change: one submit opened two changes, 2026-09-03.
  */
 
+import { shellQuote } from "git-super/shell-command"
 import { Command as CliCommand, CommanderError, Option, int } from "@silvery/commander"
 import { join } from "node:path"
 import { drainOutput } from "loggily"
@@ -257,6 +258,16 @@ function buildProgram(
     },
     command: "withdraw" | "drop",
   ): Promise<void> => {
+    if (
+      command === "drop" &&
+      (options.retire || options.releaseCheckout) &&
+      (options.tip === "<root-tip>" || options.tip === "<observed-full-oid>")
+    ) {
+      throw new Error(`replace --tip ${options.tip} with the branch's exact full commit`)
+    }
+    if (command === "drop" && options.reason?.trim() === "<why>" && (options.retire || options.releaseCheckout)) {
+      throw new Error("replace --reason <why> with the reason for this retirement")
+    }
     if (options.local !== true && (branch === undefined) === (options.issue === undefined)) {
       throw new Error("drop needs exactly one branch or --issue <id>")
     }
@@ -1747,7 +1758,7 @@ export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Prom
       return 2
     }
     if (isQueueEventShapeUnreadable(error)) {
-      const rendered = args.map((arg) => (/[ \t\n"'$`\\]/u.test(arg) ? JSON.stringify(arg) : arg)).join(" ")
+      const rendered = args.map(shellQuote).join(" ")
       const mainCommand = `@in main -- bun yrd${rendered.length > 0 ? ` ${rendered}` : ""}`
       io.stderr(
         `yrd: ${error.message}: this CLI is older than the queue's writer; run from main instead:\n  ${mainCommand}\n`,
@@ -1763,7 +1774,7 @@ export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Prom
 
 /** The process entry, shared by `yrd` and `git-yrd`. */
 export async function runYrdExecutable(
-  host: Pick<YrdCliIO, "liveEnvironmentUse" | "localBranchProtections" | "branchIssue">,
+  host: Pick<YrdCliIO, "liveEnvironmentUse" | "localBranchProtections" | "branchIssue" | "formatYrdCommand">,
 ): Promise<never> {
   const color = process.env.NO_COLOR === undefined && (process.stdout.isTTY || process.env.FORCE_COLOR !== undefined)
   const io: YrdCliIO = {
