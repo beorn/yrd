@@ -232,6 +232,35 @@ describe("yrd env open prepares the retained environment", () => {
   })
 
   /**
+   * @failure 29738: `yrd env open --issue <slug>` recorded the caller's spelling in the bind commit
+   *          and said nothing about it, so a later commit carrying the canonical issue path refused at
+   *          submit with conflicting issue bindings - after a review GO had already been given.
+   * @level   l2 (real bare remote and real retained Git worktree)
+   * @consumer anyone opening an issue branch and then committing against it
+   * @testonly none
+   */
+  it("announces the key its bind commit records, and that later commits must match it (29738)", async () => {
+    const w = await world(":")
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "29738-leaf-slug"], run.io)).toBe(0)
+
+    expect(run.stderr()).toContain("task/29738-leaf-slug is bound to 29738-leaf-slug")
+    expect(run.stderr()).toContain("carries the --issue value exactly as given")
+    expect(run.stderr()).toMatch(/every later Refs trailer on this branch must spell it exactly that way/iu)
+    // The bind commit carries exactly what the caller passed - the asymmetry this line warns about.
+    const bound = (await w.git(["log", "-1", "--format=%B", "task/29738-leaf-slug"])).trim()
+    expect(bound).toContain("Refs: 29738-leaf-slug")
+    // The counter-row: a path that writes no key announces nothing, so the line cannot be read as
+    // boilerplate. `--bay` never binds, so this bay carries the 28113 line instead.
+    const plain = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "29738-plain"], plain.io)).toBe(0)
+    expect(plain.stderr()).toContain("carries no bead id")
+    expect(plain.stderr()).not.toContain("is bound to")
+    expect(plain.stderr()).not.toContain("spell it exactly that way")
+  })
+
+  /**
    * @failure 28133: `yrd env open` cut a fresh environment from refs/remotes/origin/main as the checkout last
    *          fetched it. On 2026-10-08 the 28124 environment sat on b56bbf0d although origin's main had been
    *          feb9af30 for 60 s, so it missed 28123 and needed a git-super merge to repair.

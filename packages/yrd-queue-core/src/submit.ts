@@ -1545,6 +1545,7 @@ export async function issueOf(
           `the second binding is a ${trailer} trailer, and a Refs or Resolves trailer always binds; ` +
           `keep a follow-up link without binding it with a "Follow-up: ${issue}" line, ` +
           `or, if both keys name one issue, rewrite one trailer to the other key; ` +
+          `a bind commit made by yrd env open carries the --issue value exactly as given, so a split between two spellings can start there; ` +
           `then fix trailer at ${commit}`,
       )
     }

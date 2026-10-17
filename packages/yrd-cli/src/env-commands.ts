@@ -569,6 +569,15 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
           headSha,
         ])
         headSha = bound
+        // 29738: the bind commit carries the --issue value exactly as given, so a later Refs trailer that
+        // spells the issue the other way refuses at submit - after a review GO. ANNOUNCE the key here,
+        // where the split is created, in the 28113 shape: stderr only, never a refusal, naming yrd's OWN
+        // flag and key so yrd still learns nothing of hh's bead model. `--json` stdout and the exit code
+        // are unchanged. @cto 08:31:50Z fixed this wording: the line names the exact key it wrote and the
+        // rule that every later Refs trailer must spell it exactly that way.
+        io.stderr(
+          `${branch} is bound to ${binding.issue} by a yrd env open Refs commit, which carries the --issue value exactly as given; every later Refs trailer on this branch must spell it exactly that way, or submit refuses with conflicting issue bindings\n`,
+        )
       }
       const currentHead = (await environmentGit(["rev-parse", "HEAD"])).trim()
       if (currentHead !== headSha) {

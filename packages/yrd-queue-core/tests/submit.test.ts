@@ -896,6 +896,41 @@ describe("event submit", () => {
   })
 
   /**
+   * @failure 29738: the split usually starts at `yrd env open --issue <slug>`, which records the
+   *          caller's spelling in the bind commit; the two-key refusal named both keys but never the
+   *          bind commit, so the author had to guess where the second spelling came from.
+   * @level   l2 (real git history through issueOf)
+   * @consumer any submitter whose bind commit and later commits spell one issue two ways
+   */
+  it("conflicting keys name the yrd env open bind commit as where the split starts (29738)", async () => {
+    const w = await world()
+    const path = "@i/1-instruments/one-seat-model/29731-status-truth-turn-marker"
+    await branchWithCommit(w, "task/env-open-split", "change.txt")
+    await w.git(["checkout", "--quiet", "task/env-open-split"])
+    await w.git([
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "Bind work to 29731-status-truth-turn-marker\n\nRefs: 29731-status-truth-turn-marker",
+    ])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", `work\n\nRefs: ${path}`])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const message = await issueOf(w.git, "task/env-open-split", head, w.target).then(
+      () => "",
+      (cause: unknown) => (cause instanceof Error ? cause.message : String(cause)),
+    )
+    expect(message).toContain("29731-status-truth-turn-marker")
+    expect(message).toContain(path)
+    // It names the fact a submitter needs: an env open bind commit carries the value exactly as given.
+    expect(message).toContain("yrd env open")
+    expect(message).toMatch(/carries the --issue value exactly as given/u)
+    expect(message).toMatch(/a split between two spellings can start there/u)
+    // No cure beyond the one it can stand behind: it never tells the author to re-run env open.
+    expect(message).not.toMatch(/re-run .*env open/u)
+  })
+
+  /**
    * @failure A Refs trailer linking a follow-up issue refuses the whole branch as
    *          conflicting bindings, and the refusal named neither the trailer that
    *          binds nor the line that keeps the link without binding it (27300).
