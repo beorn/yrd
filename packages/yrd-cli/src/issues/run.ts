@@ -4,13 +4,15 @@
  * provider argv declared for the verb. Resolve validates opaque keys; other provider JSON is passed back whole.
  *
  * Never a clone, a fetch or a working-tree read: the declaration in force is the one committed on `main`.
+ * Automatic replay pins the delivered declaration. If its provider no longer runs, replay fails loudly;
+ * moving old merges to a new backend requires an explicit operator action.
  */
 import { realpathSync, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { fileURLToPath } from "node:url"
 import { cleanGitEnvironment, createProcess } from "@yrd/process"
 // Gitomic only through Yrd's one configured git seam (gitomic-boundary.test.ts): scrubbed env, bounded calls.
-import { createLegacyBackend, openReader } from "@yrd/queue-core"
+import { createLegacyBackend, gitIn, isAncestor, openReader, resolveGitSelection } from "@yrd/queue-core"
 import {
   ISSUES_CLOSE_REASONS,
   ISSUES_CODES,
@@ -45,6 +47,8 @@ export type RunIssuesVerbOptions = Readonly<{
   id?: string
   /** The project root; absent, the toplevel of `cwd`'s repository. */
   projectRoot?: string
+  /** Read this exact ancestor of main; automatic effects use their delivered merge commit. */
+  declarationCommit?: string
   /** The caller's directory: where discovery starts and where the provider runs. */
   cwd: string
   /** The provider's environment, inherited whole. Defaults to this process's. */
@@ -218,6 +222,23 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
   try {
     const reader = await openReader({ repo: repository, ref: "main", backend: createLegacyBackend("git", env) })
     commit = await reader.head()
+    if (options.declarationCommit !== undefined) {
+      await using ancestryProcess = createProcess({ cwd: repository, env: cleanGitEnvironment(env) })
+      const selection = await resolveGitSelection(repository, { process: ancestryProcess, env })
+      const ancestryGit = gitIn(repository, ancestryProcess, selection, { env })
+      const pinned = (
+        await ancestryGit(["rev-parse", "--verify", "--end-of-options", `${options.declarationCommit}^{commit}`])
+      ).trim()
+      if (!(await isAncestor(ancestryGit, pinned, commit))) {
+        return fail(
+          1,
+          ISSUES_CODES.noMain,
+          repository,
+          `declaration commit ${pinned} is not an ancestor of main ${commit}`,
+        )
+      }
+      commit = pinned
+    }
     text = await reader.at(commit).get(ISSUES_DECLARATION_PATH)
   } catch (error) {
     return fail(

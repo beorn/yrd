@@ -624,8 +624,9 @@ it.each([
     }
     if (mode === "cold-replay") {
       const reading = await readBranchHistory(store, "main", "task/first")
-      if (store.backend.publish === undefined || reading.history?.state.tip === undefined)
+      if (store.backend.publish === undefined || reading.history?.state.tip === undefined) {
         throw new Error("fixture lacks cold custody publisher")
+      }
       await store.backend.publish(
         store.repo,
         [

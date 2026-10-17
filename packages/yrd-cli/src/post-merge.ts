@@ -48,8 +48,8 @@ type IssueDiagnostic = Readonly<{
 export function readPostMergeIssueDiagnostics(workdir: string): readonly IssueDiagnostic[] {
   const directory = join(workdir, "post-merge")
   if (!existsSync(directory)) return []
-  const found: IssueDiagnostic[] = []
-  for (const name of readdirSync(directory)) {
+  const found = new Map<string, IssueDiagnostic>()
+  for (const name of readdirSync(directory).sort()) {
     if (!name.endsWith(".json")) continue
     const path = join(directory, name)
     let raw: unknown
@@ -58,7 +58,9 @@ export function readPostMergeIssueDiagnostics(workdir: string): readonly IssueDi
     } catch (error) {
       throw new Error(`post-merge attempt evidence unreadable at ${path}: ${String(error)}`)
     }
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw new Error(`post-merge attempt evidence malformed at ${path}: attempt is not an object`)
+    }
     const attempt = raw as Record<string, unknown>
     if (attempt.issueActions === undefined) continue // legacy attempts predate issue actions
     if (!Array.isArray(attempt.issueActions)) {
@@ -80,11 +82,18 @@ export function readPostMergeIssueDiagnostics(workdir: string): readonly IssueDi
           `post-merge attempt evidence malformed at ${path}: issue action lacks status, branch, mergedEvent, mergeSha or providerId`,
         )
       }
-      if (item.status !== "failed" && item.status !== "unavailable" && item.status !== "record-failed") continue
+      const identity = JSON.stringify([item.branch, item.mergedEvent, item.mergeSha, item.providerId])
+      if (item.status === "fulfilled") {
+        found.delete(identity)
+        continue
+      }
+      if (item.status !== "failed" && item.status !== "unavailable" && item.status !== "record-failed") {
+        throw new Error(`post-merge attempt evidence malformed at ${path}: unknown issue action status ${item.status}`)
+      }
       if (typeof item.diagnostic !== "string") {
         throw new Error(`post-merge attempt evidence malformed at ${path}: failed issue action lacks diagnostic`)
       }
-      found.push({
+      found.set(identity, {
         branch: item.branch,
         mergedEvent: item.mergedEvent,
         mergeSha: item.mergeSha,
@@ -93,7 +102,7 @@ export function readPostMergeIssueDiagnostics(workdir: string): readonly IssueDi
       })
     }
   }
-  return found
+  return [...found.values()]
 }
 
 async function closeMergedIssues(
@@ -116,6 +125,7 @@ async function closeMergedIssues(
     events.some((event) => readIssueEffect(event)?.providerId === providerId)
 
   for (const branch of new Set(input.branches)) {
+    if (input.stop?.aborted) return outcomes
     const reading = await readBranchHistory(input.store, input.queue, branch)
     const history = reading.history
     if (history === undefined) throw new Error(`post-merge named branch ${branch} has no event history`)
@@ -140,12 +150,27 @@ async function closeMergedIssues(
         throw new Error(`${branch}@${mergeSha}: actual merge committer time is unreadable`)
       }
       const committerTime = new Date(rawCommitterTime).toISOString()
+      const pinnedBlob = (await input.git(["rev-parse", `${mergeSha}:issues.yml`])).trim()
+      for (const event of history.events) {
+        const applied = readIssueEffect(event)
+        if (
+          applied?.mergedEvent === mergedEvent.id &&
+          applied.mergeSha === mergeSha &&
+          applied.declaration.blob !== pinnedBlob
+        ) {
+          throw new Error(
+            `${branch}@${mergeSha}: applied declaration blob ${applied.declaration.blob} differs from pinned ${pinnedBlob}`,
+          )
+        }
+      }
       const refs = closingReferencesOf(input.git, [`${base}..${mergeSha}`], branch)
       for await (const reference of refs) {
+        if (input.stop?.aborted) return outcomes
         const resolved = await runIssuesVerb({
           verb: "resolve",
           args: [reference.value],
           projectRoot: input.projectRoot,
+          declarationCommit: mergeSha,
           cwd: input.cwd,
           env: input.env,
           timeoutMs: UPDATE_TIMEOUT_MS,
@@ -193,6 +218,7 @@ async function closeMergedIssues(
             args: [key, "completed"],
             id: providerId,
             projectRoot: input.projectRoot,
+            declarationCommit: mergeSha,
             cwd: input.cwd,
             env: input.env,
             signal: input.stop,
