@@ -120,6 +120,7 @@ export async function retireIssueBranches(
   const eligible: Row[] = []
   const removed: Row[] = []
   const kept: Row[] = []
+  const mismatches: Row[] = []
   const failed: Row[] = []
   const inspected: string[] = []
   const excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[] = []
@@ -186,13 +187,21 @@ export async function retireIssueBranches(
     excluded.push(counts)
     for (const [ref, head] of new Map([...remoteHeads, ...heads])) {
       const branch = ref.slice("refs/heads/".length)
+      const recordedIssue = reading.histories.get(branch)?.state.issue
       const bound =
-        io.branchIssue !== undefined || /^(task|exp)\//u.test(branch)
-          ? branchIssue(branch, path === "" ? reading.histories.get(branch)?.state.issue : undefined)
-          : undefined
+        io.branchIssue !== undefined || /^(task|exp)\//u.test(branch) ? branchIssue(branch, recordedIssue) : undefined
       if (branch === targetBranch) counts.target++
       else if (bound !== issue) {
-        if (bound === undefined) {
+        if (bound !== undefined && recordedIssue !== undefined && branchIssue(branch) === issue) {
+          mismatches.push({
+            repo: repository,
+            path,
+            branch,
+            head,
+            reason: "mismatch",
+            detail: `recorded issue ${bound} differs from reviewed ${issue}`,
+          })
+        } else if (bound === undefined) {
           counts.unnumbered++
           unnumbered.push({ repo: repository, branch, head })
         } else counts.unrelated++
@@ -376,14 +385,18 @@ export async function retireIssueBranches(
     issue,
     repo: authorRepo,
     apply: request.apply === true,
-    mode,
+    mode:
+      candidates.length === 0 && failed.length === 0
+        ? `${mode} No branches matched issue key ${JSON.stringify(issue)} in the inspected stores.`
+        : mode,
     inspected,
     notMaterialized,
     excluded,
     unnumbered,
     eligible,
     removed,
-    kept,
+    // These unselected names explain a different binding; they are not child holds.
+    kept: [...kept, ...mismatches],
     failed,
   }
   return report

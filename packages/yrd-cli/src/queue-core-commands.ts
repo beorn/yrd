@@ -905,7 +905,7 @@ export async function coreQueueCommand(
       (request.command === "drop" && request.retire !== undefined)
     ) {
       const tip = request.command === "drop-local" ? request.tip : request.retire?.tip
-      if (tip === undefined) return noQueueOnTarget(targetLabel)
+      if (tip === undefined) return await noQueueOnTarget(targetLabel)
       const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd())
       if (authorRepo === undefined) throw new Error("drop --local requires the authoring repository as cwd")
       const report = await retireComponentBranch({
@@ -1756,7 +1756,7 @@ export async function coreQueueCommand(
           io,
           options.json,
           report,
-          `issue ${report.issue}: inspected ${report.inspected.length} repositories in ${authorRepo}; eligible ${report.eligible.length}, retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}\n${mode}` +
+          `issue ${report.issue}: inspected ${report.inspected.length} repositories in ${authorRepo}; eligible ${report.eligible.length}, retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}\n${report.mode}` +
             report.notMaterialized
               .map((row) => `\nSkipped ${row.repo}: not materialized (checkout Git pointer and private store absent)`)
               .join("") +
@@ -1824,6 +1824,7 @@ export async function coreQueueCommand(
       const failed: Row[] = []
       let excludedTarget = 0
       let excludedUnrelated = 0
+      let matched = 0
       const unnumbered: { branch: string; head: string }[] = []
       const dryRun = !local && request.dryRun === true
       try {
@@ -1849,7 +1850,13 @@ export async function coreQueueCommand(
           }
           const bound = local ? (change?.issue ?? issue) : branchIssue(branch, change?.issue)
           if (!local && (bound === undefined || issueIdentity(bound) !== issueIdentity(request.issue))) {
-            if (bound === undefined) unnumbered.push({ branch, head })
+            if (bound !== undefined && change?.issue !== undefined && branchIssue(branch) === request.issue) {
+              kept.push({
+                ...row,
+                reason: "mismatch",
+                detail: `recorded issue ${bound} differs from reviewed ${request.issue}`,
+              })
+            } else if (bound === undefined) unnumbered.push({ branch, head })
             else excludedUnrelated++
             continue
           }
@@ -1857,6 +1864,7 @@ export async function coreQueueCommand(
             kept.push({ ...row, reason: "mismatch", detail: `recorded issue ${bound} differs from reviewed ${issue}` })
             continue
           }
+          matched++
           if ((local && head !== request.tip) || (change?.commit !== undefined && change.commit !== head)) {
             kept.push({
               ...row,
@@ -1960,7 +1968,10 @@ export async function coreQueueCommand(
         ...(local ? { branch: request.branch } : { issue }),
         repo: authorRepo,
         apply: !dryRun,
-        mode,
+        mode:
+          !local && matched === 0 && failed.length === 0
+            ? `${mode} No branches matched issue key ${JSON.stringify(issue)} in the inspected stores.`
+            : mode,
         examined: heads.size,
         excluded,
         ...(local ? {} : { unnumbered }),
@@ -1976,7 +1987,7 @@ export async function coreQueueCommand(
         (local
           ? `${scope}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excludedTarget} target or out-of-scope branches; `
           : `${scope}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excludedTarget} target, ${excludedUnrelated} unrelated${unnumbered.length > 0 ? `, ${unnumbered.length} unnumbered (named below)` : ""}; `) +
-          `eligible ${eligible.length}, retired ${removed.length}, kept ${kept.length}, failed ${failed.length}\n${mode}` +
+          `eligible ${eligible.length}, retired ${removed.length}, kept ${kept.length}, failed ${failed.length}\n${report.mode}` +
           unnumbered.map((row) => `\n${row.branch}: unnumbered (${row.head.slice(0, 12)})`).join("") +
           [...eligible, ...removed, ...kept, ...failed]
             .map((row) => `\n${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`)

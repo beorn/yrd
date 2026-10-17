@@ -1951,6 +1951,128 @@ describe("a queue is the selected origin branch carrying config", () => {
     60_000,
   )
 
+  /** @failure A recorded root issue is discarded for same-named components, or key mismatches disappear from the receipt.
+   * @level l3 @consumer The root and expanded issue retirement commands with the host's recorded-or-numeric policy
+   * The ending-custody fixture above maps every fallback to its canonical key, hiding the lost root record.
+   */
+  it.each(["recorded", "unrecorded", "mismatch"] as const)(
+    "selects one same-named retirement set with %s issue evidence",
+    async (mode) => {
+      type Report = {
+        mode: string
+        eligible: { repo?: string; branch: string }[]
+        kept: { branch: string; reason: string; detail?: string }[]
+        removed: unknown[]
+        failed: unknown[]
+      }
+      const repo = await world("checks: []\n")
+      const seed = await world()
+      const git = gitIn(repo)
+      const childNames = ["first", "second"]
+      const children = childNames.map((name) => join(repo, name))
+      for (const childName of childNames) {
+        await git([
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          "--quiet",
+          join(dirname(seed), "remote.git"),
+          childName,
+        ])
+      }
+      await git(["commit", "--quiet", "-am", "register components"])
+      await git(["push", "--quiet", "origin", "main"])
+      const rootTip = (await git(["rev-parse", "HEAD"])).trim()
+      const queueTip = await createQueue(repo, "main", rootTip, new Date())
+      const branch = "task/1234-shared"
+      const recordedIssue = "@example/1234-retirement"
+      if (mode !== "unrecorded") {
+        await git(["branch", branch, rootTip])
+        await git(["push", "--quiet", "origin", branch])
+        const chain = await openEvents({
+          ...createEventStore(repo, "origin", git.selection),
+          ref: changesRef("main", branch),
+          writer: "fixture",
+        })
+        await chain.append(
+          [
+            changeInput("opened", { queueTip, at: new Date(), commit: rootTip, by: "fixture", issue: recordedIssue }),
+            changeInput("merged", { queueTip, at: new Date(), commit: rootTip }),
+          ],
+          { expect: null },
+        )
+      }
+      for (const child of children) {
+        const childGit = gitIn(child)
+        await childGit(["branch", branch])
+        await childGit(["push", "--quiet", "origin", branch])
+      }
+      const run = async (issue: string, expanded = true, human = false) => {
+        const out = capture(repo)
+        out.io.branchIssue = ({ branch: name, recordedIssue: recorded }) => recorded ?? /^task\/(\d+)-/u.exec(name)?.[1]
+        const exit = await runYrdProcess(
+          [
+            "bun",
+            "yrd",
+            "drop",
+            "--issue",
+            issue,
+            "--dry-run",
+            ...(expanded ? ["--submodules"] : []),
+            ...(human ? [] : ["--json"]),
+          ],
+          out.io,
+        )
+        expect(exit, out.stderr()).toBe(0)
+        return out.stdout()
+      }
+      if (mode === "recorded") {
+        const report = JSON.parse(await run(recordedIssue)) as Report
+        expect(report).toMatchObject({ removed: [], failed: [], kept: [] })
+        expect(report.eligible.map((row) => row.repo).sort()).toEqual([repo, ...children].sort())
+      } else if (mode === "unrecorded") {
+        const numeric = JSON.parse(await run("1234")) as Report
+        expect(numeric).toMatchObject({ removed: [], failed: [], kept: [] })
+        expect(numeric.eligible.map((row) => row.repo).sort()).toEqual(children.sort())
+        const canonical = JSON.parse(await run(recordedIssue)) as Report
+        expect(canonical).toMatchObject({ eligible: [], removed: [], failed: [], kept: [] })
+        expect(canonical.mode).toContain(`No branches matched issue key "${recordedIssue}"`)
+        expect(await run(recordedIssue, true, true)).toContain(`No branches matched issue key "${recordedIssue}"`)
+      } else {
+        const expanded = JSON.parse(await run("1234")) as Report
+        expect(expanded).toMatchObject({ eligible: [], removed: [], failed: [] })
+        expect(expanded.kept).toHaveLength(3)
+        for (const row of expanded.kept) {
+          expect(row).toMatchObject({ branch, reason: "mismatch", detail: expect.stringContaining(recordedIssue) })
+          expect(row.detail).toContain("1234")
+        }
+        const rootOnly = JSON.parse(await run("1234", false)) as Report
+        expect(rootOnly).toMatchObject({ eligible: [], removed: [], failed: [] })
+        expect(rootOnly.mode).toContain('No branches matched issue key "1234"')
+        expect(rootOnly.kept).toEqual([
+          expect.objectContaining({ branch, reason: "mismatch", detail: expect.stringContaining(recordedIssue) }),
+        ])
+        // Receipt-only mismatches cannot become a child hold on another selected root.
+        const unrelated = "task/1234-unrecorded"
+        await git(["branch", unrelated, rootTip])
+        const mixed = JSON.parse(await run("1234")) as Report
+        expect(mixed).toMatchObject({ removed: [], failed: [] })
+        expect(mixed.eligible.map((row) => row.branch)).toEqual([unrelated])
+        expect(mixed.kept).toHaveLength(3)
+      }
+      expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).trim()).toBe(
+        mode === "unrecorded" ? "" : `refs/heads/${branch}`,
+      )
+      for (const child of children) {
+        expect((await gitIn(child)(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).trim()).toBe(
+          `refs/heads/${branch}`,
+        )
+      }
+    },
+    60_000,
+  )
+
   /**
    * @failure Landing evidence disappears after resubmission, or a root pin without component origin custody permits deletion.
    * @level l3
