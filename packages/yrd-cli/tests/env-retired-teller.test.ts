@@ -94,8 +94,9 @@ it("reads nothing and prints the named no-entry line when no entry wants env-ret
 
 const fixtureRoots: string[] = []
 afterAll(() => {
-  for (const root of fixtureRoots.splice(0))
+  for (const root of fixtureRoots.splice(0)) {
     safeRemoveSync(root, { within: realpathSync(tmpdir()), allowMissing: true })
+  }
 })
 
 it("the production reader returns undefined on a store with no chain for the branch", async () => {
