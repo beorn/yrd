@@ -607,7 +607,7 @@ function checkedIssueEffect(value: unknown, where: string): AppliedIssueEffect {
   }
 }
 
-function readIssueEffect(event: EventShape): AppliedIssueEffect | undefined {
+export function readIssueEffect(event: EventShape): AppliedIssueEffect | undefined {
   const serialized = prop(event, EVENT_TRAILERS.issueEffect)
   if (serialized === undefined) return undefined
   if (event.type !== "notified") {

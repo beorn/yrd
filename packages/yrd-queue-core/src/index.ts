@@ -91,6 +91,7 @@ export {
   queueRef,
   queueResumedAfter,
   readChangeEvents,
+  readIssueEffect,
   readEventQueue,
   readEventOps,
   readEventQueueWithChanges,
@@ -102,6 +103,7 @@ export {
 } from "./events.ts"
 export type { Event } from "./git.ts"
 export type {
+  AppliedIssueEffect,
   CancellationReason,
   ChangeEventType,
   ChangeStatus,
@@ -223,6 +225,7 @@ export {
   issueOf,
   issueCandidatesOf,
   issueBindingsOf,
+  closingReferencesOf,
 } from "./submit.ts"
 export { pinCarrierName, preparePinCarrier } from "./pin-carrier.ts"
 export type { PinCarrierPin, PreparedPinCarrier } from "./pin-carrier.ts"
