@@ -17,6 +17,7 @@
  * have the worktree, the environment is not there.
  */
 
+import { shellQuote } from "git-super/shell-command"
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { createGitWorkspace, worktreeHomeRoot, type ProvisionedBay } from "@yrd/bay"
@@ -505,17 +506,16 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
           `environment ${existing.path} is locked${existing.locked === "" ? "" : `: ${existing.locked}`}; resolve the hold before reopening`,
         )
       }
-      const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
       const reopen = [
         "yrd env open",
-        ...(options.bay === undefined ? [] : [`--bay ${quote(options.bay)}`]),
-        ...(options.issue === undefined ? [] : [`--issue ${quote(options.issue)}`]),
-        ...(options.hold === undefined ? [] : [`--hold ${quote(options.hold)}`]),
+        ...(options.bay === undefined ? [] : [`--bay ${shellQuote(options.bay)}`]),
+        ...(options.issue === undefined ? [] : [`--issue ${shellQuote(options.issue)}`]),
+        ...(options.hold === undefined ? [] : [`--hold ${shellQuote(options.hold)}`]),
         ...(options.keep === true ? ["--keep"] : []),
         ...(options.json === true ? ["--json"] : []),
       ].join(" ")
       throw new Error(
-        `environment ${existing.path} is clean and merged into requested base ${base}; to continue: yrd env close ${quote(existing.path)} && ${reopen}`,
+        `environment ${existing.path} is clean and merged into requested base ${base}; to continue: yrd env close ${shellQuote(existing.path)} && ${reopen}`,
       )
     }
     const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
@@ -710,14 +710,9 @@ async function requireClean(git: Git, path: string): Promise<void> {
 }
 
 /** Retained environments preserve user work; GitSuper owns populated-submodule removal. */
-/** Quote one path for a POSIX shell command shown to a human. Mirrors git-super's `shellQuote` (#27120 AC1). */
-function quotePath(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`
-}
-
 /** The one route a private store is retired by, built here so the refusal and every reporter name the same command. */
 export function privateStoreVerifyCommand(store: string, checkout: string): string {
-  return `git super worktree private-store verify ${quotePath(store)} --checkout ${quotePath(checkout)}`
+  return `git super worktree private-store verify ${shellQuote(store)} --checkout ${shellQuote(checkout)}`
 }
 
 /**

@@ -1,4 +1,5 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
+import { shellQuote } from "git-super/shell-command"
 import { Conflict, RetriesExhausted } from "./git.ts"
 import { ARCHIVE_REF_PREFIX, archiveRefFor } from "git-super/archive-ref"
 import { retireOriginBranch } from "./origin-branch-retirement.ts"
@@ -1266,7 +1267,7 @@ export async function readEventOpsWithRefs(
     const remedy =
       store.remote === undefined
         ? "read fresh upstream authority for the exact leased retirement command"
-        : `after the reviewed retirement preflight, delete this exact tip with git -C '${store.repo.replaceAll("'", "'\\''")}' push --atomic --force-with-lease='${legacyRef}:${legacyOid}' '${store.remote.replaceAll("'", "'\\''")}' ':${legacyRef}'`
+        : `after the reviewed retirement preflight, delete this exact tip with git -C ${shellQuote(store.repo)} push --atomic ${shellQuote(`--force-with-lease=${legacyRef}:${legacyOid}`)} ${shellQuote(store.remote)} ${shellQuote(`:${legacyRef}`)}`
     throw new Error(
       `${store.remote ?? store.repo}#${queue}: retired legacy pause ref ${legacyRef} at ${legacyOid}; ${remedy}`,
     )
@@ -2436,7 +2437,9 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   if (request.retire !== undefined) {
     if (archive !== undefined) throw new Error(`${branch}: choose origin retirement or local archive custody`)
     if (!COMMIT_OID.test(request.retire.tip) || !request.note?.trim()) {
-      throw new Error(`${branch}: drop --retire needs a full --tip and nonempty --reason`)
+      throw new Error(
+        `${branch}: drop --retire needs a full --tip and nonempty --reason; received --tip ${JSON.stringify(request.retire.tip)}`,
+      )
     }
     if (state.ending === undefined || isOpen(state.status) || selectedTip === null) {
       throw new Error(`${branch}: drop --retire requires an already-ended change; found ${state.status}`)

@@ -1,4 +1,5 @@
 /** Shared remote custody sequence; callers own ending and archive eligibility. */
+import { shellQuote } from "git-super/shell-command"
 import type { QueueLocation } from "./events.ts"
 import { listRefs } from "./git.ts"
 
@@ -70,7 +71,7 @@ export async function retireOriginBranch(
     throw new Error(
       `${subject}: change moved during retirement; ${eventRef} expected ${eventTip}, found ${events.get(eventRef) ?? "absent"}; ` +
         (archive === undefined ? "caller established published-main custody; " : `archive ${archive} holds ${head}; `) +
-        `restore branch ${branch} from that custody: git branch '${branch.replaceAll("'", "'\\''")}' ${head}`,
+        `restore branch ${branch} from that custody: git branch ${shellQuote(branch)} ${head}`,
     )
   }
 }

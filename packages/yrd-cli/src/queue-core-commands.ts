@@ -33,6 +33,7 @@ import { readCommitSubmodules } from "git-super/commit-graph"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
 import { readIssueDisplay } from "./issue-resolver.ts"
+import { formatYrdCommand } from "./command-format.ts"
 import { createPostMerge } from "./post-merge.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup, type ClosedEnvironment } from "./env-cleanup.ts"
@@ -2378,7 +2379,11 @@ export async function coreQueueCommand(
         return 0
       } catch (error) {
         if (error instanceof NothingToWithdraw) {
-          io.stderr(`yrd: ${error.message}\n`)
+          const remedy =
+            error.ended === true
+              ? `; retire it with: ${formatYrdCommand(io, ["drop", request.branch, "--retire", "--tip", "<observed-full-oid>", "--reason", "<why>"], io.cwd ?? repo)}`
+              : ""
+          io.stderr(`yrd: ${error.message}${remedy}\n`)
           return 1
         }
         throw error

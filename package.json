@@ -5,7 +5,7 @@
   "description": "Agentic software delivery",
   "homepage": "https://yrd.dev",
   "license": "MIT",
-  "author": "Bjørn Stabell <bjorn@stabell.org>",
+  "author": "Bj\u00f8rn Stabell <bjorn@stabell.org>",
   "repository": "github:beorn/yrd",
   "bin": {
     "git-yrd": "bin/git-yrd",
@@ -51,9 +51,9 @@
     "@types/bun": "1.4.3",
     "@types/react": "^19.2.0",
     "@yrd/queue-core": "workspace:*",
-    "git-super": "^0.1.0",
+    "git-super": "^0.7.0",
     "typescript": "^6.0.3",
-    "vitest": "4.1.10"
+    "vitest": "5.0.4"
   },
   "overrides": {
     "git-super": "github:beorn/git-super#0c775283f25c132456853bde66f4b478955e5635",

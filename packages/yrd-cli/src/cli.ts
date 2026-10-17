@@ -28,6 +28,7 @@
  * real change: one submit opened two changes, 2026-09-03.
  */
 
+import { shellQuote } from "git-super/shell-command"
 import { Command as CliCommand, CommanderError, Option, int } from "@silvery/commander"
 import { join } from "node:path"
 import { drainOutput } from "loggily"
@@ -1747,7 +1748,7 @@ export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Prom
       return 2
     }
     if (isQueueEventShapeUnreadable(error)) {
-      const rendered = args.map((arg) => (/[ \t\n"'$`\\]/u.test(arg) ? JSON.stringify(arg) : arg)).join(" ")
+      const rendered = args.map(shellQuote).join(" ")
       const mainCommand = `@in main -- bun yrd${rendered.length > 0 ? ` ${rendered}` : ""}`
       io.stderr(
         `yrd: ${error.message}: this CLI is older than the queue's writer; run from main instead:\n  ${mainCommand}\n`,
@@ -1763,7 +1764,7 @@ export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Prom
 
 /** The process entry, shared by `yrd` and `git-yrd`. */
 export async function runYrdExecutable(
-  host: Pick<YrdCliIO, "liveEnvironmentUse" | "localBranchProtections" | "branchIssue">,
+  host: Pick<YrdCliIO, "liveEnvironmentUse" | "localBranchProtections" | "branchIssue" | "formatYrdCommand">,
 ): Promise<never> {
   const color = process.env.NO_COLOR === undefined && (process.stdout.isTTY || process.env.FORCE_COLOR !== undefined)
   const io: YrdCliIO = {

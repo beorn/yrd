@@ -186,18 +186,28 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
       expect(printed, ended.report).toBeDefined()
       // Supply the two values the operator is asked to fill, then execute the
       // recipe verbatim through the actual standalone entry, outside any repo.
-      const command = printed!
-        .replace(/'?<observed-full-oid>'?/u, head)
-        .replace(/'?<why>'?/u, "retire-ended-pointer")
-      const retired = spawnSync("sh", ["-c", command], {
-        cwd: dirname(work),
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          PATH: `${resolve(import.meta.dirname, "../../../bin")}${delimiter}${process.env["PATH"] ?? ""}`,
-          YRD_DEFAULT_SUBMITTER: "@dev/retirer",
-        },
-      })
+      const command = printed!.replace(/'?<observed-full-oid>'?/u, head).replace(/'?<why>'?/u, "retire-ended-pointer")
+      const runRecipe = (recipe: string) =>
+        spawnSync("sh", ["-c", recipe], {
+          cwd: dirname(work),
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${resolve(import.meta.dirname, "../../../bin")}${delimiter}${process.env["PATH"] ?? ""}`,
+            YRD_DEFAULT_SUBMITTER: "@dev/retirer",
+          },
+        })
+      if (status === "merged") {
+        // A pasted, unfilled recipe must reach the existing --tip validation,
+        // rather than treating angle brackets as shell redirection.
+        const unfilled = runRecipe(printed!)
+        expect(unfilled.status, `${unfilled.stdout}\n${unfilled.stderr}`).toBe(2)
+        expect(unfilled.stderr).toContain("<observed-full-oid>")
+        expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(
+          `${head}\trefs/heads/${branch}`,
+        )
+      }
+      const retired = runRecipe(command)
       expect(retired.status, `${retired.stdout}\n${retired.stderr}`).toBe(0)
       expect((await git(["ls-remote", "origin", archive])).trim()).toBe(`${head}\t${archive}`)
       expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
