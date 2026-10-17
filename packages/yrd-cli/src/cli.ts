@@ -1621,11 +1621,12 @@ function buildProgram(
           : `the declared ${verb}${write ? "" : " (a read)"}`,
       )
       .option("--project-root <path>", "the project root; default the toplevel of the current repository")
+      .option("--timeout-ms <n>", "kill the provider after this many milliseconds (yrd-issues-provider-timed-out)", int)
     // NO OPTION IS ACCEPTED AND IGNORED: a read takes no replay key, so --id is refused on it.
     if (write) command.option("--id <id>", "the event's replay key; required, the provider dedupes on it")
     command.action(async (...received: unknown[]) => {
       const args = received.slice(0, operands.length) as string[]
-      const options = received[operands.length] as Readonly<{ projectRoot?: string; id?: string }>
+      const options = received[operands.length] as Readonly<{ projectRoot?: string; id?: string; timeoutMs?: number }>
       const { runIssuesVerb } = await import("./issues/run.ts")
       const outcome = await runIssuesVerb({
         verb,
@@ -1635,6 +1636,7 @@ function buildProgram(
         stderr: (text) => io.stderr(text),
         ...(options.id === undefined ? {} : { id: options.id }),
         ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       })
       if (outcome.ok) {
         io.stdout(`${JSON.stringify(outcome.envelope)}\n`)

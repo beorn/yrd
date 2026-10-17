@@ -5,7 +5,7 @@
  *
  * Never a clone, a fetch or a working-tree read: the declaration in force is the one committed on `main`.
  */
-import { realpathSync } from "node:fs"
+import { realpathSync, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { fileURLToPath } from "node:url"
 import { cleanGitEnvironment, createProcess } from "@yrd/process"
@@ -51,6 +51,9 @@ export type RunIssuesVerbOptions = Readonly<{
   env?: NodeJS.ProcessEnv
   /** Kill the provider after this long and fail with {@link ISSUES_CODES.providerTimedOut}. */
   timeoutMs?: number
+  /** Kill the provider after this long without output, once it has written a byte; fails with
+   * {@link ISSUES_CODES.providerStalled}. */
+  noProgressTimeoutMs?: number
   /** Where the provider's stderr passes through. Defaults to this process's stderr. */
   stderr?: (text: string) => void
 }>
@@ -98,6 +101,19 @@ function checkRequest(
     }
     values.id = options.id
   }
+  for (const [name, bound] of [
+    ["timeoutMs", options.timeoutMs],
+    ["noProgressTimeoutMs", options.noProgressTimeoutMs],
+  ] as const) {
+    if (bound !== undefined && (!Number.isSafeInteger(bound) || bound < 1)) {
+      return fail(
+        2,
+        ISSUES_CODES.badArguments,
+        `${name} ${String(bound)}`,
+        "must be a positive integer of milliseconds",
+      )
+    }
+  }
   return { ok: true, values }
 }
 
@@ -122,6 +138,8 @@ function sameDirectory(left: string, right: string): boolean {
 
 /** True when `path` is itself a repository: a bare one's git dir, or a non-bare one's toplevel. */
 async function isRepositoryAt(path: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+  // git cannot be spawned in a directory that does not exist; that path is plainly not a repository.
+  if (statSync(path, { throwIfNoEntry: false })?.isDirectory() !== true) return false
   const bare = await git(["rev-parse", "--is-bare-repository", "--absolute-git-dir"], path, env)
   if (bare.exitCode !== 0) return false
   const [isBare, gitDir] = bare.stdout.split("\n")
@@ -130,7 +148,16 @@ async function isRepositoryAt(path: string, env: NodeJS.ProcessEnv): Promise<boo
   return top.exitCode === 0 && sameDirectory(top.stdout, path)
 }
 
-/** The repository to read: the root's origin when that origin is local, else the root itself. */
+/** `scheme://…` — a URL git transports over (ssh, https, git, …). `file://` is matched before this. */
+const SCHEME_URL = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u
+/** git's scp-like `[user@]host:path`: a colon before any slash, e.g. `git@github.com:beorn/x.git`. */
+const SCP_LIKE = /^(?:[^@/:\s]+@)?[^@/:\s]+:/u
+
+/**
+ * The repository to read: the root's origin when that origin is local, else the root itself. An origin is remote
+ * only on a positive match (`scheme://` or scp-like `host:path`); `file://` and absolute paths are local; every
+ * other spelling — a relative path above all — is refused by name rather than resolved the way git would.
+ */
 async function repositoryToRead(root: string, env: NodeJS.ProcessEnv): Promise<IssuesFailure | string> {
   const origin = await git(["config", "--get", "remote.origin.url"], root, env)
   // `git config --get` exits 1 for an unset key: no origin, so the root is the repository.
@@ -139,10 +166,19 @@ async function repositoryToRead(root: string, env: NodeJS.ProcessEnv): Promise<I
     return fail(1, ISSUES_CODES.notARepository, root, `git config --get remote.origin.url failed: ${origin.stderr}`)
   }
   const url = origin.stdout
-  let local: string | undefined
+  let local: string
   if (url.startsWith("file://")) local = fileURLToPath(url)
   else if (isAbsolute(url)) local = url
-  if (local === undefined) return root
+  else if (SCHEME_URL.test(url) || SCP_LIKE.test(url)) return root
+  else {
+    return fail(
+      1,
+      ISSUES_CODES.originUnsupported,
+      root,
+      `origin ${JSON.stringify(url)} is neither a local repository (file:// or an absolute path) ` +
+        "nor a remote URL (scheme:// or host:path); spell it as one of those",
+    )
+  }
   if (!(await isRepositoryAt(local, env))) {
     return fail(
       1,
@@ -216,6 +252,7 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       cwd: options.cwd,
       env,
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
       onOutput: ({ stream, chunk }) => {
         if (stream === "stderr") writeStderr(decoder.decode(chunk, { stream: true }))
       },
@@ -234,7 +271,15 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
   if (result.timedOut) {
     return fail(1, ISSUES_CODES.providerTimedOut, `${verb} ${command}`, `killed after ${options.timeoutMs} ms`)
   }
-  if (result.exitCode !== 0 || result.signal !== null || result.stalled === true) {
+  if (result.stalled === true) {
+    return fail(
+      1,
+      ISSUES_CODES.providerStalled,
+      `${verb} ${command}`,
+      `no output for too long after ${result.lastProgressBytes} bytes; killed`,
+    )
+  }
+  if (result.exitCode !== 0 || result.signal !== null) {
     const how = result.signal === null ? `exit ${result.exitCode}` : `signal ${result.signal}`
     return fail(1, ISSUES_CODES.providerFailed, `${verb} ${command}`, `provider ended with ${how}`)
   }

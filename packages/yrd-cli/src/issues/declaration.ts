@@ -9,6 +9,7 @@ export const ISSUES_CODES = {
   badArguments: "yrd-issues-bad-arguments",
   notARepository: "yrd-issues-not-a-repository",
   originNotARepository: "yrd-issues-origin-not-a-repository",
+  originUnsupported: "yrd-issues-origin-unsupported",
   noMain: "yrd-issues-no-main",
   declarationMissing: "yrd-issues-declaration-missing",
   declarationInvalid: "yrd-issues-declaration-invalid",
@@ -17,6 +18,7 @@ export const ISSUES_CODES = {
   providerFailed: "yrd-issues-provider-failed",
   providerNotJson: "yrd-issues-provider-not-json",
   providerTimedOut: "yrd-issues-provider-timed-out",
+  providerStalled: "yrd-issues-provider-stalled",
 } as const
 
 export type IssuesCode = (typeof ISSUES_CODES)[keyof typeof ISSUES_CODES]
