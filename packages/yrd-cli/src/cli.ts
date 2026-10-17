@@ -1235,8 +1235,19 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .option("--fresh", "ask the remote instead of the queue-owned local status store")
     .option("--queue <value>", QUEUE_HELP)
+    .option(
+      "--project-root <path>",
+      "show each change's issue through this project's issues.yml view (yrd issues view, killed at 10 s); " +
+        "without it, show makes no issue read and prints no issue line",
+    )
     .action(async (branch, options) => {
-      const { all, json, queue, fresh } = options as { all?: boolean; json?: boolean; queue?: string; fresh?: boolean }
+      const { all, json, queue, fresh, projectRoot } = options as {
+        all?: boolean
+        json?: boolean
+        queue?: string
+        fresh?: boolean
+        projectRoot?: string
+      }
       const location = await resolveQueueLocation(cwd(), queue, env, "reader")
       const taken = await coreQueueCommand(
         location.repo,
@@ -1255,6 +1266,7 @@ function buildProgram(
           queue: location.queue,
           workdir: location.workdir,
           ...(fresh === true ? {} : { localStatusStore: localStatusStore(location) }),
+          ...(projectRoot === undefined ? {} : { projectRoot }),
         },
       )
       setExit(taken)

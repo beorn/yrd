@@ -681,6 +681,11 @@ export async function coreQueueCommand(
     /** One-shot list/show opt-in: an existing queue-owned clone, never a writer's authority. */
     localStatusStore?: Readonly<{ path: string; transport: string }>
     /**
+     * `show`'s project root: whose `issues.yml` `view` decorates each change's issue (29644 Y1). Absent, `show`
+     * makes no display read at all — no issue line and no per-issue unavailable notice.
+     */
+    projectRoot?: string
+    /**
      * Whether `repo` is the queue's own clone (`QueueLocation.owned`). Only
      * then may a compose populate the submodule stores it borrows from;
      * composing from a seat's checkout leaves that tree exactly as it found it.
@@ -4889,12 +4894,22 @@ export async function coreQueueCommand(
         const histories = [...changeHistories, ...directHistories]
         // Start display reads independently. The queue result is emitted before
         // waiting for this optional decoration; no decision consumes its payload.
-        const displayCommand = config.issuesProvider?.read
+        // The read is the issues interface's `view` at --project-root; issuesProvider.read is no longer consulted.
+        const projectRoot = options.projectRoot
         const displayReads =
-          displayCommand === undefined
+          projectRoot === undefined
             ? []
             : [...new Set(histories.flatMap((row) => (row.issue === undefined ? [] : [row.issue])))].map(
-                async (key) => ({ key, display: await readIssueDisplay(displayCommand, key, repo, env) }),
+                async (key) => ({
+                  key,
+                  display: await readIssueDisplay({
+                    key,
+                    projectRoot,
+                    cwd: repo,
+                    stderr: (text) => io.stderr(text),
+                    env,
+                  }),
+                }),
               )
         const scope =
           request.all === true
