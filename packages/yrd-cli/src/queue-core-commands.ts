@@ -1054,7 +1054,7 @@ export async function coreQueueCommand(
         selection,
         onEnvironmentClosed: envRetiredTeller({
           notify: config.notify,
-          where: `${eventStore.remote ?? eventStore.repo}#${config.target.branch}`,
+          where: `${config.target.remote}#${config.target.branch}`,
           readChange: (branch) => readClosedChange(eventStore, config.target.branch, branch),
           tell: (closed, change) =>
             tellEnvRetired(

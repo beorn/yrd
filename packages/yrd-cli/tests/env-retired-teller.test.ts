@@ -4,8 +4,10 @@
  *   no-chain case from an undefined change rather than matched message
  *   text, and — before any chain read — do nothing but print the named
  *   no-entry line when no notify entry wants env-retired.
- * @level   l1 (injected reader, teller and io; no filesystem)
+ * @level   l2 (the gate rows inject reader, teller and io; one row drives the
+ *   production reader against a real bare remote and clone)
  * @consumer the queue round's onEnvironmentClosed callback
+ * @reach   fs-walk <fixture-only: the bare remote and clone the reader row makes under the OS temp root>
  * @testonly none
  */
 import { mkdtempSync, realpathSync, writeFileSync } from "node:fs"
