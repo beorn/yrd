@@ -280,6 +280,43 @@ describe("remote calls are counted from git's trace2 event log", () => {
     expect(calls.unreadable).toBe(0)
   })
 
+  it("labels a child at the spawn, never at runner or store creation (29697, @cto R1)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-remote-seam-spawn-"))
+    roots.push(root)
+    const seed = join(root, "seed")
+    mkdirSync(seed)
+    const git = gitIn(seed)
+    await git(["init", "--quiet", "--initial-branch=main"])
+    await git([
+      "-c",
+      "user.email=spawn@yrd.test",
+      "-c",
+      "user.name=yrd",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "one",
+    ])
+    const remote = join(root, "remote.git")
+    await gitIn(root)(["clone", "--quiet", "--bare", seed, remote])
+    const traced = traceRemoteCalls(join(root, "trace2"), { seams: true })
+    const creationEnv = { ...process.env, ...traced.env }
+    // A runner created INSIDE a labelled step must not carry that step's name in what it was created with: a
+    // later call through it, made after the step ended, would otherwise spawn a caller that did not make it.
+    const created = withRemoteSeam("compose", () => gitIn(seed, undefined, undefined, { env: creationEnv }))
+    // No assertion on `creationEnv` itself (29697, @cto R2): gitIn copies the options it is handed
+    // (git.ts `{ ...(options.env ?? globalThis.process.env) }`), so reading the caller's own literal back is
+    // unmutated whatever the spawn does — it passed on revert and proved nothing. The spawn rule is what the two
+    // calls below measure: the same runner's child is unattributed outside a step, and `compose` inside one.
+    // Outside every step the same runner's child carries no label at all.
+    await created(["ls-remote", remote, "refs/heads/main"])
+    // Inside a step it carries that step's name, which is the whole point of labelling at the spawn.
+    await withRemoteSeam("compose", () => created(["ls-remote", remote, "refs/heads/main"]))
+    const calls = traced.end()
+    expect(calls.seams).toMatchObject({ compose: { "ls-remote": 1 }, unattributed: { "ls-remote": 1 } })
+  })
+
   it("labels each fetch on one long-lived Gitomic backend with its calling seam", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-gitomic-seams-"))
     roots.push(root)
