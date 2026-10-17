@@ -4181,7 +4181,7 @@ describe("component-local retirement without a component queue", () => {
             }),
           )
           expect(records).not.toContainEqual(expect.objectContaining({ kind: "local-branch-retirement", branch }))
-        } else
+        } else {
           expect(JSON.parse(retry.stdout())).toMatchObject({
             removed: [
               expect.objectContaining({ branch, head: tip, detail: expect.stringContaining("already retired") }),
@@ -4189,6 +4189,7 @@ describe("component-local retirement without a component queue", () => {
             kept: [],
             failed: [],
           })
+        }
       }
       expect((await git(["rev-parse", "refs/heads/main"])).trim()).toBe(baseTip)
       return
