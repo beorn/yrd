@@ -908,7 +908,7 @@ export async function eventQueueRun(
   const tellDirect = async (commit: string, eventId: string): Promise<void> => {
     if (!options.notify?.some((entry) => entry.on.includes("merged-direct"))) return
     const ref = queueRef(queue)
-    const recorded = await readEventQueue(store, queue)
+    const recorded = await withRemoteSeamGap("directNoticeRead", () => readEventQueue(store, queue))
     if (recorded.observed[commit]?.id !== eventId) {
       throw new Error(`event queue ${url}#${queue}: direct notice lost observed ${commit} at ${eventId}`)
     }
@@ -918,7 +918,7 @@ export async function eventQueueRun(
     }
     for (const entry of options.notify ?? []) {
       if (!entry.on.includes("merged-direct")) continue
-      const state = await readEventQueue(store, queue)
+      const state = await withRemoteSeamGap("directNoticeRead", () => readEventQueue(store, queue))
       if (state.observed[commit]?.id !== eventId) {
         throw new Error(`event queue ${url}#${queue}: direct notice lost observed ${commit} at ${eventId}`)
       }
