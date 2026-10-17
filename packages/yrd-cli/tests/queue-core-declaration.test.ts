@@ -3838,7 +3838,11 @@ describe("component-local retirement without a component queue", () => {
       if (mode === "protection-error") {
         expect(run.stdout() + run.stderr()).toContain("host protection authority unavailable")
       }
-      if (mode === "missing-protections-reader") expect(run.stdout() + run.stderr()).toContain("localBranchProtections")
+      if (mode === "missing-protections-reader") {
+        expect(run.stdout() + run.stderr()).toContain(
+          "localBranchProtections authority reader is missing; standalone callers must explicitly pass null",
+        )
+      }
       if (mode === "unreadable-declaration") expect(run.stderr()).toContain("EACCES")
       if (mode === "archive-collision") {
         expect((await git(["ls-remote", "origin", collisionRef])).split("\t")[0]).toBe(baseTip)
@@ -4010,7 +4014,9 @@ describe("drop --local --release-checkout", () => {
         expect(await runYrdProcess([...fixture.argv, "--apply"], output.io)).toBe(1)
         const report = JSON.parse(output.stdout()) as ReleaseReport
         expect(report.failed[0]?.detail).toContain(
-          reader === "empty liveEnvironmentUse" ? "did not return an array" : reader.replace("standalone ", ""),
+          reader === "empty liveEnvironmentUse"
+            ? "live environment-use reader did not return an array"
+            : `release-checkout requires the ${reader.replace("standalone ", "")} authority reader`,
         )
         expect(report.removed).toEqual([])
         expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
