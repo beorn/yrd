@@ -1063,7 +1063,13 @@ export async function coreQueueCommand(
               return history?.state
             }),
           tell: (closed, change) =>
-            tellEnvRetired({ config, git, repo, targetSha: outcome.target, workdir, tempRoot, env }, closed, change, outcome.run, io),
+            tellEnvRetired(
+              { config, git, repo, targetSha: outcome.target, workdir, tempRoot, env },
+              closed,
+              change,
+              outcome.run,
+              io,
+            ),
           io,
         }),
       })

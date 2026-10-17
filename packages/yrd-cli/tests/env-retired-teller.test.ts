@@ -37,7 +37,9 @@ function harness(read: EventChange | undefined, wants = true) {
   const told: { branch: string; status: EventChange["status"] }[] = []
   const said: string[] = []
   const teller = envRetiredTeller({
-    notify: wants ? [{ name: "author", on: ["env-retired"], run: "true" }] : [{ name: "author", on: ["merged"], run: "true" }],
+    notify: wants
+      ? [{ name: "author", on: ["env-retired"], run: "true" }]
+      : [{ name: "author", on: ["merged"], run: "true" }],
     readChange: async (branch) => {
       reads.push(branch)
       return read
