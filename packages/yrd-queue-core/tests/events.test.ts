@@ -915,7 +915,7 @@ describe("ADR-0016 event fold", () => {
     })
   })
 
-  it("keeps a typed issue effect neutral across a later branch reuse and validates its merge reference", () => {
+  it("keeps a typed issue effect neutral across a later branch reuse", () => {
     const opened = event("opened", A, [["Commit", A]], [A])
     const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
     const effect = issueEffectEvent(ISSUE_EFFECT)
@@ -1016,6 +1016,8 @@ describe("ADR-0016 event fold", () => {
     name: string
     legacyTrailer?: readonly [string, string]
     alter?: (raw: Record<string, unknown>) => Record<string, unknown>
+    serialized?: string
+    eventType?: string
     writer?: string
     expected: RegExp
   }>
@@ -1030,6 +1032,38 @@ describe("ADR-0016 event fold", () => {
       alter: (raw) => ({ ...raw, providerId: "yrd1-wrong" }),
       expected: /providerId must be/u,
     },
+    { name: "non-object JSON value", serialized: "null", expected: /expected an object/u },
+    {
+      name: "unknown kind",
+      alter: (raw) => ({ ...raw, kind: "issue-effect-v2" }),
+      expected: /unknown kind/u,
+    },
+    {
+      name: "malformed merged event id",
+      alter: (raw) => ({ ...raw, mergedEvent: "not-an-oid" }),
+      expected: /mergedEvent and mergeSha must be commit ids/u,
+    },
+    {
+      name: "malformed merge SHA",
+      alter: (raw) => ({ ...raw, mergeSha: "not-an-oid" }),
+      expected: /mergedEvent and mergeSha must be commit ids/u,
+    },
+    {
+      name: "unknown verb",
+      alter: (raw) => ({ ...raw, verb: "resolve" }),
+      expected: /verb must be close or comment/u,
+    },
+    {
+      name: "non-string providerId",
+      alter: (raw) => ({ ...raw, providerId: 12 }),
+      expected: /providerId must be a string/u,
+    },
+    {
+      name: "effect on wrong event type",
+      eventType: "future-effect",
+      expected: /belongs on notified/u,
+    },
+    { name: "malformed serialized JSON", serialized: "{", expected: /malformed Issue-Effect/u },
     {
       name: "non-canonical JSON",
       alter: (raw) => Object.fromEntries(Object.entries(raw).reverse()),
@@ -1049,29 +1083,51 @@ describe("ADR-0016 event fold", () => {
       alter: (raw) => ({ ...raw, verb: "comment" }),
       expected: /comment cannot carry semanticEnding/u,
     },
+    {
+      name: "close without semantic ending",
+      alter: (raw) => {
+        const { semanticEnding: _semanticEnding, ...rest } = raw
+        return rest
+      },
+      expected: /close needs semanticEnding/u,
+    },
     { name: "empty key", alter: (raw) => ({ ...raw, issueKey: " " }), expected: /issueKey must be nonempty/u },
     {
       name: "non-ISO time",
       alter: (raw) => ({ ...raw, mergeCommitterTime: "yesterday" }),
       expected: /mergeCommitterTime must be an ISO instant/u,
     },
+    {
+      name: "parseable but non-canonical ISO time",
+      alter: (raw) => ({ ...raw, mergeCommitterTime: "2026-09-22T13:59:00Z" }),
+      expected: /mergeCommitterTime must be an ISO instant/u,
+    },
     { name: "wrong writer", writer: "yrd", expected: /needs writer/u },
   ]
 
-  it.each(readerRefusals)("reader refuses $name", ({ legacyTrailer, alter, writer, expected }) => {
-    const opened = event("opened", A, [["Commit", A]], [A])
-    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
-    const effectValue = alter === undefined ? ISSUE_EFFECT : alter(ISSUE_EFFECT as unknown as Record<string, unknown>)
-    const base = issueEffectEvent(effectValue)
-    const effect = {
-      ...base,
-      ...(writer === undefined ? {} : { writer }),
-      props: legacyTrailer === undefined ? base.props : [...base.props, legacyTrailer],
-    }
-    expect(() => project(changeChain(opened, merged, effect), "refs/yrd/q/changes/task/refusal", "fixture")).toThrow(
-      expected,
-    )
-  })
+  it.each(readerRefusals)(
+    "reader refuses $name",
+    ({ legacyTrailer, alter, serialized, eventType, writer, expected }) => {
+      const opened = event("opened", A, [["Commit", A]], [A])
+      const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+      const effectValue = alter === undefined ? ISSUE_EFFECT : alter(ISSUE_EFFECT as unknown as Record<string, unknown>)
+      const base = issueEffectEvent(effectValue)
+      const effect = {
+        ...base,
+        ...(eventType === undefined ? {} : { type: eventType }),
+        ...(writer === undefined ? {} : { writer }),
+        props: [
+          ...base.props.map(([key, value]): [string, string] =>
+            key === "Issue-Effect" && serialized !== undefined ? [key, serialized] : [key, value],
+          ),
+          ...(legacyTrailer === undefined ? [] : [legacyTrailer]),
+        ],
+      }
+      expect(() => project(changeChain(opened, merged, effect), "refs/yrd/q/changes/task/refusal", "fixture")).toThrow(
+        expected,
+      )
+    },
+  )
 
   it("validates issue-effect merge references when enumerating public change segments", () => {
     const opened = event("opened", A, [["Commit", A]], [A])
