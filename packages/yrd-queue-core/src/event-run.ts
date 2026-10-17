@@ -296,8 +296,7 @@ export function eventNoticeOwed(
  * second round on another clone or host holds a different one and can record a notice between this round's read
  * and its tell (@cto 2005254e, B1). So only the half that decides nothing on its own — `noticeSettledLocally` —
  * is decided from here; a notice this state does not already settle is re-decided on a fresh read before it is told.
- */
-/**
+ *
  * Residual, named not hidden (@cto 2005254e): `noticeSettledLocally` decides from a recorded notice and the
  * notify floor's present set only. An entry settled by anything else — a `Migrated-From` move, or a
  * `Time:` before the recipient's floor — therefore costs one fresh read every round and never tells.

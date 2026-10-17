@@ -13,6 +13,15 @@ import { AsyncLocalStorage } from "node:async_hooks"
 
 /** A git process's own verb when it talks to a remote. */
 const REMOTE_VERBS = new Set(["clone", "fetch", "ls-remote", "pull", "push"])
+/**
+ * The seam name yrd's own component-main read runs under (29730, @cto 316f70ff R2). The DERIVE boundary is what
+ * this seam proves, and the refresh boundary is proven by git-super's own `GIT_SUPER_PHASE=refresh` marker: each
+ * is a POSITIVE marker for its own half, and neither stands for the other. Shape alone never classifies: a fetch
+ * carrying neither marker buckets as `beyond` on its own, and it is the ROUND's read that refuses to guess -
+ * `requireRefreshTag` (readRemoteCalls' option, set from traceRemoteCalls' `refresh`) reports it unproven
+ * rather than letting a round absorb an untagged refresh into its beyond bucket.
+ */
+export const DERIVE_COMPONENT_MAIN_SEAM = "deriveComponentMain"
 const seamScope = new AsyncLocalStorage<string>()
 
 /** Label the Git processes started by one submit read without changing process-wide state. */
@@ -35,6 +44,17 @@ export function withRemoteSeamGap<T>(name: string, action: () => T): T {
   return seamScope.getStore() === undefined ? withRemoteSeam(name, action) : action()
 }
 
+/** One SSH child: its Git command, its repository, and which part of the round it belongs to. */
+export type SshCall = Readonly<{
+  command: string
+  repository: string
+  /** `refresh` is git-super's own refresh, `derive` the round's own component-main read, `beyond` anything else. */
+  bucket: "refresh" | "derive" | "beyond"
+  /** Set when this call's split cannot be proven; the round's row reports it instead of a plausible zero. */
+  unproven?: string
+  sshChildren: number
+}>
+
 export type RemoteCalls = Readonly<{
   /** git processes that wrote an event file. */
   processes: number
@@ -51,8 +71,8 @@ export type RemoteCalls = Readonly<{
   unreadable: number
   /** Per-function remote verbs and transport children; `unattributed` is an explicit measurement gap. */
   seams: Readonly<Record<string, Readonly<Record<string, number>>>>
-  /** Each SSH child with its Git command and the explicit git-super refresh tag, before Trace2 is removed. */
-  sshCalls: readonly Readonly<{ command: string; repository: string; refresh: boolean; sshChildren: number }>[]
+  /** Each SSH child with its Git command and the part of the round it belongs to, before Trace2 is removed. */
+  sshCalls: readonly SshCall[]
 }>
 
 function describeSshCall(
@@ -62,7 +82,8 @@ function describeSshCall(
   refresh: boolean,
   sshChildren: number,
   requireRefreshTag: boolean,
-): RemoteCalls["sshCalls"][number] {
+  seam: string | undefined,
+): SshCall {
   // Git clone starts its SSH transport before it has a repository to report in def_repo.
   // Its exact SSH source is still present in the process's start argv.
   const cloneSources =
@@ -79,21 +100,54 @@ function describeSshCall(
     (gitDirectory !== undefined && isAbsolute(gitDirectory) ? gitDirectory : undefined) ??
     (cloneSources.length === 1 ? cloneSources[0] : undefined)
   if (command === undefined || argv === undefined || namedRepository === undefined) {
-    return { command: "unknown", repository: namedRepository ?? "unknown", refresh, sshChildren }
+    // This drops whatever tags the call carried, so an unknown command that also wore a refresh or derive
+    // marker buckets as `beyond` here. That is safe only because roundRemoteCallsRow refuses a split carrying
+    // any "unknown" command or repository BEFORE it groups a bucket, so such a call can never make a round's
+    // refresh/derive/beyond counts read as measured; readers that only count verbs have no bucket to mislead.
+    return { command: "unknown", repository: namedRepository ?? "unknown", bucket: "beyond", sshChildren }
   }
   const dryRun = argv.includes("--dry-run") ? " --dry-run" : ""
   const mainRef = argv.some((arg) => /^\+refs\/heads\/[^:]+:refs\/remotes\/origin\/[^:]+$/u.test(arg))
   const mainFetch = command === "fetch" && argv.includes("--no-tags") && mainRef
-  if (refresh) {
-    if (!mainFetch) {
-      throw new Error(`Trace2 tagged a non-component-main SSH call as refresh: ${command} in ${namedRepository}`)
+  const shaped: SshCall = { command: `${command}${dryRun}`, repository: namedRepository, bucket: "beyond", sshChildren }
+  // 29730: each trip below used to throw out of `traced.end()` inside the row write, so the round lost its
+  // whole attribution row AND its counts. The counts are evidence about the round; the row now carries them
+  // and says in its own text that the split is unproven (@cto 316f70ff R1). The split is proven by a positive
+  // marker only (R2), so no shape is ever absorbed into a bucket it did not name.
+  if (refresh && !mainFetch) {
+    return {
+      ...shaped,
+      unproven: `Trace2 tagged a non-component-main SSH call as refresh: ${command} in ${namedRepository}`,
     }
-  } else if (mainFetch && requireRefreshTag) {
-    throw new Error(
-      `Trace2 found an untagged component-main refresh fetch in ${namedRepository}; round SSH split cannot be proven`,
-    )
   }
-  return { command: `${command}${dryRun}`, repository: namedRepository, refresh, sshChildren }
+  // The mirror trip, for the round's own name (@cto 316f70ff, fold 3): the derive seam is the round's own label
+  // for a component-main read, so a call wearing it that is not component-main-shaped has no business in the
+  // derive bucket - it reports unproven with its own reason instead of falling through as `beyond`.
+  if (seam === DERIVE_COMPONENT_MAIN_SEAM && !mainFetch) {
+    return {
+      ...shaped,
+      unproven: `Trace2 tagged a non-component-main SSH call as ${DERIVE_COMPONENT_MAIN_SEAM}: ${command} in ${namedRepository}`,
+    }
+  }
+  if (!mainFetch) return shaped
+  // 29730 review (@cto 1ce8f965): a call wearing BOTH markers is a contradiction, not a refresh. No path builds
+  // one today - git-super sets its own phase and the seam names the round's own read - so it reports unproven
+  // with its own reason instead of being silently counted as refresh on a tie-break nobody wrote down.
+  if (refresh && seam === DERIVE_COMPONENT_MAIN_SEAM) {
+    return {
+      ...shaped,
+      unproven: `Trace2 tagged one component-main fetch as both refresh and ${DERIVE_COMPONENT_MAIN_SEAM} in ${namedRepository}; round SSH split cannot be proven`,
+    }
+  }
+  if (refresh) return { ...shaped, bucket: "refresh" }
+  if (seam === DERIVE_COMPONENT_MAIN_SEAM) return { ...shaped, bucket: "derive" }
+  if (requireRefreshTag) {
+    return {
+      ...shaped,
+      unproven: `Trace2 found an untagged component-main refresh fetch in ${namedRepository}; round SSH split cannot be proven`,
+    }
+  }
+  return shaped
 }
 
 /** Count the remote calls recorded under one trace2 directory. A directory that is not there is refused. */
@@ -117,7 +171,7 @@ export function readRemoteCalls(
   let remoteSeconds = 0
   let unreadable = 0
   const seams: Record<string, Record<string, number>> = {}
-  const sshCalls: { command: string; repository: string; refresh: boolean; sshChildren: number }[] = []
+  const sshCalls: SshCall[] = []
   for (const name of names) {
     let started = false
     let remote = false
@@ -185,7 +239,7 @@ export function readRemoteCalls(
     }
     if (fileSshChildren > 0) {
       sshCalls.push(
-        describeSshCall(command, repository, argv, refresh, fileSshChildren, options.requireRefreshTag === true),
+        describeSshCall(command, repository, argv, refresh, fileSshChildren, options.requireRefreshTag === true, seam),
       )
     }
     if (remote) {
@@ -278,10 +332,24 @@ export function roundRemoteCallsRow(calls: RemoteCalls): Readonly<Record<string,
   if (total !== calls.sshChildren) {
     throw new Error(`round SSH split cannot be proven: named ${total} of ${calls.sshChildren} children`)
   }
-  const group = (refresh: boolean) => {
+  // 29730 (@cto 316f70ff R1): an unproven split journals its counts and says so in its own text, and omits
+  // every split field, so a trip can never read as a plausible zero.
+  const unproven = calls.sshCalls.filter(
+    (call): call is SshCall & { unproven: string } => typeof call.unproven === "string",
+  )
+  if (unproven.length > 0) {
+    return {
+      ...remoteCallsRow(calls),
+      ssh_split: "unproven",
+      // EVERY reason, not the first: two calls can trip two different trips in one round, and a reader that saw only
+      // one of them would hunt the wrong line (@cto 1ce8f965, optional item).
+      ssh_split_reason: unproven.map((call) => call.unproven).join("; "),
+    }
+  }
+  const group = (bucket: SshCall["bucket"]) => {
     const grouped = new Map<string, { command: string; repository: string; ssh_children: number }>()
     for (const call of calls.sshCalls) {
-      if (call.refresh !== refresh) continue
+      if (call.bucket !== bucket) continue
       const key = JSON.stringify([call.command, call.repository])
       const row = grouped.get(key) ?? { command: call.command, repository: call.repository, ssh_children: 0 }
       row.ssh_children += call.sshChildren
@@ -291,15 +359,21 @@ export function roundRemoteCallsRow(calls: RemoteCalls): Readonly<Record<string,
       .sort((a, b) => a.repository.localeCompare(b.repository) || a.command.localeCompare(b.command))
       .map((row) => `${row.ssh_children} ${row.command} @ ${row.repository}`)
   }
-  const refreshCalls = group(true)
-  const beyondCalls = group(false)
-  const refreshChildren = calls.sshCalls.filter((call) => call.refresh).reduce((sum, call) => sum + call.sshChildren, 0)
+  const children = (bucket: SshCall["bucket"]) =>
+    calls.sshCalls.filter((call) => call.bucket === bucket).reduce((sum, call) => sum + call.sshChildren, 0)
+  const refreshChildren = children("refresh")
+  const deriveChildren = children("derive")
   return {
     ...remoteCallsRow(calls),
     refresh_boundary: "GIT_SUPER_PHASE=refresh on component-main fetch",
+    // The round's own component-main read, which names itself with a seam (@cto 316f70ff R2): its own bucket
+    // beside the refresh, so a derivation round's split is provable instead of permanently unproven.
+    derive_boundary: `YRD_SEAM=${DERIVE_COMPONENT_MAIN_SEAM} on component-main fetch`,
     refresh_ssh_children: refreshChildren,
-    beyond_refresh_ssh_children: calls.sshChildren - refreshChildren,
-    refresh_calls: refreshCalls,
-    beyond_refresh_calls: beyondCalls,
+    derive_ssh_children: deriveChildren,
+    beyond_refresh_ssh_children: calls.sshChildren - refreshChildren - deriveChildren,
+    refresh_calls: group("refresh"),
+    derive_calls: group("derive"),
+    beyond_refresh_calls: group("beyond"),
   }
 }
