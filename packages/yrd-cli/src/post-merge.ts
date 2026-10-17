@@ -5,6 +5,7 @@ import { createProcess } from "@yrd/process"
 import {
   appendChangeEvent,
   closingReferencesOf,
+  Conflict,
   enumerateChangeSegments,
   readBranchHistory,
   readIssueEffect,
@@ -60,15 +61,29 @@ export function readPostMergeIssueDiagnostics(workdir: string): readonly IssueDi
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue
     const attempt = raw as Record<string, unknown>
     if (attempt.issueActions === undefined) continue // legacy attempts predate issue actions
-    if (!Array.isArray(attempt.issueActions)) throw new Error(`post-merge attempt evidence malformed at ${path}: issueActions is not an array`)
+    if (!Array.isArray(attempt.issueActions)) {
+      throw new Error(`post-merge attempt evidence malformed at ${path}: issueActions is not an array`)
+    }
     for (const action of attempt.issueActions) {
-      if (typeof action !== "object" || action === null || Array.isArray(action)) throw new Error(`post-merge attempt evidence malformed at ${path}: issue action is not an object`)
+      if (typeof action !== "object" || action === null || Array.isArray(action)) {
+        throw new Error(`post-merge attempt evidence malformed at ${path}: issue action is not an object`)
+      }
       const item = action as Record<string, unknown>
-      if (typeof item.status !== "string" || typeof item.branch !== "string" || typeof item.mergedEvent !== "string" || typeof item.mergeSha !== "string" || typeof item.providerId !== "string") {
-        throw new Error(`post-merge attempt evidence malformed at ${path}: issue action lacks status, branch, mergedEvent, mergeSha or providerId`)
+      if (
+        typeof item.status !== "string" ||
+        typeof item.branch !== "string" ||
+        typeof item.mergedEvent !== "string" ||
+        typeof item.mergeSha !== "string" ||
+        typeof item.providerId !== "string"
+      ) {
+        throw new Error(
+          `post-merge attempt evidence malformed at ${path}: issue action lacks status, branch, mergedEvent, mergeSha or providerId`,
+        )
       }
       if (item.status !== "failed" && item.status !== "unavailable" && item.status !== "record-failed") continue
-      if (typeof item.diagnostic !== "string") throw new Error(`post-merge attempt evidence malformed at ${path}: failed issue action lacks diagnostic`)
+      if (typeof item.diagnostic !== "string") {
+        throw new Error(`post-merge attempt evidence malformed at ${path}: failed issue action lacks diagnostic`)
+      }
       found.push({
         branch: item.branch,
         mergedEvent: item.mergedEvent,
@@ -81,23 +96,26 @@ export function readPostMergeIssueDiagnostics(workdir: string): readonly IssueDi
   return found
 }
 
-async function closeMergedIssues(input: Readonly<{
-  branches: readonly string[]
-  queue: string
-  store: QueueLocation
-  git: GitRunner
-  projectRoot: string
-  workdir: string
-  cwd: string
-  env?: NodeJS.ProcessEnv
-  report: (message: string) => void
-}>): Promise<Array<Record<string, unknown>>> {
+async function closeMergedIssues(
+  input: Readonly<{
+    branches: readonly string[]
+    queue: string
+    store: QueueLocation
+    git: GitRunner
+    projectRoot: string
+    workdir: string
+    cwd: string
+    env?: NodeJS.ProcessEnv
+    report: (message: string) => void
+    stop?: AbortSignal
+  }>,
+): Promise<Array<Record<string, unknown>>> {
   const outcomes: Array<Record<string, unknown>> = []
   const seen = new Set<string>()
   const hasEffect = (events: readonly import("@yrd/queue-core").Event[], providerId: string): boolean =>
     events.some((event) => readIssueEffect(event)?.providerId === providerId)
 
-  for (const branch of [...new Set(input.branches)]) {
+  for (const branch of new Set(input.branches)) {
     const reading = await readBranchHistory(input.store, input.queue, branch)
     const history = reading.history
     if (history === undefined) throw new Error(`post-merge named branch ${branch} has no event history`)
@@ -131,22 +149,41 @@ async function closeMergedIssues(input: Readonly<{
           cwd: input.cwd,
           env: input.env,
           timeoutMs: UPDATE_TIMEOUT_MS,
-            noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
+          signal: input.stop,
+          noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
         })
         if (!resolved.ok) {
-          const providerId = "yrd1-" + createHash("sha256").update(JSON.stringify([mergeSha, "resolve", null, reference.value])).digest("hex")
+          const providerId =
+            "yrd1-" +
+            createHash("sha256")
+              .update(JSON.stringify([mergeSha, "resolve", null, reference.value]))
+              .digest("hex")
           const diagnostic = resolved.message
-          outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "failed", diagnostic, raw: reference.value })
+          outcomes.push({
+            branch,
+            mergedEvent: mergedEvent.id,
+            mergeSha,
+            providerId,
+            status: "failed",
+            diagnostic,
+            raw: reference.value,
+          })
           input.report(`issuesProvider.resolve failed for ${branch}@${mergeSha}: ${diagnostic}`)
           continue
         }
         const keys = (resolved.envelope.result as { keys: string[] }).keys
         for (const key of keys) {
-          const providerId = "yrd1-" + createHash("sha256").update(JSON.stringify([mergeSha, "close", "completed", key])).digest("hex")
+          const providerId =
+            "yrd1-" +
+            createHash("sha256")
+              .update(JSON.stringify([mergeSha, "close", "completed", key]))
+              .digest("hex")
           if (seen.has(providerId)) continue
           seen.add(providerId)
           let fresh = await readBranchHistory(input.store, input.queue, branch)
-          if (fresh.history === undefined) throw new Error(`post-merge branch ${branch} lost its history before recording ${providerId}`)
+          if (fresh.history === undefined) {
+            throw new Error(`post-merge branch ${branch} lost its history before recording ${providerId}`)
+          }
           if (hasEffect(fresh.history.events, providerId)) {
             outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
             continue
@@ -158,8 +195,9 @@ async function closeMergedIssues(input: Readonly<{
             projectRoot: input.projectRoot,
             cwd: input.cwd,
             env: input.env,
-          timeoutMs: UPDATE_TIMEOUT_MS,
-          noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
+            signal: input.stop,
+            timeoutMs: UPDATE_TIMEOUT_MS,
+            noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
           })
           if (!closed.ok) {
             const diagnostic = closed.message
@@ -168,11 +206,15 @@ async function closeMergedIssues(input: Readonly<{
             continue
           }
           try {
-            const declarationBlob = (await input.git.at(closed.envelope.declaration.repository)([
-              "rev-parse",
-              `${closed.envelope.declaration.commit}:issues.yml`,
-            ])).trim()
-            if (declarationBlob === "") throw new Error(`issues.yml blob is unreadable at ${closed.envelope.declaration.commit}`)
+            const declarationBlob = (
+              await input.git.at(closed.envelope.declaration.repository)([
+                "rev-parse",
+                `${closed.envelope.declaration.commit}:issues.yml`,
+              ])
+            ).trim()
+            if (declarationBlob === "") {
+              throw new Error(`issues.yml blob is unreadable at ${closed.envelope.declaration.commit}`)
+            }
             const issueEffect: AppliedIssueEffect = {
               kind: "issue-effect-v1",
               mergedEvent: mergedEvent.id,
@@ -187,13 +229,19 @@ async function closeMergedIssues(input: Readonly<{
             let recorded = false
             for (let retry = 0; retry < 4 && !recorded; retry++) {
               fresh = await readBranchHistory(input.store, input.queue, branch)
-              if (fresh.history === undefined) throw new Error(`post-merge branch ${branch} lost its history while recording ${providerId}`)
+              if (fresh.history === undefined) {
+                throw new Error(`post-merge branch ${branch} lost its history while recording ${providerId}`)
+              }
+              const selectedTip = fresh.history.state.tip
+              if (selectedTip === undefined) {
+                throw new Error(`post-merge branch ${branch} has no event tip while recording ${providerId}`)
+              }
               if (hasEffect(fresh.history.events, providerId)) {
                 recorded = true
                 break
               }
               try {
-                await appendChangeEvent(input.store, input.queue, branch, fresh.history.state.tip, {
+                await appendChangeEvent(input.store, input.queue, branch, selectedTip, {
                   type: "notified",
                   at: new Date(),
                   commit: mergeSha,
@@ -202,17 +250,24 @@ async function closeMergedIssues(input: Readonly<{
                 })
                 recorded = true
               } catch (error) {
-                if (retry === 3) throw error
                 // A rival append may have fulfilled this identity while the provider ran.
                 const after = await readBranchHistory(input.store, input.queue, branch)
                 if (after.history !== undefined && hasEffect(after.history.events, providerId)) recorded = true
+                else if (!(error instanceof Conflict) || retry === 3) throw error
               }
             }
             if (!recorded) throw new Error(`could not append applied issue effect ${providerId}`)
             outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
           } catch (error) {
             const diagnostic = `provider succeeded but applied effect could not be recorded: ${String(error)}`
-            outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "record-failed", diagnostic })
+            outcomes.push({
+              branch,
+              mergedEvent: mergedEvent.id,
+              mergeSha,
+              providerId,
+              status: "record-failed",
+              diagnostic,
+            })
             input.report(`${branch}@${mergeSha}: ${diagnostic}`)
           }
         }
@@ -313,48 +368,48 @@ export function createPostMerge<C extends Context>(
     try {
       try {
         if (context.update !== undefined && context.updateDue !== false) {
-        const result = await process.run({
-          argv: context.update,
-          cwd: options.cwd,
-          timeoutMs: UPDATE_TIMEOUT_MS,
-          signal: options.stop,
-          onOutput: ({ stream, chunk }) => {
-            const output = stream === "stdout" ? stdout : stderr
-            evidence(output, () => {
-              appendFileSync(output, chunk)
-            })
-          },
-        })
-        const failed =
-          result.exitCode !== 0 ||
-          result.signal !== null ||
-          result.timedOut ||
-          result.stalled ||
-          result.escapedDescendant ||
-          result.sweepFailure !== undefined
-        settled = {
-          status: failed ? "failed" : "succeeded",
-          exitCode: result.exitCode,
-          signal: result.signal,
-          timedOut: result.timedOut,
-          stalled: result.stalled,
-          sweepFailure: result.sweepFailure,
-          escapedDescendant: result.escapedDescendant,
-        }
-        if (failed) {
-          options.report(
-            "issuesProvider.update " +
-              JSON.stringify(context.update) +
-              " failed: exit " +
-              result.exitCode +
-              ", signal " +
-              result.signal +
-              ", timeout " +
-              result.timedOut +
-              "; " +
-              stderr,
-          )
-        }
+          const result = await process.run({
+            argv: context.update,
+            cwd: options.cwd,
+            timeoutMs: UPDATE_TIMEOUT_MS,
+            signal: options.stop,
+            onOutput: ({ stream, chunk }) => {
+              const output = stream === "stdout" ? stdout : stderr
+              evidence(output, () => {
+                appendFileSync(output, chunk)
+              })
+            },
+          })
+          const failed =
+            result.exitCode !== 0 ||
+            result.signal !== null ||
+            result.timedOut ||
+            result.stalled ||
+            result.escapedDescendant ||
+            result.sweepFailure !== undefined
+          settled = {
+            status: failed ? "failed" : "succeeded",
+            exitCode: result.exitCode,
+            signal: result.signal,
+            timedOut: result.timedOut,
+            stalled: result.stalled,
+            sweepFailure: result.sweepFailure,
+            escapedDescendant: result.escapedDescendant,
+          }
+          if (failed) {
+            options.report(
+              "issuesProvider.update " +
+                JSON.stringify(context.update) +
+                " failed: exit " +
+                result.exitCode +
+                ", signal " +
+                result.signal +
+                ", timeout " +
+                result.timedOut +
+                "; " +
+                stderr,
+            )
+          }
         }
       } catch (error) {
         settled = { status: "unavailable", reason: String(error) }
@@ -362,7 +417,13 @@ export function createPostMerge<C extends Context>(
           "issuesProvider.update " + JSON.stringify(context.update) + " unavailable: " + String(error) + "; " + stderr,
         )
       }
-      if (context.merged.length > 0 && options.git !== undefined && options.store !== undefined && context.projectRoot !== undefined && context.queueBranch !== undefined) {
+      if (
+        context.merged.length > 0 &&
+        options.git !== undefined &&
+        options.store !== undefined &&
+        context.projectRoot !== undefined &&
+        context.queueBranch !== undefined
+      ) {
         issueActions = await closeMergedIssues({
           branches: context.merged,
           queue: context.queueBranch,
@@ -373,6 +434,7 @@ export function createPostMerge<C extends Context>(
           cwd: options.cwd,
           env: options.env,
           report: options.report,
+          stop: options.stop,
         })
       } else if (context.merged.length > 0 && context.projectRoot === undefined) {
         options.report("automatic issue close skipped: this queue invocation has no explicit projectRoot")
@@ -381,7 +443,10 @@ export function createPostMerge<C extends Context>(
       options.report("post-merge issue close attempt unavailable: " + String(error))
     } finally {
       evidence(path, () => {
-        writeFileSync(path, JSON.stringify({ ...provenance, ...settled, issueActions, endedAt: new Date().toISOString() }) + "\n")
+        writeFileSync(
+          path,
+          JSON.stringify({ ...provenance, ...settled, issueActions, endedAt: new Date().toISOString() }) + "\n",
+        )
       })
       try {
         await options.cleanup(context)

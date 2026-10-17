@@ -101,6 +101,7 @@ export {
   writeQueueEvent,
   writeQueueOverride,
 } from "./events.ts"
+export { Conflict } from "./git.ts"
 export type { Event } from "./git.ts"
 export type {
   AppliedIssueEffect,

@@ -54,6 +54,8 @@ export type RunIssuesVerbOptions = Readonly<{
   /** Kill the provider after this long without output, once it has written a byte; fails with
    * {@link ISSUES_CODES.providerStalled}. */
   noProgressTimeoutMs?: number
+  /** Cancel and reap this provider when its caller stops. */
+  signal?: AbortSignal
   /** Where the provider's stderr passes through. Defaults to this process's stderr. */
   stderr?: (text: string) => void
 }>
@@ -243,6 +245,9 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
 
   const argv = substituteArgv(declared, request.values)
   const command = commandText(declared)
+  const stopped = (): IssuesFailure =>
+    fail(1, ISSUES_CODES.providerFailed, `${verb} ${command}`, `stopped: ${String(options.signal?.reason)}`)
+  if (options.signal?.aborted) return stopped()
   const decoder = new TextDecoder()
   await using provider = createProcess({ cwd: options.cwd, env })
   let result: Awaited<ReturnType<typeof provider.run>>
@@ -251,6 +256,7 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       argv,
       cwd: options.cwd,
       env,
+      signal: options.signal,
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
       onOutput: ({ stream, chunk }) => {
@@ -258,6 +264,7 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       },
     })
   } catch (error) {
+    if (options.signal?.aborted) return stopped()
     if ((error as { code?: unknown } | null)?.code === "ENOENT") {
       return fail(1, ISSUES_CODES.providerMissing, `${verb} ${command}`, `command ${JSON.stringify(argv[0])} not found`)
     }
@@ -268,6 +275,7 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       `could not start: ${error instanceof Error ? error.message : String(error)}`,
     )
   }
+  if (options.signal?.aborted) return stopped()
   if (result.timedOut) {
     return fail(1, ISSUES_CODES.providerTimedOut, `${verb} ${command}`, `killed after ${options.timeoutMs} ms`)
   }

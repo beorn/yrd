@@ -6777,12 +6777,15 @@ export async function readEventListing(
     !undatedDraftsFetched &&
     !draftWindowChanged
   ) {
-    return withPostMergeIssueDiagnostics({
-      ...cache.reading,
-      ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
-      observation: await observe(cache.queueRefs, cache.branchRefs),
-      journals: await journalsFor(cache.reading.history, cache.reading.all),
-    }, workdir)
+    return withPostMergeIssueDiagnostics(
+      {
+        ...cache.reading,
+        ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
+        observation: await observe(cache.queueRefs, cache.branchRefs),
+        journals: await journalsFor(cache.reading.history, cache.reading.all),
+      },
+      workdir,
+    )
   }
 
   // 3. Head listing: runs at most once a minute, or when event-ref fetch reports a change
@@ -6813,12 +6816,15 @@ export async function readEventListing(
     !draftWindowChanged
   ) {
     cache.lastHeadListingAt = headListingAt
-    return withPostMergeIssueDiagnostics({
-      ...cache.reading,
-      ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
-      observation: await observe(cache.queueRefs, branchRefs),
-      journals: await journalsFor(cache.reading.history, cache.reading.all),
-    }, workdir)
+    return withPostMergeIssueDiagnostics(
+      {
+        ...cache.reading,
+        ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
+        observation: await observe(cache.queueRefs, branchRefs),
+        journals: await journalsFor(cache.reading.history, cache.reading.all),
+      },
+      workdir,
+    )
   }
 
   // 4. Full read
@@ -7123,7 +7129,10 @@ function withPostMergeIssueDiagnostics<Run extends JournalSummary>(
             (failure) => row.merge === failure.mergeSha && events.some((event) => event.id === failure.mergedEvent),
           )
           if (matched.length === 0) return { row, events }
-          const added = matched.map((failure) => `issuesProvider close failed for merged event ${failure.mergedEvent} at ${failure.mergeSha} (${failure.providerId}): ${failure.diagnostic}`)
+          const added = matched.map(
+            (failure) =>
+              `issuesProvider close failed for merged event ${failure.mergedEvent} at ${failure.mergeSha} (${failure.providerId}): ${failure.diagnostic}`,
+          )
           return { row: { ...row, diagnostic: [row.diagnostic, ...added].filter(Boolean).join("; ") }, events }
         }),
       ] as const
@@ -7132,12 +7141,18 @@ function withPostMergeIssueDiagnostics<Run extends JournalSummary>(
   const decorate = (rows: readonly Row[]): readonly Row[] =>
     rows.map((row) => {
       const matched = (byBranch.get(row.branch) ?? []).filter((failure) =>
-        history.get(row.branch)?.some(
-          (entry) => entry.row.merge === failure.mergeSha && entry.events.some((event) => event.id === failure.mergedEvent),
-        ),
+        history
+          .get(row.branch)
+          ?.some(
+            (entry) =>
+              entry.row.merge === failure.mergeSha && entry.events.some((event) => event.id === failure.mergedEvent),
+          ),
       )
       if (matched.length === 0) return row
-      const added = matched.map((failure) => `issuesProvider close failed for historical merged event ${failure.mergedEvent} at ${failure.mergeSha} (${failure.providerId}): ${failure.diagnostic}`)
+      const added = matched.map(
+        (failure) =>
+          `issuesProvider close failed for historical merged event ${failure.mergedEvent} at ${failure.mergeSha} (${failure.providerId}): ${failure.diagnostic}`,
+      )
       return { ...row, diagnostic: [row.diagnostic, ...added].filter(Boolean).join("; ") }
     })
   return { ...reading, history, all: decorate(reading.all), document: decorate(reading.document) }
