@@ -328,10 +328,11 @@ it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
                     const calls = existsSync(closeCalls)
                       ? readFileSync(closeCalls, "utf8").trim().split("\n").filter(Boolean)
                       : []
-                    expect(calls).toHaveLength(2)
+                expect(calls, diagnostics.join(" ")).toHaveLength(2)
                   },
                   { timeout: 5000 },
                 )
+                await vi.waitFor(() => expect(existsSync(finished)).toBe(true), { timeout: 5000 })
                 stop.abort()
               } else if (rounds > 3) stop.abort()
             },
@@ -364,7 +365,7 @@ it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
       .filter((n) => n.endsWith(".json"))
       .map((n) => attemptAt(join(workdir, "post-merge", n)))
     expect(attempts.length).toBeGreaterThan(0)
-    expect(attempts.every((attempt) => attempt.status === "succeeded")).toBe(true)
+    expect(attempts.every((attempt) => attempt.status === "succeeded"), JSON.stringify(attempts)).toBe(true)
     expect(existsSync(finished)).toBe(true)
     const calls = readFileSync(closeCalls, "utf8")
       .trim()
@@ -392,7 +393,7 @@ it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
       const history = byBranch.get(branch)!
       const mergeSha = history.state.merge!
       const mergedEvent = history.state.ending!.id
-      const committerTime = await git(["show", "-s", "--format=%cI", mergeSha])
+      const committerTime = new Date(await git(["show", "-s", "--format=%cI", mergeSha])).toISOString()
       expect(durable(branch)).toContainEqual(
         expect.objectContaining({
           mergedEvent,
