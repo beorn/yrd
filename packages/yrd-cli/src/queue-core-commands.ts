@@ -711,18 +711,54 @@ export async function coreQueueCommand(
    * so an addressed miss and a repository that never declared one at all
    * produce the identical call. The cure below is worded to hold for both.
    */
-  const noQueueOnTarget = (ref: string): YrdCliExitCode => {
+  const noQueueOnTarget = async (ref: string): Promise<YrdCliExitCode> => {
+    let cleanup = ""
+    if (request.command === "drop-local" || request.command === "drop-issue") {
+      cleanup = "For retained-checkout cleanup, run from the superproject that vendors it.\n"
+      const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd())
+      if (authorRepo !== undefined) {
+        let owner: string | undefined
+        try {
+          const authorGit = gitIn(authorRepo, undefined, selection, { env })
+          owner = (await authorGit(["rev-parse", "--show-superproject-working-tree"])).trim()
+        } catch (cause) {
+          cleanup =
+            `For retained-checkout cleanup, cannot read the author superproject at ${authorRepo}: ${cause instanceof Error ? cause.message : String(cause)}. ` +
+            "Run from the superproject that vendors it.\n"
+        }
+        if (owner !== undefined) {
+          const root = owner === "" ? authorRepo : owner
+          const ownBranch = owner === "" && request.command === "drop-local"
+          const command = formatYrdCommand(
+            io,
+            [
+              "drop",
+              ownBranch ? request.branch : "<root-branch>",
+              "--local",
+              "--tip",
+              ownBranch ? request.tip : "<root-tip>",
+              "--issue",
+              request.issue ?? "<issue>",
+              "--reason",
+              request.reason ?? "<why>",
+              "--release-checkout",
+              "--submodules",
+            ],
+            root,
+          )
+          cleanup =
+            `For retained-checkout cleanup, preview from the author repository's owning root: ${command}\n` +
+            "Use the root branch and its exact tip, review the receipt, then repeat with --apply.\n"
+        }
+      }
+    }
     io.stderr(
       `yrd: ${NAMED[request.command]} needs a queue, and ${ref} carries no .yrd.yml. ` +
         "The queue's config lives on the queue branch itself. Point at a different one with " +
         "--queue <repo>#<branch>, or, if this repository is a submodule with none of its own, " +
         "the superproject that vendors it gates the change instead, by checking the gitlink, " +
         `not a declaration here. Repository: ${repo}.\n` +
-        (request.command === "drop-local" || request.command === "drop-issue"
-          ? "For retained-checkout cleanup, run from that superproject: " +
-            "yrd drop <root-branch> --local --tip <root-tip> --issue <issue> --reason <why> --release-checkout --submodules. " +
-            "This is a preview; use the root branch and its exact tip, review the receipt, then repeat with --apply.\n"
-          : ""),
+        cleanup,
     )
     return 2
   }
