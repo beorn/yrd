@@ -925,8 +925,9 @@ export function runnerLine(
   facts: RunnerFacts | undefined,
   now: Date,
   options: Readonly<{ held?: HeldChange; waiting?: number; stopped?: StopFact | null; queue?: string }> = {},
+  formatCommand?: (argv: readonly string[]) => string,
 ): RunnerLine {
-  const line = runnerLineOf(facts, now, options)
+  const line = runnerLineOf(facts, now, options, formatCommand)
   const note = flowNote(facts?.service)
   const oldest = facts?.service.kind === "beating" ? facts.service.flow?.oldestWaiting : undefined
   const age = oldest === undefined ? undefined : now.getTime() - Date.parse(oldest.openedAt)
@@ -974,6 +975,7 @@ function runnerLineOf(
   facts: RunnerFacts | undefined,
   now: Date,
   options: Readonly<{ held?: HeldChange; waiting?: number; stopped?: StopFact | null; queue?: string }>,
+  formatCommand?: (argv: readonly string[]) => string,
 ): RunnerLine {
   const { held, waiting = 0, stopped, queue = "main" } = options
   const state = runnerWord(facts, held !== undefined, stopped)
@@ -1136,11 +1138,11 @@ function runnerLineOf(
           stop === undefined
             ? `${word} since ${clock(stoppedAt)}${publishedClaim?.Holding === undefined ? "" : ` on ${publishedClaim.Holding}`}`
             : change === undefined
-              ? `paused: by ${stop.by === "" ? "an operator" : stop.by} since ${clock(stoppedAt)} · resume: yrd queue resume`
+              ? `paused: by ${stop.by === "" ? "an operator" : stop.by} since ${clock(stoppedAt)} · resume: ${formatCommand?.(["queue", "resume"]) ?? "yrd queue resume"}`
               : // The spec's cure text, with ONE correction: the verb is
                 // `yrd queue withdraw` (cli.ts). There is no `yrd cancel`, and a
                 // cure a reader cannot run is worse than no cure at all.
-                `line stopped at ${change} since ${clock(stoppedAt)} — fix and yrd merge <fix>, or yrd queue withdraw ${change}, or yrd queue resume`,
+                `line stopped at ${change} since ${clock(stoppedAt)} — fix and ${formatCommand?.(["merge", "<fix>"]) ?? "yrd merge <fix>"}, or ${formatCommand?.(["queue", "withdraw", change]) ?? `yrd queue withdraw ${change}`}, or ${formatCommand?.(["queue", "resume"]) ?? "yrd queue resume"}`,
         state,
       }
     }
@@ -1153,7 +1155,7 @@ function runnerLineOf(
         ...at,
         detail: gone === undefined ? detail : `${gone.cause} · ${detail}`,
         ...(gone?.since === undefined ? {} : { duration: `${word} ${since(gone.since)}` }),
-        holds: `${gone?.kind === "stopped" ? (gone.stopReason ?? "") : ""} · start: yrd queue up`,
+        holds: `${gone?.kind === "stopped" ? (gone.stopReason ?? "") : ""} · start: ${formatCommand?.(["queue", "up"]) ?? "yrd queue up"}`,
         state,
       }
     }

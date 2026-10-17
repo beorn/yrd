@@ -18,6 +18,7 @@ import * as silvery from "silvery"
 import { render } from "silvery/test"
 import { journalKey, watchRows, type Journals, type JournalRun, type Row } from "@yrd/queue-core"
 import { ListingPage, printListing } from "../src/watch-print.tsx"
+import { formatYrdCommand } from "../src/command-format.ts"
 import type { WatchSnapshot } from "../src/watch-pane.tsx"
 import { journalRun } from "../../../tests/support/journal-run.ts"
 
@@ -517,5 +518,46 @@ describe("the flow page: four bands, one row per change", () => {
     const text80 = await paint(snap(80), 80)
     expect(text80).toContain("resume: yrd queue resume")
     expect(text80).toContain("stuck=yrd-check-unresolved")
+
+    // A viewer's executable and cwd differ from the runner's producer context.
+    const io = {
+      stdout() {},
+      stderr() {},
+      localBranchProtections: null,
+      formatYrdCommand: (argv: readonly string[], cwd: string) => `viewer ${cwd} yrd ${argv.join(" ")}`,
+    }
+    const paused = { ...snap(120), queue: "example.test/selected#release" }
+    const options = {
+      columns: 480,
+      color: false,
+      formatCommand: (argv: readonly string[]) =>
+        formatYrdCommand(io, [...argv, "--queue", paused.queue], "/viewer/worktree"),
+    }
+    const printed = await printListing(paused, options)
+    expect(printed).toContain(`viewer /viewer/worktree yrd queue resume --queue ${paused.queue}`)
+
+    const stuck = await printListing(
+      {
+        ...paused,
+        stopped: { ...paused.stopped!, change: `task/incident@${"1".repeat(40)}` },
+      },
+      options,
+    )
+    expect(stuck).toContain(`viewer /viewer/worktree yrd merge <fix> --queue ${paused.queue}`)
+    expect(stuck).toContain(`viewer /viewer/worktree yrd queue withdraw task/incident --queue ${paused.queue}`)
+    expect(stuck).toContain(`viewer /viewer/worktree yrd queue resume --queue ${paused.queue}`)
+
+    const stopped = await printListing(
+      {
+        ...paused,
+        stopped: null,
+        runner: {
+          journalDir: "/runner/logs",
+          service: { kind: "stopped", graceful: true, why: "service stopped", cause: "operator stop" },
+        },
+      },
+      options,
+    )
+    expect(stopped).toContain(`viewer /viewer/worktree yrd queue up --queue ${paused.queue}`)
   })
 })

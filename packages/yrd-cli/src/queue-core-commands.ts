@@ -4275,6 +4275,7 @@ export async function coreQueueCommand(
         const single = one.rows.length === 1 ? one.rows[0] : undefined
         const snapshot = snapshotOf(one)
         const listing = await printListing(snapshot, {
+          formatCommand: (argv) => formatYrdCommand(io, [...argv, "--queue", snapshot.queue], io.cwd ?? repo),
           color: io.color === true,
           columns: io.columns ?? 120,
           ...(one.scope === undefined ? {} : { scope: one.scope }),
