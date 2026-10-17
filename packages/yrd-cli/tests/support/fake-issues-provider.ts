@@ -4,6 +4,7 @@
  *   text   print a line that is not JSON and exit 0
  *   exit3  write "fake provider refused" to stderr and exit 3
  *   sleep  sleep 30 s (the caller's timeout must kill it)
+ *   stall  write one stderr line, then sleep 30 s silently (the no-progress lease must kill it)
  */
 const [mode, ...rest] = process.argv.slice(2)
 if (mode === "json") {
@@ -15,6 +16,9 @@ if (mode === "json") {
   process.stderr.write("fake provider refused\n")
   process.exit(3)
 } else if (mode === "sleep") {
+  await Bun.sleep(30_000)
+} else if (mode === "stall") {
+  process.stderr.write("fake provider: started\n")
   await Bun.sleep(30_000)
 } else {
   process.stderr.write(`fake provider: unknown mode ${String(mode)}\n`)

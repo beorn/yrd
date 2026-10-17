@@ -149,6 +149,44 @@ describe("yrd issues", () => {
     expect(envelope.result).toEqual({ argv: ["from-origin", "k"] })
   })
 
+  it.each(["git@github.com:beorn/hh.git", "https://github.com/beorn/hh.git", "ssh://git@host/x.git"])(
+    "reads the root when origin %s is remote by positive match (rule: remote classification)",
+    async (url) => {
+      const root = project({ "issues.yml": declare(ALL_READS) })
+      git(root, "remote", "add", "origin", url)
+      const ran = await yrd(root, "issues", "view", "k")
+      expect(ran.exitCode, ran.stderr).toBe(0)
+      expect(envelopeOf(ran).declaration.repository).toBe(root)
+    },
+  )
+
+  it.each(["../hh.git", "./state.git"])(
+    "refuses origin %s by name, never resolving it as git would (rule: unsupported origin spelling)",
+    async (url) => {
+      const root = project({ "issues.yml": declare(ALL_READS) })
+      git(root, "remote", "add", "origin", url)
+      const ran = await yrd(root, "issues", "view", "k")
+      expect(ran.exitCode).toBe(1)
+      expect(ran.stdout).toBe("")
+      expect(ran.stderr).toContain(`yrd-issues-origin-unsupported: ${root}: origin ${JSON.stringify(url)}`)
+    },
+  )
+
+  it.each([
+    ["exists but is not a repository", (base: string) => mkdtempSync(join(base, "plain-"))],
+    ["does not exist", (base: string) => join(base, "missing.git")],
+  ])("refuses a local origin path that %s (rule: local origin must be a repository)", async (_label, origin) => {
+    const base = scratch()
+    const root = project({ "issues.yml": declare(ALL_READS) }, join(base, "root"))
+    const path = origin(base)
+    git(root, "remote", "add", "origin", path)
+    const ran = await yrd(root, "issues", "view", "k")
+    expect(ran.exitCode).toBe(1)
+    expect(ran.stderr).toContain(
+      `yrd-issues-origin-not-a-repository: ${root}: origin ${JSON.stringify(path)} names a local path`,
+    )
+  })
+
   it("refuses an unknown top-level key by name, listing the verbs (rule: keys are verbs)", async () => {
     const root = project({ "issues.yml": declare({ ...ALL_READS, veiw: provider("json") }) })
     const ran = await yrd(root, "issues", "view", "k")
@@ -260,5 +298,25 @@ describe("yrd issues", () => {
     const root = project({ "issues.yml": declare({ list: provider("sleep") }) })
     const outcome = await runIssuesVerb({ verb: "list", args: [], cwd: root, timeoutMs: 300, stderr: () => {} })
     expect(outcome).toMatchObject({ ok: false, exitCode: 1, code: "yrd-issues-provider-timed-out" })
+  })
+
+  it("passes --timeout-ms to the provider bound, and refuses a non-positive one with exit 2 (rule: CLI timeout)", async () => {
+    const root = project({ "issues.yml": declare({ list: provider("sleep") }) })
+    const ran = await yrd(root, "issues", "list", "--timeout-ms", "300")
+    expect(ran.exitCode).toBe(1)
+    expect(ran.stderr).toContain(`yrd-issues-provider-timed-out: list ${BUN} ${PROVIDER} sleep: killed after 300 ms`)
+    expect((await yrd(root, "issues", "list", "--timeout-ms", "0")).exitCode).toBe(2)
+  })
+
+  it("names a stalled provider as its own cause, not an exit code (rule: stalled is distinct)", async () => {
+    const root = project({ "issues.yml": declare({ list: provider("stall") }) })
+    const outcome = await runIssuesVerb({
+      verb: "list",
+      args: [],
+      cwd: root,
+      noProgressTimeoutMs: 300,
+      stderr: () => {},
+    })
+    expect(outcome).toMatchObject({ ok: false, exitCode: 1, code: "yrd-issues-provider-stalled" })
   })
 })
