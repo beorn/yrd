@@ -862,9 +862,11 @@ export function RunnerRow({
         </Cells>
       )}
       {cureText === undefined ? null : (
-        <Text color={forced ?? color} minWidth={0} paddingLeft={(layout.timeWidth ?? 5) + 1} wrap="wrap">
-          {cureText}
-        </Text>
+        <Box paddingLeft={(layout.timeWidth ?? 5) + 1} minWidth={0}>
+          <Text color={forced ?? color} minWidth={0} wrap="wrap">
+            {cureText}
+          </Text>
+        </Box>
       )}
     </Box>
   )
