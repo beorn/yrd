@@ -8,7 +8,7 @@
  *           cancelled record (`yrd queue show`, bead close, the /yrd skill)
  * @testonly none
  */
-import { permitCensus } from "../../../tests/support/permit-census.ts"
+import { permitCensus } from "./support/permit-census.ts"
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"

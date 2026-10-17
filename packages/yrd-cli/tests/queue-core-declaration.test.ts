@@ -6,7 +6,7 @@
  * @level l2 (`coreQueueCommand` against a real remote and clone)
  * @consumer Every queue command.
  */
-import { permitCensus } from "../../../tests/support/permit-census.ts"
+import { permitCensus } from "./support/permit-census.ts"
 import {
   existsSync,
   chmodSync,
