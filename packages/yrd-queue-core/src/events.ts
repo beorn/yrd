@@ -23,7 +23,7 @@ export { queueRef } from "./refs.ts"
 export { changesRef } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
 import { assertPlainEventQueueConfig } from "./event-config.ts"
-import { createLegacyBackend, gitIn, seamProcess } from "./git.ts"
+import { createLegacyBackend, gitIn, seamProcess, isAncestor, mergeChangesNothing } from "./git.ts"
 import type { Git, GitSelection } from "./git.ts"
 import type { QueueConfig } from "./config.ts"
 import { checkTrailer, readCheckTrailer } from "./check.ts"
@@ -1051,7 +1051,14 @@ export type DropRequest = Readonly<{
   /** Optional host policy; absence means a standalone caller with no host policy. */
   protections?: (head: string, issue?: string) => Promise<readonly string[]>
 }>
-export type Dropped = Readonly<{ queue: string; branch: string; head: string; event: string; archive?: string }>
+export type Dropped = Readonly<{
+  queue: string
+  branch: string
+  head: string
+  event: string
+  archive?: string
+  main?: Readonly<{ ref: string; tip: string }>
+}>
 export type SetBranchIgnoredRequest = Readonly<
   { queue: string; branch: string; by: string } & ({ ignored: true; reason: string } | { ignored: false })
 >
@@ -2433,12 +2440,14 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   const state = selected?.state ?? initial
   const branchRef = `refs/heads/${branch}`
   const archive = request.localArchive
+  const retiringDraft = request.retire !== undefined && state.status === "draft" && state.ending === undefined
+  let main: Dropped["main"]
   if (request.retire !== undefined) {
     if (archive !== undefined) throw new Error(`${branch}: choose origin retirement or local archive custody`)
     if (!COMMIT_OID.test(request.retire.tip) || !request.note?.trim()) {
       throw new Error(`${branch}: drop --retire needs a full --tip and nonempty --reason`)
     }
-    if (state.ending === undefined || isOpen(state.status) || selectedTip === null) {
+    if (!retiringDraft && (state.ending === undefined || isOpen(state.status) || selectedTip === null)) {
       throw new Error(`${branch}: drop --retire requires an already-ended change; found ${state.status}`)
     }
   }
@@ -2486,6 +2495,25 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
         `an exact-tip archive from another date or actor is not accepted as proof`,
     )
   }
+  const protectDraft = async (): Promise<void> => {
+    if (!retiringDraft || head === undefined) return
+    const reasons = await request.protections?.(head, state.issue)
+    if (reasons !== undefined && reasons.length > 0) throw new Error(`${branch}: kept: ${reasons.join("; ")}`)
+  }
+  if (retiringDraft) {
+    await protectDraft()
+    if (head === undefined) throw new Error(`${branch}: draft retirement lost its exact head`)
+    const mainRef = `refs/heads/${queue}`
+    const target = (await fetchRefs(store.repo, mainRef, store.remote)).get(mainRef)
+    if (target === undefined) throw new Error(`${branch}: published ${mainRef} is absent at ${store.remote}`)
+    const git = gitIn(store.repo, undefined, store.selection)
+    if (!(await isAncestor(git, head, target)) && !(await mergeChangesNothing(git, target, head))) {
+      throw new Error(
+        `${branch}@${head}: merging into fresh ${mainRef}@${target} changes main; keep this draft or use explicit unmerged abandonment with yrd drop ${branch} --reason <why>`,
+      )
+    }
+    main = { ref: mainRef, tip: target }
+  }
   if (state.ending !== undefined && head !== undefined) {
     const kept = history.flatMap((event) => event.links)
     if (!kept.includes(head)) {
@@ -2506,8 +2534,7 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
     await retireOriginBranch(store, {
       branch,
       head: keptHead,
-      eventRef: ref,
-      eventTip,
+      authority: { kind: "event", ref, tip: eventTip },
       archive: originArchive,
       protections: protections === undefined ? undefined : () => protections(keptHead, state.issue),
     })
@@ -2516,7 +2543,7 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
     ])
     return originArchive
   }
-  if (request.retire !== undefined) {
+  if (request.retire !== undefined && !retiringDraft) {
     if (head === undefined || selectedTip === null || state.ending === undefined) {
       throw new Error(`${branch}: terminal retirement lost its exact head or ending`)
     }
@@ -2583,13 +2610,19 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
           input,
         ]
       : decide(history, input)
+  await protectDraft()
   const result = await chain.append(planned, {
     expect: selectedTip,
     // The event keeps H, so this branch delete only removes its name.
     ...(archiveUpdate === undefined
       ? head === undefined
         ? {}
-        : { also: [{ ref: branchRef, expect: head, oid: retiringEnded ? head : null }] }
+        : {
+            also: [
+              ...(main === undefined ? [] : [{ ref: main.ref, expect: main.tip, oid: main.tip }]),
+              { ref: branchRef, expect: head, oid: retiringEnded ? head : null },
+            ],
+          }
       : { also: [archiveUpdate] }),
   })
   const written = result.events.findLast((event) => event.type === "cancelled")?.id
@@ -2601,7 +2634,7 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   if (head !== undefined && archive === undefined) {
     await deleteCandidateRefsForShas(gitIn(store.repo, undefined, store.selection), store.repo, store.remote, [head])
   }
-  return { queue, branch, event: written, head: keptHead }
+  return { queue, branch, event: written, head: keptHead, ...(main === undefined ? {} : { main }) }
 }
 
 type ChangeHistory = Readonly<{ state: EventChange; events: readonly Event[] }>

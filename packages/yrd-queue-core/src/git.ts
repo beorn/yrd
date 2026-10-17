@@ -1153,6 +1153,21 @@ export async function isAncestor(git: Git, sha: string, of: string): Promise<boo
   }
 }
 
+/** Whether Git's conflict-free merge of an exact tip into main leaves main's tree unchanged. */
+export async function mergeChangesNothing(git: Git, main: string, tip: string): Promise<boolean> {
+  let tree: string
+  try {
+    tree = (await git(["merge-tree", "--write-tree", "--no-messages", main, tip])).trim()
+  } catch (error) {
+    if (isExit(error, 1)) return false
+    throw error
+  }
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(tree)) {
+    throw new Error(`merge-tree ${main} ${tip} returned no exact tree oid`)
+  }
+  return tree === (await git(["rev-parse", `${main}^{tree}`])).trim()
+}
+
 /**
  * The heads among these the target does not contain, from ONE `rev-list` of
  * them not reachable from it. Empty heads: no git. Exit 1 is not an answer

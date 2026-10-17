@@ -1390,20 +1390,23 @@ function buildProgram(
       .description(
         "end a change, or archive and retire local branches; root issue cleanup applies by default using exact origin custody; --submodules previews because it expands to component repositories",
       )
-      .option("--local", "archive and retire only the named local branch; requires --tip")
+      .option(
+        "--local",
+        "archive and retire the named local branch, including explicit unmerged abandonment; requires --tip",
+      )
       .option(
         "--release-checkout",
         "retain checkout bytes and detach its exact branch; requires --local, --tip, --issue and --reason; preview unless --apply",
       )
       .option(
         "--retire",
-        "archive and retire an already-ended origin branch without changing its ending; requires --tip and --reason",
+        "retire an ended origin branch, or end a draft whose exact tip is already accepted by fresh origin main; requires --tip and --reason",
       )
       .option("--tip <commit>", "expected full commit for --local or --retire; an advanced branch is kept")
       .option("--issue <id>", "retire issue-bound local refs; with --local, carry the reviewed issue identity")
       .option(
         "--submodules",
-        "include registered submodule branches using the issue's branch-name mapping; preview by default",
+        "include local and origin branches in registered component author stores using the issue's mapping; preview by default",
       )
       .option("--dry-run", "preview issue cleanup without archiving or deleting branches")
       .option("--apply", "apply issue cleanup after rechecking exact tips and protections"),

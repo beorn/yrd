@@ -99,8 +99,7 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
     await retireOriginBranch(store, {
       branch: request.branch,
       head,
-      eventRef: ref,
-      eventTip: record,
+      authority: { kind: "event", ref, tip: record },
       archive,
       protections: protections === undefined ? undefined : () => protections(head, state.issue),
     })

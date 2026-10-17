@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { archiveRefFor, ensureArchiveRef, findArchiveRefFor, readArchiveRows } from "git-super/archive-ref"
 import { readCommitSubmodules } from "git-super/commit-graph"
@@ -17,6 +17,10 @@ import {
   listRefs,
   openLog,
   readBranchHistory,
+  readEventQueueWithChanges,
+  initial,
+  evolve,
+  isOpen,
   readConfig,
   resolveGitSelection,
   readRemoteCommit,
@@ -24,6 +28,8 @@ import {
   refAt,
   registeredWorktrees,
   retireLocalBranch,
+  retireOriginBranch,
+  publishRetirementArchive,
   remoteHead,
   remoteUrl,
   type Git,
@@ -51,44 +57,288 @@ export async function readBranchProtections(
   return io.localBranchProtections(input)
 }
 
-/** The existing per-repository custody step, shared by component drops and retained checkout release. */
-async function publishRetirementArchive(
+/** The existing issue retirement walk, coordinated with component author stores before root removal. */
+export async function retireIssueBranches(
   input: Readonly<{
-    repo: string
+    authorRepo: string
     git: Git
-    selection: GitSelection
     remote: string
-    archiveRef: string
-    tip: string
+    selection: GitSelection
+    env?: NodeJS.ProcessEnv
+    io: YrdCliIO
+    config: QueueConfig
+    request: Readonly<{ issue: string; by: string; reason?: string; apply?: boolean }>
+    workdir: string
+    mode: string
+    targetLabel: string
+    command: string
+    branchIssue(branch: string, recordedIssue?: string): string | undefined
   }>,
-): Promise<void> {
-  const { repo, git, selection, remote, archiveRef, tip } = input
-  const archive = ensureArchiveRef(repo, archiveRef, tip)
-  if (!archive.ok) throw new Error(archive.reason)
-  const store = createEventStore(repo, remote, selection)
-  const previous = (await listRefs(archiveRef, store)).get(archiveRef)
-  if (previous !== undefined && previous !== tip) {
-    throw new Error(`${repo}: origin archive holds ${previous}, not ${tip}`)
+) {
+  const {
+    authorRepo,
+    git: authorGit,
+    selection,
+    env,
+    io,
+    config,
+    request,
+    workdir,
+    mode,
+    targetLabel,
+    branchIssue,
+  } = input
+  const issue = request.issue
+
+  const eventStore = createEventStore(authorRepo, input.remote, selection)
+  const reading = await readEventQueueWithChanges(eventStore, config.target.branch)
+  const landings: { event: string; path: string; tip: string }[] = []
+  for (const history of reading.histories.values()) {
+    let state = initial
+    for (const event of history.events) {
+      state = evolve(state, event)
+      if (event.type === "merged") {
+        for (const pin of state.landedGitlinks ?? []) {
+          landings.push({ event: event.id, path: pin.path, tip: pin.target })
+        }
+      }
+    }
   }
-  if (store.backend.publish === undefined) throw new Error(`${repo}: Gitomic backend lacks archive publication`)
-  await store.backend.publish(repo, [{ ref: archiveRef, expect: previous ?? "0".repeat(tip.length), oid: tip }], remote)
-  if ((await readRemoteCommit(git, remote, archiveRef)) !== tip) {
-    throw new Error(`${repo}: archive custody did not read back; local refs kept`)
+  type Row = {
+    repo: string
+    path: string
+    branch: string
+    head: string
+    reason: string
+    detail?: string
+    archiveRef?: string
+    custody?: Readonly<{ kind: "published-main"; ref: string; tip: string }>
   }
+  const eligible: Row[] = []
+  const removed: Row[] = []
+  const kept: Row[] = []
+  const failed: Row[] = []
+  const inspected: string[] = []
+  const excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[] = []
+  const unnumbered: { repo: string; branch: string; head: string }[] = []
+  const log = openLog(join(workdir, "logs"))
+  // THE HEADER FIRST, before the walk writes any retirement record. A journal
+  // whose first record is not a run or Git row is one the projection reader
+  // refuses (`invalid record before run header`) and every reader older than
+  // it refuses with it — one record then denies the whole queue its positions
+  // (28791 learned this for the sibling drop path; this path wrote records
+  // with no header at all). The queue row marks the preamble complete so the
+  // journal never reads as a run that died in it (24470).
+  log.write({
+    command: input.command,
+    config: config.blob,
+    kind: "run",
+    target: targetLabel,
+  })
+  log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
+  type Candidate = {
+    repo: string
+    path: string
+    git: Git
+    branch: string
+    head: string
+    local: boolean
+    originHead?: string
+    remote: string
+    target: string
+    targetRef: string
+    ownQueue: boolean
+  }
+  const candidates: Candidate[] = []
+  const seenStores = new Set<string>()
+  const visit = async (repository: string, path: string, commit: string): Promise<void> => {
+    const childGit = gitIn(repository, undefined, selection, { env })
+    try {
+      if (
+        !existsSync(join(repository, ".git")) ||
+        realpathSync((await childGit(["rev-parse", "--show-toplevel"])).trim()) !== realpathSync(repository)
+      ) {
+        throw new Error(`registered repository ${repository} is not materialized at its named path`)
+      }
+      inspected.push(repository)
+      const metadata = await inspectCheckoutGitMetadata(repository)
+      if (!seenStores.has(metadata.commonDirectory)) {
+        seenStores.add(metadata.commonDirectory)
+        const heads = await listRefs("refs/heads/", createLocalEventStore(repository, selection))
+        const remote = path === "" ? eventStore.remote : await remoteUrl(childGit, "origin")
+        const origins = await listRefs("refs/heads/", createEventStore(repository, remote, selection))
+        const targetBranch = path === "" ? config.target.branch : await originHead(childGit)
+        const counts = { repo: repository, target: 0, unrelated: 0, unnumbered: 0 }
+        excluded.push(counts)
+        const selected: { branch: string; head: string; local: boolean; originHead?: string }[] = []
+        for (const [ref, head] of new Map([...origins, ...heads])) {
+          const branch = ref.slice("refs/heads/".length)
+          const bound =
+            io.branchIssue !== undefined || /^(task|exp)\//u.test(branch)
+              ? branchIssue(branch, path === "" ? reading.histories.get(branch)?.state.issue : undefined)
+              : undefined
+          if (branch === targetBranch) counts.target++
+          else if (bound !== issue) {
+            if (bound === undefined) {
+              counts.unnumbered++
+              unnumbered.push({ repo: repository, branch, head })
+            } else counts.unrelated++
+          } else selected.push({ branch, head, local: heads.has(ref), originHead: origins.get(ref) })
+        }
+        if (selected.length > 0) {
+          const targetRef = `refs/heads/${targetBranch}`
+          const target = await readRemoteCommit(childGit, remote, targetRef)
+          if (target === undefined) {
+            throw new Error(`registered repository ${repository} has no ${remote}#${targetBranch}`)
+          }
+          const ownQueue =
+            path !== "" && (await readConfig(childGit, target, { remote, branch: targetBranch })) !== undefined
+          candidates.push(
+            ...selected.map((row) => ({
+              ...row,
+              repo: repository,
+              path,
+              git: childGit,
+              remote,
+              target,
+              targetRef,
+              ownQueue,
+            })),
+          )
+        }
+      }
+      // Even a shared root store can have distinct materialized component author stores.
+      for (const child of await readCommitSubmodules(seamProcess(childGit, repository), repository, commit)) {
+        await visit(join(repository, child.path), path === "" ? child.path : `${path}/${child.path}`, child.target)
+      }
+    } catch (cause) {
+      failed.push({ repo: repository, path, branch: "", head: commit, reason: "unreadable", detail: String(cause) })
+    }
+  }
+  try {
+    await visit(authorRepo, "", (await authorGit(["rev-parse", "HEAD"])).trim())
+    for (const root of await registeredWorktrees(authorGit)) {
+      if (realpathSync(root.path) === realpathSync(authorRepo)) continue
+      if (root.head === undefined) {
+        failed.push({
+          repo: root.path,
+          path: "",
+          branch: root.branch ?? "",
+          head: "",
+          reason: "unreadable",
+          detail: "registered author worktree has no HEAD",
+        })
+      } else await visit(root.path, "", root.head)
+    }
+    // Prefer a native local author store for a shared origin arm; inspect every store before removal.
+    const originOwners = new Map<string, Candidate>()
+    const key = (row: Candidate) => `${row.remote}\0${row.branch}`
+    for (const candidate of candidates) {
+      if (candidate.originHead === undefined) continue
+      const prior = originOwners.get(key(candidate))
+      if (prior === undefined || (!prior.local && candidate.local)) originOwners.set(key(candidate), candidate)
+    }
+    candidates.sort(
+      (a, b) => Number(a.path === "") - Number(b.path === "") || b.path.split("/").length - a.path.split("/").length,
+    )
+    for (const candidate of candidates) {
+      const origin = originOwners.get(key(candidate)) === candidate
+      if (!candidate.local && !origin) continue
+      const { repo, path, branch, head } = candidate
+      const row = { repo, path, branch, head }
+      if (candidate.ownQueue || (path === "" && isOpen(reading.histories.get(branch)?.state.status ?? "draft"))) {
+        kept.push({
+          ...row,
+          reason: "held",
+          detail: candidate.ownQueue
+            ? `component owns a queue at ${candidate.remote}#${candidate.targetRef}; its ending event must authorize retirement`
+            : "root change is still open",
+        })
+        continue
+      }
+      const arm = path === "" ? [...kept, ...failed].find((arm) => arm.path !== "") : undefined
+      if (arm !== undefined) {
+        kept.push({
+          ...row,
+          reason: "held",
+          detail: `child ${arm.repo} ${arm.branch}: ${arm.detail ?? arm.reason}; root kept for retry`,
+        })
+        continue
+      }
+      try {
+        const retire = createLandedBranchRetirement({
+          repo,
+          git: candidate.git,
+          selection,
+          remote: candidate.remote,
+          target: candidate.target,
+          targetRef: candidate.targetRef,
+          ...(path === "" ? { queue: config.target.branch } : {}),
+        })
+        const result = await retire({
+          path,
+          landings,
+          branch,
+          tip: head,
+          actor: request.by,
+          issue,
+          reason: request.reason,
+          date: new Date().toISOString().slice(0, 10),
+          dryRun: !request.apply,
+          log,
+          local: candidate.local,
+          origin,
+          protections: async () => (await readBranchProtections(io, { repo, branch, tip: head, issue })).protections,
+        })
+        const output = {
+          ...row,
+          reason: result.reason,
+          ...(result.detail === undefined ? {} : { detail: result.detail }),
+          archiveRef: result.archiveRef,
+          ...(result.custody === "main"
+            ? { custody: { kind: "published-main" as const, ref: candidate.targetRef, tip: candidate.target } }
+            : {}),
+        }
+        if (result.outcome === "eligible") eligible.push(output)
+        else if (result.outcome === "removed") removed.push(output)
+        else if (result.outcome === "failed") failed.push({ ...output, reason: "failed", detail: result.reason })
+        else kept.push(output)
+      } catch (cause) {
+        failed.push({ ...row, reason: "failed", detail: String(cause) })
+      }
+    }
+  } finally {
+    log.finish()
+  }
+  const report = {
+    issue,
+    repo: authorRepo,
+    apply: request.apply === true,
+    mode,
+    inspected,
+    excluded,
+    unnumbered,
+    eligible,
+    removed,
+    kept,
+    failed,
+  }
+  return report
 }
 
-/** Plain component-local cleanup has no queue event; its declared owner's existing log owns the result. */
-export async function retireComponentLocalBranch(
+/** Component cleanup has no queue event; its declared owner's existing log owns the result. */
+export async function retireComponentBranch(
   input: Readonly<{
     repo: string
     git: Git
     selection: GitSelection
     env?: NodeJS.ProcessEnv
     io: YrdCliIO
+    destination: "local" | "origin"
     request: Readonly<{ branch: string; tip: string; by: string; issue?: string; reason?: string }>
   }>,
 ) {
-  const { repo, git, selection, env, io, request } = input
+  const { repo, git, selection, env, io, request, destination } = input
   try {
     lstatSync(join(repo, ".yrd.yml"))
     throw new Error(`${repo}: local .yrd.yml exists but the selected target has no declaration`)
@@ -117,17 +367,63 @@ export async function retireComponentLocalBranch(
       throw new Error(`${repo}: own origin target declares .yrd.yml; run local retirement against that queue`)
     }
     const log = openLog(join(await workdirOf(ownerGit, { cwd: owner, env }), "logs"))
-    log.write({ kind: "run", command: "drop --local", target: `origin/${queue}`, config: config.blob })
+    log.write({
+      kind: "run",
+      command: destination === "local" ? "drop --local" : "drop --retire",
+      target: `origin/${queue}`,
+      config: config.blob,
+    })
     const date = new Date().toISOString().slice(0, 10)
     let attemptedArchive: string | undefined
     try {
       const archiveRef =
         findArchiveRefFor(repo, request.branch, request.tip) ?? archiveRefFor(request.branch, request.by, date)
-      const observedTip = await refAt(git, `refs/heads/${request.branch}`)
-      if (observedTip === undefined) {
+      const observedTip =
+        destination === "local"
+          ? await refAt(git, `refs/heads/${request.branch}`)
+          : await readRemoteCommit(git, remote, `refs/heads/${request.branch}`)
+      if (observedTip === undefined && destination === "local") {
         throw new Error(`${repo}: refs/heads/${request.branch} is absent; nothing was removed`)
       }
       const merged = await isAncestor(git, request.tip, target)
+      if (destination === "origin") {
+        const row = { repo, branch: request.branch, head: observedTip ?? request.tip }
+        const custody = { kind: "published-main" as const, ref: `refs/heads/${targetBranch}`, tip: target }
+        const retire = createLandedBranchRetirement({ repo, git, selection, remote, target, targetRef: custody.ref })
+        const result = await retire({
+          path: "",
+          landings: [],
+          branch: request.branch,
+          tip: request.tip,
+          actor: request.by,
+          issue: request.issue,
+          reason: request.reason,
+          date,
+          log,
+          local: false,
+          origin: true,
+          protections: async () =>
+            (
+              await readBranchProtections(io, {
+                repo,
+                branch: request.branch,
+                tip: request.tip,
+                issue: request.issue,
+              })
+            ).protections,
+        })
+        const output = {
+          ...row,
+          reason: result.reason,
+          detail: result.detail,
+          ...(result.custody === "main" ? { custody } : {}),
+        }
+        return {
+          removed: result.outcome === "removed" ? [output] : [],
+          kept: result.outcome === "kept" ? [output] : [],
+          failed: result.outcome === "failed" ? [output] : [],
+        }
+      }
       const protections = async (): Promise<readonly string[]> => {
         const host = (
           await readBranchProtections(io, { repo, branch: request.branch, tip: request.tip, issue: request.issue })
@@ -170,7 +466,12 @@ export async function retireComponentLocalBranch(
         if (preview.outcome !== "eligible") result = preview
         else {
           attemptedArchive = archiveRef
-          await publishRetirementArchive({ repo, git, selection, remote, archiveRef, tip: request.tip })
+          const archive = ensureArchiveRef(repo, archiveRef, request.tip)
+          if (!archive.ok) throw new Error(archive.reason)
+          await publishRetirementArchive(createEventStore(repo, remote, selection), {
+            archive: archiveRef,
+            head: request.tip,
+          })
           result = await retireLocalBranch({ ...retirement, protections })
         }
       } else result = await retireLocalBranch({ ...retirement, protections })
@@ -569,13 +870,11 @@ export async function releaseRetainedCheckouts(
       return report
     }
     for (const { row, remote } of candidates) {
-      await publishRetirementArchive({
-        repo: row.repo,
-        git: readGit(row.repo),
-        selection: input.selection,
-        remote,
-        archiveRef: row.archiveRef,
-        tip: row.head,
+      const archive = ensureArchiveRef(row.repo, row.archiveRef, row.head)
+      if (!archive.ok) throw new Error(archive.reason)
+      await publishRetirementArchive(createEventStore(row.repo, remote, input.selection), {
+        archive: row.archiveRef,
+        head: row.head,
       })
     }
     for (const candidate of candidates) {
@@ -1217,6 +1516,7 @@ export async function retireMergedComponentAuthors(
         selection: input.selection,
         remote: author.remote,
         target,
+        targetRef: "refs/heads/main",
       })
       const result = await retire({
         path: author.path,
@@ -1293,6 +1593,8 @@ type LandedCandidate = Omit<LocalBranchRetirement, "repo" | "git" | "disposition
     path: string
     landings: readonly LandingPin[]
     reason?: string
+    local?: boolean
+    origin?: boolean
   }>
 
 /** One store's origin-custody judgment, shared by explicit landing candidates and manual issue selection.
@@ -1305,6 +1607,8 @@ export function createLandedBranchRetirement(
     selection: GitSelection
     remote: string
     target: string
+    targetRef: string
+    queue?: string
   }>,
 ) {
   return async (
@@ -1317,7 +1621,19 @@ export function createLandedBranchRetirement(
     }
   > => {
     const { repo, git, target } = store
-    const { path: _path, landings: _landings, reason, ...retirement } = candidate
+    const { path: _path, landings: _landings, reason, local = true, origin = false, ...retirement } = candidate
+    const remoteTip = origin ? await readRemoteCommit(git, store.remote, `refs/heads/${candidate.branch}`) : undefined
+    if (remoteTip !== undefined && remoteTip !== candidate.tip) {
+      return {
+        outcome: "kept",
+        reason: "moved",
+        detail: `origin branch moved: expected ${candidate.tip}, found ${remoteTip}`,
+      }
+    }
+    if (origin) {
+      const reasons = await candidate.protections()
+      if (reasons.length > 0) return { outcome: "kept", reason: "held", detail: reasons.join("; ") }
+    }
     const custody = (await isAncestor(git, candidate.tip, target)) ? target : undefined
     const proof = { kind: "ancestry" as const }
     if (custody === undefined) {
@@ -1327,13 +1643,44 @@ export function createLandedBranchRetirement(
         detail: `exact branch head ${candidate.tip} is not an ancestor of target ${target}; kept for owner review`,
       }
     }
-    const landed = await retireLocalBranch({
-      ...retirement,
-      repo,
-      git,
-      reason: reason ?? `landed by ${proof.kind}`,
-      disposition: { kind: "landed", target: custody, proof },
-    })
+    const landed = local
+      ? await retireLocalBranch({
+          ...retirement,
+          repo,
+          git,
+          reason: reason ?? `landed by ${proof.kind}`,
+          disposition: { kind: "landed", target: custody, proof },
+        })
+      : {
+          outcome: candidate.dryRun ? ("eligible" as const) : ("removed" as const),
+          reason: reason ?? "merged by ancestry",
+        }
+    if (origin && !candidate.dryRun && landed.outcome === "removed" && remoteTip !== undefined) {
+      const eventStore = createEventStore(repo, store.remote, store.selection)
+      if (store.queue !== undefined) {
+        await drop(eventStore, {
+          queue: store.queue,
+          branch: candidate.branch,
+          by: candidate.actor,
+          retire: { tip: candidate.tip },
+          note: reason ?? "merged by ancestry",
+          protections: () => candidate.protections(),
+        })
+      } else {
+        await retireOriginBranch(eventStore, {
+          branch: candidate.branch,
+          head: candidate.tip,
+          authority: { kind: "published-main", ref: store.targetRef, tip: target },
+          protections: () => candidate.protections(),
+        })
+      }
+      candidate.log.write({
+        kind: "observation",
+        branch: candidate.branch,
+        scope: "branch-retirement",
+        reason: `${repo}: retired origin ${candidate.branch}@${candidate.tip}; ${store.targetRef}@${target} contains its exact tip`,
+      })
+    }
     return { ...landed, custody: "main" }
   }
 }

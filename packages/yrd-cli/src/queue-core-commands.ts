@@ -29,7 +29,6 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
-import { readCommitSubmodules } from "git-super/commit-graph"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
 import { readIssueDisplay } from "./issue-resolver.ts"
@@ -39,11 +38,11 @@ import { createEnvironmentCleanup, type ClosedEnvironment } from "./env-cleanup.
 import { environmentInventory } from "./env-commands.ts"
 import {
   captureMergedComponentAuthors,
-  createLandedBranchRetirement,
   retireMergedComponentAuthors,
   retireMergedRootAuthor,
   releaseRetainedCheckouts,
-  retireComponentLocalBranch,
+  retireComponentBranch,
+  retireIssueBranches,
   readBranchProtections,
 } from "./branch-retirement.ts"
 import { sweepRoundOutputInRound } from "./log-retention.ts"
@@ -61,9 +60,6 @@ import {
   claimWorktrees,
   directMergeLine,
   drop,
-  seamProcess,
-  initial,
-  evolve,
   retireLocalBranch,
   pauseLine,
   eventDirectMergeCommits,
@@ -867,16 +863,30 @@ export async function coreQueueCommand(
   }
   const captured = await withRemoteSeam("declaration", declaration)
   if (captured === undefined) {
-    if (request.command === "drop-local" && !request.releaseCheckout) {
+    if (
+      (request.command === "drop-local" && !request.releaseCheckout) ||
+      (request.command === "drop" && request.retire !== undefined)
+    ) {
+      const tip = request.command === "drop-local" ? request.tip : request.retire?.tip
+      if (tip === undefined) return noQueueOnTarget(targetLabel)
       const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd())
       if (authorRepo === undefined) throw new Error("drop --local requires the authoring repository as cwd")
-      const report = await retireComponentLocalBranch({
+      const report = await retireComponentBranch({
         repo: authorRepo,
         git: gitIn(authorRepo, undefined, selection, { env }),
         selection,
         env,
         io,
-        request,
+        destination: request.command === "drop-local" ? "local" : "origin",
+        request:
+          request.command === "drop-local"
+            ? request
+            : {
+                branch: request.branch,
+                tip,
+                by: request.by,
+                reason: request.reason,
+              },
       }).catch((cause: unknown) => {
         throw new Error(
           `${authorRepo}: component retirement failed: ${cause instanceof Error ? cause.message : String(cause)}`,
@@ -1690,182 +1700,43 @@ export async function coreQueueCommand(
         }
       }
       if (request.command === "drop-issue" && request.submodules) {
-        const issue = request.issue
-
-        const eventStore = createEventStore(authorRepo, await remoteUrl(git, config.target.remote), selection)
-        const reading = await readEventQueueWithChanges(eventStore, config.target.branch)
-        const landings: { event: string; path: string; tip: string }[] = []
-        for (const history of reading.histories.values()) {
-          let state = initial
-          for (const event of history.events) {
-            state = evolve(state, event)
-            if (event.type === "merged") {
-              for (const pin of state.landedGitlinks ?? []) {
-                landings.push({ event: event.id, path: pin.path, tip: pin.target })
-              }
-            }
-          }
-        }
-        type Row = {
-          repo: string
-          path: string
-          branch: string
-          head: string
-          reason: string
-          detail?: string
-          archiveRef?: string
-        }
-        const eligible: Row[] = []
-        const removed: Row[] = []
-        const kept: Row[] = []
-        const failed: Row[] = []
-        const inspected: string[] = []
-        const excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[] = []
-        const unnumbered: { repo: string; branch: string; head: string }[] = []
-        const log = openLog(join(workdir, "logs"))
-        // THE HEADER FIRST, before the walk writes any retirement record. A journal
-        // whose first record is not a run or Git row is one the projection reader
-        // refuses (`invalid record before run header`) and every reader older than
-        // it refuses with it — one record then denies the whole queue its positions
-        // (28791 learned this for the sibling drop path; this path wrote records
-        // with no header at all). The queue row marks the preamble complete so the
-        // journal never reads as a run that died in it (24470).
-        log.write({
-          command: NAMED[request.command],
-          config: config.blob,
-          kind: "run",
-          target: targetLabel,
-        })
-        log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
-        const visit = async (repository: string, path: string, commit: string): Promise<void> => {
-          const childGit = gitIn(repository, undefined, selection, { env })
-          try {
-            // A missing child .git must never let Git walk upward and operate on its parent.
-            if (
-              !existsSync(join(repository, ".git")) ||
-              realpathSync((await childGit(["rev-parse", "--show-toplevel"])).trim()) !== realpathSync(repository)
-            ) {
-              throw new Error(`registered repository ${repository} is not materialized at its named path`)
-            }
-            inspected.push(repository)
-            const heads = await listRefs("refs/heads/", createLocalEventStore(repository, selection))
-            const targetBranch = path === "" ? config.target.branch : "main"
-            const candidates: { branch: string; head: string }[] = []
-            const counts = { repo: repository, target: 0, unrelated: 0, unnumbered: 0 }
-            excluded.push(counts)
-            for (const [ref, head] of heads) {
-              const branch = ref.slice("refs/heads/".length)
-              const bound =
-                io.branchIssue !== undefined || /^(task|exp)\//u.test(branch)
-                  ? branchIssue(branch, path === "" ? reading.histories.get(branch)?.state.issue : undefined)
-                  : undefined
-              if (branch === targetBranch || bound !== issue) {
-                if (branch === targetBranch) counts.target++
-                else if (bound === undefined) {
-                  counts.unnumbered++
-                  unnumbered.push({ repo: repository, branch, head })
-                } else counts.unrelated++
-              } else candidates.push({ branch, head })
-            }
-            if (candidates.length > 0) {
-              const remote = path === "" ? eventStore.remote : await remoteUrl(childGit, "origin")
-              const target = await readRemoteCommit(childGit, remote, `refs/heads/${targetBranch}`)
-              if (target === undefined) {
-                throw new Error(`registered repository ${repository} has no ${remote}#${targetBranch}`)
-              }
-              const retire = createLandedBranchRetirement({
-                repo: repository,
-                git: childGit,
-                selection,
-                remote,
-                target,
-              })
-              for (const { branch, head } of candidates) {
-                const row = { repo: repository, path, branch, head }
-                const result = await retire({
-                  path,
-                  landings,
-                  branch,
-                  tip: head,
-                  actor: request.by,
-                  issue,
-                  reason: request.reason,
-                  date: new Date().toISOString().slice(0, 10),
-                  dryRun: !request.apply,
-                  log,
-                  protections: async () =>
-                    (await readBranchProtections(io, { repo: repository, branch, tip: head, issue })).protections,
-                })
-                const output = {
-                  ...row,
-                  reason: result.reason,
-                  ...(result.detail === undefined ? {} : { detail: result.detail }),
-                  archiveRef: result.archiveRef,
-                }
-                if (result.outcome === "eligible") eligible.push(output)
-                else if (result.outcome === "removed") removed.push(output)
-                else if (result.outcome === "failed") {
-                  failed.push({ ...output, reason: "failed", detail: result.reason })
-                } else kept.push(output)
-              }
-            }
-            for (const child of await readCommitSubmodules(seamProcess(childGit, repository), repository, commit)) {
-              await visit(
-                join(repository, child.path),
-                path === "" ? child.path : `${path}/${child.path}`,
-                child.target,
-              )
-            }
-          } catch (error) {
-            // Report the named unreadable repository and exit nonzero after examining the remaining stores.
-            failed.push({
-              repo: repository,
-              path,
-              branch: "",
-              head: commit,
-              reason: "unreadable",
-              detail: String(error),
-            })
-          }
-        }
-        try {
-          await visit(authorRepo, "", (await authorGit(["rev-parse", "HEAD"])).trim())
-        } finally {
-          log.finish()
-        }
-        const report = {
-          issue,
-          repo: authorRepo,
-          apply: request.apply === true,
+        const report = await retireIssueBranches({
+          authorRepo,
+          git: authorGit,
+          remote: await remoteUrl(git, config.target.remote),
+          selection,
+          env,
+          io,
+          request,
+          config,
+          workdir,
           mode,
-          inspected,
-          excluded,
-          unnumbered,
-          eligible,
-          removed,
-          kept,
-          failed,
-        }
+          targetLabel,
+          command: NAMED[request.command],
+          branchIssue,
+        })
         emit(
           io,
           options.json,
           report,
-          `issue ${issue}: inspected ${inspected.length} repositories in ${authorRepo}; eligible ${eligible.length}, retired ${removed.length}, kept ${kept.length}, failed ${failed.length}\n${mode}` +
-            excluded
+          `issue ${report.issue}: inspected ${report.inspected.length} repositories in ${authorRepo}; eligible ${report.eligible.length}, retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}\n${mode}` +
+            report.excluded
               .map(
                 (row) =>
                   `\n${row.repo}: excluded ${row.target} target, ${row.unrelated} unrelated, ${row.unnumbered} unnumbered${row.unnumbered > 0 ? " (named below)" : ""}`,
               )
               .join("") +
-            unnumbered.map((row) => `\n${row.repo} ${row.branch}: unnumbered (${row.head.slice(0, 12)})`).join("") +
-            [...eligible, ...removed, ...kept, ...failed]
+            report.unnumbered
+              .map((row) => `\n${row.repo} ${row.branch}: unnumbered (${row.head.slice(0, 12)})`)
+              .join("") +
+            [...report.eligible, ...report.removed, ...report.kept, ...report.failed]
               .map(
                 (row) =>
                   `\n${row.repo} ${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`,
               )
               .join(""),
         )
-        return failed.length === 0 ? 0 : 1
+        return report.failed.length === 0 ? 0 : 1
       }
       const issue = request.issue === undefined ? undefined : request.issue
       if (local && (request.branch === config.target.branch || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(request.tip))) {
