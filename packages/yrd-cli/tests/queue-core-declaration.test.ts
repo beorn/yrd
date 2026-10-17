@@ -3678,6 +3678,7 @@ describe("component-local retirement without a component queue", () => {
     "root-retired",
     "advanced",
     "protection-error",
+    "missing-protections-reader",
     "archive-collision",
     "malformed-declaration",
     "unreadable-declaration",
@@ -3780,6 +3781,9 @@ describe("component-local retirement without a component queue", () => {
       if (mode === "protection-error") throw new Error("host protection authority unavailable")
       return { protections: mode === "held" ? ["fixture owner hold"] : [], evidence: [] }
     }
+    // An untyped embedder can omit wiring; that is not an explicit standalone
+    // repository. Existing cases always install a reader and miss this fault.
+    if (mode === "missing-protections-reader") Reflect.deleteProperty(run.io, "localBranchProtections")
     const nativeLstat = fs.lstatSync
     const unreadable =
       mode === "unreadable-declaration"
@@ -3813,6 +3817,7 @@ describe("component-local retirement without a component queue", () => {
     ).finally(() => unreadable?.mockRestore())
     const failure =
       mode === "protection-error" ||
+      mode === "missing-protections-reader" ||
       mode === "archive-collision" ||
       mode === "publication-refused" ||
       mode === "archive-readback-lost" ||
@@ -3826,6 +3831,7 @@ describe("component-local retirement without a component queue", () => {
       if (mode === "protection-error") {
         expect(run.stdout() + run.stderr()).toContain("host protection authority unavailable")
       }
+      if (mode === "missing-protections-reader") expect(run.stdout() + run.stderr()).toContain("localBranchProtections")
       if (mode === "unreadable-declaration") expect(run.stderr()).toContain("EACCES")
       if (mode === "archive-collision") {
         expect((await git(["ls-remote", "origin", collisionRef])).split("\t")[0]).toBe(baseTip)
