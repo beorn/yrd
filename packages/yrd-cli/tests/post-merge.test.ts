@@ -13,9 +13,11 @@ import { afterEach, expect, it, vi } from "vitest"
 import { createPostMerge, readPostMergeIssueDiagnostics } from "../src/post-merge.ts"
 import { coreQueueCommand, readEventListing } from "../src/queue-core-commands.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
-import { Conflict } from "../../yrd-queue-core/src/git.ts"
+import { Conflict, openEvents } from "../../yrd-queue-core/src/git.ts"
+import { changeInput } from "../../yrd-queue-core/src/events.ts"
 import {
   createEventQueue,
+  changesRef,
   appendChangeEvent,
   createEventStore,
   readBranchHistory,
@@ -211,12 +213,18 @@ it.each([
   { mode: "observed-ff" },
   { mode: "observed-after-target" },
   { mode: "observed-stacked" },
+  { mode: "observed-merge" },
+  { mode: "observed-legacy" },
   { mode: "provider-lost-reply" },
 ] as const)(
   "preserves the real merge queue while exercising post-merge $mode behavior",
   async ({ mode }) => {
     const reconcileAfterQueue =
-      mode.startsWith("append-") || mode === "reuse-pending" || mode === "concurrent" || mode === "provider-lost-reply"
+      mode.startsWith("append-") ||
+      mode === "reuse-pending" ||
+      mode === "concurrent" ||
+      mode === "provider-lost-reply" ||
+      mode === "observed-legacy"
     const expectedCloses = mode.startsWith("observed-") ? 3 : 2
     const root = world(),
       remote = join(root, "remote.git"),
@@ -264,7 +272,7 @@ it.each([
       join(repo, "issues.yml"),
       JSON.stringify({
         resolve:
-          mode === "blob-mismatch"
+          mode === "blob-mismatch" || mode === "observed-legacy"
             ? [
                 "sh",
                 "-c",
@@ -284,7 +292,7 @@ it.each([
       config = await readConfig(git, target, { remote: "origin", branch: "main" })
     if (config === undefined) throw Error("fixture queue lost config")
     const store = createEventStore(repo, "origin", git.selection)
-    await createEventQueue(store, "main", target, config, new Date())
+    const queueTip = await createEventQueue(store, "main", target, config, new Date())
     const queue = async (branch: string, message: string) => {
       await git(["checkout", "--quiet", "-b", branch, "origin/main"])
       writeFileSync(join(repo, branch.replaceAll("/", "-") + ".txt"), branch)
@@ -315,6 +323,16 @@ it.each([
       }
       await git(["add", "."])
       await git(["commit", "--quiet", "-m", message])
+      if (mode === "observed-legacy" && branch === "task/first") {
+        const head = (await git(["rev-parse", "HEAD"])).trim()
+        await git(["push", "--quiet", "origin", branch])
+        // A real pre-Base record, rather than a current submit with its field hidden.
+        await (
+          await openEvents({ ...store, ref: changesRef("main", branch) })
+        ).append([changeInput("opened", { queueTip, at: new Date(), commit: head, by: "fixture" })], { expect: null })
+        await git(["checkout", "--quiet", "main"])
+        return
+      }
       const submitted = await submit(git, "origin", {
         branch,
         submitter: "fixture",
@@ -325,6 +343,7 @@ it.each([
     }
     await queue("task/first", "first\n\nCloses: issue-first")
     const firstSubmittedHead = (await git(["rev-parse", "task/first"])).trim()
+    let firstObservedMerge = firstSubmittedHead
     if (mode === "observed-stacked") {
       await git(["checkout", "--quiet", "-b", "task/aa-stacked", "task/first"])
       writeFileSync(join(repo, "stacked.txt"), "upper source")
@@ -337,6 +356,16 @@ it.each([
       })
       await git(["checkout", "--quiet", "main"])
       await git(["push", "--quiet", "origin", "task/aa-stacked:refs/heads/main"])
+    } else if (mode === "observed-merge") {
+      writeFileSync(join(repo, "unrelated.txt"), "target-only intent")
+      await git(["add", "unrelated.txt"])
+      await git(["commit", "--quiet", "-m", "target work\n\nCloses: issue-unrelated"])
+      await git(["merge", "--quiet", "--no-ff", "task/first", "-m", "delivery\n\nCloses: issue-merge"])
+      firstObservedMerge = (await git(["rev-parse", "HEAD"])).trim()
+      writeFileSync(join(repo, "later.txt"), "later target-only intent")
+      await git(["add", "later.txt"])
+      await git(["commit", "--quiet", "-m", "later work\n\nCloses: issue-later-unrelated"])
+      await git(["push", "--quiet", "origin", "main"])
     } else if (mode.startsWith("observed-")) {
       await git(["push", "--quiet", "origin", "task/first:refs/heads/main"])
       if (mode === "observed-after-target") {
@@ -393,8 +422,8 @@ it.each([
             afterRound: async (outcome) => {
               rounds++
               merged.push(...outcome.merged)
-              if ((mode === "observed-after-target" || mode === "observed-stacked") && merged.includes("task/first")) {
-                expect((await readStatus(store, "main", "task/first")).merge).toBe(firstSubmittedHead)
+              if (mode.startsWith("observed-") && merged.includes("task/first")) {
+                expect((await readStatus(store, "main", "task/first")).merge).toBe(firstObservedMerge)
               }
               await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 10000 })
               expect(existsSync(finished)).toBe(false)
@@ -451,6 +480,33 @@ it.each([
       ).toBe(0)
     } finally {
       stop.abort()
+    }
+    if (mode === "observed-legacy") {
+      const before = (await readBranchHistory(store, "main", "task/first")).history!
+      expect(before.state.status).toBe("merged")
+      expect(trailer(before.events.find((event) => event.type === "opened")!, "Base")).toBeUndefined()
+      expect(trailer(before.events.find((event) => event.type === "merged")!, "Base")).toBeUndefined()
+      await using runner = createPostMerge({
+        workdir,
+        cwd: repo,
+        git,
+        store,
+        cleanup: async () => {},
+        report: (message) => diagnostics.push(message),
+      })
+      runner.nudge({
+        ...context,
+        target: firstObservedMerge,
+        merged: ["task/first"],
+        projectRoot: repo,
+        queueBranch: "main",
+      })
+      await runner[Symbol.asyncDispose]()
+      expect(existsSync(closeCalls)).toBe(false)
+      expect(existsSync(resolveCalls)).toBe(false)
+      expect(diagnostics.join(" ")).toContain("no provable historical base")
+      expect((await readBranchHistory(store, "main", "task/first")).history!.state).toEqual(before.state)
+      return
     }
     if (mode === "stop") {
       expect(merged).toContain("task/second")
@@ -795,6 +851,7 @@ it.each([
         [mode === "delivered-declaration" ? "delivered-issue-first" : "issue-first", "completed"],
         ...(mode === "observed-ff" || mode === "observed-after-target" ? [["issue-older", "completed"]] : []),
         ...(mode === "observed-stacked" ? [["issue-stacked", "completed"]] : []),
+        ...(mode === "observed-merge" ? [["issue-merge", "completed"]] : []),
         [mode === "delivered-declaration" ? "delivered-issue-second" : "issue-second", "completed"],
       ].sort(),
     )
