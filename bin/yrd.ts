@@ -8,4 +8,4 @@
 
 import { runYrdExecutable } from "../packages/yrd-cli/src/cli.ts"
 
-await runYrdExecutable()
+await runYrdExecutable({ localBranchProtections: null })

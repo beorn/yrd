@@ -1710,6 +1710,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   async function listHelp(): Promise<string> {
     let text = ""
     const io: YrdCliIO = {
+      localBranchProtections: null,
       color: false,
       columns: 120,
       cwd: process.cwd(),
