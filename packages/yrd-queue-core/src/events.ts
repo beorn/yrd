@@ -404,6 +404,7 @@ function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [str
     if (type !== "notified" || details.notice !== undefined) {
       throw new TypeError("issue effect belongs on notified and cannot share a notice")
     }
+    if (details.reason !== undefined) throw new TypeError("issue effect cannot carry Reason:")
     checkedIssueEffect(details.issueEffect, "changeInput")
   }
   if (details.retry !== undefined && type !== "stuck") throw new TypeError("Retried: belongs on stuck")

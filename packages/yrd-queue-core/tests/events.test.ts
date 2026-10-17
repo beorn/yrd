@@ -1027,6 +1027,17 @@ describe("ADR-0016 event fold", () => {
     expect(written.props?.some(([key]) => ["For", "To", "Key", "Result"].includes(key))).toBe(false)
   })
 
+  it("rejects a reason on an issue-effect notification", () => {
+    expect(() =>
+      changeInput("notified", {
+        queueTip: A,
+        at: new Date("2026-09-22T14:01:00.000Z"),
+        issueEffect: ISSUE_EFFECT,
+        reason: "audit",
+      }),
+    ).toThrow(/issue effect cannot carry Reason/u)
+  })
+
   it("settles multiple recipients for a stuck event while keeping the stop in place", () => {
     const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
     const verified = evolve(queued, event("verifying", B, [["Commit", B]], [B]))
