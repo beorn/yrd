@@ -79,12 +79,12 @@ export function liftLine(pause: PauseRecord, remote: string, queue: string): str
   const selector = remote === "origin" ? queue : `${remote}#${queue}`
   const resume = `resume queue ${selector} with a reason`
   if (pause.cause === "maintenance") {
-    return `submit after resume; the person who set this maintenance stop lifts it with ${resume}`
+    return `submit after resume; the person who set this maintenance stop must ${resume}`
   }
-  if (pause.cause === "operator" || pause.change === undefined) return `run ${resume} to check and merge work again`
+  if (pause.cause === "operator" || pause.change === undefined) return `${resume} to check and merge work again`
   return (
     `the line waits on ${changeName(pause.change)}; recorded guidance: ${pause.next ?? stuckCures(pause.change.branch)}. ` +
-    `Resuming this queue, once it is repaired, is: ${resume}`
+    `Once it is repaired, ${resume}`
   )
 }
 

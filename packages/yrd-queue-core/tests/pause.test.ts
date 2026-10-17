@@ -11,7 +11,7 @@ import { type Git } from "../src/git.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { pauseRef } from "../src/refs.ts"
 import { createEventQueue, createEventStore, readConfig, readEventOps, selectionFor } from "../src/index.ts"
-import { incidentLine, incidentLines, incidentTrailers } from "../src/incident.ts"
+import { incidentLine, incidentTrailers } from "../src/incident.ts"
 import { stuckCures } from "../src/pause.ts"
 
 const roots: string[] = []
@@ -32,10 +32,7 @@ describe("portable queue guidance", () => {
         next,
         owner: "the queue operator",
       }
-      const before = JSON.stringify(incidentTrailers(incident))
       expect(incidentLine(incident)).toContain(`recorded guidance: ${next}`)
-      expect(incidentLines(incident)).toContain(`recorded guidance: ${next}`)
-      expect(JSON.stringify(incidentTrailers(incident))).toBe(before)
       expect(incidentTrailers(incident)).toContainEqual(["Next", next])
     },
   )

@@ -2764,6 +2764,13 @@ describe("yrd queue up, the service", () => {
 
     for (const dryRun of [true, false]) {
       const accepted = capture(w.work)
+      // A stopped submit must render its current action in the viewer's host
+      // context; the old bare-command assertion could not detect its loss.
+      const commands: { argv: readonly string[]; cwd: string }[] = []
+      accepted.io.formatYrdCommand = (argv, cwd) => {
+        commands.push({ argv, cwd })
+        return "host-selected-resume"
+      }
       expect(
         await coreQueueCommand(
           w.work,
@@ -2775,7 +2782,18 @@ describe("yrd queue up, the service", () => {
       ).toBe(0)
       expect(accepted.stderr()).toContain("paused by @chief")
       expect(accepted.stderr()).toContain("49 new failures on main")
-      expect(accepted.stderr()).toContain("yrd queue resume")
+      expect(accepted.stderr()).toContain("host-selected-resume")
+      expect(commands).toContainEqual({
+        argv: [
+          "queue",
+          "resume",
+          "--reason",
+          "<why>",
+          "--queue",
+          `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`,
+        ],
+        cwd: w.work,
+      })
     }
     const ref = changesRef("main", "task/one")
     expect(await w.git(["ls-remote", "--refs", "origin", ref])).toContain(ref)
