@@ -290,6 +290,16 @@ describe("the queue declaration grammar", () => {
       )
     })
 
+    it("accepts env-retired as a known occasion an entry may name (29720)", () => {
+      const config = parseConfig(
+        "notify:\n  - submitter:\n      on: [merged, env-retired]\n      run: bun tools/notify.ts --to submitter\n",
+        SOURCE,
+      )
+      expect(config.notify).toEqual([
+        { name: "submitter", on: ["merged", "env-retired"], run: "bun tools/notify.ts --to submitter" },
+      ])
+    })
+
     it("warns once, naming the entry and the event, and keeps the events it knows", () => {
       const heard: Array<Readonly<{ entry: string; event: string }>[]> = []
       const config = parseConfig(mixed, {

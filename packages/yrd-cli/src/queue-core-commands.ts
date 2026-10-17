@@ -35,7 +35,7 @@ import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartId
 import { readIssueDisplay } from "./issue-resolver.ts"
 import { createPostMerge } from "./post-merge.ts"
 import { repositoryHere } from "./declaration.ts"
-import { createEnvironmentCleanup } from "./env-cleanup.ts"
+import { createEnvironmentCleanup, type ClosedEnvironment } from "./env-cleanup.ts"
 import { environmentInventory } from "./env-commands.ts"
 import {
   captureMergedComponentAuthors,
@@ -148,6 +148,7 @@ import {
   type PinCarrierPin,
   notifyOutsideRound,
   notifyRetiredRoot,
+  notifyEnvRetired,
   dispatchNotifications,
   overrideNotice,
   HEARTBEAT_GRACE_MS,
@@ -1050,6 +1051,21 @@ export async function coreQueueCommand(
         io,
         env,
         selection,
+        onEnvironmentClosed: async (closed) => {
+          if (closed.branch === undefined || closed.proof === undefined) return
+          try {
+            const change = await readStatus(eventStore, config.target.branch, closed.branch)
+            await tellEnvRetired(
+              { config, git, repo, targetSha: outcome.target, workdir, tempRoot, env },
+              closed,
+              change,
+              outcome.run,
+              io,
+            )
+          } catch (error) {
+            io.stderr(`yrd: could not tell about the retired environment ${closed.path}: ${String(error)}\n`)
+          }
+        },
       })
       await retireMergedComponentAuthors({
         authors: componentAuthors,
@@ -2297,6 +2313,7 @@ export async function coreQueueCommand(
           let log: ReturnType<typeof openLog> | undefined
           try {
             log = openLog(join(workdir, "logs"))
+            const runId = log.id
             log.write({ kind: "run", command: "withdraw", config: config.blob, target: targetLabel })
             log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
             const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
@@ -2313,6 +2330,21 @@ export async function coreQueueCommand(
               io,
               env,
               selection,
+              onEnvironmentClosed: async (closed) => {
+                if (closed.branch === undefined || closed.proof === undefined) return
+                try {
+                  const change = await readStatus(eventStore, config.target.branch, closed.branch)
+                  await tellEnvRetired(
+                    { config, git, repo, targetSha: target, workdir, tempRoot, env },
+                    closed,
+                    change,
+                    runId,
+                    io,
+                  )
+                } catch (error) {
+                  io.stderr(`yrd: could not tell about the retired environment ${closed.path}: ${String(error)}\n`)
+                }
+              },
             })
             for (const branch of retired) {
               if ((await refAt(authorGit, `refs/heads/${branch}`)) === undefined) {
@@ -5459,6 +5491,76 @@ async function tellRetiredRoot(
     }
   }
   return told
+}
+
+/**
+ * Tell the declaration's notify entries that post-merge cleanup retired one
+ * author environment (29720), so its author hears where the folder went
+ * instead of finding it gone. Never throws and never gates: the close
+ * already happened, and a failed delivery is named on stderr like every
+ * other housekeeping tell. The caller reads the change for its submitter;
+ * a close whose branch or proof cannot be named is not announced here (the
+ * round log's environment-cleanup rows still record it).
+ */
+async function tellEnvRetired(
+  context: Readonly<{
+    config: QueueConfig
+    git: Git
+    repo: string
+    targetSha: string
+    workdir: string
+    tempRoot: string
+    env?: NodeJS.ProcessEnv
+    populateReference?: boolean
+  }>,
+  closed: ClosedEnvironment,
+  change: EventChange,
+  run: string,
+  io: YrdCliIO,
+): Promise<void> {
+  if (closed.branch === undefined || closed.proof === undefined) return
+  let handed: readonly Readonly<{ name: string; delivery: string; failure?: string }>[]
+  try {
+    handed = await notifyEnvRetired(
+      {
+        git: context.git,
+        notify: context.config.notify,
+        repo: context.repo,
+        targetSha: context.targetSha,
+        workdir: context.workdir,
+        tempRoot: context.tempRoot,
+        ...(context.config.setup === undefined ? {} : { setup: context.config.setup }),
+        ...(context.env === undefined ? {} : { env: context.env }),
+        ...(context.populateReference === undefined ? {} : { populateReference: context.populateReference }),
+      },
+      {
+        record: "env-retired",
+        change: `${closed.branch}@${closed.head ?? change.commit ?? ""}`,
+        endingId: `${run}:${closed.path}`,
+        endedAt: new Date().toISOString(),
+        ...(change.submitter === undefined ? {} : { submitter: change.submitter }),
+        ...(change.issue === undefined ? {} : { issue: change.issue }),
+        ...(change.merge === undefined ? {} : { merge: change.merge }),
+        environment: closed.path,
+        proof: closed.proof.manifest,
+        retainUntil: closed.proof.retainUntil,
+      },
+    )
+  } catch (error) {
+    handed = [{ delivery: "failed", failure: error instanceof Error ? error.message : String(error), name: "notify" }]
+  }
+  for (const each of handed) {
+    if (each.delivery === "none") {
+      io.stderr(
+        "yrd: no notify entry in .yrd.yml wants env-retired, so nobody was told;" +
+          ` the retired environment ${closed.path} is on the record\n`,
+      )
+    } else if (each.delivery === "failed") {
+      io.stderr(
+        `yrd: could not tell ${each.name} about the retired environment ${closed.path}: ${each.failure ?? "no reason given"}\n`,
+      )
+    }
+  }
 }
 
 function runOptions(

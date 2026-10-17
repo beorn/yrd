@@ -81,6 +81,9 @@ const NOTIFY_SHAPE = "notify: [- <name>: {on: [merged, failed], run: <command>}]
 // 6eb10b57): the service found a write under a retired `%23` queue root. It is
 // an OCCASION, not a change ending — the record has no `change` — and, like
 // `override`, only an entry that names it hears it.
+// `env-retired` (29720) is likewise a housekeeping occasion about a merged
+// change: post-merge cleanup sealed and removed the author's environment.
+// The record names the change so its submitter hears where the folder went.
 export const ENDINGS = [
   "admission-warning",
   "merged",
@@ -91,6 +94,7 @@ export const ENDINGS = [
   "deferred",
   "override",
   "retired-root-written",
+  "env-retired",
   "cancelled",
 ] as const
 const DEFAULT_ENDINGS = ["merged", "failed", "stuck", "merged-direct", "cancelled"] as const

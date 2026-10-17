@@ -154,6 +154,7 @@ async function consumeCloseRequests(
     worktrees: Git
     io: YrdCliIO
     outcome: Pick<QueueRunOutcome, "run" | "log">
+    onEnvironmentClosed?: (closed: ClosedEnvironment) => Promise<void>
   }>,
 ): Promise<Readonly<{ closed: number; handled: ReadonlySet<string>; proofs: readonly WorktreeRemovalProof[] }>> {
   const proofs: WorktreeRemovalProof[] = []
@@ -297,6 +298,7 @@ async function consumeCloseRequests(
     const ending = request.ending
     let exit: YrdCliExitCode
     let output = ""
+    let closedProof: WorktreeRemovalProof | undefined
     try {
       exit = await closeEnvironment(
         request.path,
@@ -335,7 +337,10 @@ async function consumeCloseRequests(
                 )
               }
             },
-        (proof) => proofs.push(proof),
+        (proof) => {
+          closedProof = proof
+          proofs.push(proof)
+        },
       )
     } catch (cause) {
       if (cause instanceof IncompleteCensusError) {
@@ -419,6 +424,12 @@ async function consumeCloseRequests(
       journal(file, request, request.path, "closed", `closed at the request of ${request.requester}`, fingerprint)
       dropCloseRequest(staged)
       closed++
+      await input.onEnvironmentClosed?.({
+        ...(ending === undefined ? {} : { branch: ending.branch }),
+        head: request.head,
+        path: request.path,
+        ...(closedProof === undefined ? {} : { proof: closedProof }),
+      })
       // One close per round, like every other removal here: a waiting merge is
       // judged before another removal (@i/10-yrd eligibility discipline).
       break
@@ -699,6 +710,19 @@ async function proveEnvironmentRemovable(input: {
   }
 }
 
+/**
+ * One environment this cleanup actually closed, handed to the caller so the
+ * author can be told (29720). `branch`/`head` are absent when the registry
+ * could not name them; `proof` is the retained-removal proof the close
+ * reported, absent when the close needed none.
+ */
+export type ClosedEnvironment = Readonly<{
+  branch?: string
+  head?: string
+  path: string
+  proof?: WorktreeRemovalProof
+}>
+
 async function cleanupEnvironments(
   input: Readonly<{
     repo: string
@@ -710,6 +734,8 @@ async function cleanupEnvironments(
     io: YrdCliIO
     env?: NodeJS.ProcessEnv
     selection: GitSelection
+    /** Told about each environment this run closed; telling never gates the close. */
+    onEnvironmentClosed?: (closed: ClosedEnvironment) => Promise<void>
   }>,
   cache: Map<string, CachedEnvironment>,
   progress: CleanupProgress,
@@ -1007,7 +1033,14 @@ async function cleanupEnvironments(
   }
   // 22894: a close no caller here could certify is consumed BEFORE the cursor
   // batch, because this round is the context whose census reads every pid.
-  const requests = await consumeCloseRequests({ workdir, registry, worktrees: registryGit, io, outcome })
+  const requests = await consumeCloseRequests({
+    workdir,
+    registry,
+    worktrees: registryGit,
+    io,
+    outcome,
+    ...(input.onEnvironmentClosed === undefined ? {} : { onEnvironmentClosed: input.onEnvironmentClosed }),
+  })
   proofs.push(...requests.proofs)
   closed += requests.closed
   const lookups = 0
@@ -1125,6 +1158,7 @@ async function cleanupEnvironments(
       const finalProtection = automaticKeep(row.path, readEnvOpenRecord(openingDir))
       if (finalProtection !== undefined) throw new Error(finalProtection)
       let output = ""
+      let closedProof: WorktreeRemovalProof | undefined
       const exit = await closeEnvironment(
         row.path,
         { json: true, noRehome: true },
@@ -1140,7 +1174,10 @@ async function cleanupEnvironments(
         // the pre-22894 loud refusal, never a filed request (22894).
         "refuse",
         undefined,
-        (proof) => proofs.push(proof),
+        (proof) => {
+          closedProof = proof
+          proofs.push(proof)
+        },
       )
       if (exit !== 0) {
         // #27120 AC2: a refusal that names a class is still a refusal — the environment stays — but the
@@ -1159,6 +1196,12 @@ async function cleanupEnvironments(
         closed++
         cache.delete(row.path)
         record(row.path, "closed", "native retained removal proof accepted")
+        await input.onEnvironmentClosed?.({
+          ...(row.branch === undefined ? {} : { branch: row.branch }),
+          head,
+          path: row.path,
+          ...(closedProof === undefined ? {} : { proof: closedProof }),
+        })
       } else if ("kept" in result && result.kept === row.path) preserve(row.path, output.trim())
       else throw new Error(`unproven close result ${output}`)
     } catch (cause) {

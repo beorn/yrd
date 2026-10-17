@@ -69,8 +69,9 @@ export function messageFor(
 export type NotifyRecord =
   | Readonly<{ record: "observed"; notice: ObservationNotice }>
   | OverrideNotice
+  | EnvRetiredNotice
   | Readonly<{
-      record: Exclude<Ending, "observed" | "override" | "retired-root-written">
+      record: Exclude<Ending, "observed" | "override" | "retired-root-written" | "env-retired">
       change: string
       endingId: string
       endedAt: string
@@ -109,6 +110,28 @@ export type NotifyRecord =
       boundMs?: number
     }>
   | RetiredRootNotice
+
+/**
+ * The env-retired occasion (29720): post-merge cleanup sealed and removed the
+ * merged change's author environment. `environment` is the author folder that
+ * is gone, `proof` the sealed retained-copy manifest that can rebuild it, and
+ * `retainUntil` the instant that copy may be dropped. Housekeeping about a
+ * change that already ended in a merge, so nothing is owed on this record;
+ * it exists so the author hears where the folder went instead of finding it
+ * gone.
+ */
+export type EnvRetiredNotice = Readonly<{
+  record: "env-retired"
+  change: string
+  endingId: string
+  endedAt: string
+  submitter?: string
+  issue?: string
+  merge?: string
+  environment: string
+  proof: string
+  retainUntil: string
+}>
 
 /**
  * A retired `%23` queue root that received a write after the cutover
@@ -276,6 +299,18 @@ export async function notifyRetiredRoot(
   notice: RetiredRootNotice,
 ): Promise<readonly Readonly<{ name: string; delivery: Delivery; failure?: string; refused?: string }>[]> {
   return dispatchNotifications(context, "retired-root-written", notice)
+}
+
+/**
+ * Hand an env-retired notice to every `notify:` entry that wants it, outside
+ * any round — post-merge environment cleanup watches no round either. The
+ * retirement already happened; this only ever tells, never gates.
+ */
+export async function notifyEnvRetired(
+  context: OutsideRound,
+  notice: EnvRetiredNotice,
+): Promise<readonly Readonly<{ name: string; delivery: Delivery; failure?: string; refused?: string }>[]> {
+  return dispatchNotifications(context, "env-retired", notice)
 }
 
 /** Run the declaration's existing notify transport for an event-chain ending. */
