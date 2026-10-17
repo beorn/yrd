@@ -13,7 +13,14 @@ import { afterAll, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import { createLegacyBackend, invokeGit, readRemoteCommit } from "../src/git.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
-import { readRemoteCalls, roundRemoteCallsRow, traceRemoteCalls, withRemoteSeam } from "../src/remote-calls.ts"
+import { readComponentMain } from "../src/reference.ts"
+import {
+  DERIVE_COMPONENT_MAIN_SEAM,
+  readRemoteCalls,
+  roundRemoteCallsRow,
+  traceRemoteCalls,
+  withRemoteSeam,
+} from "../src/remote-calls.ts"
 
 const roots: string[] = []
 
@@ -131,8 +138,9 @@ describe("remote calls are counted from git's trace2 event log", () => {
       expect(row.beyond_refresh_calls).toEqual([`1 ls-remote @ ${repository}`])
       expect(existsSync(join(root, "trace2"))).toBe(false)
 
-      // An older git-super still makes the same refresh fetch but cannot mark it;
-      // the round must warn instead of publishing a plausible zero refresh count.
+      // An older git-super still makes the same refresh fetch but cannot mark it. The split is unproven, and
+      // 29730 (@cto 316f70ff R1) journals that as a row carrying its counts: never a plausible zero, and never
+      // no row at all, which is what this used to be when the throw came out of end() inside the row write.
       const oldTrace = traceRemoteCalls(join(root, "old-trace2"), { refresh: true })
       await caller({ ...process.env, ...oldTrace.env, GIT_SSH_COMMAND: ssh })([
         "fetch",
@@ -140,7 +148,23 @@ describe("remote calls are counted from git's trace2 event log", () => {
         selected,
         "+refs/heads/main:refs/remotes/origin/main",
       ])
-      expect(() => roundRemoteCallsRow(oldTrace.end())).toThrow(/untagged component-main refresh/u)
+      const oldRow = roundRemoteCallsRow(oldTrace.end())
+      expect(oldRow).toMatchObject({ ssh_split: "unproven", ssh_children: 1, fetch: 1, unreadable: 0 })
+      expect(String(oldRow.ssh_split_reason)).toMatch(/untagged component-main refresh fetch/u)
+      // The whole key set (@cto 1ce8f965, fold 4): an unproven row carries its counts and its reason, and NO
+      // split field at all - asserting three absences let every other split field slip through unasserted.
+      expect(Object.keys(oldRow).sort()).toEqual([
+        "fetch",
+        "processes",
+        "remote_ms",
+        "seam.unattributed.fetch",
+        "seam.unattributed.remote_ms",
+        "seam.unattributed.ssh_children",
+        "ssh_children",
+        "ssh_split",
+        "ssh_split_reason",
+        "unreadable",
+      ])
       expect(existsSync(join(root, "old-trace2"))).toBe(false)
 
       // Submit observes the same Git call but has no round refresh boundary.
@@ -155,6 +179,144 @@ describe("remote calls are counted from git's trace2 event log", () => {
     },
     60_000,
   )
+
+  const roundFixture = async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-round-unproven-"))
+    roots.push(root)
+    const seed = join(root, "seed")
+    mkdirSync(seed)
+    const git = gitIn(seed)
+    await git(["init", "--quiet", "--initial-branch=main"])
+    await git([
+      "-c",
+      "user.email=calls@yrd.test",
+      "-c",
+      "user.name=yrd",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "one",
+    ])
+    const remote = join(root, "remote.git")
+    await gitIn(root)(["clone", "--quiet", "--bare", seed, remote])
+    const ssh = join(root, "fake-ssh")
+    writeFileSync(ssh, '#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n')
+    chmodSync(ssh, 0o755)
+    const url = `ssh://calls.invalid${remote}`
+    await gitIn(seed)(["remote", "add", "origin", url])
+    return { root, seed, remote, ssh, url }
+  }
+
+  /**
+   * @failure 29730 R1 (@cto 316f70ff): the guard's proof ran inside the row write, so a round that tripped it
+   *          journaled no remote-calls row at all and lost every count it had measured. A trip keeps the row,
+   *          its counts, and says in its own text that the split is unproven.
+   * @level   l2 (real git processes writing git's own trace2 event log; a stand-in ssh that runs upload-pack locally)
+   * @consumer the round's remote-calls journal row
+   */
+  it("journals the round's own untagged component-main read as a row with its counts and an unproven split", async () => {
+    const { root, seed, ssh } = await roundFixture()
+    const caller = (env: NodeJS.ProcessEnv) => gitIn(seed, undefined, undefined, { env })
+    const untagged = traceRemoteCalls(join(root, "untagged-trace2"), { refresh: true, seams: true })
+    await caller({ ...process.env, ...untagged.env, GIT_SSH_COMMAND: ssh })([
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "origin",
+      "+refs/heads/main:refs/remotes/origin/main",
+    ])
+    const untaggedRow = roundRemoteCallsRow(untagged.end())
+    // The whole key set, so an unproven split can never carry a split field that reads as a measured zero.
+    expect(Object.keys(untaggedRow).sort()).toEqual([
+      "fetch",
+      "processes",
+      "remote_ms",
+      "seam.unattributed.fetch",
+      "seam.unattributed.remote_ms",
+      "seam.unattributed.ssh_children",
+      "ssh_children",
+      "ssh_split",
+      "ssh_split_reason",
+      "unreadable",
+    ])
+    expect(untaggedRow).toMatchObject({ ssh_split: "unproven", ssh_children: 1, fetch: 1, unreadable: 0 })
+    expect(String(untaggedRow.ssh_split_reason)).toMatch(/untagged component-main refresh fetch/u)
+  }, 60_000)
+
+  /**
+   * @failure 29730 R2 (@cto 316f70ff): a refresh tag on a call that is not component-main-shaped must never be
+   *          absorbed as a refresh. The split is proven by a positive marker ON the shape it names.
+   * @level   l2 (real git processes writing git's own trace2 event log; a stand-in ssh that runs upload-pack locally)
+   * @consumer roundRemoteCallsRow's unproven arm
+   */
+  it("reports unproven, never refresh, when a refresh tag rides a call that is not component-main-shaped", async () => {
+    const { root, seed, ssh, url } = await roundFixture()
+    const caller = (env: NodeJS.ProcessEnv) => gitIn(seed, undefined, undefined, { env })
+    const mistagged = traceRemoteCalls(join(root, "mistagged-trace2"), { refresh: true, seams: true })
+    await caller({ ...process.env, ...mistagged.env, GIT_SSH_COMMAND: ssh, GIT_SUPER_PHASE: "refresh" })([
+      "ls-remote",
+      url,
+      "refs/heads/main",
+    ])
+    const mistaggedRow = roundRemoteCallsRow(mistagged.end())
+    expect(mistaggedRow).toMatchObject({ ssh_split: "unproven", ssh_children: 1, "ls-remote": 1 })
+    expect(String(mistaggedRow.ssh_split_reason)).toMatch(/tagged a non-component-main SSH call as refresh/u)
+    // The whole key set (@cto 1ce8f965, fold 4), not a sample: a mistagged call keeps its counts, its seam row
+    // and its reason, and gains none of the split fields it did not earn.
+    expect(Object.keys(mistaggedRow).sort()).toEqual([
+      "ls-remote",
+      "processes",
+      "remote_ms",
+      "seam.unattributed.ls-remote",
+      "seam.unattributed.remote_ms",
+      "seam.unattributed.ssh_children",
+      "ssh_children",
+      "ssh_split",
+      "ssh_split_reason",
+      "unreadable",
+    ])
+  }, 60_000)
+
+  /**
+   * @failure 29730 R2 (@cto 316f70ff, fold 1): yrd's own component-main read carries no git-super marker, so the
+   *          classifier proves it by the round's own seam. This drives the PRODUCTION call under a caller's
+   *          wider seam, so deleting the production seam changes this row instead of leaving it green.
+   * @level   l2 (real git processes writing git's own trace2 event log; a stand-in ssh that runs upload-pack locally)
+   * @consumer roundRemoteCallsRow's derive bucket
+   */
+  it("proves the round's own component-main read through readComponentMain under a caller's wider seam", async () => {
+    const { root, seed, ssh, url } = await roundFixture()
+    const store = join(root, "store.git")
+    await gitIn(root)(["init", "--bare", "--quiet", store])
+    await gitIn(store)(["remote", "add", "origin", url])
+    const expected = (await gitIn(seed)(["rev-parse", "HEAD"])).trim()
+    const named = traceRemoteCalls(join(root, "named-trace2"), { refresh: true, seams: true })
+    const env = { ...process.env, ...named.env, GIT_SSH_COMMAND: ssh }
+    const main = await withRemoteSeam("compose", () =>
+      readComponentMain(
+        (cwd) => gitIn(cwd, undefined, undefined, { env }),
+        store,
+        () => {},
+      ),
+    )
+    const namedRow = roundRemoteCallsRow(named.end())
+    expect(main).toBe(expected)
+    expect(namedRow).toMatchObject({
+      ssh_children: 1,
+      refresh_ssh_children: 0,
+      derive_ssh_children: 1,
+      beyond_refresh_ssh_children: 0,
+      unreadable: 0,
+    })
+    expect(namedRow.ssh_split).toBeUndefined()
+    expect(namedRow.derive_calls).toEqual([`1 fetch @ ${store}`])
+    expect(namedRow.refresh_calls).toEqual([])
+    expect(namedRow.beyond_refresh_calls).toEqual([])
+    expect(namedRow.derive_boundary).toBe(`YRD_SEAM=${DERIVE_COMPONENT_MAIN_SEAM} on component-main fetch`)
+    // The seam also names the read in the ordinary seam row, so its cost is measurable beside the rest.
+    expect(namedRow[`seam.${DERIVE_COMPONENT_MAIN_SEAM}.fetch`]).toBe(1)
+  }, 60_000)
 
   it("names an SSH clone even when Git has not defined its destination repository", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-round-clone-"))
@@ -381,5 +543,180 @@ describe("remote calls are counted from git's trace2 event log", () => {
       expect(calls.sshChildren).toBe(1)
       expect(() => roundRemoteCallsRow(calls)).toThrow(/transport child lacks its Git command or repository/u)
     }
+  })
+
+  /**
+   * @failure 29730 fold 2 (@cto 5b4fb097): the derive seam is accepted by NAME, not by the presence of any seam.
+   *          A caller's own name on a component-main-shaped fetch stays unproven, so loosening the equality to a
+   *          mere presence check would move this row rather than passing it. This row asserts that only: the
+   *          positive half - that the derive seam DOES prove the round's own read - is row (c)'s, which drives
+   *          the production readComponentMain.
+   * @level   l0 (synthetic trace2 events at the count consumer)
+   * @consumer roundRemoteCallsRow's unproven arm
+   */
+  it("keeps a component-main fetch unproven under a caller's own seam", () => {
+    const directory = mkdtempSync(join(tmpdir(), "yrd-round-seam-exact-"))
+    roots.push(directory)
+    writeFileSync(
+      join(directory, "process"),
+      [
+        {
+          event: "start",
+          argv: ["git", "fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"],
+        },
+        { event: "def_repo", worktree: "/repo" },
+        { event: "def_param", param: "YRD_SEAM", value: "compose" },
+        { event: "cmd_name", name: "fetch" },
+        { event: "child_start", child_class: "transport/ssh" },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n"),
+    )
+    const row = roundRemoteCallsRow(readRemoteCalls(directory, { requireRefreshTag: true }))
+    expect(Object.keys(row).sort()).toEqual([
+      "fetch",
+      "processes",
+      "remote_ms",
+      "seam.compose.fetch",
+      "seam.compose.remote_ms",
+      "seam.compose.ssh_children",
+      "ssh_children",
+      "ssh_split",
+      "ssh_split_reason",
+      "unreadable",
+    ])
+    expect(row.ssh_split).toBe("unproven")
+    expect(String(row.ssh_split_reason)).toMatch(/untagged component-main refresh fetch/u)
+  })
+
+  /**
+   * @failure 29730 fold 3 (@cto 5b4fb097): the mirror of the refresh trip, for the round's own name. A call
+   *          carrying the derive seam that is not component-main-shaped has no business in the derive bucket —
+   *          it reports unproven with its own reason rather than falling through as `beyond`.
+   * @level   l0 (synthetic trace2 events at the count consumer)
+   * @consumer roundRemoteCallsRow's unproven arm
+   */
+  it("reports unproven, never beyond, when the derive seam rides a call that is not component-main-shaped", () => {
+    const directory = mkdtempSync(join(tmpdir(), "yrd-round-seam-mirror-"))
+    roots.push(directory)
+    writeFileSync(
+      join(directory, "process"),
+      [
+        { event: "start", argv: ["git", "ls-remote", "origin", "refs/heads/main"] },
+        { event: "def_repo", worktree: "/repo" },
+        { event: "def_param", param: "YRD_SEAM", value: DERIVE_COMPONENT_MAIN_SEAM },
+        { event: "cmd_name", name: "ls-remote" },
+        { event: "child_start", child_class: "transport/ssh" },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n"),
+    )
+    const row = roundRemoteCallsRow(readRemoteCalls(directory, { requireRefreshTag: true }))
+    expect(Object.keys(row).sort()).toEqual([
+      "ls-remote",
+      "processes",
+      "remote_ms",
+      `seam.${DERIVE_COMPONENT_MAIN_SEAM}.ls-remote`,
+      `seam.${DERIVE_COMPONENT_MAIN_SEAM}.remote_ms`,
+      `seam.${DERIVE_COMPONENT_MAIN_SEAM}.ssh_children`,
+      "ssh_children",
+      "ssh_split",
+      "ssh_split_reason",
+      "unreadable",
+    ])
+    expect(row.ssh_split).toBe("unproven")
+    expect(String(row.ssh_split_reason)).toMatch(/tagged a non-component-main SSH call as deriveComponentMain/u)
+  })
+
+  /**
+   * @failure 29730 review (@cto 1ce8f965): a call wearing BOTH the refresh tag and the derive seam was counted
+   *          as refresh by a tie-break nobody wrote down, so a contradictory call would have read as measured.
+   *          No path builds one, and the row now says so in its own text instead of picking a bucket.
+   * @level   l0 (synthetic trace2 events at the count consumer)
+   * @consumer roundRemoteCallsRow's unproven arm
+   */
+  it("reports unproven when one component-main fetch wears both the refresh tag and the derive seam", () => {
+    const directory = mkdtempSync(join(tmpdir(), "yrd-round-both-markers-"))
+    roots.push(directory)
+    writeFileSync(
+      join(directory, "process"),
+      [
+        {
+          event: "start",
+          argv: ["git", "fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"],
+        },
+        { event: "def_repo", worktree: "/repo" },
+        { event: "def_param", param: "GIT_SUPER_PHASE", value: "refresh" },
+        { event: "def_param", param: "YRD_SEAM", value: DERIVE_COMPONENT_MAIN_SEAM },
+        { event: "cmd_name", name: "fetch" },
+        { event: "child_start", child_class: "transport/ssh" },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n"),
+    )
+    const row = roundRemoteCallsRow(readRemoteCalls(directory, { requireRefreshTag: true }))
+    expect(Object.keys(row).sort()).toEqual([
+      "fetch",
+      "processes",
+      "remote_ms",
+      `seam.${DERIVE_COMPONENT_MAIN_SEAM}.fetch`,
+      `seam.${DERIVE_COMPONENT_MAIN_SEAM}.remote_ms`,
+      `seam.${DERIVE_COMPONENT_MAIN_SEAM}.ssh_children`,
+      "ssh_children",
+      "ssh_split",
+      "ssh_split_reason",
+      "unreadable",
+    ])
+    expect(row.ssh_split).toBe("unproven")
+    expect(String(row.ssh_split_reason)).toMatch(/both refresh and deriveComponentMain/u)
+  })
+
+  /**
+   * @failure 29730 review (@cto 430b5daa): the row must name EVERY unproven reason. With the first match alone, a
+   *          round holding two different trips reported only one of them, so a reader would hunt the wrong line; and
+   *          the reason text names its own repository, so two calls tripping the same trip in one repository are one
+   *          reason rather than the same sentence twice.
+   * @level   l0 (synthetic trace2 events at the count consumer)
+   * @consumer roundRemoteCallsRow's unproven arm
+   */
+  it("names every distinct unproven reason once when one round holds two trips", () => {
+    const directory = mkdtempSync(join(tmpdir(), "yrd-round-two-trips-"))
+    roots.push(directory)
+    const untagged = (name: string) =>
+      writeFileSync(
+        join(directory, name),
+        [
+          {
+            event: "start",
+            argv: ["git", "fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"],
+          },
+          { event: "def_repo", worktree: "/repo" },
+          { event: "cmd_name", name: "fetch" },
+          { event: "child_start", child_class: "transport/ssh" },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n"),
+      )
+    // Two calls tripping the SAME trip in one repository: its sentence names the repository, so they are one reason.
+    untagged("process-a")
+    untagged("process-b")
+    // A third call tripping a DIFFERENT trip: it must be named too, not passed over by the first match.
+    writeFileSync(
+      join(directory, "process-c"),
+      [
+        { event: "start", argv: ["git", "ls-remote", "origin", "refs/heads/main"] },
+        { event: "def_repo", worktree: "/repo" },
+        { event: "def_param", param: "GIT_SUPER_PHASE", value: "refresh" },
+        { event: "cmd_name", name: "ls-remote" },
+        { event: "child_start", child_class: "transport/ssh" },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n"),
+    )
+    const row = roundRemoteCallsRow(readRemoteCalls(directory, { requireRefreshTag: true }))
+    expect(row.ssh_split).toBe("unproven")
+    const reason = String(row.ssh_split_reason)
+    expect(reason.match(/untagged component-main refresh fetch/gu)?.length).toBe(1)
+    expect(reason).toMatch(/tagged a non-component-main SSH call as refresh/u)
   })
 })

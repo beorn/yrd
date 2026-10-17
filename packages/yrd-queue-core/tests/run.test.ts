@@ -1099,9 +1099,6 @@ it("closes the round's journal with every remote call it made, counted from git'
     refresh_calls: expect.any(Array),
     beyond_refresh_calls: expect.any(Array),
   })
-  expect(Number(counted?.refresh_ssh_children) + Number(counted?.beyond_refresh_ssh_children)).toBe(
-    Number(counted?.ssh_children),
-  )
   // The merge fetched and published: both are real remote calls, and every git process wrote its log.
   expect(counted?.fetch).toEqual(expect.any(Number))
   expect(counted?.push).toEqual(expect.any(Number))

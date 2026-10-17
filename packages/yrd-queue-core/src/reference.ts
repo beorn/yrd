@@ -31,6 +31,7 @@ import { accessSync, constants, existsSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { ensureCommitObject } from "git-super/objects"
 import { GitExit, refAt, seamProcess, type Git } from "./git.ts"
+import { DERIVE_COMPONENT_MAIN_SEAM, withRemoteSeam } from "./remote-calls.ts"
 
 /** One store this run created, as the caller records it. */
 export type ReferenceStore = Readonly<{
@@ -230,15 +231,21 @@ export async function readComponentMain(
   if (!existsSync(store)) return undefined
   const storeGit = gitIn(store)
   try {
-    await storeGit([
-      "fetch",
-      "--quiet",
-      "--no-tags",
-      "--no-recurse-submodules",
-      "--no-write-fetch-head",
-      "origin",
-      "+refs/heads/main:refs/remotes/origin/main",
-    ])
+    // 29730 R2 (@cto 316f70ff): this fetch is a component-main read made by yrd's own code, so it carries no
+    // git-super refresh tag and used to trip the round's refresh guard, losing the round's whole attribution
+    // row. It names itself instead: the round's seam is on, and this name is what the classifier accepts as
+    // the round's own derive read, in its own bucket beside `refresh_ssh_children`.
+    await withRemoteSeam(DERIVE_COMPONENT_MAIN_SEAM, () =>
+      storeGit([
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-recurse-submodules",
+        "--no-write-fetch-head",
+        "origin",
+        "+refs/heads/main:refs/remotes/origin/main",
+      ]),
+    )
   } catch (error) {
     const why = error instanceof Error ? (error.message.split("\n")[0] ?? error.message) : String(error)
     await onStale(why)
