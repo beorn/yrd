@@ -4017,12 +4017,34 @@ describe("drop --local --release-checkout", () => {
         expect(hint).toContain("gitfile does not point to a valid repository")
         expect(hint).not.toContain("&& yrd")
       } else if (author === undefined) {
-        expect(hint).not.toContain("yrd drop")
+        expect(hint).not.toContain("&& yrd")
         expect(hint).not.toContain(queueRepo)
         expect(hint).toContain("superproject that vendors it")
       } else {
         expect(hint).toContain(`cd '${author}' && yrd`)
         expect(hint).toContain("preview")
+        const unfilled = capture(author)
+        expect(
+          await runYrdProcess(
+            [
+              process.execPath,
+              "yrd",
+              "drop",
+              "<root-branch>",
+              "--local",
+              "--tip",
+              "<root-tip>",
+              "--issue",
+              "29600",
+              "--reason",
+              "retain checkout",
+              "--release-checkout",
+            ],
+            unfilled.io,
+          ),
+          unfilled.stderr(),
+        ).toBe(2)
+        expect(unfilled.stderr()).toContain("replace --tip <root-tip>")
       }
     },
   )

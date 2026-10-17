@@ -126,7 +126,7 @@ describe("`yrd withdraw` is `yrd queue withdraw`", () => {
     // 29387: the refusal names its cure, because an ended change is retired by drop, never by withdraw.
     expect(refusedCanonical.stderr, refusedCanonical.report).toContain("already ended cancelled")
     expect(refusedCanonical.stderr, refusedCanonical.report).toContain(
-      "yrd drop task/one --retire --tip <observed-full-oid> --reason",
+      "yrd 'drop' 'task/one' '--retire' '--tip' '<observed-full-oid>' '--reason' '<why>'",
     )
   })
 

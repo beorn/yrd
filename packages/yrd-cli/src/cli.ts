@@ -258,6 +258,16 @@ function buildProgram(
     },
     command: "withdraw" | "drop",
   ): Promise<void> => {
+    if (
+      command === "drop" &&
+      (options.retire || options.releaseCheckout) &&
+      (options.tip === "<root-tip>" || options.tip === "<observed-full-oid>")
+    ) {
+      throw new Error(`replace --tip ${options.tip} with the branch's exact full commit`)
+    }
+    if (command === "drop" && options.reason?.trim() === "<why>" && (options.retire || options.releaseCheckout)) {
+      throw new Error("replace --reason <why> with the reason for this retirement")
+    }
     if (options.local !== true && (branch === undefined) === (options.issue === undefined)) {
       throw new Error("drop needs exactly one branch or --issue <id>")
     }

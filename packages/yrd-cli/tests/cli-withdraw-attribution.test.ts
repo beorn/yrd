@@ -99,7 +99,7 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
 }
 
 /** A bare remote whose `main` declares the queue, a clone of it, and one change per named branch. */
-async function queueWithChanges(...branches: readonly string[]): Promise<string> {
+async function queueWithChanges(branches: readonly string[], queue = "main"): Promise<string> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-withdraw-attribution-"))
   roots.push(root)
   const seed = gitIn(root)
@@ -115,14 +115,18 @@ async function queueWithChanges(...branches: readonly string[]): Promise<string>
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
-  await birthEventQueue(work, "main", { localStore: false })
+  if (queue !== "main") {
+    await git(["checkout", "--quiet", "-b", queue])
+    await git(["push", "--quiet", "origin", queue])
+  }
+  await birthEventQueue(work, queue, { localStore: false })
   for (const branch of branches) {
-    await git(["checkout", "--quiet", "-b", branch, "main"])
+    await git(["checkout", "--quiet", "-b", branch, queue])
     writeFileSync(join(work, "pass.txt"), `${branch}\n`)
     await git(["add", "."])
     await git(["commit", "--quiet", "-m", `${branch} does its work`])
-    await git(["checkout", "--quiet", "main"])
-    await submit(git, "origin", { branch, submitter: "@dev/submitter", target: { branch: "main", remote: "origin" } })
+    await git(["checkout", "--quiet", queue])
+    await submit(git, "origin", { branch, submitter: "@dev/submitter", target: { branch: queue, remote: "origin" } })
   }
   mkdirSync(join(root, "queue"), { recursive: true })
   return work
@@ -153,16 +157,25 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
   it("retires merged and cancelled origin branches archive-first without replacing their endings", async () => {
     const merged = "task/retire-merged'quoted"
     const cancelled = "task/retire-cancelled"
-    const work = await queueWithChanges(merged, cancelled)
+    const work = await queueWithChanges([merged, cancelled], "release")
     const git = gitIn(work)
     const heads = new Map(
       await Promise.all(
         [merged, cancelled].map(async (branch) => [branch, (await git(["rev-parse", branch])).trim()] as const),
       ),
     )
-    const withdrawn = await yrd(work, "withdraw", cancelled, "--submitter", "@dev/withdrawer", "--json")
+    const withdrawn = await yrd(
+      work,
+      "withdraw",
+      cancelled,
+      "--queue",
+      "release",
+      "--submitter",
+      "@dev/withdrawer",
+      "--json",
+    )
     expect(withdrawn.exitCode, withdrawn.report).toBe(0)
-    const landed = await yrd(work, "queue", "run", "--json")
+    const landed = await yrd(work, "queue", "run", "--queue", "release", "--json")
     expect(landed.exitCode, landed.report).toBe(0)
 
     for (const [branch, status] of [
@@ -174,16 +187,17 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
       // Recreate only the remote pointer: its queue history remains ended.
       await git(["push", "--quiet", "origin", `${head}:refs/heads/${branch}`])
       const store = createEventStore(work, "origin", git.selection, git.backend)
-      const before = await readStatus(store, "main", branch)
+      const before = await readStatus(store, "release", branch)
       expect(before.status).toBe(status)
       const archive = `refs/archive/${new Date().toISOString().slice(0, 10)}/dev-retirer/${branch}`
       expect((await git(["ls-remote", "origin", archive])).trim()).toBe("")
       // 29721: copying the hint must preserve standalone authority, cwd and shell
       // arguments. The previous direct argv call could not detect a broken recipe.
-      const ended = await yrd(work, "withdraw", branch)
+      const ended = await yrd(work, "withdraw", branch, "--queue", "release")
       expect(ended.exitCode, ended.report).toBe(1)
       const printed = ended.stderr.split("retire it with: ")[1]?.trim()
       expect(printed, ended.report).toBeDefined()
+      expect(printed, ended.report).toContain("'--queue'")
       // Supply the two values the operator is asked to fill, then execute the
       // recipe verbatim through the actual standalone entry, outside any repo.
       const command = printed!.replace(/'?<observed-full-oid>'?/u, head).replace(/'?<why>'?/u, "retire-ended-pointer")
@@ -206,12 +220,18 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
         expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(
           `${head}\trefs/heads/${branch}`,
         )
+        const unfilledReason = runRecipe(printed!.replace(/'?<observed-full-oid>'?/u, head))
+        expect(unfilledReason.status, `${unfilledReason.stdout}\n${unfilledReason.stderr}`).toBe(2)
+        expect(unfilledReason.stderr).toContain("<why>")
+        expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(
+          `${head}\trefs/heads/${branch}`,
+        )
       }
       const retired = runRecipe(command)
       expect(retired.status, `${retired.stdout}\n${retired.stderr}`).toBe(0)
       expect((await git(["ls-remote", "origin", archive])).trim()).toBe(`${head}\t${archive}`)
       expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
-      const after = await readStatus(store, "main", branch)
+      const after = await readStatus(store, "release", branch)
       expect(after.tip).toBe(before.tip)
       expect(after.status).toBe(before.status)
       expect(after.reason).toBe(before.reason)
@@ -222,7 +242,7 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
   // advanced-head controls cannot catch a re-submit between filing and consuming the close request.
   it("keeps a withdrawn job reopened at the same head before its close request is consumed", async () => {
     const branch = "task/reopened"
-    const work = await queueWithChanges(branch)
+    const work = await queueWithChanges([branch])
     const git = gitIn(work)
     const head = (await git(["rev-parse", `refs/heads/${branch}`])).trim()
     const opened = await yrd(work, "env", "open", "--bay", "reopened", "--json")
@@ -260,7 +280,7 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     // AC2: recovery must preserve the original change name, including shell quotes.
     // The former generic git/head assertions accepted a newly named change instead.
     const branch = "task/one'quoted"
-    const work = await queueWithChanges(branch, "task/on-main", "task/archive-collision")
+    const work = await queueWithChanges([branch, "task/on-main", "task/archive-collision"])
     const git = gitIn(work)
     const head = (await git(["rev-parse", `refs/heads/${branch}`])).trim()
     // AC2: the public ending must release its exact job, not only its remote ref.
@@ -340,7 +360,7 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
   // recorded coordination target — never delivery proof (manual withdraw sends
   // no notice, README).
   it("records the notified seat separately from the actor", async () => {
-    const work = await queueWithChanges("task/three")
+    const work = await queueWithChanges(["task/three"])
 
     const ran = await yrd(
       work,
@@ -362,7 +382,7 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
   })
 
   it("takes the actor from YRD_DEFAULT_SUBMITTER when `--notify` names another seat", async () => {
-    const work = await queueWithChanges("task/two")
+    const work = await queueWithChanges(["task/two"])
     process.env["YRD_DEFAULT_SUBMITTER"] = "@dev/env-actor"
 
     const ran = await yrd(
@@ -386,7 +406,7 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
   // the drop path needs its own row. `drop` carried its own option table with no
   // --submitter and a --notify help that named the actor.
   it("`yrd drop` names `--submitter` as the actor while `--notify` names another seat", async () => {
-    const work = await queueWithChanges("task/four")
+    const work = await queueWithChanges(["task/four"])
 
     const ran = await yrd(
       work,

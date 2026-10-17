@@ -2417,7 +2417,7 @@ export async function coreQueueCommand(
         if (error instanceof NothingToWithdraw) {
           const remedy =
             error.ended === true
-              ? `; retire it with: ${formatYrdCommand(io, ["drop", request.branch, "--retire", "--tip", "<observed-full-oid>", "--reason", "<why>"], io.cwd ?? repo)}`
+              ? `; retire it with: ${formatYrdCommand(io, ["drop", request.branch, "--retire", "--tip", "<observed-full-oid>", "--reason", "<why>", "--queue", formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))], io.cwd ?? globalThis.process.cwd())}`
               : ""
           io.stderr(`yrd: ${error.message}${remedy}\n`)
           return 1
