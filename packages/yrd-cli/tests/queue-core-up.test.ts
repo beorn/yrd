@@ -4913,9 +4913,10 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       expect(document.error?.code).toBe("queue-round-stuck")
       expect(document.error?.cause).toContain(`task/stuck@${head}`)
       const body = document.error?.resolution.join("\n") ?? ""
-      expect(body).toContain("yrd queue withdraw task/stuck")
+      expect(body).toContain("withdraw task/stuck")
       expect(body).toContain("clears this reason")
-      expect(body).toContain("yrd queue resume")
+      expect(body).toContain("resume the queue")
+      expect(body).not.toContain(w.work)
       expect(body).not.toMatch(/clears on its own|next round|resets the spacing/u)
       expect(document.facts).toMatchObject({ stopped: { by: "yrd", cause: "stuck", change: `task/stuck@${head}` } })
       expect(document.facts?.stuckRounds).toBeUndefined()
@@ -5098,7 +5099,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       ),
       service.stderr(),
     ).toBe(0)
-    expect(seen[0]?.error?.resolution.join(" ")).toContain("yrd queue resume")
+    expect(seen[0]?.error?.resolution.join(" ")).toContain("resume the queue")
 
     const resumed = capture(w.work)
     expect(
@@ -5285,6 +5286,11 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
 
     for (const dryRun of [true, false]) {
       const accepted = capture(w.work)
+      const commands: { argv: readonly string[]; cwd: string }[] = []
+      accepted.io.formatYrdCommand = (argv, cwd) => {
+        commands.push({ argv, cwd })
+        return "host-stuck-remedy"
+      }
       expect(
         await coreQueueCommand(
           w.work,
@@ -5299,8 +5305,14 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
         stopped: { by: "yrd", cause: "stuck", change: `task/stuck@${stuckHead}` },
       })
       expect(accepted.stderr()).toContain(`task/stuck@${stuckHead}`)
-      expect(accepted.stderr()).toContain("yrd queue withdraw task/stuck")
-      expect(accepted.stderr()).toContain("yrd queue resume")
+      expect(accepted.stderr()).toContain("recorded guidance:")
+      expect(accepted.stderr()).toContain("host-stuck-remedy")
+      const queue = `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`
+      expect(commands).toContainEqual({ argv: ["queue", "withdraw", "task/stuck", "--queue", queue], cwd: w.work })
+      expect(commands).toContainEqual({
+        argv: ["queue", "resume", "--reason", "<why>", "--queue", queue],
+        cwd: w.work,
+      })
     }
     // Opened, and nothing more: no check ran at submit.
     expect(
