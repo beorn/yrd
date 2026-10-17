@@ -7,6 +7,7 @@
  */
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
+import { createHash } from "node:crypto"
 import { join } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
 import { createPostMerge, readPostMergeIssueDiagnostics } from "../src/post-merge.ts"
@@ -15,9 +16,11 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { Conflict } from "../../yrd-queue-core/src/git.ts"
 import {
   createEventQueue,
+  appendChangeEvent,
   createEventStore,
   readBranchHistory,
   readConfig,
+  readIssueEffect,
   readStatus,
   submit,
   trailer,
@@ -198,11 +201,17 @@ it.each([
   { mode: "close-stop" },
   { mode: "append-conflict" },
   { mode: "append-error" },
+  { mode: "append-lost-reply" },
+  { mode: "concurrent" },
   { mode: "cold-replay" },
   { mode: "declaration-edit" },
+  { mode: "delivered-declaration" },
+  { mode: "reuse-pending" },
+  { mode: "blob-mismatch" },
 ] as const)(
   "preserves the real merge queue while exercising post-merge $mode behavior",
   async ({ mode }) => {
+    const reconcileAfterQueue = mode.startsWith("append-") || mode === "reuse-pending" || mode === "concurrent"
     const root = world(),
       remote = join(root, "remote.git"),
       repo = join(root, "author"),
@@ -217,7 +226,8 @@ it.each([
       finished = join(root, "finished"),
       closeCalls = join(root, "close-calls.jsonl"),
       closeReady = join(root, "close-ready"),
-      closeRelease = join(root, "close-release")
+      closeRelease = join(root, "close-release"),
+      resolveCalls = join(root, "resolve-calls")
     await git(["config", "user.email", "provider@yrd.test"])
     await git(["config", "user.name", "fixture"])
     await git(["checkout", "--quiet", "-b", "main"])
@@ -228,7 +238,9 @@ it.each([
     const fakeProvider = join(import.meta.dirname, "support", "fake-issues-provider.ts")
     const closeScript =
       (mode === "close-stop" ? 'printf "%s" "$$" > "$5"; while ! test -f "$6"; do sleep .05; done; ' : "") +
-      'printf "%s\\t%s\\t%s\\n" "$1" "$2" "$3" >> "$4"; printf \'{"applied":true}\\n\''
+      'printf "%s\\t%s\\t%s\\n" "$1" "$2" "$3" >> "$4"; ' +
+      (mode === "concurrent" ? 'while ! test -f "$6"; do sleep .05; done; ' : "") +
+      "printf '{\"applied\":true}\\n'"
     writeFileSync(
       join(repo, ".yrd.yml"),
       JSON.stringify({
@@ -243,7 +255,17 @@ it.each([
     writeFileSync(
       join(repo, "issues.yml"),
       JSON.stringify({
-        resolve: [process.execPath, fakeProvider, "resolve", "<raw>"],
+        resolve:
+          mode === "blob-mismatch"
+            ? [
+                "sh",
+                "-c",
+                'printf "%s\\n" "$1" >> "$2"; printf \'{"keys":["%s"]}\\n\' "$1"',
+                "resolve",
+                "<raw>",
+                resolveCalls,
+              ]
+            : [process.execPath, fakeProvider, "resolve", "<raw>"],
         close: ["sh", "-c", closeScript, "close", "<key>", "<reason>", "<id>", closeCalls, closeReady, closeRelease],
       }),
     )
@@ -258,6 +280,26 @@ it.each([
     const queue = async (branch: string, message: string) => {
       await git(["checkout", "--quiet", "-b", branch, "origin/main"])
       writeFileSync(join(repo, branch.replaceAll("/", "-") + ".txt"), branch)
+      if (mode === "delivered-declaration" && branch === "task/first") {
+        writeFileSync(
+          join(repo, "issues.yml"),
+          JSON.stringify({
+            resolve: ["sh", "-c", 'printf \'{"keys":["delivered-%s"]}\\n\' "$1"', "resolve", "<raw>"],
+            close: [
+              "sh",
+              "-c",
+              closeScript,
+              "close",
+              "<key>",
+              "<reason>",
+              "<id>",
+              closeCalls,
+              closeReady,
+              closeRelease,
+            ],
+          }),
+        )
+      }
       await git(["add", "."])
       await git(["commit", "--quiet", "-m", message])
       const submitted = await submit(git, "origin", {
@@ -336,7 +378,7 @@ it.each([
               }
               if (merged.includes("task/refs")) {
                 writeFileSync(release, "go")
-                if (mode === "append-conflict" || mode === "append-error") {
+                if (reconcileAfterQueue) {
                   await vi.waitFor(() => expect(existsSync(finished)).toBe(true), { timeout: 10000 })
                   stop.abort()
                   return
@@ -363,7 +405,7 @@ it.each([
           {
             workdir,
             json: true,
-            ...(mode === "append-conflict" || mode === "append-error" ? {} : { projectRoot: repo }),
+            ...(reconcileAfterQueue ? {} : { projectRoot: repo }),
           },
         ),
         diagnostics.join(" "),
@@ -384,7 +426,114 @@ it.each([
       expect(existsSync(finished)).toBe(false)
       return
     }
-    if (mode === "append-conflict" || mode === "append-error") {
+    if (mode === "reuse-pending") {
+      const old = await readBranchHistory(store, "main", "task/first")
+      const mergeSha = old.history!.state.merge!
+      const mergedEvent = old.history!.state.ending!.id
+      if (store.backend.publish === undefined) throw new Error("fixture lacks cold custody publisher")
+      await store.backend.publish(
+        store.repo,
+        [
+          { ref: "refs/yrd-archive/main/task/first", expect: "0".repeat(40), oid: old.history!.state.tip! },
+          { ref: old.ref, expect: old.history!.state.tip!, oid: null },
+        ],
+        "origin",
+      )
+      await git(["checkout", "--quiet", "task/first"])
+      await git(["merge", "--quiet", "--ff-only", "origin/main"])
+      writeFileSync(join(repo, "new-generation.txt"), "new work remains queued")
+      await git(["add", "new-generation.txt"])
+      await git(["commit", "--quiet", "-m", "new generation without closing intent"])
+      await submit(git, "origin", {
+        branch: "task/first",
+        submitter: "fixture",
+        target: { remote: "origin", branch: "main" },
+      })
+      await git(["checkout", "--quiet", "main"])
+      const before = (await readBranchHistory(store, "main", "task/first")).history!.state
+      expect(before.status).toBe("queued")
+      await using runner = createPostMerge({
+        workdir,
+        cwd: repo,
+        git,
+        store,
+        cleanup: async () => {},
+        report: (message) => diagnostics.push(message),
+      })
+      runner.nudge({
+        ...context,
+        target: (await git(["rev-parse", "origin/main"])).trim(),
+        base: (await git(["rev-parse", "origin/main"])).trim(),
+        merged: ["task/first", "task/second"],
+        projectRoot: repo,
+        queueBranch: "main",
+      })
+      await runner[Symbol.asyncDispose]()
+      const after = (await readBranchHistory(store, "main", "task/first")).history!
+      expect(after.state).toEqual({ ...before, tip: expect.any(String) })
+      const applied = after.events
+        .flatMap((event) => trailer(event, "Issue-Effect") ?? [])
+        .map((value) => JSON.parse(value) as Record<string, unknown>)
+      expect(applied).toContainEqual(
+        expect.objectContaining({ mergedEvent, mergeSha, issueKey: "issue-first", semanticEnding: "completed" }),
+      )
+      expect(
+        readFileSync(closeCalls, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => line.split("\t")[0]),
+      ).toEqual(["issue-first", "issue-second"])
+      return
+    }
+    if (mode === "concurrent") {
+      await using first = createPostMerge({
+        workdir,
+        cwd: repo,
+        git,
+        store,
+        cleanup: async () => {},
+        report: (message) => diagnostics.push(message),
+      })
+      await using second = createPostMerge({
+        workdir,
+        cwd: repo,
+        git,
+        store,
+        cleanup: async () => {},
+        report: (message) => diagnostics.push(message),
+      })
+      const action = {
+        ...context,
+        target: (await git(["rev-parse", "origin/main"])).trim(),
+        merged: ["task/first"],
+        projectRoot: repo,
+        queueBranch: "main",
+      }
+      first.nudge(action)
+      second.nudge(action)
+      await vi.waitFor(
+        () => {
+          expect(existsSync(closeCalls)).toBe(true)
+          expect(readFileSync(closeCalls, "utf8").trim().split("\n")).toHaveLength(2)
+        },
+        { timeout: 10000 },
+      )
+      const calls = readFileSync(closeCalls, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => line.split("\t"))
+      expect(calls[0]).toEqual(calls[1])
+      writeFileSync(closeRelease, "go")
+      await Promise.all([first[Symbol.asyncDispose](), second[Symbol.asyncDispose]()])
+      const { history } = await readBranchHistory(store, "main", "task/first")
+      const effects = history!.events.flatMap((event) => readIssueEffect(event) ?? [])
+      expect(effects).toHaveLength(1)
+      expect(effects[0]!.providerId).toBe(calls[0]![2])
+      expect(readFileSync(closeCalls, "utf8").trim().split("\n")).toHaveLength(2)
+      expect(diagnostics.join(" ")).not.toContain("could not be recorded")
+      return
+    }
+    if (mode === "append-conflict" || mode === "append-error" || mode === "append-lost-reply") {
       const publish = store.backend.publish
       if (publish === undefined) throw new Error("fixture lacks existing publish seam")
       let firstAppends = 0
@@ -399,6 +548,10 @@ it.each([
           publish: async (...args: Parameters<typeof publish>) => {
             if (args[1].some((update) => update.ref.endsWith("/task/first"))) {
               firstAppends++
+              if (mode === "append-lost-reply" && firstAppends === 1) {
+                await publish(...args)
+                throw new Error("fixture publish landed but response was lost")
+              }
               if (mode === "append-error" || firstAppends === 1) throw fault
             }
             return publish(...args)
@@ -424,7 +577,7 @@ it.each([
       expect(firstAppends).toBe(mode === "append-conflict" ? 2 : 1)
       const { history } = await readBranchHistory(store, "main", "task/first")
       expect(history!.events.filter((event) => trailer(event, "Issue-Effect") !== undefined)).toHaveLength(
-        mode === "append-conflict" ? 1 : 0,
+        mode === "append-error" ? 0 : 1,
       )
       expect(readFileSync(closeCalls, "utf8").trim().split("\n")).toHaveLength(2)
       if (mode === "append-error") expect(diagnostics.join(" ")).toContain("fixture permanent append failure")
@@ -562,8 +715,8 @@ it.each([
       .split("\n")
       .map((line) => line.split("\t"))
     expect(calls.map(([key, reason]) => [key, reason])).toEqual([
-      ["issue-first", "completed"],
-      ["issue-second", "completed"],
+      [mode === "delivered-declaration" ? "delivered-issue-first" : "issue-first", "completed"],
+      [mode === "delivered-declaration" ? "delivered-issue-second" : "issue-second", "completed"],
     ])
     const effects = await Promise.all(
       ["task/first", "task/second", "task/refs"].map((branch) => readBranchHistory(store, "main", branch)),
@@ -591,7 +744,7 @@ it.each([
           mergeCommitterTime: committerTime,
           verb: "close",
           semanticEnding: "completed",
-          issueKey: key,
+          issueKey: mode === "delivered-declaration" ? `delivered-${key}` : key,
         }),
       )
     }
@@ -708,6 +861,57 @@ it.each([
       },
       { timeout: 5000 },
     )
+    if (mode === "blob-mismatch") {
+      const reading = await readBranchHistory(store, "main", "task/first")
+      const applied = reading
+        .history!.events.map((event) => readIssueEffect(event))
+        .find((effect) => effect !== undefined)!
+      const wrongBlob = (await git(["rev-parse", `${applied.mergeSha}:.yrd.yml`])).trim()
+      expect(wrongBlob).not.toBe(applied.declaration.blob)
+      await appendChangeEvent(store, "main", "task/first", reading.history!.state.tip!, {
+        type: "notified",
+        at: new Date(),
+        commit: applied.mergeSha,
+        writer: "yrd-run",
+        issueEffect: {
+          kind: "issue-effect-v1",
+          mergedEvent: applied.mergedEvent,
+          mergeSha: applied.mergeSha,
+          mergeCommitterTime: applied.mergeCommitterTime,
+          verb: "comment",
+          issueKey: applied.issueKey,
+          providerId:
+            "yrd1-" +
+            createHash("sha256")
+              .update(JSON.stringify([applied.mergeSha, "comment", null, applied.issueKey]))
+              .digest("hex"),
+          declaration: { path: "issues.yml", blob: wrongBlob },
+        },
+      })
+      const resolutionsBefore = readFileSync(resolveCalls, "utf8")
+      const closesBefore = readFileSync(closeCalls, "utf8")
+      await using runner = createPostMerge({
+        workdir,
+        cwd: repo,
+        git,
+        store,
+        cleanup: async () => {},
+        report: (message) => diagnostics.push(message),
+      })
+      runner.nudge({
+        ...context,
+        target: applied.mergeSha,
+        merged: ["task/first"],
+        projectRoot: repo,
+        queueBranch: "main",
+      })
+      await runner[Symbol.asyncDispose]()
+      expect(diagnostics.join(" ")).toContain(
+        `applied declaration blob ${wrongBlob} differs from pinned ${applied.declaration.blob}`,
+      )
+      expect(readFileSync(resolveCalls, "utf8")).toBe(resolutionsBefore)
+      expect(readFileSync(closeCalls, "utf8")).toBe(closesBefore)
+    }
   },
   60000,
 )
