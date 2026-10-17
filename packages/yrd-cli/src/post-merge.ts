@@ -146,8 +146,9 @@ async function closeMergedIssues(
       }
       const phase = segment.events.findLast((event) => event.type === "merging" && trailer(event, "Base") !== undefined)
       const base = observed ? trailer(mergedEvent, "Base") : phase === undefined ? undefined : trailer(phase, "Base")
-      if (base === undefined || base === "")
+      if (base === undefined || base === "") {
         throw new Error(`${branch}@${mergeSha}: actual merged commit has no provable historical base`)
+      }
       const rawCommitterTime = (await input.git(["show", "-s", "--format=%cI", mergeSha])).trim()
       if (rawCommitterTime === "" || Number.isNaN(Date.parse(rawCommitterTime))) {
         throw new Error(`${branch}@${mergeSha}: actual merge committer time is unreadable`)
