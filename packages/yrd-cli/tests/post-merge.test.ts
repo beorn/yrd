@@ -12,6 +12,7 @@ import { afterEach, expect, it, vi } from "vitest"
 import { createPostMerge } from "../src/post-merge.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
+import { Conflict } from "../../yrd-queue-core/src/git.ts"
 import {
   createEventQueue,
   createEventStore,
@@ -191,7 +192,13 @@ it("attempts the provider and cleanup even when its derived artifact directory i
   expect(reports.join(" ")).toContain("post-merge evidence unavailable")
 })
 
-it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
+it.each([
+  { mode: "stop" },
+  { mode: "completion" },
+  { mode: "close-stop" },
+  { mode: "append-conflict" },
+  { mode: "append-error" },
+] as const)(
   "preserves the real merge queue while exercising post-merge $mode behavior",
   async ({ mode }) => {
     const root = world(),
@@ -206,7 +213,9 @@ it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
       ready = join(root, "ready"),
       release = join(root, "release"),
       finished = join(root, "finished"),
-      closeCalls = join(root, "close-calls.jsonl")
+      closeCalls = join(root, "close-calls.jsonl"),
+      closeReady = join(root, "close-ready"),
+      closeRelease = join(root, "close-release")
     await git(["config", "user.email", "provider@yrd.test"])
     await git(["config", "user.name", "fixture"])
     await git(["checkout", "--quiet", "-b", "main"])
@@ -215,7 +224,9 @@ it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
         ? 'printf "%s" "$$" > "$1"; turns=0; while test "$turns" -lt 400; do turns=$((turns+1)); sleep .1; done; touch "$2"'
         : 'printf "%s" "$$" > "$1"; while ! test -f "$2"; do sleep .05; done; touch "$3"'
     const fakeProvider = join(import.meta.dirname, "support", "fake-issues-provider.ts")
-    const closeScript = 'printf "%s\\t%s\\t%s\\n" "$1" "$2" "$3" >> "$4"; printf \'{"applied":true}\\n\''
+    const closeScript =
+      (mode === "close-stop" ? 'printf "%s" "$$" > "$5"; while ! test -f "$6"; do sleep .05; done; ' : "") +
+      'printf "%s\\t%s\\t%s\\n" "$1" "$2" "$3" >> "$4"; printf \'{"applied":true}\\n\''
     writeFileSync(
       join(repo, ".yrd.yml"),
       JSON.stringify({
@@ -231,7 +242,7 @@ it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
       join(repo, "issues.yml"),
       JSON.stringify({
         resolve: [process.execPath, fakeProvider, "resolve", "<raw>"],
-        close: ["sh", "-c", closeScript, "close", "<key>", "<reason>", "<id>", closeCalls],
+        close: ["sh", "-c", closeScript, "close", "<key>", "<reason>", "<id>", closeCalls, closeReady, closeRelease],
       }),
     )
     await git(["add", ".yrd.yml", "issues.yml"])
@@ -323,12 +334,22 @@ it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
               }
               if (merged.includes("task/refs")) {
                 writeFileSync(release, "go")
+                if (mode === "append-conflict" || mode === "append-error") {
+                  await vi.waitFor(() => expect(existsSync(finished)).toBe(true), { timeout: 10000 })
+                  stop.abort()
+                  return
+                }
+                if (mode === "close-stop") {
+                  await vi.waitFor(() => expect(existsSync(closeReady)).toBe(true), { timeout: 10000 })
+                  stop.abort("queue shutdown fixture")
+                  return
+                }
                 await vi.waitFor(
                   () => {
                     const calls = existsSync(closeCalls)
                       ? readFileSync(closeCalls, "utf8").trim().split("\n").filter(Boolean)
                       : []
-                expect(calls, diagnostics.join(" ")).toHaveLength(2)
+                    expect(calls, diagnostics.join(" ")).toHaveLength(2)
                   },
                   { timeout: 5000 },
                 )
@@ -337,7 +358,11 @@ it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
               } else if (rounds > 3) stop.abort()
             },
           },
-          { workdir, json: true, projectRoot: repo },
+          {
+            workdir,
+            json: true,
+            ...(mode === "append-conflict" || mode === "append-error" ? {} : { projectRoot: repo }),
+          },
         ),
         diagnostics.join(" "),
       ).toBe(0)
@@ -357,6 +382,122 @@ it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
       expect(existsSync(finished)).toBe(false)
       return
     }
+    if (mode === "append-conflict" || mode === "append-error") {
+      const publish = store.backend.publish
+      if (publish === undefined) throw new Error("fixture lacks existing publish seam")
+      let firstAppends = 0
+      const fault =
+        mode === "append-conflict"
+          ? new Conflict("fixture CAS lost", { refs: ["refs/yrd/main/changes/task/first"] })
+          : new Error("fixture permanent append failure")
+      const faultStore = {
+        ...store,
+        backend: {
+          ...store.backend,
+          publish: async (...args: Parameters<typeof publish>) => {
+            if (args[1].some((update) => update.ref.endsWith("/task/first"))) {
+              firstAppends++
+              if (mode === "append-error" || firstAppends === 1) throw fault
+            }
+            return publish(...args)
+          },
+        },
+      }
+      await using runner = createPostMerge({
+        workdir,
+        cwd: repo,
+        git,
+        store: faultStore,
+        cleanup: async () => {},
+        report: (message) => diagnostics.push(message),
+      })
+      runner.nudge({
+        ...context,
+        target: (await git(["rev-parse", "origin/main"])).trim(),
+        merged: ["task/first", "task/second"],
+        projectRoot: repo,
+        queueBranch: "main",
+      })
+      await runner[Symbol.asyncDispose]()
+      expect(firstAppends).toBe(mode === "append-conflict" ? 2 : 1)
+      const { history } = await readBranchHistory(store, "main", "task/first")
+      expect(history!.events.filter((event) => trailer(event, "Issue-Effect") !== undefined)).toHaveLength(
+        mode === "append-conflict" ? 1 : 0,
+      )
+      expect(readFileSync(closeCalls, "utf8").trim().split("\n")).toHaveLength(2)
+      if (mode === "append-error") expect(diagnostics.join(" ")).toContain("fixture permanent append failure")
+      return
+    }
+    if (mode === "close-stop") {
+      const pid = Number(readFileSync(closeReady, "utf8"))
+      expect(pid).toBeGreaterThan(0)
+      expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }))
+      expect(diagnostics.join(" ")).toContain("stopped: queue shutdown fixture")
+      for (const branch of ["task/first", "task/second"]) {
+        const { history } = await readBranchHistory(store, "main", branch)
+        expect(history!.events.flatMap((event) => trailer(event, "Issue-Effect") ?? [])).toEqual([])
+        expect(history!.state.status).toBe("merged")
+      }
+      expect(existsSync(closeCalls)).toBe(false)
+      const failedAction = readdirSync(join(workdir, "post-merge"))
+        .filter((name) => name.endsWith(".json"))
+        .flatMap(
+          (name) =>
+            (
+              JSON.parse(readFileSync(join(workdir, "post-merge", name), "utf8")) as {
+                issueActions: Array<{ branch: string; providerId: string; status: string }>
+              }
+            ).issueActions,
+        )
+        .find((action) => action.branch === "task/first" && action.status === "failed")
+      expect(failedAction).toBeDefined()
+      const environments = join(workdir, "environments")
+      mkdirSync(environments, { recursive: true })
+      for (const branch of ["first", "second", "refs"]) {
+        await git(["worktree", "add", "--quiet", join(environments, branch), `task/${branch}`])
+      }
+      writeFileSync(closeRelease, "go")
+      const retryStop = new AbortController()
+      expect(
+        await coreQueueCommand(
+          repo,
+          {
+            cwd: repo,
+            stdout: () => {},
+            stderr: (message) => diagnostics.push(message),
+            localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
+          },
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: retryStop.signal,
+            afterRound: async () => {
+              await vi.waitFor(
+                async () => {
+                  for (const branch of ["task/first", "task/second"]) {
+                    const { history } = await readBranchHistory(store, "main", branch)
+                    expect(
+                      history!.events.filter((event) => trailer(event, "Issue-Effect") !== undefined),
+                    ).toHaveLength(1)
+                  }
+                },
+                { timeout: 10000 },
+              )
+              retryStop.abort()
+            },
+          },
+          { workdir, json: true, projectRoot: repo },
+        ),
+        diagnostics.join(" "),
+      ).toBe(0)
+      const calls = readFileSync(closeCalls, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => line.split("\t"))
+      expect(calls).toHaveLength(2)
+      expect(calls.find(([key]) => key === "issue-first")?.[2]).toBe(failedAction!.providerId)
+      return
+    }
     expect(merged).toContain("task/second")
     expect(merged).toContain("task/refs")
     expect((await readStatus(store, "main", "task/second")).status).toBe("merged")
@@ -365,7 +506,10 @@ it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
       .filter((n) => n.endsWith(".json"))
       .map((n) => attemptAt(join(workdir, "post-merge", n)))
     expect(attempts.length).toBeGreaterThan(0)
-    expect(attempts.every((attempt) => attempt.status === "succeeded"), JSON.stringify(attempts)).toBe(true)
+    expect(
+      attempts.every((attempt) => attempt.status === "succeeded"),
+      JSON.stringify(attempts),
+    ).toBe(true)
     expect(existsSync(finished)).toBe(true)
     const calls = readFileSync(closeCalls, "utf8")
       .trim()
@@ -393,7 +537,7 @@ it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
       const history = byBranch.get(branch)!
       const mergeSha = history.state.merge!
       const mergedEvent = history.state.ending!.id
-      const committerTime = new Date(await git(["show", "-s", "--format=%cI", mergeSha])).toISOString()
+      const committerTime = new Date((await git(["show", "-s", "--format=%cI", mergeSha])).trim()).toISOString()
       expect(durable(branch)).toContainEqual(
         expect.objectContaining({
           mergedEvent,
@@ -414,7 +558,7 @@ it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
     await git(["worktree", "add", "--quiet", join(environments, "refs"), "task/refs"])
     const callCount = calls.length
     const replayStop = new AbortController()
-    let replayAttemptStart = readdirSync(join(workdir, "post-merge")).filter((name) => name.endsWith(".json")).length
+    const replayAttemptStart = new Set(readdirSync(join(workdir, "post-merge")))
     expect(
       await coreQueueCommand(
         repo,
@@ -428,7 +572,33 @@ it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
           command: "up",
           intervalSeconds: 0,
           stop: replayStop.signal,
-          afterRound: async () => replayStop.abort(),
+          afterRound: async () => {
+            await vi.waitFor(
+              () => {
+                const attempts = readdirSync(join(workdir, "post-merge"))
+                  .filter((name) => name.endsWith(".json") && !replayAttemptStart.has(name))
+                  .map(
+                    (name) =>
+                      JSON.parse(readFileSync(join(workdir, "post-merge", name), "utf8")) as {
+                        endedAt?: string
+                        merged: string[]
+                        issueActions: Array<{ branch: string; status: string }>
+                      },
+                  )
+                expect(attempts.length).toBeGreaterThan(0)
+                expect(attempts.every((attempt) => attempt.endedAt !== undefined)).toBe(true)
+                const acted = attempts.flatMap((attempt) => attempt.merged)
+                expect(acted).toEqual(expect.arrayContaining(["task/first", "task/second", "task/refs"]))
+                for (const branch of ["task/first", "task/second"]) {
+                  expect(attempts.flatMap((attempt) => attempt.issueActions)).toContainEqual(
+                    expect.objectContaining({ branch, status: "fulfilled" }),
+                  )
+                }
+              },
+              { timeout: 10000 },
+            )
+            replayStop.abort()
+          },
         },
         { workdir, json: true, projectRoot: repo },
       ),
@@ -437,8 +607,6 @@ it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
     replayStop.abort()
     await vi.waitFor(
       () => {
-        const current = readdirSync(join(workdir, "post-merge")).filter((name) => name.endsWith(".json")).length
-        if (current > replayAttemptStart) replayAttemptStart = current
         const currentCalls = readFileSync(closeCalls, "utf8").trim().split("\n").filter(Boolean)
         expect(currentCalls).toHaveLength(callCount)
       },
