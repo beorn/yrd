@@ -2339,7 +2339,6 @@ export async function coreQueueCommand(
           let log: ReturnType<typeof openLog> | undefined
           try {
             log = openLog(join(workdir, "logs"))
-            const runId = log.id
             log.write({ kind: "run", command: "withdraw", config: config.blob, target: targetLabel })
             log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
             const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
