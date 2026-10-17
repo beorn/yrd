@@ -1541,8 +1541,10 @@ export async function issueOf(
       const trailer = candidate.trailer ?? "Refs/Resolves"
       throw new Error(
         `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${issue} at ${commit}; ` +
+          `Yrd compares issue keys exactly, so it cannot tell whether two keys name one issue; ` +
           `the second binding is a ${trailer} trailer, and a Refs or Resolves trailer always binds; ` +
           `keep a follow-up link without binding it with a "Follow-up: ${issue}" line, ` +
+          `or, if both keys name one issue, rewrite one trailer to the other key; ` +
           `then fix trailer at ${commit}`,
       )
     }

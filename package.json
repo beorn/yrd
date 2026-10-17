@@ -58,6 +58,6 @@
   "overrides": {
     "git-super": "github:beorn/git-super#9bb070837bd356b8a5bd5406e28fe3ae72fe665a",
     "gitomic": "github:beorn/gitomic#326e8a1c96ab738b1f5dda22c74cc59a1acfd273",
-    "loggily": "github:beorn/loggily#d22f90551dc22612aba797328dae93ff31a39471"
+    "loggily": "github:beorn/loggily#f99ab809814b2d018ba94dc3c1f41720a27a458a"
   }
 }
