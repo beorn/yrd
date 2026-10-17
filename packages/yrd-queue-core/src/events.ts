@@ -241,7 +241,10 @@ export type NoticeWrite = Readonly<{
   reason?: string
 }>
 
-/** A completed provider write, retained as neutral history on the branch's existing event chain. */
+/**
+ * A completed provider write, retained as neutral history on the branch's existing event chain.
+ * mergeCommitterTime is syntax-checked here; the writer must bind it to the named merge commit.
+ */
 export type AppliedIssueEffect = Readonly<{
   kind: "issue-effect-v1"
   mergedEvent: Oid

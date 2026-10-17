@@ -917,7 +917,12 @@ describe("ADR-0016 event fold", () => {
   it("keeps a typed issue effect neutral across a later branch reuse and validates its merge reference", () => {
     const opened = event("opened", A, [["Commit", A]], [A])
     const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
-    const effect = issueEffectEvent(ISSUE_EFFECT)
+    const effect = {
+      ...issueEffectEvent(ISSUE_EFFECT),
+      props: issueEffectEvent(ISSUE_EFFECT).props.map(([key, value]) =>
+        key === "Time" ? [key, "2026-09-22T14:01:00.000Z"] as [string, string] : [key, value] as [string, string],
+      ),
+    }
     const original = changeChain(opened, merged)
     const withEffect = changeChain(opened, merged, effect)
     const beforeEffect = project(original, "refs/yrd/q/changes/task/reused", "fixture")
@@ -927,6 +932,7 @@ describe("ADR-0016 event fold", () => {
       status: beforeEffect.status,
       at: beforeEffect.at,
       endedAt: beforeEffect.endedAt,
+      lastNotifiable: beforeEffect.lastNotifiable,
       ending: beforeEffect.ending,
       tip: EFFECT_EVENT,
     })
@@ -991,6 +997,47 @@ describe("ADR-0016 event fold", () => {
     expect(() =>
       project(changeChain(opened, effect, merged), "refs/yrd/q/changes/task/forward-ref", "fixture"),
     ).toThrow(/earlier merged event/u)
+  })
+
+  it.each([
+    ["Reason", [["Reason", "audit"]]],
+    ["For", [["For", "a".repeat(40)]]],
+    ["To", [["To", "@dev/2"]]],
+    ["Key", [["Key", "issue"]]],
+    ["Result", [["Result", "delivered"]]],
+  ] as const)("refuses Issue-Effect with a legacy %s field", (_name, extra) => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    const base = issueEffectEvent(ISSUE_EFFECT)
+    const effect = { ...base, props: [...base.props, ...extra] }
+    expect(() => project(changeChain(opened, merged, effect), "refs/yrd/q/changes/task/refusal", "fixture")).toThrow()
+  })
+
+  it.each([
+    ["providerId mismatch", (raw: Record<string, unknown>) => ({ ...raw, providerId: "yrd1-wrong" })],
+    ["non-canonical JSON", (raw: Record<string, unknown>) => Object.fromEntries(Object.entries(raw).reverse())],
+    ["extra field", (raw: Record<string, unknown>) => ({ ...raw, extra: true })],
+    ["missing field", (raw: Record<string, unknown>) => {
+      const { declaration: _declaration, ...rest } = raw
+      return rest
+    }],
+    ["wrong verb-ending pairing", (raw: Record<string, unknown>) => ({ ...raw, verb: "comment" })],
+    ["empty key", (raw: Record<string, unknown>) => ({ ...raw, issueKey: " " })],
+    ["non-ISO time", (raw: Record<string, unknown>) => ({ ...raw, mergeCommitterTime: "yesterday" })],
+  ] as const)("reader refuses %s", (_name, alter) => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    const effect = issueEffectEvent(alter(ISSUE_EFFECT as unknown as Record<string, unknown>))
+    expect(() => project(changeChain(opened, merged, effect), "refs/yrd/q/changes/task/refusal", "fixture")).toThrow()
+  })
+
+  it("reader refuses an issue effect from the wrong writer", () => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    const effect = { ...issueEffectEvent(ISSUE_EFFECT), writer: "yrd" }
+    expect(() => project(changeChain(opened, merged, effect), "refs/yrd/q/changes/task/writer", "fixture")).toThrow(
+      /needs writer/u,
+    )
   })
 
   it("validates issue-effect merge references when enumerating public change segments", () => {
