@@ -1763,7 +1763,7 @@ export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Prom
 
 /** The process entry, shared by `yrd` and `git-yrd`. */
 export async function runYrdExecutable(
-  host: Pick<YrdCliIO, "liveEnvironmentUse" | "localBranchProtections" | "branchIssue"> = {},
+  host: Pick<YrdCliIO, "liveEnvironmentUse" | "localBranchProtections" | "branchIssue">,
 ): Promise<never> {
   const color = process.env.NO_COLOR === undefined && (process.stdout.isTTY || process.env.FORCE_COLOR !== undefined)
   const io: YrdCliIO = {

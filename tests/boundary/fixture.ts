@@ -372,6 +372,7 @@ function capture(cwd: string): { io: YrdCliIO; stdout(): string; stderr(): strin
   let stderr = ""
   return {
     io: {
+      localBranchProtections: null,
       cwd,
       color: false,
       stdout(text) {

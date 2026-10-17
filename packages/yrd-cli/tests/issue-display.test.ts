@@ -43,6 +43,7 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
   let stderr = ""
   const io: YrdCliIO = {
     color: false,
+    localBranchProtections: null,
     cwd,
     stderr(text) {
       stderr += text
@@ -165,6 +166,7 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
       [BUN, "/usr/local/bin/yrd", "queue", "show", "task/one", "--json", "--fresh", "--project-root", project],
       {
         color: false,
+        localBranchProtections: null,
         cwd: work,
         stdout(text) {
           stdout += text

@@ -1,2 +1,4 @@
 #!/usr/bin/env bun
-import "./yrd.ts"
+import { runYrdExecutable } from "../packages/yrd-cli/src/cli.ts"
+
+await runYrdExecutable({ localBranchProtections: null })

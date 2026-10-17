@@ -23,7 +23,14 @@ const author = ["-c", "user.email=mirror@yrd.test", "-c", "user.name=yrd"] as co
 function capture(cwd: string): YrdCliIO & { out: string[]; err: string[] } {
   const out: string[] = []
   const err: string[] = []
-  return { cwd, out, err, stdout: (text) => out.push(text), stderr: (text) => err.push(text) }
+  return {
+    localBranchProtections: null,
+    cwd,
+    out,
+    err,
+    stdout: (text) => out.push(text),
+    stderr: (text) => err.push(text),
+  }
 }
 
 /** A product declaring one hosted child, where the hosted URL is a local bare repository. */

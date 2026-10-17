@@ -84,6 +84,7 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
   let stderr = ""
   const io: YrdCliIO = {
     color: false,
+    localBranchProtections: null,
     cwd,
     stderr(text) {
       stderr += text

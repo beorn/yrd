@@ -39,6 +39,18 @@ import { originHead } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
 import { admitEnvironmentClose } from "./env-close-holders.ts"
 
+/** Ordinary cleanup permits an explicitly standalone host; missing wiring is not that declaration. */
+export async function readBranchProtections(
+  io: YrdCliIO,
+  input: Parameters<NonNullable<YrdCliIO["localBranchProtections"]>>[0],
+): Promise<LocalBranchProtectionResult> {
+  if (io.localBranchProtections === null) return { protections: [], evidence: [] }
+  if (io.localBranchProtections === undefined) {
+    throw new Error("localBranchProtections authority reader is missing; standalone callers must explicitly pass null")
+  }
+  return io.localBranchProtections(input)
+}
+
 /** The existing per-repository custody step, shared by component drops and retained checkout release. */
 async function publishRetirementArchive(
   input: Readonly<{
@@ -117,9 +129,9 @@ export async function retireComponentLocalBranch(
       }
       const merged = await isAncestor(git, request.tip, target)
       const protections = async (): Promise<readonly string[]> => {
-        const host =
-          (await io.localBranchProtections?.({ repo, branch: request.branch, tip: request.tip, issue: request.issue }))
-            ?.protections ?? []
+        const host = (
+          await readBranchProtections(io, { repo, branch: request.branch, tip: request.tip, issue: request.issue })
+        ).protections
         if (!merged && (await readRemoteCommit(git, remote, archiveRef)) !== request.tip) {
           throw new Error(`${repo}: archive custody changed before conditional removal`)
         }
@@ -147,13 +159,13 @@ export async function retireComponentLocalBranch(
           dryRun: true,
           protections: async () =>
             (
-              await io.localBranchProtections?.({
+              await readBranchProtections(io, {
                 repo,
                 branch: request.branch,
                 tip: request.tip,
                 issue: request.issue,
               })
-            )?.protections ?? [],
+            ).protections,
         })
         if (preview.outcome !== "eligible") result = preview
         else {
@@ -293,7 +305,7 @@ export async function releaseRetainedCheckouts(
       }
       if (overlaps(checkout, use.path)) return [`live use: ${use.reason} (${use.path})`]
     }
-    if (io.localBranchProtections === undefined) {
+    if (typeof io.localBranchProtections !== "function") {
       throw new Error("release-checkout requires the localBranchProtections authority reader")
     }
     const result = await io.localBranchProtections({
@@ -361,7 +373,7 @@ export async function releaseRetainedCheckouts(
   }
   try {
     for (const reader of ["liveEnvironmentUse", "localBranchProtections"] as const) {
-      if (io[reader] === undefined) throw new Error(`release-checkout requires the ${reader} authority reader`)
+      if (typeof io[reader] !== "function") throw new Error(`release-checkout requires the ${reader} authority reader`)
     }
     const rootStore = createEventStore(input.repo, await remoteUrl(input.git, input.remote), input.selection)
     rootRow.remote = publicText(rootStore.remote)
@@ -762,7 +774,7 @@ export async function retireMergedRootAuthor(
       ) {
         throw new Error(`${branch}@${tip}: origin archive custody changed before root retirement`)
       }
-      return (await input.io.localBranchProtections?.({ repo, branch, tip, issue: change.issue }))?.protections ?? []
+      return (await readBranchProtections(input.io, { repo, branch, tip, issue: change.issue })).protections
     },
     // Attributed submissions have a separate proven component judgment; the old root-only
     // warning remains correct only for submissions that recorded no component authors.
@@ -1231,22 +1243,22 @@ export async function retireMergedComponentAuthors(
             throw new Error(`root author ${author.rootBranch} advanced since capture`)
           }
           return [
-            ...((
-              await input.io.localBranchProtections?.({
+            ...(
+              await readBranchProtections(input.io, {
                 repo,
                 branch: author.branch,
                 tip: author.tip,
                 issue: author.issue,
               })
-            )?.protections ?? []),
-            ...((
-              await input.io.localBranchProtections?.({
+            ).protections,
+            ...(
+              await readBranchProtections(input.io, {
                 repo: author.rootCommonDirectory,
                 branch: author.rootBranch,
                 tip: author.rootTip,
                 issue: author.issue,
               })
-            )?.protections ?? []),
+            ).protections,
           ]
         },
       })

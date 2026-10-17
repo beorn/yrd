@@ -82,7 +82,12 @@ async function runRound(w: Awaited<ReturnType<typeof world>>, run: string): Prom
       git: w.git,
       config,
       workdir: w.workdir,
-      io: { cwd: w.repo, stdout: () => {}, stderr: () => {} },
+      io: {
+        localBranchProtections: null,
+        cwd: w.repo,
+        stdout: () => {},
+        stderr: () => {},
+      },
       selection: w.git.selection,
       outcome: { run, log: join(w.workdir, "journal.jsonl"), merged: [] } as never,
     })

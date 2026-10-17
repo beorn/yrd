@@ -67,6 +67,7 @@ function captureIo(cwd: string): Readonly<{ io: YrdCliIO; stdout(): string; stde
   let stderr = ""
   return {
     io: {
+      localBranchProtections: null,
       cwd,
       color: false,
       stdout: (text) => {

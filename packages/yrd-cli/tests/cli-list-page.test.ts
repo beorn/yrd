@@ -34,6 +34,7 @@ async function yrd(cwd: string, io: Pick<YrdCliIO, "color" | "columns">, ...args
   let stdout = ""
   let stderr = ""
   const full: YrdCliIO = {
+    localBranchProtections: null,
     ...io,
     cwd,
     stderr(text) {
