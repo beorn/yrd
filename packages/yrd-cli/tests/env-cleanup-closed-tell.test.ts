@@ -168,7 +168,7 @@ async function runRound(
     git: w.git,
     config: configFor(w.head),
     workdir: w.workdir,
-    io: { cwd: w.repo, stdout: () => {}, stderr: () => {} },
+    io: { cwd: w.repo, stdout: () => {}, stderr: () => {}, localBranchProtections: null },
     selection: w.git.selection,
     outcome: { run, log: join(w.workdir, "journal.jsonl"), merged, target: w.head } as never,
     ...(onEnvironmentClosed === undefined ? {} : { onEnvironmentClosed }),
