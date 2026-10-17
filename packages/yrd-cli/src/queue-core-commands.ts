@@ -1867,13 +1867,14 @@ export async function coreQueueCommand(
           }
           matched++
           if (
-            ((local && head !== request.tip) || (change?.commit !== undefined && change.commit !== head)) &&
-            !(await acceptsMergedLocalRetirement(authorGit, {
-              local,
-              expectedTip: local ? request.tip : head,
-              head,
-              change,
-            }))
+            (local && head !== request.tip) ||
+            (change?.commit !== undefined &&
+              change.commit !== head &&
+              !(await acceptsMergedLocalRetirement(authorGit, {
+                local,
+                head,
+                change,
+              })))
           ) {
             kept.push({
               ...row,
