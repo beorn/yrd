@@ -1681,6 +1681,12 @@ export function createLandedBranchRetirement(
         reason: `${repo}: retired origin ${candidate.branch}@${candidate.tip}; ${store.targetRef}@${target} contains its exact tip`,
       })
     }
-    return { ...landed, custody: "main" }
+    return {
+      ...landed,
+      ...(origin && !local && remoteTip === undefined && !candidate.dryRun
+        ? { detail: `already retired: origin ${candidate.branch} is absent; this run deleted no ref` }
+        : {}),
+      custody: "main",
+    }
   }
 }

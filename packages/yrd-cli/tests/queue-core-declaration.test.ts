@@ -3711,6 +3711,8 @@ describe("component-local retirement without a component queue", () => {
     "origin-only",
     "origin-held",
     "origin-advanced",
+    "origin-stale-local-main",
+    "origin-main-moved",
     "merged",
     "unmerged",
     "held",
@@ -3766,7 +3768,8 @@ describe("component-local retirement without a component queue", () => {
       mode === "publication-refused" ||
       mode === "archive-readback-lost" ||
       mode === "prior-day-archive" ||
-      mode === "origin-advanced"
+      mode === "origin-advanced" ||
+      mode === "origin-stale-local-main"
     ) {
       await git(["checkout", "--quiet", "-b", branch])
       writeFileSync(join(child, "private.txt"), "reviewed unmerged work\n")
@@ -3790,6 +3793,8 @@ describe("component-local retirement without a component queue", () => {
     if (origin) {
       await git(["push", "--quiet", "origin", `refs/heads/${branch}:refs/heads/${branch}`])
       if (mode === "origin-only") await git(["update-ref", "-d", `refs/heads/${branch}`, actualTip])
+      // The local main stays stale: a local-only authority reader must miss this accepted head.
+      if (mode === "origin-stale-local-main") await git(["push", "--quiet", "origin", `${actualTip}:refs/heads/main`])
     }
     const collisionRef = archiveRefFor(branch, "fixture", new Date().toISOString().slice(0, 10))
     const priorRef = archiveRefFor(branch, "fixture", new Date(Date.now() - 86_400_000).toISOString().slice(0, 10))
@@ -3831,7 +3836,27 @@ describe("component-local retirement without a component queue", () => {
     const run = capture(child)
     const selectedOther = ownSelectedOther ? await world() : undefined
     if (ownSelectedOther) unlinkSync(join(child, ".yrd.yml"))
+    let mainMoved = false
     run.io.localBranchProtections = async () => {
+      if (mode === "origin-main-moved" && !mainMoved) {
+        mainMoved = true
+        const tree = (await git(["rev-parse", `${baseTip}^{tree}`])).trim()
+        const next = (
+          await git([
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@test.invalid",
+            "commit-tree",
+            tree,
+            "-p",
+            baseTip,
+            "-m",
+            "concurrent published-main move",
+          ])
+        ).trim()
+        await git(["push", "--quiet", "origin", `${next}:refs/heads/main`])
+      }
       if (mode === "protection-error") throw new Error("host protection authority unavailable")
       return { protections: mode === "held" || mode === "origin-held" ? ["fixture owner hold"] : [], evidence: [] }
     }
@@ -3854,25 +3879,23 @@ describe("component-local retirement without a component queue", () => {
           })
         : undefined
     if (mode === "unreadable-declaration") writeFileSync(join(child, ".yrd.yml"), "{}\n")
-    const exit = await runYrdProcess(
-      [
-        "bun",
-        "yrd",
-        "drop",
-        branch,
-        origin ? "--retire" : "--local",
-        "--tip",
-        tip,
-        ...(origin ? [] : ["--issue", "28824"]),
-        "--reason",
-        "explicit reviewed component drop",
-        "--submitter",
-        "fixture",
-        ...(mode === "publication-refused" ? [] : ["--json"]),
-        ...(selectedOther === undefined ? [] : ["--queue", `${join(dirname(selectedOther), "remote.git")}#main`]),
-      ],
-      io,
-    ).finally(() => unreadable?.mockRestore())
+    const argv = [
+      "bun",
+      "yrd",
+      "drop",
+      branch,
+      origin ? "--retire" : "--local",
+      "--tip",
+      tip,
+      ...(origin ? [] : ["--issue", "28824"]),
+      "--reason",
+      "explicit reviewed component drop",
+      "--submitter",
+      "fixture",
+      ...(mode === "publication-refused" ? [] : ["--json"]),
+      ...(selectedOther === undefined ? [] : ["--queue", `${join(dirname(selectedOther), "remote.git")}#main`]),
+    ]
+    const exit = await runYrdProcess(argv, io).finally(() => unreadable?.mockRestore())
     const failure =
       mode === "protection-error" ||
       mode === "missing-protections-reader" ||
@@ -3881,6 +3904,7 @@ describe("component-local retirement without a component queue", () => {
       mode === "archive-readback-lost" ||
       mode === "malformed-declaration" ||
       mode === "unreadable-declaration" ||
+      mode === "origin-main-moved" ||
       ownSelectedOther
     if (failure) {
       expect(exit).not.toBe(0)
@@ -3895,6 +3919,14 @@ describe("component-local retirement without a component queue", () => {
         )
       }
       if (mode === "unreadable-declaration") expect(run.stderr()).toContain("EACCES")
+      if (mode === "origin-main-moved") {
+        expect(run.stdout() + run.stderr()).toContain("published main moved")
+        expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(
+          `${actualTip}\trefs/heads/${branch}`,
+        )
+        expect((await git(["ls-remote", "origin", "refs/archive/*", "refs/yrd/*"])).trim()).toBe("")
+        return
+      }
       if (mode === "archive-collision") {
         expect((await git(["ls-remote", "origin", collisionRef])).split("\t")[0]).toBe(baseTip)
       }
@@ -3926,11 +3958,23 @@ describe("component-local retirement without a component queue", () => {
           expect.objectContaining({
             branch,
             head: tip,
-            custody: { kind: "published-main", ref: "refs/heads/main", tip: baseTip },
+            custody: {
+              kind: "published-main",
+              ref: "refs/heads/main",
+              tip: mode === "origin-stale-local-main" ? actualTip : baseTip,
+            },
           }),
         ])
         expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
         expect((await git(["ls-remote", "origin", "refs/archive/*", "refs/yrd/*"])).trim()).toBe("")
+        const retry = capture(child)
+        retry.io.localBranchProtections = run.io.localBranchProtections
+        expect(await runYrdProcess(argv, retry.io), retry.stderr()).toBe(0)
+        expect(JSON.parse(retry.stdout())).toMatchObject({
+          removed: [expect.objectContaining({ branch, head: tip, detail: expect.stringContaining("already retired") })],
+          kept: [],
+          failed: [],
+        })
       }
       expect((await git(["rev-parse", "refs/heads/main"])).trim()).toBe(baseTip)
       return
