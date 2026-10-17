@@ -1625,6 +1625,17 @@ describe("a queue is the selected origin branch carrying config", () => {
     await childGit(["config", "user.name", "yrd test"])
     await childGit(["config", "user.email", "yrd@test.invalid"])
     const landed = (await childGit(["rev-parse", "HEAD"])).trim()
+    // Main's materialized child is not the private author worktree's module store.
+    // The previous fixture only checked local refs in the selected checkout, missing both destinations.
+    const privateRoot = join(dirname(repo), "private-author")
+    await git(["worktree", "add", "--quiet", "--detach", privateRoot, "HEAD"])
+    const privateGit = gitIn(privateRoot)
+    await privateGit(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--quiet"])
+    const privateChild = join(privateRoot, "modules/child")
+    const privateChildGit = gitIn(privateChild)
+    const privateBranch = "task/1234-private"
+    await privateChildGit(["branch", privateBranch, landed])
+    await privateChildGit(["push", "--quiet", "origin", `refs/heads/${privateBranch}`])
     for (const branch of [
       "task/28988-landed",
       "exp/28988-landed",
@@ -1635,6 +1646,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     ]) {
       await childGit(["branch", branch, landed])
     }
+    await childGit(["push", "--quiet", "origin", "refs/heads/task/28988-landed"])
     await childGit(["checkout", "--quiet", "-b", "task/28988-unique"])
     writeFileSync(join(child, "unique.txt"), "unpublished\n")
     await childGit(["add", "unique.txt"])
@@ -1643,6 +1655,9 @@ describe("a queue is the selected origin branch carrying config", () => {
     await childGit(["checkout", "--quiet", "task/28988-held"])
     const refs = async (read: typeof git) =>
       read(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/archive/", "refs/yrd/"])
+    const rootBranch = "task/1234-root"
+    await git(["branch", rootBranch])
+    await git(["push", "--quiet", "origin", `refs/heads/${rootBranch}`])
     const rootBefore = await refs(git)
     const childBefore = await refs(childGit)
     const argv = [
@@ -1658,7 +1673,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     ]
     const fixtureIssue: NonNullable<YrdCliIO["branchIssue"]> = ({ branch, recordedIssue }) => {
       const key = recordedIssue ?? /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
-      return key === "28988" ? "@example/28988-cleanup" : key
+      return key === "28988" || key === "1234" ? "@example/28988-cleanup" : key
     }
     type Report = {
       excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[]
@@ -1674,10 +1689,11 @@ describe("a queue is the selected origin branch carrying config", () => {
       const result = JSON.parse(preview.stdout()) as Report
       expect(result.eligible.map((row) => row.branch).sort()).toEqual([
         "exp/28988-landed",
+        privateBranch,
         "task/28988-landed",
         "task/28988-moved",
       ])
-      expect(result.eligible.every((row) => row.repo === child && row.head === landed)).toBe(true)
+      expect(result.eligible.every((row) => [child, privateChild].includes(row.repo) && row.head === landed)).toBe(true)
       expect(result.removed).toEqual([])
       expect(result.kept).toEqual(
         expect.arrayContaining([
@@ -1686,7 +1702,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         ]),
       )
       expect(result.excluded).toContainEqual({ repo: child, target: 1, unrelated: 1, unnumbered: 1 })
-      expect(result.kept.every((row) => row.branch.includes("28988"))).toBe(true)
+      expect(result.kept.every((row) => /(?:28988|1234)/u.test(row.branch))).toBe(true)
       expect(await refs(git)).toBe(rootBefore)
       expect(await refs(childGit)).toBe(childBefore)
     }
@@ -1702,14 +1718,35 @@ describe("a queue is the selected origin branch carrying config", () => {
     }
     expect(await runYrdProcess([...argv, "--apply"], apply.io), apply.stderr()).toBe(0)
     const result = JSON.parse(apply.stdout()) as Report
-    expect(result.removed.map((row) => row.branch).sort()).toEqual(["exp/28988-landed", "task/28988-landed"])
+    expect(result.removed.map((row) => row.branch).sort()).toEqual([
+      "exp/28988-landed",
+      privateBranch,
+      "task/28988-landed",
+    ])
     for (const row of result.removed) {
-      expect((await childGit(["rev-parse", row.archiveRef])).trim()).toBe(landed)
-      expect((await childGit(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
+      const owningGit = row.repo === privateChild ? privateChildGit : childGit
+      expect((await owningGit(["rev-parse", row.archiveRef])).trim()).toBe(landed)
+      expect((await owningGit(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
     }
+    expect(
+      (await childGit(["ls-remote", "origin", "refs/heads/task/28988-landed", `refs/heads/${privateBranch}`])).trim(),
+    ).toBe("")
     expect(result.kept).toContainEqual(
       expect.objectContaining({ repo: child, branch: "task/28988-moved", reason: "moved" }),
     )
+    expect(result.kept).toContainEqual(
+      expect.objectContaining({ repo, branch: rootBranch, reason: "held", detail: expect.stringContaining("child") }),
+    )
+    for (const row of result.removed) {
+      expect(row).toMatchObject({ custody: { kind: "published-main", ref: "refs/heads/main", tip: landed } })
+    }
+    const retry = capture(repo)
+    retry.io.branchIssue = fixtureIssue
+    expect(await runYrdProcess([...argv, "--apply"], retry.io), retry.stderr()).toBe(0)
+    expect(JSON.parse(retry.stdout())).toMatchObject({
+      removed: [],
+      kept: expect.arrayContaining([expect.objectContaining({ repo, branch: rootBranch, reason: "held" })]),
+    })
     expect((await childGit(["rev-parse", "refs/heads/task/28988-unique"])).trim()).toBe(unique)
     expect((await childGit(["rev-parse", "refs/heads/task/28988-held"])).trim()).toBe(landed)
     expect(await refs(git)).toBe(rootBefore)
@@ -1744,6 +1781,175 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect.objectContaining({ kind: "local-branch-retirement", branch: "task/28988-landed", outcome: "removed" }),
     )
   }, 60_000)
+
+  /** @failure Store discovery repeats remote reads or never retires a root after its children finish.
+   * @level l3 @consumer Issue retirement's root queue arm, including exact ending-event custody
+   * The private-store fixture above always keeps a child, so it never reaches root retirement.
+   */
+  it.each(["ended", "draft", "retry"] as const)(
+    "retires children before the %s root with its real ending custody",
+    async (mode) => {
+      const repo = await world("checks: []\n")
+      const seed = await world()
+      const git = gitIn(repo)
+      await git([
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        join(dirname(seed), "remote.git"),
+        "child",
+      ])
+      await git(["commit", "--quiet", "-am", "register child"])
+      await git(["push", "--quiet", "origin", "main"])
+      const rootTip = (await git(["rev-parse", "HEAD"])).trim()
+      const queueTip = await createQueue(repo, "main", rootTip, new Date())
+      const child = join(repo, "child")
+      const childGit = gitIn(child)
+      const childTip = (await childGit(["rev-parse", "HEAD"])).trim()
+      const rootBranch = "task/1234-root"
+      const childBranch = "task/1234-child"
+      const issue = "@example/1234-retirement"
+      await git(["branch", rootBranch, rootTip])
+      await git(["push", "--quiet", "origin", rootBranch])
+      await childGit(["branch", childBranch, childTip])
+      await childGit(["push", "--quiet", "origin", childBranch])
+      if (mode === "ended") {
+        const chain = await openEvents({
+          ...createEventStore(repo, "origin", git.selection),
+          ref: changesRef("main", rootBranch),
+          writer: "fixture",
+        })
+        await chain.append(
+          [
+            changeInput("opened", { queueTip, at: new Date(), commit: rootTip, by: "fixture", issue }),
+            changeInput("merged", { queueTip, at: new Date(), commit: rootTip }),
+          ],
+          { expect: null },
+        )
+      }
+      const argv = ["bun", "yrd", "drop", "--issue", issue, "--submodules", "--submitter", "fixture", "--json"]
+      let held = mode === "retry"
+      const run = async (flags: string[], format: "json" | "human" = "json") => {
+        const out = capture(repo)
+        out.io.branchIssue = ({ branch, recordedIssue }) =>
+          recordedIssue ?? (branch.startsWith("task/1234-") ? issue : undefined)
+        out.io.localBranchProtections = async ({ branch }) => ({
+          protections: held && branch === childBranch ? ["fixture child hold"] : [],
+          evidence: [],
+        })
+        const args = format === "json" ? argv : argv.filter((arg) => arg !== "--json")
+        const exit = await runYrdProcess([...args, ...flags], out.io)
+        return { exit, out }
+      }
+      if (mode === "ended") {
+        const measure = async (name: string) => {
+          const trace = join(dirname(repo), name)
+          mkdirSync(trace)
+          const previous = process.env.GIT_TRACE2_EVENT
+          try {
+            process.env.GIT_TRACE2_EVENT = trace
+            const preview = await run(["--dry-run"])
+            expect(preview.exit, preview.out.stderr()).toBe(0)
+            const calls = readRemoteCalls(trace)
+            expect(calls.unreadable).toBe(0)
+            expect(calls.verbs["ls-remote"]).toBeGreaterThan(0)
+            return calls.verbs
+          } finally {
+            if (previous === undefined) delete process.env.GIT_TRACE2_EVENT
+            else process.env.GIT_TRACE2_EVENT = previous
+          }
+        }
+        const before = await measure("one-store-trace")
+        for (const name of ["private-one", "private-two"]) {
+          const author = join(dirname(repo), name)
+          await git(["worktree", "add", "--quiet", "--detach", author, "HEAD"])
+          await gitIn(author)(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--quiet"])
+        }
+        const after = await measure("three-store-trace")
+        expect(after["ls-remote"]).toBe(before["ls-remote"])
+        if (before.fetch === undefined) throw new Error("one-store trace lacks expected fetch calls")
+        // A warm fetched queue ref can save a read; extra stores must never add one.
+        expect(after.fetch).toBeLessThanOrEqual(before.fetch)
+
+        // No checkout pointer and no module store means there is no private branch here.
+        const absent = join(dirname(repo), "unmaterialized-author")
+        await git(["worktree", "add", "--quiet", "--detach", absent, "HEAD"])
+        const preview = await run(["--dry-run"])
+        expect(preview.exit, preview.out.stderr()).toBe(0)
+        expect(JSON.parse(preview.out.stdout())).toMatchObject({
+          failed: [],
+          notMaterialized: [expect.objectContaining({ repo: join(absent, "child"), reason: "not-materialized" })],
+        })
+        const human = await run(["--dry-run"], "human")
+        expect(human.exit, human.out.stderr()).toBe(0)
+        expect(human.out.stdout()).toContain(`Skipped ${join(absent, "child")}: not materialized`)
+
+        // A prunable root registration still needs a subject and holds every root.
+        const missing = join(dirname(repo), "prunable-author")
+        const saved = `${missing}-saved`
+        await git(["worktree", "add", "--quiet", "--detach", missing, "HEAD"])
+        fs.renameSync(missing, saved)
+        try {
+          const stopped = await run(["--apply"])
+          expect(stopped.exit).toBe(1)
+          expect(JSON.parse(stopped.out.stdout())).toMatchObject({
+            failed: [expect.objectContaining({ repo: missing, reason: "unreadable" })],
+            kept: expect.arrayContaining([expect.objectContaining({ branch: rootBranch, reason: "held" })]),
+          })
+          expect((await git(["rev-parse", `refs/heads/${rootBranch}`])).trim()).toBe(rootTip)
+        } finally {
+          fs.renameSync(saved, missing)
+        }
+      }
+      if (held) {
+        const stopped = await run(["--apply"])
+        expect(stopped.exit, stopped.out.stderr()).toBe(0)
+        expect(JSON.parse(stopped.out.stdout())).toMatchObject({
+          removed: [],
+          kept: expect.arrayContaining([
+            expect.objectContaining({ branch: childBranch, reason: "held" }),
+            expect.objectContaining({ branch: rootBranch, reason: "held", detail: expect.stringContaining("child") }),
+          ]),
+        })
+        held = false
+      }
+      const applied = await run(["--apply"])
+      expect(applied.exit, applied.out.stderr()).toBe(0)
+      const result = JSON.parse(applied.out.stdout()) as {
+        removed: {
+          branch: string
+          archiveRef?: string
+          custody?: { kind: string; ref: string; tip: string; archive?: string }
+        }[]
+        failed: unknown[]
+        kept: unknown[]
+      }
+      expect(result.failed).toEqual([])
+      expect(result.kept).toEqual([])
+      expect(result.removed.map((row) => row.branch)).toEqual(
+        mode === "ended" ? [rootBranch] : [childBranch, rootBranch],
+      )
+      const row = result.removed.find((entry) => entry.branch === rootBranch)
+      expect(row).toMatchObject({ custody: { kind: "event", ref: changesRef("main", rootBranch) } })
+      if (row?.custody === undefined || row.archiveRef === undefined) throw new Error("root receipt lacks custody")
+      const state = (await listChanges(createEventStore(repo, "origin", git.selection), "main")).get(rootBranch)
+      expect(state).toMatchObject({ status: mode === "ended" ? "merged" : "cancelled", commit: rootTip })
+      expect(state?.ending?.id).toBe(row.custody.tip)
+      expect((await git(["rev-parse", row.archiveRef])).trim()).toBe(rootTip)
+      expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${rootBranch}`])).trim()).toBe("")
+      expect((await childGit(["for-each-ref", "--format=%(refname)", `refs/heads/${childBranch}`])).trim()).toBe("")
+      expect((await git(["ls-remote", "origin", `refs/heads/${rootBranch}`])).trim()).toBe("")
+      expect((await childGit(["ls-remote", "origin", `refs/heads/${childBranch}`])).trim()).toBe("")
+      if (mode === "ended") {
+        expect(row.custody.archive).toEqual(expect.any(String))
+        if (row.custody.archive === undefined) throw new Error("ended-root receipt lacks origin archive")
+        expect((await git(["ls-remote", "origin", row.custody.archive])).trim().split(/\s+/u)[0]).toBe(rootTip)
+      }
+    },
+    60_000,
+  )
 
   /**
    * @failure Landing evidence disappears after resubmission, or a root pin without component origin custody permits deletion.
@@ -3668,6 +3874,14 @@ describe("a queue is the selected origin branch carrying config", () => {
  */
 describe("component-local retirement without a component queue", () => {
   it.each([
+    "origin-merged",
+    "origin-only",
+    "origin-held",
+    "origin-advanced",
+    "origin-stale-local-main",
+    "origin-stale-default-ref",
+    "origin-main-moved",
+    "origin-publication-refused",
     "merged",
     "unmerged",
     "held",
@@ -3686,6 +3900,9 @@ describe("component-local retirement without a component queue", () => {
     "malformed-declaration",
     "unreadable-declaration",
   ] as const)("retires exact %s component work through the declared root's existing log", async (mode) => {
+    // The local-only fixture missed origin retirement and an absent local twin.
+    // Fresh published-main custody suffices, but host holds and exact-tip races still keep the name.
+    const origin = mode.startsWith("origin-")
     const root = await world("{}\n")
     const rootGit = gitIn(root)
     const ownSelectedOther = mode === "own-declared-selected-other" || mode === "own-malformed-selected-other"
@@ -3719,7 +3936,10 @@ describe("component-local retirement without a component queue", () => {
       mode === "archive-collision" ||
       mode === "publication-refused" ||
       mode === "archive-readback-lost" ||
-      mode === "prior-day-archive"
+      mode === "prior-day-archive" ||
+      mode === "origin-advanced" ||
+      mode === "origin-stale-local-main" ||
+      mode === "origin-stale-default-ref"
     ) {
       await git(["checkout", "--quiet", "-b", branch])
       writeFileSync(join(child, "private.txt"), "reviewed unmerged work\n")
@@ -3739,7 +3959,18 @@ describe("component-local retirement without a component queue", () => {
       await git(["branch", branch])
     }
     const actualTip = (await git(["rev-parse", "refs/heads/" + branch])).trim()
-    const tip = mode === "advanced" ? baseTip : actualTip
+    const tip = mode === "advanced" || mode === "origin-advanced" ? baseTip : actualTip
+    if (origin) {
+      await git(["push", "--quiet", "origin", `refs/heads/${branch}:refs/heads/${branch}`])
+      if (mode === "origin-only") await git(["update-ref", "-d", `refs/heads/${branch}`, actualTip])
+      // The local main stays stale: a local-only authority reader must miss this accepted head.
+      if (mode === "origin-stale-local-main") await git(["push", "--quiet", "origin", `${actualTip}:refs/heads/main`])
+      if (mode === "origin-stale-default-ref") {
+        await git(["push", "--quiet", "origin", `${actualTip}:refs/heads/trunk`])
+        await gitIn(join(dirname(seed), "remote.git"))(["symbolic-ref", "HEAD", "refs/heads/trunk"])
+        await git(["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"])
+      }
+    }
     const collisionRef = archiveRefFor(branch, "fixture", new Date().toISOString().slice(0, 10))
     const priorRef = archiveRefFor(branch, "fixture", new Date(Date.now() - 86_400_000).toISOString().slice(0, 10))
     if (mode === "prior-day-archive") {
@@ -3749,16 +3980,16 @@ describe("component-local retirement without a component queue", () => {
     }
     if (mode === "archive-collision") await git(["push", "--quiet", "origin", baseTip + ":" + collisionRef])
     if (mode === "checked-out") await git(["checkout", "--quiet", branch])
-    if (mode === "publication-refused" || mode === "archive-readback-lost") {
+    if (mode === "publication-refused" || mode === "origin-publication-refused" || mode === "archive-readback-lost") {
       const hook = join(
         dirname(seed),
         "remote.git",
         "hooks",
-        mode === "publication-refused" ? "pre-receive" : "post-receive",
+        mode !== "archive-readback-lost" ? "pre-receive" : "post-receive",
       )
       writeFileSync(
         hook,
-        mode === "publication-refused"
+        mode !== "archive-readback-lost"
           ? "#!/bin/sh\necho 'fixture refuses archive publication' >&2\nexit 1\n"
           : '#!/bin/sh\nwhile read old new ref; do\ncase "$ref" in refs/archive/*) git update-ref -d "$ref" "$new" ;; esac\ndone\n',
       )
@@ -3780,9 +4011,29 @@ describe("component-local retirement without a component queue", () => {
     const run = capture(child)
     const selectedOther = ownSelectedOther ? await world() : undefined
     if (ownSelectedOther) unlinkSync(join(child, ".yrd.yml"))
+    let mainMoved = false
     run.io.localBranchProtections = async () => {
+      if (mode === "origin-main-moved" && !mainMoved) {
+        mainMoved = true
+        const tree = (await git(["rev-parse", `${baseTip}^{tree}`])).trim()
+        const next = (
+          await git([
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@test.invalid",
+            "commit-tree",
+            tree,
+            "-p",
+            baseTip,
+            "-m",
+            "concurrent published-main move",
+          ])
+        ).trim()
+        await git(["push", "--quiet", "origin", `${next}:refs/heads/main`])
+      }
       if (mode === "protection-error") throw new Error("host protection authority unavailable")
-      return { protections: mode === "held" ? ["fixture owner hold"] : [], evidence: [] }
+      return { protections: mode === "held" || mode === "origin-held" ? ["fixture owner hold"] : [], evidence: [] }
     }
     if (mode === "standalone") run.io.localBranchProtections = null
     let io = run.io
@@ -3803,26 +4054,23 @@ describe("component-local retirement without a component queue", () => {
           })
         : undefined
     if (mode === "unreadable-declaration") writeFileSync(join(child, ".yrd.yml"), "{}\n")
-    const exit = await runYrdProcess(
-      [
-        "bun",
-        "yrd",
-        "drop",
-        branch,
-        "--local",
-        "--tip",
-        tip,
-        "--issue",
-        "28824",
-        "--reason",
-        "explicit reviewed component drop",
-        "--submitter",
-        "fixture",
-        ...(mode === "publication-refused" ? [] : ["--json"]),
-        ...(selectedOther === undefined ? [] : ["--queue", `${join(dirname(selectedOther), "remote.git")}#main`]),
-      ],
-      io,
-    ).finally(() => unreadable?.mockRestore())
+    const argv = [
+      "bun",
+      "yrd",
+      "drop",
+      branch,
+      origin ? "--retire" : "--local",
+      "--tip",
+      tip,
+      ...(origin ? [] : ["--issue", "28824"]),
+      "--reason",
+      "explicit reviewed component drop",
+      "--submitter",
+      "fixture",
+      ...(mode === "publication-refused" ? [] : ["--json"]),
+      ...(selectedOther === undefined ? [] : ["--queue", `${join(dirname(selectedOther), "remote.git")}#main`]),
+    ]
+    const exit = await runYrdProcess(argv, io).finally(() => unreadable?.mockRestore())
     const failure =
       mode === "protection-error" ||
       mode === "missing-protections-reader" ||
@@ -3831,6 +4079,8 @@ describe("component-local retirement without a component queue", () => {
       mode === "archive-readback-lost" ||
       mode === "malformed-declaration" ||
       mode === "unreadable-declaration" ||
+      mode === "origin-main-moved" ||
+      mode === "origin-publication-refused" ||
       ownSelectedOther
     if (failure) {
       expect(exit).not.toBe(0)
@@ -3845,11 +4095,40 @@ describe("component-local retirement without a component queue", () => {
         )
       }
       if (mode === "unreadable-declaration") expect(run.stderr()).toContain("EACCES")
+      if (mode === "origin-main-moved") {
+        expect(run.stdout() + run.stderr()).toContain("published main moved")
+        expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(
+          `${actualTip}\trefs/heads/${branch}`,
+        )
+        expect((await git(["ls-remote", "origin", "refs/archive/*", "refs/yrd/*"])).trim()).toBe("")
+        return
+      }
       if (mode === "archive-collision") {
         expect((await git(["ls-remote", "origin", collisionRef])).split("\t")[0]).toBe(baseTip)
       }
-      if (mode === "publication-refused") {
+      if (mode === "publication-refused" || mode === "origin-publication-refused") {
         expect(run.stdout() + run.stderr()).toContain("fixture refuses archive publication")
+      }
+      if (mode === "publication-refused" || mode === "archive-readback-lost" || mode === "archive-collision") {
+        expect(run.stdout() + run.stderr()).toContain(`${branch}@${tip} at`)
+        expect(run.stdout() + run.stderr()).toContain("local refs kept")
+      }
+      if (mode === "origin-publication-refused") {
+        const logs = join(await workdirOf(rootGit), "logs")
+        const records = readdirSync(logs)
+          .filter((name) => name.endsWith(".jsonl"))
+          .flatMap((name) => readRunLog(logs, name.slice(0, -".jsonl".length)))
+        expect(records).toContainEqual(
+          expect.objectContaining({
+            kind: "observation",
+            scope: "branch-retirement",
+            repo: child,
+            branch,
+            outcome: "failed",
+          }),
+        )
+        expect(records).not.toContainEqual(expect.objectContaining({ kind: "local-branch-retirement", branch }))
+        return
       }
       if (mode === "archive-readback-lost") expect(run.stdout() + run.stderr()).toContain("read back")
       if (mode === "own-declared-selected-other") expect(run.stderr()).toContain("own origin target declares")
@@ -3857,6 +4136,68 @@ describe("component-local retirement without a component queue", () => {
       if (ownSelectedOther) return
       if (mode === "malformed-declaration" || mode === "unreadable-declaration") return
     } else expect(exit, run.stderr()).toBe(0)
+    if (origin) {
+      const report = JSON.parse(run.stdout()) as {
+        removed: { branch: string; head: string; custody: { kind: string; ref: string; tip: string } }[]
+        kept: { branch: string }[]
+        failed: unknown[]
+      }
+      expect(report.failed).toEqual([])
+      if (mode === "origin-held" || mode === "origin-advanced") {
+        expect(report.removed).toEqual([])
+        expect(report.kept).toEqual([expect.objectContaining({ branch })])
+        expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(
+          `${actualTip}\trefs/heads/${branch}`,
+        )
+      } else {
+        expect(report.kept).toEqual([])
+        expect(report.removed).toEqual([
+          expect.objectContaining({
+            branch,
+            head: tip,
+            custody: {
+              kind: "published-main",
+              ref: mode === "origin-stale-default-ref" ? "refs/heads/trunk" : "refs/heads/main",
+              tip: mode === "origin-stale-local-main" || mode === "origin-stale-default-ref" ? actualTip : baseTip,
+            },
+          }),
+        ])
+        expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
+        expect((await git(["ls-remote", "origin", "refs/archive/*", "refs/yrd/*"])).trim()).toBe("")
+        const retry = capture(child)
+        retry.io.localBranchProtections = run.io.localBranchProtections
+        expect(
+          await runYrdProcess(mode === "origin-merged" ? argv.filter((arg) => arg !== "--json") : argv, retry.io),
+          retry.stderr(),
+        ).toBe(0)
+        if (mode === "origin-merged") {
+          expect(retry.stdout()).toContain(`origin retirement in ${child}: retired 1, kept 0, failed 0`)
+          const logs = join(await workdirOf(rootGit), "logs")
+          const records = readdirSync(logs)
+            .filter((name) => name.endsWith(".jsonl"))
+            .flatMap((name) => readRunLog(logs, name.slice(0, -".jsonl".length)))
+          expect(records).toContainEqual(
+            expect.objectContaining({
+              kind: "observation",
+              scope: "branch-retirement",
+              branch,
+              reason: expect.stringContaining("retired origin"),
+            }),
+          )
+          expect(records).not.toContainEqual(expect.objectContaining({ kind: "local-branch-retirement", branch }))
+        } else {
+          expect(JSON.parse(retry.stdout())).toMatchObject({
+            removed: [
+              expect.objectContaining({ branch, head: tip, detail: expect.stringContaining("already retired") }),
+            ],
+            kept: [],
+            failed: [],
+          })
+        }
+      }
+      expect((await git(["rev-parse", "refs/heads/main"])).trim()).toBe(baseTip)
+      return
+    }
     if (!failure) {
       const report = JSON.parse(run.stdout()) as {
         removed: { branch: string; head: string; archiveRef: string }[]
@@ -3902,6 +4243,112 @@ describe("component-local retirement without a component queue", () => {
         expect.objectContaining({ kind: "local-branch-retirement", repo: child, branch, outcome: "failed" }),
       )
     }
+  })
+})
+
+describe("exact-tip origin retirement of a draft", () => {
+  // Ended-only cases miss safe never-submitted work and its required ending fold.
+  // Use the real origin and Git merge result: matching trees are not ancestry proof.
+  it.each([
+    "ancestor",
+    "equivalent",
+    "equivalent-human",
+    "unmerged",
+    "advanced",
+    "held",
+    "held-later",
+    "opened-later",
+  ] as const)("retires a %s draft only under fresh-main custody and its exact tip", async (mode) => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const base = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", base, new Date())
+    const branch = "task/1234-draft"
+    await git(["checkout", "--quiet", "-b", branch])
+    writeFileSync(join(repo, "draft.txt"), "already accepted work\n")
+    await git(["add", "draft.txt"])
+    await git(["commit", "--quiet", "-m", "draft work"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["push", "--quiet", "origin", `refs/heads/${branch}`])
+    await git(["checkout", "--quiet", "main"])
+    if (mode === "ancestor") await git(["merge", "--ff-only", "--quiet", head])
+    else {
+      const file = mode === "unmerged" ? "different.txt" : "draft.txt"
+      writeFileSync(join(repo, file), "already accepted work\n")
+      await git(["add", file])
+      await git(["commit", "--quiet", "-m", "independent main work"])
+    }
+    await git(["push", "--quiet", "origin", "main"])
+    const main = (await git(["rev-parse", "HEAD"])).trim()
+    const output = capture(repo)
+    let reads = 0
+    output.io.localBranchProtections = async () => {
+      reads++
+      if (mode === "held" || (mode === "held-later" && reads === 2)) {
+        return { protections: ["fixture draft hold"], evidence: [] }
+      }
+      if (mode === "opened-later" && reads === 2) {
+        const chain = await openEvents({
+          ...createEventStore(repo, "origin", git.selection),
+          ref: changesRef("main", branch),
+        })
+        await chain.append(
+          [changeInput("opened", { queueTip, at: new Date(), commit: head, by: "concurrent writer" })],
+          { expect: null },
+        )
+      }
+      return { protections: [], evidence: [] }
+    }
+    const code = await runYrdProcess(
+      [
+        "bun",
+        "yrd",
+        "drop",
+        branch,
+        "--retire",
+        "--tip",
+        mode === "advanced" ? base : head,
+        "--reason",
+        "retire exact work already accepted by main",
+        "--submitter",
+        "fixture",
+        ...(mode === "equivalent-human" ? [] : ["--json"]),
+      ],
+      output.io,
+    )
+    const store = createEventStore(repo, "origin", git.selection)
+    if (
+      mode === "unmerged" ||
+      mode === "advanced" ||
+      mode === "held" ||
+      mode === "held-later" ||
+      mode === "opened-later"
+    ) {
+      expect(code).not.toBe(0)
+      expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(`${head}\trefs/heads/${branch}`)
+      if (mode === "opened-later") {
+        expect(await readStatus(store, "main", branch)).toMatchObject({ status: "queued", commit: head })
+      } else expect((await listChanges(store, "main")).size).toBe(0)
+      if (mode === "held" || mode === "held-later") expect(output.stderr()).toContain("fixture draft hold")
+      if (mode === "unmerged") {
+        expect(output.stderr()).toContain(`merging into fresh refs/heads/main@${main} changes main`)
+        expect(output.stderr()).toContain(`explicit unmerged abandonment with yrd drop ${branch} --reason <why>`)
+      }
+      if (mode === "advanced") expect(output.stderr()).toContain(`expected ${base} at origin, found ${head}`)
+      return
+    }
+    expect(code, output.stderr()).toBe(0)
+    if (mode === "equivalent-human") expect(output.stdout()).toContain(`published main refs/heads/main@${main}`)
+    else expect(JSON.parse(output.stdout())).toMatchObject({ head, main: { ref: "refs/heads/main", tip: main } })
+    expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
+    expect(await readStatus(store, "main", branch)).toMatchObject({
+      status: "cancelled",
+      reason: "dropped",
+      commit: head,
+    })
+    const events = await (await openEvents({ ...store, ref: changesRef("main", branch) })).events()
+    expect(events.at(-1)).toMatchObject({ type: "cancelled", links: [head] })
+    expect((await git(["ls-remote", "origin", "refs/heads/main"])).trim()).toBe(`${main}\trefs/heads/main`)
   })
 })
 
