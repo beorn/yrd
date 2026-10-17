@@ -145,7 +145,14 @@ export type QueueConfig = Readonly<{
   queueRoot?: "tilde"
   /** Whole-branch Bun.Glob patterns that suppress unsubmitted drafts. */
   ignore: readonly string[]
-  /** Optional provider commands; read is display only, update owns its own catch-up. */
+  /**
+   * Optional provider commands (29615; retires with km's merge-close under 29630, @cto b59e0e09). `read` is retired
+   * (29644 Y1, @cto 6a06588f): `queue show` reads `issues.yml`'s `view` at `--project-root` and says out loud on
+   * stderr when the declaration in force still holds `read`. The parser keeps accepting `read` because live paths
+   * read historical declarations from the 2026-10-16 15:27–17:52 window (5db2ceaf4f2..57aeb363646~1):
+   * `declarationFor(git, config, history.base)` (queue-core-commands.ts:4921, :6303), `inspectNativeCheckoutForRelease`
+   * (branch-retirement.ts:823), and `readConfig(git, queueState.declaration, ...)` (event-run.ts:995).
+   */
   issuesProvider?: Readonly<{ read?: readonly string[]; update?: readonly string[] }>
   /** Target-owned pre-submit policy command. Exit 1 refuses; failures to judge warn. */
   admission?: Readonly<{ run: string; timeoutMs: number }>

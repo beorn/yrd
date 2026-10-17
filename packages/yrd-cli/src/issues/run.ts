@@ -276,7 +276,7 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       1,
       ISSUES_CODES.providerStalled,
       `${verb} ${command}`,
-      `no output for too long after ${result.lastProgressBytes} bytes; killed`,
+      `no output for ${options.noProgressTimeoutMs} ms after ${result.lastProgressBytes} bytes; killed`,
     )
   }
   if (result.exitCode !== 0 || result.signal !== null) {

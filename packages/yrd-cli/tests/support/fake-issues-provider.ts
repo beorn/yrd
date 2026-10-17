@@ -24,3 +24,5 @@ if (mode === "json") {
   process.stderr.write(`fake provider: unknown mode ${String(mode)}\n`)
   process.exit(9)
 }
+
+export {}
