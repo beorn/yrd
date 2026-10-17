@@ -185,7 +185,10 @@ it("reports a sweep-closed environment once, with its proof, and never a kept on
   }
   const w = await world(OLD)
   const rows = await runRound(w, "tell-sweep", [w.branch], tell)
-  expect(rows.some((row) => row.result === "closed" && row.path === w.env), JSON.stringify(rows)).toBe(true)
+  expect(
+    rows.some((row) => row.result === "closed" && row.path === w.env),
+    JSON.stringify(rows),
+  ).toBe(true)
   expect(closed, "the sweep close is reported exactly once").toHaveLength(1)
   expect(closed[0]?.path).toBe(w.env)
   expect(closed[0]?.branch).toBe(w.branch)
@@ -220,7 +223,10 @@ it("reports a consumed close request once, with its proof", async () => {
   const rows = await runRound(w, "tell-request", [w.branch], async (entry) => {
     closed.push(entry)
   })
-  expect(rows.some((row) => row.result === "closed" && row.path === w.env), JSON.stringify(rows)).toBe(true)
+  expect(
+    rows.some((row) => row.result === "closed" && row.path === w.env),
+    JSON.stringify(rows),
+  ).toBe(true)
   expect(closed, "the consumed close is reported exactly once").toHaveLength(1)
   expect(closed[0]?.branch).toBe(w.branch)
   expect(closed[0]?.head).toBe(w.head)
@@ -232,7 +238,10 @@ it("a throwing tell is named tell-failed and never undoes the close", async () =
   const rows = await runRound(w, "tell-throws", [w.branch], async () => {
     throw new Error("fixture tell boom")
   })
-  expect(rows.some((row) => row.result === "closed" && row.path === w.env), JSON.stringify(rows)).toBe(true)
+  expect(
+    rows.some((row) => row.result === "closed" && row.path === w.env),
+    JSON.stringify(rows),
+  ).toBe(true)
   const failed = rows.find((row) => row.result === "tell-failed" && row.path === w.env)
   expect(failed, JSON.stringify(rows)).toBeDefined()
   expect(String(failed?.why)).toContain("telling about it failed: fixture tell boom")
