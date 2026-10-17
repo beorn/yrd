@@ -17,7 +17,7 @@
         "@types/bun": "1.4.3",
         "@types/react": "^19.2.0",
         "@yrd/queue-core": "workspace:*",
-        "git-super": "^0.7.0",
+        "git-super": "0.7.0",
         "typescript": "^6.0.3",
         "vitest": "4.1.10",
       },
@@ -42,7 +42,7 @@
         "@yrd/bay": "workspace:*",
         "@yrd/process": "workspace:*",
         "@yrd/queue-core": "workspace:*",
-        "git-super": "^0.7.0",
+        "git-super": "0.7.0",
         "gitomic": "^0.4.0",
         "loggily": "^0.11.0",
         "react": "^19.2.0",
@@ -76,7 +76,7 @@
         "@bearly/durable-file": "0.1.0",
         "@bearly/flock": "^0.1.1",
         "@yrd/process": "workspace:*",
-        "git-super": "^0.7.0",
+        "git-super": "0.7.0",
         "gitomic": "^0.4.0",
         "removely": "0.4.0",
       },
@@ -546,9 +546,15 @@
 
     "zwitch": ["zwitch@2.0.4", "", {}, "sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A=="],
 
+    "@yrd/cli/loggily": ["loggily@github:beorn/loggily#55bdc5a", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-55bdc5a", "sha512-Z/gYWHOhlDAUGQZrDkpXwJXV13WUdgwe68Ly8E+/0+hgiY/1rlTASbiYzzxiTTsGkGCGjJhxEN54XKg0mUd9iQ=="],
+
+    "@yrd/process/loggily": ["loggily@github:beorn/loggily#55bdc5a", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-55bdc5a", "sha512-Z/gYWHOhlDAUGQZrDkpXwJXV13WUdgwe68Ly8E+/0+hgiY/1rlTASbiYzzxiTTsGkGCGjJhxEN54XKg0mUd9iQ=="],
+
     "git-super/@bearly/flock": ["@bearly/flock@0.2.2", "", { "dependencies": { "koffi": "3.3.2" } }, "sha512-pmQ0SfqqZ1sLLQImQ3NnmfugIKHg/SC9WyAVPKSZNC1PYRw9LRhRaZrOuzzAJG35i931BG7lF5KCXBZ6FPt8Kg=="],
 
     "git-super/@silvery/commander": ["@silvery/commander@0.23.2", "", { "dependencies": { "@silvery/ansi": "0.23.2", "commander": ">=15.0.0", "zod": ">=3.0.0" } }, "sha512-hJz9U6/SuSWgRpne00ES3vxiIM+2PuJLvXgQ4SwfjLPJxwAw/q6bWLKvwIT8WhdeaiPikZuYsxpO3RBU7o2PSQ=="],
+
+    "git-super/loggily": ["loggily@github:beorn/loggily#55bdc5a", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-55bdc5a", "sha512-Z/gYWHOhlDAUGQZrDkpXwJXV13WUdgwe68Ly8E+/0+hgiY/1rlTASbiYzzxiTTsGkGCGjJhxEN54XKg0mUd9iQ=="],
 
     "git-super/silvery": ["silvery@0.23.2", "", { "dependencies": { "@chenglou/pretext": "^0.0.8", "@silvery/color": "0.23.2", "@silvery/commander": "0.23.2", "@termless/core": "^0.8.1", "css-select": "^7.0.0", "css-what": "^8.0.0", "flexily": "0.7.3", "loggily": "^0.10.2", "react-reconciler": "^0.33.0", "slice-ansi": "^8.0.0", "string-width": "^8.2.2" }, "peerDependencies": { "@termless/ghostty": "^0.8.2", "@termless/ghostty-native": "^0.8.1", "@termless/test": "^0.8.1", "@termless/xtermjs": "^0.8.1", "playwright": ">=1.40.0", "react": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@termless/ghostty", "@termless/ghostty-native", "@termless/test", "@termless/xtermjs", "playwright"] }, "sha512-jAdZJi0PkNJ3iibn6kdlqkXSsjrOi32gPpsNPerUp8ilxfy2WodtZ+FgCQ75CPSbjYbSmwtev+pvL0AHwYw3Vg=="],
 
@@ -561,6 +567,8 @@
     "git-super/silvery/@silvery/color": ["@silvery/color@0.23.2", "", {}, "sha512-MiqmdlODFLHDRVcSB4uaCBBe6GcoWCA1V/ZA9IfJXTwSyI8Dhhvi9olzMto4St2JXnVjirREwu6K+6C68m3OGA=="],
 
     "git-super/silvery/@termless/core": ["@termless/core@0.8.4", "", { "optionalDependencies": { "@napi-rs/canvas": "^1.0.2", "@resvg/resvg-js": "^2.6.2", "@twemoji/svg": "^15.0.0", "ghostty-web": "^0.4.0", "gifenc": "^1.0.3", "playwright": "^1.59.0", "upng-js": "^2.1.0" }, "peerDependencies": { "node-pty": ">=1.0.0" }, "optionalPeers": ["node-pty"] }, "sha512-iYMUDDGjvT3YCuLXqGr8cuU37DqQjbPNviXUML2ERnXjO/JTxQIKNOY5nCLFQa54f0RCUqJYKLPGus3PAidfpg=="],
+
+    "git-super/silvery/loggily": ["loggily@github:beorn/loggily#55bdc5a", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-55bdc5a", "sha512-Z/gYWHOhlDAUGQZrDkpXwJXV13WUdgwe68Ly8E+/0+hgiY/1rlTASbiYzzxiTTsGkGCGjJhxEN54XKg0mUd9iQ=="],
 
     "git-super/@silvery/commander/@silvery/ansi/@silvery/color": ["@silvery/color@0.23.2", "", {}, "sha512-MiqmdlODFLHDRVcSB4uaCBBe6GcoWCA1V/ZA9IfJXTwSyI8Dhhvi9olzMto4St2JXnVjirREwu6K+6C68m3OGA=="],
   }
