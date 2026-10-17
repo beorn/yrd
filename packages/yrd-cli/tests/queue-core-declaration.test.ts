@@ -155,6 +155,7 @@ function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout
   let stdout = ""
   return {
     io: {
+      localBranchProtections: null,
       color: false,
       cwd,
       stderr: (text) => void (stderr += text),
@@ -3678,6 +3679,7 @@ describe("component-local retirement without a component queue", () => {
     "root-retired",
     "advanced",
     "protection-error",
+    "standalone",
     "missing-protections-reader",
     "archive-collision",
     "malformed-declaration",
@@ -3781,9 +3783,14 @@ describe("component-local retirement without a component queue", () => {
       if (mode === "protection-error") throw new Error("host protection authority unavailable")
       return { protections: mode === "held" ? ["fixture owner hold"] : [], evidence: [] }
     }
-    // An untyped embedder can omit wiring; that is not an explicit standalone
-    // repository. Existing cases always install a reader and miss this fault.
-    if (mode === "missing-protections-reader") Reflect.deleteProperty(run.io, "localBranchProtections")
+    if (mode === "standalone") run.io.localBranchProtections = null
+    let io = run.io
+    if (mode === "missing-protections-reader") {
+      // Missing wiring must fail statically and preserve the branch at runtime
+      // when an untyped embedder bypasses the required host contract.
+      // @ts-expect-error A standalone caller must explicitly select null.
+      io = { cwd: child, stdout: run.io.stdout, stderr: run.io.stderr }
+    }
     const nativeLstat = fs.lstatSync
     const unreadable =
       mode === "unreadable-declaration"
@@ -3813,7 +3820,7 @@ describe("component-local retirement without a component queue", () => {
         ...(mode === "publication-refused" ? [] : ["--json"]),
         ...(selectedOther === undefined ? [] : ["--queue", `${join(dirname(selectedOther), "remote.git")}#main`]),
       ],
-      run.io,
+      io,
     ).finally(() => unreadable?.mockRestore())
     const failure =
       mode === "protection-error" ||
@@ -3985,7 +3992,12 @@ describe("drop --local --release-checkout", () => {
   }
   // Explicit release must prove both host authorities are connected; ordinary
   // drop fixtures do not exercise the missing-reader boundary.
-  it.each(["liveEnvironmentUse", "localBranchProtections", "empty liveEnvironmentUse"] as const)(
+  it.each([
+    "liveEnvironmentUse",
+    "localBranchProtections",
+    "standalone localBranchProtections",
+    "empty liveEnvironmentUse",
+  ] as const)(
     "refuses release without the %s authority reader",
     async (reader) => {
       const fixture = await releaseWorld()
@@ -3993,11 +4005,12 @@ describe("drop --local --release-checkout", () => {
       try {
         const output = releaseCapture(fixture.repo)
         if (reader === "empty liveEnvironmentUse") output.io.liveEnvironmentUse = vi.fn().mockResolvedValue(undefined)
-        else delete output.io[reader]
+        else if (reader === "standalone localBranchProtections") output.io.localBranchProtections = null
+        else Reflect.deleteProperty(output.io, reader)
         expect(await runYrdProcess([...fixture.argv, "--apply"], output.io)).toBe(1)
         const report = JSON.parse(output.stdout()) as ReleaseReport
         expect(report.failed[0]?.detail).toContain(
-          reader === "empty liveEnvironmentUse" ? "did not return an array" : reader,
+          reader === "empty liveEnvironmentUse" ? "did not return an array" : reader.replace("standalone ", ""),
         )
         expect(report.removed).toEqual([])
         expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)

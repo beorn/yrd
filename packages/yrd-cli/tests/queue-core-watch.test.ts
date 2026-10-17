@@ -152,6 +152,7 @@ function capture(cwd: string): Capture {
   let stderr = ""
   return {
     io: {
+      localBranchProtections: null,
       color: false,
       cwd,
       stderr(text) {

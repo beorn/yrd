@@ -19,6 +19,7 @@ import type { YrdCliIO } from "../src/types.ts"
 function capture(): Readonly<{ io: YrdCliIO; out(): string }> {
   let text = ""
   const io: YrdCliIO = {
+    localBranchProtections: null,
     stdout: (chunk) => void (text += chunk),
     stderr: (chunk) => void (text += chunk),
     cwd: process.cwd(),
