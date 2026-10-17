@@ -3,6 +3,7 @@
 // @level l1
 // @consumer yrd list, submit and the queue runner on ADR-0016 event queues
 
+import { createHash } from "node:crypto"
 import { describe, expect, it, vi } from "vitest"
 import type { Event, EventInput } from "gitomic/events"
 import { listRefs, openEvents } from "gitomic/events"
@@ -2228,6 +2229,102 @@ describe("the queue-format boundary", () => {
     })
     expect((await readStatus(location, "lab", "task/42")).status).toBe("merged")
     expect(await target.head()).toBe(composed)
+  })
+
+  it("appends only validated runner issue effects without changing the branch verdict", async () => {
+    const { store, location } = remoteMemStore("yrd-event-run-issue-effect")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const mergeSha = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const reusedBranch = await open({ ...store, ref: "refs/heads/task/issue-effect" })
+    const reusedSha = (await reusedBranch.transact(async (map) => map.set("work", "reused"), "reuse")).oid
+    const queueTip = await seedEventQueue(location, "lab", mergeSha, new Date("2026-09-22T14:00:00.000Z"))
+    const ref = changesRef("lab", "task/issue-effect")
+    const chain = await openEvents({ ...store, ref })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: mergeSha, by: "author" })],
+      { expect: null },
+    )
+    const merged = await chain.append(
+      [changeInput("merged", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), commit: mergeSha })],
+      { expect: opened.head },
+    )
+    if (merged.head === null) throw new Error("fixture merged event has no tip")
+    const reopened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:03:00.000Z"), commit: reusedSha, by: "author" })],
+      { expect: merged.head },
+    )
+    const verifying = await chain.append(
+      [changeInput("verifying", { queueTip, at: new Date("2026-09-22T14:04:00.000Z"), commit: reusedSha })],
+      { expect: reopened.head },
+    )
+    const checking = await chain.append(
+      [changeInput("checking", { queueTip, at: new Date("2026-09-22T14:05:00.000Z") })],
+      { expect: verifying.head },
+    )
+    const merging = await chain.append(
+      [changeInput("merging", { queueTip, at: new Date("2026-09-22T14:06:00.000Z"), commit: reusedSha })],
+      { expect: checking.head },
+    )
+    const selectedTip = merging.head
+    if (selectedTip === null) throw new Error("fixture reused branch has no tip")
+    const before = await readStatus(location, "lab", "task/issue-effect")
+    const issueKey = "wk/issue/314"
+    const providerIdentity = JSON.stringify([mergeSha, "close", "completed", issueKey])
+    const effect = {
+      ...ISSUE_EFFECT,
+      mergedEvent: merged.head,
+      mergeSha,
+      issueKey,
+      providerId: `yrd1-${createHash("sha256").update(providerIdentity).digest("hex")}`,
+      declaration: { path: "issues.yml" as const, blob: B },
+    }
+    const written = await appendChangeEvent(location, "lab", "task/issue-effect", selectedTip, {
+      type: "notified",
+      at: new Date("2026-09-22T14:07:00.000Z"),
+      issueEffect: effect,
+      writer: QUEUE_RUN_WRITER,
+    })
+    const after = await readStatus(location, "lab", "task/issue-effect")
+    expect(after).toEqual({ ...before, tip: written })
+    const stored = (await chain.events()).at(-1)
+    expect(stored?.props.find(([key]) => key === "Issue-Effect")?.[1]).toBe(JSON.stringify(effect))
+
+    const remoteTip = await chain.head()
+    if (remoteTip === null) throw new Error("fixture effect chain lost its tip")
+    await expect(
+      appendChangeEvent(location, "lab", "task/issue-effect", remoteTip, {
+        type: "notified",
+        at: new Date("2026-09-22T14:08:00.000Z"),
+        issueEffect: { ...effect, mergedEvent: B },
+        writer: QUEUE_RUN_WRITER,
+      }),
+    ).rejects.toThrow(/does not name an earlier merged event/u)
+    expect(await chain.head()).toBe(remoteTip)
+    await expect(
+      appendChangeEvent(location, "lab", "task/issue-effect", remoteTip, {
+        type: "notified",
+        at: new Date("2026-09-22T14:09:00.000Z"),
+        issueEffect: effect,
+        writer: QUEUE_RUN_WRITER,
+      }),
+    ).rejects.toThrow(/duplicate issue effect/u)
+    expect(await chain.head()).toBe(remoteTip)
+    await expect(
+      appendChangeEvent(location, "lab", "task/issue-effect", remoteTip, {
+        type: "stuck",
+        at: new Date("2026-09-22T14:10:00.000Z"),
+        reason: "ordinary runner event",
+        writer: QUEUE_RUN_WRITER,
+      }),
+    ).rejects.toThrow(/reserved for an atomic published merge/u)
+    await expect(
+      appendChangeEvent(location, "lab", "task/issue-effect", remoteTip, {
+        type: "notified",
+        at: new Date("2026-09-22T14:11:00.000Z"),
+        issueEffect: effect,
+      }),
+    ).rejects.toThrow(/issue effect requires yrd-run writer/u)
+    expect(await chain.head()).toBe(remoteTip)
   })
 
   it("appends a reverted-paths admission warning and keeps its Warning-Kind through appendChangeEvent (27363)", async () => {
