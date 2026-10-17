@@ -43,6 +43,7 @@ async function yrd(
   let stdout = ""
   let stderr = ""
   const io: YrdCliIO = {
+    localBranchProtections: null,
     color: false,
     cwd: work,
     stdout: (text) => {

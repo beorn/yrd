@@ -41,7 +41,13 @@ const DECLARATION = 'checks:\n  - {no-marker: {run: "test ! -f marker.txt"}}\n'
 function capture(cwd: string): Readonly<{ io: YrdCliIO; stdout(): string }> {
   let stdout = ""
   return {
-    io: { cwd, color: false, stdout: (text) => void (stdout += text), stderr: () => {} },
+    io: {
+      localBranchProtections: null,
+      cwd,
+      color: false,
+      stdout: (text) => void (stdout += text),
+      stderr: () => {},
+    },
     stdout: () => stdout,
   }
 }
@@ -432,7 +438,13 @@ describe("yrd check uses the protected program without publishing", () => {
       let stderr = ""
       const exit = await coreQueueCommand(
         w.work,
-        { cwd: w.work, color: false, stdout: () => {}, stderr: (text) => void (stderr += text) },
+        {
+          localBranchProtections: null,
+          cwd: w.work,
+          color: false,
+          stdout: () => {},
+          stderr: (text) => void (stderr += text),
+        },
         { command: "check", names: ["break-refs"] },
         { workdir: w.workdir },
       )

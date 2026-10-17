@@ -82,6 +82,7 @@ async function yrd(cwd: string, ...args: string[]): Promise<{ code: number; stdo
   let stdout = ""
   let stderr = ""
   const io: YrdCliIO = {
+    localBranchProtections: null,
     color: false,
     cwd,
     stdout: (text) => (stdout += text),

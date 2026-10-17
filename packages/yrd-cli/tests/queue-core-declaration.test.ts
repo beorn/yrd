@@ -163,6 +163,7 @@ function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout
   let stdout = ""
   return {
     io: {
+      localBranchProtections: null,
       color: false,
       cwd,
       stderr: (text) => void (stderr += text),
@@ -3688,6 +3689,8 @@ describe("component-local retirement without a component queue", () => {
     "root-retired",
     "advanced",
     "protection-error",
+    "standalone",
+    "missing-protections-reader",
     "archive-collision",
     "malformed-declaration",
     "unreadable-declaration",
@@ -3790,6 +3793,14 @@ describe("component-local retirement without a component queue", () => {
       if (mode === "protection-error") throw new Error("host protection authority unavailable")
       return { protections: mode === "held" ? ["fixture owner hold"] : [], evidence: [] }
     }
+    if (mode === "standalone") run.io.localBranchProtections = null
+    let io = run.io
+    if (mode === "missing-protections-reader") {
+      // Missing wiring must fail statically and preserve the branch at runtime
+      // when an untyped embedder bypasses the required host contract.
+      // @ts-expect-error A standalone caller must explicitly select null.
+      io = { cwd: child, stdout: run.io.stdout, stderr: run.io.stderr }
+    }
     const nativeLstat = fs.lstatSync
     const unreadable =
       mode === "unreadable-declaration"
@@ -3819,10 +3830,11 @@ describe("component-local retirement without a component queue", () => {
         ...(mode === "publication-refused" ? [] : ["--json"]),
         ...(selectedOther === undefined ? [] : ["--queue", `${join(dirname(selectedOther), "remote.git")}#main`]),
       ],
-      run.io,
+      io,
     ).finally(() => unreadable?.mockRestore())
     const failure =
       mode === "protection-error" ||
+      mode === "missing-protections-reader" ||
       mode === "archive-collision" ||
       mode === "publication-refused" ||
       mode === "archive-readback-lost" ||
@@ -3835,6 +3847,11 @@ describe("component-local retirement without a component queue", () => {
       expect(run.stdout() + run.stderr()).toContain(child)
       if (mode === "protection-error") {
         expect(run.stdout() + run.stderr()).toContain("host protection authority unavailable")
+      }
+      if (mode === "missing-protections-reader") {
+        expect(run.stdout() + run.stderr()).toContain(
+          "localBranchProtections authority reader is missing; standalone callers must explicitly pass null",
+        )
       }
       if (mode === "unreadable-declaration") expect(run.stderr()).toContain("EACCES")
       if (mode === "archive-collision") {
@@ -3982,7 +3999,12 @@ describe("drop --local --release-checkout", () => {
   }
   // Explicit release must prove both host authorities are connected; ordinary
   // drop fixtures do not exercise the missing-reader boundary.
-  it.each(["liveEnvironmentUse", "localBranchProtections", "empty liveEnvironmentUse"] as const)(
+  it.each([
+    "liveEnvironmentUse",
+    "localBranchProtections",
+    "standalone localBranchProtections",
+    "empty liveEnvironmentUse",
+  ] as const)(
     "refuses release without the %s authority reader",
     async (reader) => {
       const fixture = await releaseWorld()
@@ -3990,11 +4012,14 @@ describe("drop --local --release-checkout", () => {
       try {
         const output = releaseCapture(fixture.repo)
         if (reader === "empty liveEnvironmentUse") output.io.liveEnvironmentUse = vi.fn().mockResolvedValue(undefined)
-        else delete output.io[reader]
+        else if (reader === "standalone localBranchProtections") output.io.localBranchProtections = null
+        else Reflect.deleteProperty(output.io, reader)
         expect(await runYrdProcess([...fixture.argv, "--apply"], output.io)).toBe(1)
         const report = JSON.parse(output.stdout()) as ReleaseReport
         expect(report.failed[0]?.detail).toContain(
-          reader === "empty liveEnvironmentUse" ? "did not return an array" : reader,
+          reader === "empty liveEnvironmentUse"
+            ? "live environment-use reader did not return an array"
+            : `release-checkout requires the ${reader.replace("standalone ", "")} authority reader`,
         )
         expect(report.removed).toEqual([])
         expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)

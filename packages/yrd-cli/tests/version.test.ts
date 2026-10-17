@@ -54,7 +54,7 @@ describe("version CLI", () => {
       process.stdout.write("x".repeat(${size}))
       process.stderr.write("x".repeat(${size}))
       process.argv = [process.execPath, "yrd", ${JSON.stringify(flag)}]
-      await runYrdExecutable()
+      await runYrdExecutable({ localBranchProtections: null })
     `
     const result = spawnSync(process.execPath, ["-e", script], {
       cwd: tmpdir(),

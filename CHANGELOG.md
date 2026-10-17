@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `YrdCliIO.localBranchProtections` is now required and accepts a reader or explicit `null` for a standalone repository. Omitted wiring fails with a named error; ordinary standalone cleanup retains its previous behavior, while retained-checkout release requires the reader. `runYrdExecutable` also requires an explicit host argument; shipped standalone bins pass `localBranchProtections: null` (29648).
+
 - `QueueRunOutcome` loses its `checkedWaiting` field and the two readers that consulted it
   (`sleepAfter` and environment cleanup). The field was hardcoded `0` — a round returns on its
   first merge, so no checked change can wait behind it — so the sleep test's impossible
