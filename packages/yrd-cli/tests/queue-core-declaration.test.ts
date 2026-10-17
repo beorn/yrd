@@ -6,6 +6,7 @@
  * @level l2 (`coreQueueCommand` against a real remote and clone)
  * @consumer Every queue command.
  */
+import { permitCensus } from "../../../tests/support/permit-census.ts"
 import {
   existsSync,
   chmodSync,
@@ -77,14 +78,6 @@ vi.mock("node:fs", async (original) => {
 })
 
 vi.mock("removely", async (original) => ({ ...(await original<typeof import("removely")>()) }))
-
-async function permitCensus() {
-  const actual = await vi.importActual<typeof import("removely")>("removely")
-  const observed = await actual.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2000 })
-  const permitted = { ...observed, rows: [], coverage: { ...observed.coverage, complete: true, unreadable: [] } }
-  const spy = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue(permitted)
-  return { spy, permitted }
-}
 
 const roots: string[] = []
 afterAll(() => {

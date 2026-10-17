@@ -8,6 +8,7 @@
  *           cancelled record (`yrd queue show`, bead close, the /yrd skill)
  * @testonly none
  */
+import { permitCensus } from "../../../tests/support/permit-census.ts"
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -25,6 +26,13 @@ import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 // Standalone CI imports removely as native ESM; spies need a mutable facade over its real exports.
 vi.mock("removely", async (original) => ({ ...(await original<typeof import("removely")>()) }))
 
+const emptyCwds: Awaited<ReturnType<typeof removely.inspectProcessCwds>> = {
+  complete: true,
+  unreadable: [],
+  mechanism: "proc",
+  rows: [],
+}
+
 const roots: string[] = []
 
 afterAll(() => {
@@ -41,7 +49,7 @@ afterEach(() => {
 type Ran = Readonly<{ exitCode: YrdCliExitCode; stdout: string; stderr: string; report: string }>
 
 /** One service round: unlike a manual queue run, the service respects the pause. */
-async function serviceRound(cwd: string): Promise<void> {
+async function serviceRound(cwd: string): Promise<string> {
   const stop = new AbortController()
   let stderr = ""
   const code = await coreQueueCommand(
@@ -61,6 +69,7 @@ async function serviceRound(cwd: string): Promise<void> {
     },
   )
   expect(code, stderr).toBe(0)
+  return stderr
 }
 
 /** The CLI as the shell runs it: argv in, exit code and both streams out. */
@@ -199,12 +208,7 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     const opened = await yrd(work, "env", "open", "--bay", "reopened", "--json")
     expect(opened.exitCode, opened.report).toBe(0)
     const environment = JSON.parse(opened.stdout) as { path: string }
-    const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue({
-      complete: true,
-      unreadable: [],
-      mechanism: "proc",
-      rows: [],
-    })
+    const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue(emptyCwds)
     try {
       const ran = await yrd(work, "withdraw", branch, "--submitter", "@dev/actor", "--json")
       expect(ran.exitCode, ran.report).toBe(0)
@@ -231,6 +235,8 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
   })
 
   it("names `--submitter` as the actor while `--notify` names another seat", async () => {
+    using _census = (await permitCensus()).spy
+    using _cwds = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue(emptyCwds)
     // AC2: recovery must preserve the original change name, including shell quotes.
     // The former generic git/head assertions accepted a newly named change instead.
     const branch = "task/one'quoted"
@@ -280,8 +286,8 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
       by: "@chief",
       reason: "consume only terminal requests",
     })
-    await serviceRound(work)
-    expect(existsSync(environment.path)).toBe(false)
+    const cleanup = await serviceRound(work)
+    expect(existsSync(environment.path), cleanup).toBe(false)
     expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).trim()).toBe("")
 
     // Published-main custody needs no extra archive ref.
