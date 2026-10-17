@@ -168,7 +168,8 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
         cwd: work,
         stdout(text) {
           stdout += text
-          if (JSON.parse(stdout).changes.length === 5) writeFileSync(outputMarker, "complete")
+          const history = JSON.parse(stdout) as { changes: readonly unknown[] }
+          if (history.changes.length === 5) writeFileSync(outputMarker, "complete")
         },
         stderr(text) {
           stderr += text
@@ -176,7 +177,7 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
       },
     )
     expect(exitCode, stderr).toBe(0)
-    expect(JSON.parse(stdout).changes).toHaveLength(5)
+    expect((JSON.parse(stdout) as { changes: readonly unknown[] }).changes).toHaveLength(5)
     const observed = readFileSync(starts, "utf8")
       .trim()
       .split("\n")
