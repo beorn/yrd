@@ -1054,14 +1054,8 @@ export async function coreQueueCommand(
         selection,
         onEnvironmentClosed: envRetiredTeller({
           notify: config.notify,
-          // The no-chain case is the reader's own result, never matched message
-          // text: readStatus throws on exactly this undefined history.
-          readChange: (branch) =>
-            withRemoteSeam("envRetiredHistory", async () => {
-              await readEventQueue(eventStore, config.target.branch)
-              const { history } = await readBranchHistory(eventStore, config.target.branch, branch)
-              return history?.state
-            }),
+          where: `${eventStore.remote ?? eventStore.repo}#${config.target.branch}`,
+          readChange: (branch) => readClosedChange(eventStore, config.target.branch, branch),
           tell: (closed, change) =>
             tellEnvRetired(
               { config, git, repo, targetSha: outcome.target, workdir, tempRoot, env },
@@ -5482,17 +5476,25 @@ async function tellRetiredRoot(
   return handed.every((each) => each.delivery !== "failed")
 }
 
-/**
- * Tell the declaration's notify entries that post-merge cleanup retired one
- * merged change's author environment (29720), so its author hears where the
- * folder went instead of finding it gone. Never throws and never gates: the
- * close already happened. The caller has already established the change
- * MERGED and that branch and proof can be named — every other close is
- * skipped there, by name.
- */
 /** The one line a retirement nobody wants env-retired for gets, whoever notices first. */
 function noEnvRetiredEntryLine(path: string): string {
   return `yrd: no notify entry in .yrd.yml wants env-retired, so nobody was told; the retired environment ${path} is on the record\n`
+}
+
+/**
+ * readStatus's own reads without its throw: the no-chain case is the
+ * reader's own result (an undefined history), never matched message text.
+ */
+export function readClosedChange(
+  store: Parameters<typeof readBranchHistory>[0],
+  queue: string,
+  branch: string,
+): Promise<EventChange | undefined> {
+  return withRemoteSeam("envRetiredHistory", async () => {
+    await readEventQueue(store, queue)
+    const { history } = await readBranchHistory(store, queue, branch)
+    return history?.state
+  })
 }
 
 /**
@@ -5504,6 +5506,8 @@ function noEnvRetiredEntryLine(path: string): string {
  */
 export function envRetiredTeller(deps: {
   notify: QueueConfig["notify"]
+  /** Where the change record is read, named in the no-record skip (e.g. `origin#main`). */
+  where: string
   readChange: (branch: string) => Promise<EventChange | undefined>
   tell: (
     closed: Readonly<{ branch: string; head?: string; path: string; proof: NonNullable<ClosedEnvironment["proof"]> }>,
@@ -5526,7 +5530,9 @@ export function envRetiredTeller(deps: {
     }
     const change = await deps.readChange(closed.branch)
     if (change === undefined) {
-      deps.io.stderr(`yrd: environment ${closed.path} retired; no change record for ${closed.branch}, nobody to tell\n`)
+      deps.io.stderr(
+        `yrd: environment ${closed.path} retired; no change record for ${closed.branch} at ${deps.where}, nobody to tell\n`,
+      )
       return
     }
     if (change.status !== "merged") {
@@ -5539,6 +5545,14 @@ export function envRetiredTeller(deps: {
   }
 }
 
+/**
+ * Tell the declaration's notify entries that post-merge cleanup retired one
+ * merged change's author environment (29720), so its author hears where the
+ * folder went instead of finding it gone. Never throws and never gates: the
+ * close already happened. The caller has already established the change
+ * MERGED and that branch and proof can be named — every other close is
+ * skipped there, by name.
+ */
 async function tellEnvRetired(
   context: OutsideRoundTellContext,
   closed: Readonly<{ branch: string; head?: string; path: string; proof: NonNullable<ClosedEnvironment["proof"]> }>,

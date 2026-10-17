@@ -8,10 +8,15 @@
  * @consumer the queue round's onEnvironmentClosed callback
  * @testonly none
  */
-import { expect, it } from "vitest"
-import type { EventChange } from "@yrd/queue-core"
-import { envRetiredTeller } from "../src/queue-core-commands.ts"
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { safeRemoveSync } from "removely"
+import { afterAll, expect, it } from "vitest"
+import { createEventQueue, createEventStore, readConfig, type EventChange } from "@yrd/queue-core"
+import { envRetiredTeller, readClosedChange } from "../src/queue-core-commands.ts"
 import type { ClosedEnvironment } from "../src/env-cleanup.ts"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 
 // The proof shape is git-super's retention report, opaque to the teller: it
 // only requires one to be present and passes it through untouched.
@@ -40,6 +45,7 @@ function harness(read: EventChange | undefined, wants = true) {
     notify: wants
       ? [{ name: "author", on: ["env-retired"], run: "true" }]
       : [{ name: "author", on: ["merged"], run: "true" }],
+    where: "origin#main",
     readChange: async (branch) => {
       reads.push(branch)
       return read
@@ -75,7 +81,7 @@ it("names the no-chain case from the reader result, not matched text", async () 
   const h = harness(undefined)
   await h.teller(CLOSED)
   expect(h.told).toEqual([])
-  expect(h.said.join("")).toContain("no change record for task/env-fresh, nobody to tell")
+  expect(h.said.join("")).toContain("no change record for task/env-fresh at origin#main, nobody to tell")
 })
 
 it("reads nothing and prints the named no-entry line when no entry wants env-retired", async () => {
@@ -84,6 +90,37 @@ it("reads nothing and prints the named no-entry line when no entry wants env-ret
   expect(h.reads, "zero chain reads before the subscriber check fails").toEqual([])
   expect(h.told).toEqual([])
   expect(h.said.join("")).toContain("no notify entry in .yrd.yml wants env-retired")
+})
+
+const fixtureRoots: string[] = []
+afterAll(() => {
+  for (const root of fixtureRoots.splice(0)) safeRemoveSync(root, { within: realpathSync(tmpdir()), allowMissing: true })
+})
+
+it("the production reader returns undefined on a store with no chain for the branch", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "yrd-read-closed-change-")))
+  fixtureRoots.push(root)
+  const seed = gitIn(root)
+  const bare = join(root, "remote.git")
+  const repo = join(root, "work")
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", bare])
+  await seed(["clone", "--quiet", bare, repo])
+  const git = gitIn(repo)
+  await git(["config", "user.email", "teller@yrd.test"])
+  await git(["config", "user.name", "yrd"])
+  await git(["checkout", "--quiet", "-b", "main"])
+  writeFileSync(join(repo, ".yrd.yml"), "{}\n")
+  await git(["add", ".yrd.yml"])
+  await git(["commit", "--quiet", "-m", "declare the queue"])
+  await git(["push", "--quiet", "origin", "main"])
+  const head = (await git(["rev-parse", "HEAD"])).trim()
+  const store = createEventStore(repo, "origin", git.selection)
+  const config = await readConfig(git, head, { branch: "main", remote: "origin" })
+  if (config === undefined) throw new Error("the fixture target lost .yrd.yml")
+  // A real queue chain (cleanup only ever runs after a round), but no chain
+  // for the branch: the never-submitted close the sweep can meet.
+  await createEventQueue(store, "main", head, config, new Date())
+  await expect(readClosedChange(store, "main", "task/never-submitted")).resolves.toBeUndefined()
 })
 
 it("names a closed environment that carries no branch or no proof", async () => {

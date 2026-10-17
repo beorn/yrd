@@ -10,16 +10,8 @@
  * @reach   fs-walk <fixture-only: the registry, environment and close-request trees this fixture makes under the OS temp root>
  * @testonly none — census and close seams are module mocks, as in env-cleanup-kept-wording.test.ts.
  */
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, writeFileSync } from "node:fs"
+import { safeRemoveSync } from "removely"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, expect, it, vi } from "vitest"
@@ -79,7 +71,7 @@ vi.mock("@yrd/queue-core", async (importOriginal) => {
 
 const roots: string[] = []
 afterAll(() => {
-  for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true })
+  for (const root of roots.splice(0)) safeRemoveSync(root, { within: realpathSync(tmpdir()), allowMissing: true })
 })
 
 function cleanupRows(root: string, depth = 0): readonly Record<string, unknown>[] {
