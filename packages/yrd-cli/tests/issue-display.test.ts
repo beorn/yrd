@@ -14,7 +14,8 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterAll, describe, expect, it } from "vitest"
-import { submit } from "@yrd/queue-core"
+import { openEvents } from "gitomic/events"
+import { changeInput, changesRef, createEventStore, queueRef, submit } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { readIssueDisplay } from "../src/issue-resolver.ts"
@@ -74,8 +75,8 @@ async function issuesProject(mode: string): Promise<string> {
   return dir
 }
 
-/** A queue whose one change is bound to issue 29644. */
-async function queueWithIssueChange(extraYrdYml = ""): Promise<string> {
+/** A real queue with distinct historical issue bindings on one branch. */
+async function queueWithIssueHistory(issueCount = 1, extraYrdYml = ""): Promise<string> {
   const root = scratch("yrd-issue-display-queue-")
   const seed = gitIn(root)
   const remote = join(root, "remote.git")
@@ -102,12 +103,26 @@ async function queueWithIssueChange(extraYrdYml = ""): Promise<string> {
     submitter: "@dev/12",
     target: { branch: "main", remote: "origin" },
   })
+  for (let index = 1; index < issueCount; index++) {
+    const store = createEventStore(work, "origin", git.selection)
+    const chain = await openEvents({ ...store, ref: changesRef("main", "task/one") })
+    const tip = await chain.head()
+    const queueTip = (await git(["rev-parse", queueRef("main")])).trim()
+    const head = (await git(["rev-parse", "refs/heads/task/one"])).trim()
+    await chain.append([changeInput("cancelled", { queueTip, at: new Date(), commit: head, by: "fixture", reason: "historical fixture" })], { expect: tip })
+    await git(["checkout", "--quiet", "task/one"])
+    writeFileSync(join(work, "one.txt"), String(index))
+    await git(["add", "one.txt"])
+    await git(["commit", "--quiet", "-m", "historical revision " + String(index)])
+    await git(["checkout", "--quiet", "main"])
+    await submit(git, "origin", { branch: "task/one", issue: "issue-" + String(index), submitter: "@dev/12", target: { branch: "main", remote: "origin" } })
+  }
   return work
 }
 
 describe("yrd queue show's issue display read (29644 Y1)", () => {
   it("--project-root reaches the display read, which runs the project's view (rule: threading, one reader)", async () => {
-    const work = await queueWithIssueChange()
+    const work = await queueWithIssueHistory()
     const project = await issuesProject("json")
     const shown = await yrd(work, "queue", "show", "task/one", "--json", "--fresh", "--project-root", project)
     expect(shown.exitCode, shown.report).toBe(0)
@@ -115,27 +130,29 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
   })
 
   it("makes no display read without --project-root (rule: absent root, no issue line)", async () => {
-    const work = await queueWithIssueChange()
+    const work = await queueWithIssueHistory()
     const shown = await yrd(work, "queue", "show", "task/one", "--json", "--fresh")
     expect(shown.exitCode, shown.report).toBe(0)
     expect(shown.stderr, shown.report).not.toContain("issue info")
   })
 
-  // Whole-history queries caused the provider process storm (29673). A missing
-  // project directory makes the pre-fix unwanted reads fail before any process
-  // starts, so this regression can fail without repeating the host outage.
+  // Five distinct real bindings expose the whole-history read storm without
+  // launching thousands of providers (29673, CTO plan amendment).
+
   it("whole-history show emits every change without attempting optional issue reads", async () => {
-    const work = await queueWithIssueChange()
-    const missingProject = join(scratch("yrd-issue-display-unused-project-"), "absent")
-    const shown = await yrd(work, "queue", "show", "--all", "--json", "--fresh", "--project-root", missingProject)
+    const work = await queueWithIssueHistory(5)
+    const project = await issuesProject("json")
+    const shown = await yrd(work, "queue", "show", "--all", "--json", "--fresh", "--project-root", project)
     expect(shown.exitCode, shown.report).toBe(0)
-    expect(JSON.parse(shown.stdout).changes).toHaveLength(1)
-    expect(shown.stderr, shown.report).not.toContain("issue info unavailable")
+    const history = JSON.parse(shown.stdout) as { changes: readonly { issue: string }[] }
+    expect(history.changes).toHaveLength(5)
+    expect(new Set(history.changes.map((change) => change.issue)).size).toBe(5)
+    expect(shown.stderr, shown.report).not.toContain("fake provider:")
   })
 
   it("says out loud when the declaration in force still holds issuesProvider.read, and never runs it (rule: retired key said out loud)", async () => {
     const marker = join(scratch("yrd-issue-display-retired-"), "ran")
-    const work = await queueWithIssueChange(
+    const work = await queueWithIssueHistory(1,
       `issuesProvider:\n  read: ${JSON.stringify(["sh", "-c", `touch ${JSON.stringify(marker)}`, "read", "<key>"])}\n`,
     )
     const shown = await yrd(work, "queue", "show", "task/one", "--json", "--fresh")
