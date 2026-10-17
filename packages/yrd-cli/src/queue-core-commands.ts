@@ -251,6 +251,10 @@ import { SERVICE } from "./queue-health.ts"
 const START_SERVICE_COMMAND = `hab up ${SERVICE}`
 const CHECK_SERVICE_COMMAND = `hab ps ${SERVICE}`
 
+// Whole-history issue fanout caused three host OOMs; cap total reads before
+// starting the batch, so its count cap is also its concurrency cap (29673).
+const ISSUE_DISPLAY_READ_CAP = 4
+
 import { queueTempRoot, workdirOf } from "./workdir.ts"
 import { originHead } from "./queue-location.ts"
 import {
@@ -4925,8 +4929,6 @@ export async function coreQueueCommand(
                 .map((row) => ({ ...row, queue: config.target.branch, events: [] }))
             : []
         const histories = [...changeHistories, ...directHistories]
-        // Start display reads independently. The queue result is emitted before
-        // waiting for this optional decoration; no decision consumes its payload.
         // The read is the issues interface's `view` at --project-root; issuesProvider.read is no longer consulted,
         // and a declaration in force that still holds it is told out loud (@cto 6a06588f).
         if (config.issuesProvider?.read !== undefined) {
@@ -4934,22 +4936,6 @@ export async function coreQueueCommand(
             "yrd: .yrd.yml issuesProvider.read: retired (29644 Y1) and ignored; the issue display is issues.yml's view, read by yrd queue show --project-root <root>; delete this key\n",
           )
         }
-        const projectRoot = options.projectRoot
-        const displayReads =
-          projectRoot === undefined
-            ? []
-            : [...new Set(histories.flatMap((row) => (row.issue === undefined ? [] : [row.issue])))].map(
-                async (key) => ({
-                  key,
-                  display: await readIssueDisplay({
-                    key,
-                    projectRoot,
-                    cwd: repo,
-                    stderr: (text) => io.stderr(text),
-                    env,
-                  }),
-                }),
-              )
         const scope =
           request.all === true
             ? `Read all event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and ${archivedChangesPrefix(config.target.branch)}, and direct target commits at ${config.target.remote}; draft branches are outside this reading.`
@@ -5045,11 +5031,34 @@ export async function coreQueueCommand(
                 })
                 .join("\n"),
         )
+        const projectRoot = options.projectRoot
+        if (projectRoot === undefined) return 0
+        if (request.all === true) {
+          io.stderr(
+            `yrd: issue display: skipped for --all; use yrd queue show <branch> --project-root <root> for at most ${ISSUE_DISPLAY_READ_CAP} issue reads\n`,
+          )
+          return 0
+        }
+        // Histories are newest-first. Select the entire bounded batch only
+        // after queue output; creating a promise already starts its read.
+        const keys = [...new Set(histories.flatMap((row) => (row.issue === undefined ? [] : [row.issue])))]
+        const selectedKeys = keys.slice(0, ISSUE_DISPLAY_READ_CAP)
+        const omitted = keys.length - selectedKeys.length
+        if (omitted > 0) {
+          io.stderr(
+            `yrd: issue display: omitted ${omitted} older distinct issue${omitted === 1 ? "" : "s"}; showing at most ${ISSUE_DISPLAY_READ_CAP}\n`,
+          )
+        }
+        // readIssueDisplay returns failures as values, preserving siblings.
+        const displayReads = selectedKeys.map(async (key) => ({
+          key,
+          display: await readIssueDisplay({ key, projectRoot, cwd: repo, stderr: (text) => io.stderr(text), env }),
+        }))
         for (const { key, display } of await Promise.all(displayReads)) {
           io.stderr(
             display.available
               ? `yrd: issue info ${key}: ${JSON.stringify(display.data)}\n`
-              : `yrd: ${display.reason}\n`,
+              : `yrd: issue ${key}: ${display.reason}\n`,
           )
         }
         return 0

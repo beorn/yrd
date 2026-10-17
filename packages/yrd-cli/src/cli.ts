@@ -1237,8 +1237,8 @@ function buildProgram(
     .option("--queue <value>", QUEUE_HELP)
     .option(
       "--project-root <path>",
-      "show each change's issue through this project's issues.yml view (yrd issues view, killed at 10 s); " +
-        "without it, show makes no issue read and prints no issue line",
+      "after branch output, show at most four newest distinct issues through this project's issues.yml view " +
+        "(yrd issues view, killed at 10 s); --all and an absent root make no issue reads",
     )
     .action(async (branch, options) => {
       const { all, json, queue, fresh, projectRoot } = options as {

@@ -116,15 +116,16 @@ Submission scans branch history back to its merge-base with the captured target,
 
 Later commits and branch renames retain the binding. Conflicts name both issues and commits; `--issue` must match an existing binding.
 
-The target's `.yrd.yml` may declare provider commands:
+An explicit `yrd queue show <branch> --project-root <root>` reads optional display through that project's `issues.yml` `view` command (`yrd issues view`). After emitting the complete queue result, it reads at most four newest distinct issue keys in one batch; the count cap also bounds concurrency. It reports how many older keys were omitted from the display. `show --all` starts no display reads and says so when a project root was supplied; without `--project-root`, show makes no display read.
+
+Issue keys and returned JSON are opaque. Each display read has a 10-second bound; failures name their key and cause without discarding successful siblings. Display reads never resolve submission identity or decide cleanup. The retired `.yrd.yml issuesProvider.read` is ignored with a diagnostic naming the `issues.yml` replacement.
+
+The target's `.yrd.yml` may declare the post-merge update command:
 
 ```yaml
 issuesProvider:
-  read: [issues, show, "<key>", --json]
   update: [issues, catchup, --json]
 ```
-
-Issue keys are opaque. The optional `read` command substitutes each literal `<key>` argv element with the complete key as one argument. It returns JSON for display only; missing commands, invalid JSON and failed reads say `issue info unavailable`. The display bound is 10 seconds. Reads never resolve submission identity or decide cleanup.
 
 After the merge round releases its lock, Yrd attempts `update` with exactly the configured argv, then runs existing archive-first cleanup even if the provider fails. No range, merge arguments, stdin facts or merge environment facts are supplied. The provider acquires its own source commits and retry position. The update bound is 120 seconds, separate from display reads: the measured public Km command took 1.246 seconds for one closing action, so 50 actions at that whole-command cost allow about 62.3 seconds with nearly twice that margin. This bounds an attempt; it does not guarantee worst-case completion. A blocked provider leaves subsequent queue rounds independent. Each service owner has one active attempt and one coalesced pending catch-up; startup schedules one fresh catch-up. Independent foreground CLI processes retain their own lifecycle. Service disposal owns and reaps its children.
 

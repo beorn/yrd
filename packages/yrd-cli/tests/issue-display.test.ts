@@ -9,13 +9,12 @@
  * @consumer an operator or agent reading `yrd queue show` for a change bound to an issue
  * @testonly none
  */
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterAll, describe, expect, it } from "vitest"
-import { openEvents } from "gitomic/events"
-import { changeInput, changesRef, createEventStore, queueRef, submit } from "@yrd/queue-core"
+import { submit } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { readIssueDisplay } from "../src/issue-resolver.ts"
@@ -62,14 +61,14 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
 }
 
 /** A project whose committed `main` declares `view` as the fake provider in `mode`. */
-async function issuesProject(mode: string): Promise<string> {
+async function issuesProject(mode: string, extraArgs: readonly string[] = []): Promise<string> {
   const dir = join(scratch("yrd-issue-display-project-"), "project")
   mkdirSync(dir)
   const git = gitIn(dir)
   await git(["init", "--quiet", "--initial-branch=main"])
   await git(["config", "user.email", "issues@yrd.test"])
   await git(["config", "user.name", "yrd"])
-  writeFileSync(join(dir, "issues.yml"), `view: ${JSON.stringify([BUN, PROVIDER, mode, "<key>"])}\n`)
+  writeFileSync(join(dir, "issues.yml"), `view: ${JSON.stringify([BUN, PROVIDER, mode, "<key>", ...extraArgs])}\n`)
   await git(["add", "issues.yml"])
   await git(["commit", "--quiet", "-m", "declare view"])
   return dir
@@ -95,7 +94,7 @@ async function queueWithIssueHistory(issueCount = 1, extraYrdYml = ""): Promise<
   await git(["checkout", "--quiet", "-b", "task/one", "main"])
   writeFileSync(join(work, "one.txt"), "one\n")
   await git(["add", "."])
-  await git(["commit", "--quiet", "-m", "task/one does its work\n\nRefs: 29644"])
+  await git(["commit", "--quiet", "-m", "task/one does its work"])
   await git(["checkout", "--quiet", "main"])
   await submit(git, "origin", {
     branch: "task/one",
@@ -104,18 +103,17 @@ async function queueWithIssueHistory(issueCount = 1, extraYrdYml = ""): Promise<
     target: { branch: "main", remote: "origin" },
   })
   for (let index = 1; index < issueCount; index++) {
-    const store = createEventStore(work, "origin", git.selection)
-    const chain = await openEvents({ ...store, ref: changesRef("main", "task/one") })
-    const tip = await chain.head()
-    const queueTip = (await git(["rev-parse", queueRef("main")])).trim()
-    const head = (await git(["rev-parse", "refs/heads/task/one"])).trim()
-    await chain.append([changeInput("cancelled", { queueTip, at: new Date(), commit: head, by: "fixture", reason: "historical fixture" })], { expect: tip })
     await git(["checkout", "--quiet", "task/one"])
     writeFileSync(join(work, "one.txt"), String(index))
     await git(["add", "one.txt"])
     await git(["commit", "--quiet", "-m", "historical revision " + String(index)])
     await git(["checkout", "--quiet", "main"])
-    await submit(git, "origin", { branch: "task/one", issue: "issue-" + String(index), submitter: "@dev/12", target: { branch: "main", remote: "origin" } })
+    await submit(git, "origin", {
+      branch: "task/one",
+      issue: "issue-" + String(index),
+      submitter: "@dev/12",
+      target: { branch: "main", remote: "origin" },
+    })
   }
   return work
 }
@@ -134,6 +132,9 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
     const shown = await yrd(work, "queue", "show", "task/one", "--json", "--fresh")
     expect(shown.exitCode, shown.report).toBe(0)
     expect(shown.stderr, shown.report).not.toContain("issue info")
+    const all = await yrd(work, "queue", "show", "--all", "--json", "--fresh")
+    expect(all.exitCode, all.report).toBe(0)
+    expect(all.stderr, all.report).not.toContain("issue display")
   })
 
   // Five distinct real bindings expose the whole-history read storm without
@@ -150,9 +151,52 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
     expect(shown.stderr, shown.report).not.toContain("fake provider:")
   })
 
+  // The old one-key suite cannot expose eager startup, an excessive batch, or
+  // one failed lookup hiding successful siblings. Four of five keys prove all three.
+  it("reads at most four newest distinct branch issues after queue output and preserves siblings on failure", async () => {
+    const work = await queueWithIssueHistory(5)
+    const trace = scratch("yrd-issue-display-trace-")
+    const outputMarker = join(trace, "queue-output")
+    const starts = join(trace, "starts.jsonl")
+    const project = await issuesProject("trace", [outputMarker, starts])
+    let stdout = ""
+    let stderr = ""
+    const exitCode = await runYrdProcess(
+      [BUN, "/usr/local/bin/yrd", "queue", "show", "task/one", "--json", "--fresh", "--project-root", project],
+      {
+        color: false,
+        cwd: work,
+        stdout(text) {
+          stdout += text
+          if (JSON.parse(stdout).changes.length === 5) writeFileSync(outputMarker, "complete")
+        },
+        stderr(text) {
+          stderr += text
+        },
+      },
+    )
+    expect(exitCode, stderr).toBe(0)
+    expect(JSON.parse(stdout).changes).toHaveLength(5)
+    const observed = readFileSync(starts, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { key: string; queueOutputEmitted: boolean })
+    expect(observed.map(({ key }) => key).sort(), stderr).toEqual(["issue-1", "issue-2", "issue-3", "issue-4"])
+    expect(
+      observed.every(({ queueOutputEmitted }) => queueOutputEmitted),
+      stderr,
+    ).toBe(true)
+    expect(stderr).toContain("yrd: issue display: omitted 1 older distinct issue; showing at most 4")
+    expect(stderr).toContain("yrd: issue issue-3: issue info unavailable:")
+    expect(stderr).toContain('yrd: issue info issue-4: {"key":"issue-4","queueOutputEmitted":true}')
+    expect(stderr).toContain('yrd: issue info issue-2: {"key":"issue-2","queueOutputEmitted":true}')
+    expect(stderr).toContain('yrd: issue info issue-1: {"key":"issue-1","queueOutputEmitted":true}')
+  })
+
   it("says out loud when the declaration in force still holds issuesProvider.read, and never runs it (rule: retired key said out loud)", async () => {
     const marker = join(scratch("yrd-issue-display-retired-"), "ran")
-    const work = await queueWithIssueHistory(1,
+    const work = await queueWithIssueHistory(
+      1,
       `issuesProvider:\n  read: ${JSON.stringify(["sh", "-c", `touch ${JSON.stringify(marker)}`, "read", "<key>"])}\n`,
     )
     const shown = await yrd(work, "queue", "show", "task/one", "--json", "--fresh")
