@@ -1307,21 +1307,28 @@ export async function eventQueueRun(
   for (const {
     entry: [branch, change],
   } of ordered) {
-    const row = (
-      await git([
-        "rev-list",
-        "--reverse",
-        "--first-parent",
-        "--ancestry-path",
-        "--parents",
-        `${change.commit}..${target}`,
-      ])
-    )
+    const range = `${change.commit}..${target}`
+    const [ancestryRows, firstParentRows] = await Promise.all([
+      git(["rev-list", "--reverse", "--topo-order", "--ancestry-path", "--parents", range]),
+      git(["rev-list", "--first-parent", range]),
+    ])
+    const ancestry = ancestryRows
       .trim()
-      .split("\n")[0]
-      ?.trim()
-      .split(/\s+/u)
-      .filter((sha) => sha !== "")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => line.trim().split(/\s+/u))
+    const firstParents = new Set(
+      firstParentRows
+        .trim()
+        .split("\n")
+        .filter((line) => line !== ""),
+    )
+    const row = ancestry.find(([commit]) => commit !== undefined && firstParents.has(commit))
+    if (change.commit !== target && row === undefined) {
+      throw new Error(
+        `${branch}: observed source ${change.commit} is on target ${target} but has no delivery intersection (${ancestry.length} ancestry rows, ${firstParents.size} first-parent rows)`,
+      )
+    }
     const merge = row?.[1] === change.commit ? change.commit : (row?.[0] ?? change.commit)
     const opened = histories
       .get(branch)

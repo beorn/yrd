@@ -4383,7 +4383,7 @@ it("observes a submitted head on the target, then uses its merged event as the d
 /** @failure Cleanup loses exact component pins when the published root differs from the submitted root.
  * @level l3 @consumer yrd local component branch retirement
  */
-it.each(["published", "observed"] as const)(
+it.each(["published", "observed", "observed-ff"] as const)(
   "retains actual %s root gitlinks on its landing event",
   async (producer) => {
     const w = await world()
@@ -4416,21 +4416,29 @@ it.each(["published", "observed"] as const)(
         opsFences: [],
       })
     } else {
-      // A true merge has its own delivered tree. A fast-forward observed after
-      // another target commit instead belongs to the submitted head itself.
-      await w.git(["merge", "--no-ff", landed, "-m", "observed root merge with component"])
-      landed = (await w.git(["rev-parse", "HEAD"])).trim()
+      if (producer === "observed-ff") {
+        await w.git(["merge", "--ff-only", landed])
+      } else {
+        await w.git(["merge", "--no-ff", landed, "-m", "observed root merge with component"])
+        landed = (await w.git(["rev-parse", "HEAD"])).trim()
+      }
       await w.git(["push", "--quiet", "origin", "main"])
       const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
       expect(outcome.merged).toEqual([branch])
     }
     const state = await readStatus(store, "main", branch)
-    expect(state).toMatchObject({ status: "merged", commit: head, merge: landed, landedGitlinks: pins })
+    const deliveredPins = producer === "observed-ff" ? [] : pins
+    expect(state).toMatchObject({
+      status: "merged",
+      commit: head,
+      merge: producer === "observed-ff" ? head : landed,
+      landedGitlinks: deliveredPins,
+    })
     if (endingId !== undefined) expect(state.ending?.id).toBe(endingId)
     const ending = (await (await openEvents({ ...store, ref: changesRef("main", branch) })).events()).find(
       (event) => event.id === state.ending?.id,
     )
-    expect(ending?.props).toContainEqual(["Gitlinks", JSON.stringify(pins)])
+    expect(ending?.props).toContainEqual(["Gitlinks", JSON.stringify(deliveredPins)])
     expect(await remoteTarget(w)).toBe(landed)
   },
 )
