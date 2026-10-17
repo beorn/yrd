@@ -209,13 +209,15 @@ it.each([
   { mode: "reuse-pending" },
   { mode: "blob-mismatch" },
   { mode: "observed-ff" },
+  { mode: "observed-after-target" },
+  { mode: "observed-stacked" },
   { mode: "provider-lost-reply" },
 ] as const)(
   "preserves the real merge queue while exercising post-merge $mode behavior",
   async ({ mode }) => {
     const reconcileAfterQueue =
       mode.startsWith("append-") || mode === "reuse-pending" || mode === "concurrent" || mode === "provider-lost-reply"
-    const expectedCloses = mode === "observed-ff" ? 3 : 2
+    const expectedCloses = mode.startsWith("observed-") ? 3 : 2
     const root = world(),
       remote = join(root, "remote.git"),
       repo = join(root, "author"),
@@ -286,7 +288,7 @@ it.each([
     const queue = async (branch: string, message: string) => {
       await git(["checkout", "--quiet", "-b", branch, "origin/main"])
       writeFileSync(join(repo, branch.replaceAll("/", "-") + ".txt"), branch)
-      if (mode === "observed-ff" && branch === "task/first") {
+      if ((mode === "observed-ff" || mode === "observed-after-target") && branch === "task/first") {
         writeFileSync(join(repo, "older.txt"), "older closing intent")
         await git(["add", "older.txt"])
         await git(["commit", "--quiet", "-m", "older\n\nCloses: issue-older"])
@@ -322,8 +324,28 @@ it.each([
       return submitted
     }
     await queue("task/first", "first\n\nCloses: issue-first")
-    if (mode === "observed-ff") {
+    const firstSubmittedHead = (await git(["rev-parse", "task/first"])).trim()
+    if (mode === "observed-stacked") {
+      await git(["checkout", "--quiet", "-b", "task/stacked", "task/first"])
+      writeFileSync(join(repo, "stacked.txt"), "upper source")
+      await git(["add", "stacked.txt"])
+      await git(["commit", "--quiet", "-m", "upper\n\nCloses: issue-stacked"])
+      await submit(git, "origin", {
+        branch: "task/stacked",
+        submitter: "fixture",
+        target: { remote: "origin", branch: "main" },
+      })
+      await git(["checkout", "--quiet", "main"])
+      await git(["push", "--quiet", "origin", "task/stacked:refs/heads/main"])
+    } else if (mode.startsWith("observed-")) {
       await git(["push", "--quiet", "origin", "task/first:refs/heads/main"])
+      if (mode === "observed-after-target") {
+        await git(["merge", "--quiet", "--ff-only", "origin/main"])
+        writeFileSync(join(repo, "unrelated.txt"), "later target commit")
+        await git(["add", "unrelated.txt"])
+        await git(["commit", "--quiet", "-m", "unrelated\n\nCloses: issue-unrelated"])
+        await git(["push", "--quiet", "origin", "main"])
+      }
     }
     const stop = new AbortController(),
       merged: string[] = [],
@@ -371,6 +393,9 @@ it.each([
             afterRound: async (outcome) => {
               rounds++
               merged.push(...outcome.merged)
+              if ((mode === "observed-after-target" || mode === "observed-stacked") && merged.includes("task/first")) {
+                expect((await readStatus(store, "main", "task/first")).merge).toBe(firstSubmittedHead)
+              }
               await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 10000 })
               expect(existsSync(finished)).toBe(false)
               if (mode === "stop") {
@@ -767,7 +792,8 @@ it.each([
       .map((line) => line.split("\t"))
     expect(calls.map(([key, reason]) => [key, reason])).toEqual([
       [mode === "delivered-declaration" ? "delivered-issue-first" : "issue-first", "completed"],
-      ...(mode === "observed-ff" ? [["issue-older", "completed"]] : []),
+      ...(mode === "observed-ff" || mode === "observed-after-target" ? [["issue-older", "completed"]] : []),
+      ...(mode === "observed-stacked" ? [["issue-stacked", "completed"]] : []),
       [mode === "delivered-declaration" ? "delivered-issue-second" : "issue-second", "completed"],
     ])
     const effects = await Promise.all(
