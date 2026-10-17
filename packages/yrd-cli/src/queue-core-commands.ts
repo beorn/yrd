@@ -5591,7 +5591,14 @@ export function summarize(kind: string, rest: Readonly<Record<string, unknown>>)
   }
 }
 
-function describeRun(
+/**
+ * A round's one summary line: the RESULT only (#29679 defect 3). How the round
+ * OBSERVED the queue is a diagnostic with its own routes — the
+ * `yrd:queue:observation` DEBUG row, and the `invalid` observation's stderr
+ * line — so it is never appended to what the round did. A note that prints on
+ * every clean round reads as a failure.
+ */
+export function describeRun(
   outcome: Readonly<{
     exitCode: number
     merged: readonly string[]
@@ -5601,7 +5608,6 @@ function describeRun(
     directMerges: readonly string[]
     log: string
     stopped?: Readonly<{ says: string }>
-    observation: GitObservation
     noCheck?: boolean
   }>,
 ): string {
@@ -5617,8 +5623,6 @@ function describeRun(
       ? `${String(outcome.directMerges.length)} ${outcome.directMerges.length === 1 ? "commit" : "commits"} around the queue at ${outcome.directMerges.map((sha) => sha.slice(0, 12)).join(", ")}`
       : undefined,
     outcome.stopped === undefined ? undefined : `${outcome.stopped.says}; no merge was made`,
-    outcome.observation.message,
-    ...outcome.observation.notices.map((notice) => notice.text),
   ].filter((part): part is string => part !== undefined)
   return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")} (log ${outcome.log})`
 }

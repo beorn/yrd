@@ -48,6 +48,23 @@ export type EnvCloseRequest = Readonly<{
 /** What is stored on disk: the requester's intent plus the consumer's retry bound. */
 export type StoredCloseRequest = EnvCloseRequest & Readonly<{ coverageAttempts?: number }>
 
+/**
+ * A request for this path already STANDS with a different ending or different options. The caller refuses to
+ * overwrite it — but that refusal is a NO-OP, not a failure: nothing was written and nothing was lost. The
+ * class carries the standing file and request so a reporter names them from the class, never from message
+ * prose (#29679 defect 2).
+ */
+export class CloseRequestAlreadyStandsError extends Error {
+  constructor(
+    readonly file: string,
+    readonly standing: StoredCloseRequest,
+    message: string,
+  ) {
+    super(message)
+    this.name = "CloseRequestAlreadyStandsError"
+  }
+}
+
 /** The recorded requester: the launched seat identity, else `unknown` (cli.ts's own default). */
 export function requesterOf(env: NodeJS.ProcessEnv): string {
   const launched = env.YRD_DEFAULT_SUBMITTER?.trim()
@@ -99,7 +116,9 @@ export function writeCloseRequest(
       standing.ending?.branch !== request.ending?.branch ||
       standing.ending?.event !== request.ending?.event
     ) {
-      throw new Error(
+      throw new CloseRequestAlreadyStandsError(
+        file,
+        standing,
         `a close request for ${standing.path} already stands at ${file} from ${standing.requester} (${standing.at}) ` +
           `with options ${JSON.stringify(standing.options)} and ending ${JSON.stringify(standing.ending)}; this request asks for ${JSON.stringify(request.options)} and ending ${JSON.stringify(request.ending)}; ` +
           `resolve the standing request before filing another`,

@@ -26,6 +26,7 @@ import {
   privateStoreVerifyCommand,
 } from "./env-commands.ts"
 import {
+  CloseRequestAlreadyStandsError,
   ENV_CLOSE_PREDICATE,
   MAX_COVERAGE_ATTEMPTS,
   closeRequestFile,
@@ -446,6 +447,26 @@ function privateRefusalIn(cause: unknown): PrivateStoreRefusalError | PrivateChe
 }
 
 /**
+ * One cause as a REASON, never `Error: <message>`.
+ *
+ * The sweep uses `throw new Error(<keep reason>)` as control flow — `fresh: opened …`, `held`,
+ * `opening lifetime standing`, `eligible; yielding to the next queue round` — and its catch records what it
+ * caught. Stringifying the Error there printed `kept: Error: fresh: opened …`, so a benign keep read as a
+ * failure (#29679 defect 1, round1-merge.log:112). The reason TEXT itself is unchanged; the Error wrapper is.
+ */
+function reasonText(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause)
+}
+
+/** The standing-request refusal at any depth of a cause chain, or undefined for any other cause. */
+function closeRequestAlreadyStands(cause: unknown): CloseRequestAlreadyStandsError | undefined {
+  for (let at: unknown = cause; at instanceof Error; at = at.cause) {
+    if (at instanceof CloseRequestAlreadyStandsError) return at
+  }
+  return undefined
+}
+
+/**
  * One named class from a cause that IS a typed private refusal at any depth, or undefined for any other cause.
  * Read from the guard's own structured payload — never from message prose, and never a second `modules/<name>`
  * derivation — so the sweep reports `kept: private checkout; store <store>; retire with <command>` for the tree,
@@ -551,7 +572,20 @@ async function fileTerminalCloseRequests(
         `${alreadyStood ? "close request already stood" : "close request"} ${file} after terminal ending of ${row.branch}`,
       )
     } catch (cause) {
-      input.record(row.path, "file-failed", String(cause))
+      // #29679 defect 2: a request that already STANDS is a no-op, not a failure — nothing was written and
+      // nothing failed. It is reported as `filed`, naming the standing file, exactly like the same-options
+      // path above; the standing request is never overwritten (hand-start-1827.log:38).
+      const stood = closeRequestAlreadyStands(cause)
+      if (stood !== undefined) {
+        input.record(
+          row.path,
+          "filed",
+          `close request already stood ${stood.file} from ${stood.standing.requester} with a different ending; ` +
+            `left as it stands after terminal ending of ${row.branch}`,
+        )
+        continue
+      }
+      input.record(row.path, "file-failed", reasonText(cause))
     }
   }
 }
@@ -833,7 +867,7 @@ async function cleanupEnvironments(
   try {
     snapshot = await census()
   } catch (cause) {
-    for (const row of inventory.rows) preserve(row.path, String(cause))
+    for (const row of inventory.rows) preserve(row.path, reasonText(cause))
     appendFileSync(
       outcome.log,
       `${JSON.stringify({ kind: "observation", run: outcome.run, at: new Date().toISOString(), scope: "environment-cleanup", registry, closed, kept, deferred: 0, remaining: inventory.rows.length - closed, ...(censusReceipt === undefined ? {} : { census: censusReceipt }) })}\n`,
@@ -1030,7 +1064,7 @@ async function cleanupEnvironments(
       } else if ("kept" in result && result.kept === row.path) preserve(row.path, output.trim())
       else throw new Error(`unproven close result ${output}`)
     } catch (cause) {
-      preserve(row.path, namedPrivateStoreRefusal(cause, row.path) ?? String(cause))
+      preserve(row.path, namedPrivateStoreRefusal(cause, row.path) ?? reasonText(cause))
     }
   }
   progress.cursor = stoppedAt < 0 ? 0 : (offset + stoppedAt) % inventory.rows.length
