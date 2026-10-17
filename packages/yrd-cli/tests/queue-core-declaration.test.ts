@@ -1869,7 +1869,8 @@ describe("a queue is the selected origin branch carrying config", () => {
         }
         const after = await measure("three-store-trace")
         expect(after["ls-remote"]).toBe(before["ls-remote"])
-        expect(after.fetch).toBe(before.fetch)
+        // A warm fetched queue ref can save a read; extra stores must never add one.
+        expect(after.fetch).toBeLessThanOrEqual(before.fetch)
 
         // No checkout pointer and no module store means there is no private branch here.
         const absent = join(dirname(repo), "unmaterialized-author")
