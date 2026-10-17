@@ -3990,8 +3990,9 @@ describe("drop --local --release-checkout", () => {
       const outside =
         context === "outside" || context === "unreadable" ? outsideRepositoryRoot("yrd-release-hint-") : undefined
       if (outside !== undefined) roots.push(outside)
-      if (context === "unreadable")
+      if (context === "unreadable") {
         writeFileSync(join(outside!, ".git"), `gitdir: ${join(outside!, "missing-gitdir")}\n`)
+      }
       const author = context === "child" ? component!.repo : context === "standalone" ? await world() : undefined
       const output = capture(outside ?? (context === "standalone" ? author! : queueRepo))
       const exit = await coreQueueCommand(

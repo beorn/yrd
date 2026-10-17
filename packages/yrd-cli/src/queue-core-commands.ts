@@ -933,7 +933,7 @@ export async function coreQueueCommand(
         return report.failed.length === 0 ? 0 : 1
       }
     }
-    return noQueueOnTarget(targetLabel)
+    return await noQueueOnTarget(targetLabel)
   }
   const config = captured.config
   const eventStore = createEventStore(repo, config.target.remote, selection, git.backend)
