@@ -71,6 +71,7 @@ import { queueRefPrefix, runIndexRef } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
 import { revertedPathsFinding, revertedPathsReason, revertGuardAction } from "./revert-guard.ts"
 import { publishCheckedChildren } from "./publication.ts"
+import { withRemoteSeam } from "./remote-calls.ts"
 import { SETUP, SetupFailed, discardWorktree } from "./worktree.ts"
 import { installInputsChanged } from "./install-inputs.ts"
 import { WorktreePool } from "./pool.ts"
@@ -645,6 +646,17 @@ export async function eventQueueRun(
   /** The line as this round read it (25669), stated on every outcome once the line is read. */
   const read: { line?: RoundLine } = {}
   const branches: string[] = []
+  /**
+   * `timedStep` under the round's remote seam: the step's own name labels every remote call it starts, so the
+   * round's `remote-calls` row answers "who" and not only "how much" (29697 row 1). The seam rides the async
+   * scope, so a git-super child started inside the step inherits it (git.ts `seamEnvironment`).
+   */
+  const seamStep = <T>(
+    about: Readonly<
+      { name: string; phase: string } & ({ branch: string; head: string } | { target: string; base: string })
+    >,
+    work: () => Promise<T>,
+  ): Promise<T> => timedStep(log, about, () => withRemoteSeam(about.name, work))
   const deleteMergedBranch = async (branch: string, head?: string): Promise<void> => {
     if (head === undefined) {
       log.write({ branch, kind: "branch-kept", saw: "unread", reason: "no submitted commit recorded" })
@@ -653,15 +665,18 @@ export async function eventQueueRun(
     }
     const ref = `refs/heads/${branch}`
     try {
-      if (store.backend.publish === undefined) {
+      const publishMergedBranch = store.backend.publish
+      if (publishMergedBranch === undefined) {
         throw new Error("Gitomic backend lacks publish for merged branch deletion")
       }
-      await store.backend.publish(store.repo, [{ ref, expect: head, oid: null }], options.target.remote)
+      await withRemoteSeam("retire", () =>
+        publishMergedBranch.call(store.backend, store.repo, [{ ref, expect: head, oid: null }], options.target.remote),
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       let saw: string
       try {
-        saw = (await readRemoteCommit(git, options.target.remote, ref)) ?? "absent"
+        saw = (await withRemoteSeam("retire", () => readRemoteCommit(git, options.target.remote, ref))) ?? "absent"
       } catch (readError) {
         saw = `unread (${readError instanceof Error ? readError.message : String(readError)})`
       }
@@ -910,7 +925,7 @@ export async function eventQueueRun(
     return result(observation.outcome === "invalid" ? 2 : 0)
   }
 
-  let operational = await readEventOps(store, git, queue, target)
+  let operational = await withRemoteSeam("roundOpen", () => readEventOps(store, git, queue, target))
   // No override can expire or need a reminder when the table is empty. Keep
   // the round's injected clock for its stop window until a clock act is due.
   const clock =
@@ -962,9 +977,9 @@ export async function eventQueueRun(
       }
     }
   }
-  operational = await readEventOps(store, git, queue, target)
+  operational = await withRemoteSeam("prePick", () => readEventOps(store, git, queue, target))
   let queueState = operational.queue
-  const { histories, invalid } = await listChangeHistories(store, queue)
+  const { histories, invalid } = await withRemoteSeam("prePick", () => listChangeHistories(store, queue))
   // 27198: ONE queue-level `notify-floors` snapshot per run, before any ending
   // delivery. The first snapshot is a migration: it mints every declared name at
   // the queue's created instant, and refuses loudly unless the declared name set
@@ -1025,7 +1040,7 @@ export async function eventQueueRun(
           floors,
         }),
       )
-      operational = await readEventOps(store, git, queue, target)
+      operational = await withRemoteSeam("floorsRefresh", () => readEventOps(store, git, queue, target))
       queueState = operational.queue
     }
     notifyFloors = queueState.notifyFloors
@@ -1112,7 +1127,7 @@ export async function eventQueueRun(
     await tellDirect(commit.commit, observed)
   }
   if (direct.length > 0) {
-    operational = await readEventOps(store, git, queue, target)
+    operational = await withRemoteSeam("afterDirect", () => readEventOps(store, git, queue, target))
     queueState = operational.queue
   }
   if (operational.stop !== undefined && options.foreground !== true) {
@@ -1577,7 +1592,7 @@ export async function eventQueueRun(
     try {
       child = await publishWithTransientRetry(
         () =>
-          timedStep(log, { branch, head, name: "publish", phase: "merge" }, () =>
+          seamStep({ branch, head, name: "publish", phase: "merge" }, () =>
             publishCheckedChildren({
               git,
               cwd: options.repo,
@@ -1634,7 +1649,7 @@ export async function eventQueueRun(
     try {
       const stagedMerge = await publishWithTransientRetry<StagedEvent>(
         (prepared) =>
-          timedStep(log, { branch, head, name: "merge", phase: "merge" }, () =>
+          seamStep({ branch, head, name: "merge", phase: "merge" }, () =>
             appendOwnedMergeOnce(
               (staged) => {
                 preparedMerge = staged.oid
@@ -1964,7 +1979,7 @@ export async function eventQueueRun(
     mkdirSync(join(options.workdir, "worktrees", log.id), { recursive: true })
     let verified: Awaited<ReturnType<typeof verifyCandidate>>
     try {
-      verified = await timedStep(log, { branch, head, name: "compose", phase: "submit" }, () =>
+      verified = await seamStep({ branch, head, name: "compose", phase: "submit" }, () =>
         verifyCandidate({
           git,
           repo: options.repo,
@@ -2029,7 +2044,7 @@ export async function eventQueueRun(
     }
     try {
       if (verified.state === "failed") {
-        await timedStep(log, { branch, head, name: "remove", phase: "deprovision" }, () =>
+        await seamStep({ branch, head, name: "remove", phase: "deprovision" }, () =>
           discardWorktree(verified.failedWorktree),
         )
         const ended = await appendOwnedChange(store, queue, branch, tip, {
@@ -2294,7 +2309,7 @@ export async function eventQueueRun(
           const setupAbout = { branch, head, name: SETUP, phase }
           let worktree
           try {
-            worktree = await timedStep(log, { branch, head, name: "prepare", phase }, () =>
+            worktree = await seamStep({ branch, head, name: "prepare", phase }, () =>
               pool.borrow({
                 role: "candidate",
                 commit: candidate,
@@ -2396,7 +2411,7 @@ export async function eventQueueRun(
           } finally {
             if (worktree !== undefined) {
               try {
-                await timedStep(log, { branch, head, name: "remove", phase: "deprovision" }, () => pool.give(worktree))
+                await seamStep({ branch, head, name: "remove", phase: "deprovision" }, () => pool.give(worktree))
               } catch (error) {
                 log.write({
                   kind: "warning",

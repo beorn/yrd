@@ -264,7 +264,10 @@ async function queueRunWithLog(options: QueueRunOptions, log: QueueRunLog): Prom
   // git-super's children, writes git's trace2 event log under the run's own directory, and one `remote-calls`
   // row counts them when the round ends, however it ends. Set in both environments a round's Git reads from; a
   // check's environment is built, never inherited, so a check's own git is not counted here.
-  const traced = traceRemoteCalls(join(options.workdir, "logs", log.id, "trace2"), { refresh: true })
+  // `seams` is what makes the row answer "who": without it `YRD_SEAM` is not among the variables git records,
+  // and every millisecond lands in `seam.unattributed` — the round counted its remote time and could not name a
+  // caller for one line of it (29697 row 1). The labels are set by the round's own call sites.
+  const traced = traceRemoteCalls(join(options.workdir, "logs", log.id, "trace2"), { refresh: true, seams: true })
   if (options.env !== undefined) options = { ...options, env: { ...options.env, ...traced.env } }
   resources.defer(() => {
     try {

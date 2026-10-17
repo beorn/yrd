@@ -817,12 +817,15 @@ export function gitEnvironment(
     [`GIT_CONFIG_KEY_${count + 1}`]: "push.recurseSubmodules",
     [`GIT_CONFIG_VALUE_${count + 1}`]: "no",
   }
-  return applyGitObjectContext(composed, objects)
+  // Seam-aware at the one place every child environment is built: a git or git-super child started inside a
+  // labelled step carries the label, which is the only way the round's git-super children can be attributed
+  // (29697 row 1 — they are started by another process, so no yrd-side wrapper sees them).
+  return seamEnvironment(applyGitObjectContext(composed, objects))
 }
 
 /** Attach the current call's trace label at the spawn boundary, never at runner or store creation. */
-function seamEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const seam = remoteSeam()
+function seamEnvironment(base: NodeJS.ProcessEnv, fallback?: string): NodeJS.ProcessEnv {
+  const seam = remoteSeam() ?? fallback
   return seam !== undefined && base.GIT_TRACE2_ENV_VARS?.split(",").includes("YRD_SEAM")
     ? { ...base, YRD_SEAM: seam }
     : base
@@ -862,7 +865,9 @@ export function createLegacyBackend(
   }
   const first = makeReader(baseEnv)
   const readerForCall = () => {
-    const env = seamEnvironment(baseEnv)
+    // `queueStore` is the fallback for this layer's own traffic: an outer step label wins, and a call made
+    // outside every labelled step is still named for what it is instead of landing in `unattributed`.
+    const env = seamEnvironment(baseEnv, "queueStore")
     return { env, reader: env === baseEnv ? first : makeReader(env) }
   }
   return {

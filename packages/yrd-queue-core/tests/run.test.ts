@@ -1084,6 +1084,20 @@ it("closes the round's journal with every remote call it made, counted from git'
     expect.objectContaining({ oldestBranch: "task/event-counted", waiting: 1 }),
   ])
   const counted = rows.at(-1)
+  // 29697 row 1: the round attributes its remote calls to a caller. `unattributed` is a measurement gap, not
+  // a bucket, so a round whose row carries it has calls nobody can name; this round names all of them.
+  const seamKeys = Object.keys(counted ?? {}).filter((key) => key.startsWith("seam."))
+  expect(seamKeys.filter((key) => key.startsWith("seam.unattributed."))).toEqual([])
+  expect(seamKeys).toContain("seam.merge.push")
+  expect(Number(counted?.["seam.merge.remote_ms"])).toBeGreaterThan(0)
+  // The round's own event-store traffic is named for the layer that makes it, not lumped with a step.
+  expect(Number(counted?.["seam.queueStore.remote_ms"])).toBeGreaterThan(0)
+  const attributedMs = seamKeys
+    .filter((key) => key.endsWith(".remote_ms"))
+    .reduce((sum, key) => sum + Number(counted?.[key]), 0)
+  // Each file's milliseconds are rounded on their own, so the attributed sum may differ from the total by a
+  // few; the bar is the acceptance's own: under 5% of the round's remote time unknown.
+  expect(attributedMs).toBeGreaterThanOrEqual(Number(counted?.remote_ms) * 0.95)
   expect(counted).toMatchObject({
     kind: "remote-calls",
     unreadable: 0,
