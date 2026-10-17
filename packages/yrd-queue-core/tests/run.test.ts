@@ -3832,6 +3832,20 @@ it("settles a direct-merge notice on the queue chain across an empty journal", a
   expect(messages(w)).toEqual([
     { change: direct, record: "merged-direct", endingId: observed?.id, endedAt: expect.any(String) },
   ])
+  // 29697 row 1: a round that settles a direct notice reads the queue chain from the observed loop, and those
+  // reads carry the caller's own name — never `unattributed`, whose bar is its SHARE of `remote_ms` (@cto c6505435).
+  const counted = logRecords(restarted).at(-1)
+  const seamKeys = Object.keys(counted ?? {}).filter((key) => key.startsWith("seam."))
+  const shares = JSON.stringify({
+    seamKeys,
+    remote_ms: counted?.remote_ms,
+    unattributed_ms: counted?.["seam.unattributed.remote_ms"],
+  })
+  expect(seamKeys, shares).toContain("seam.directNoticeRead.ls-remote")
+  expect(Number(counted?.["seam.directNoticeRead.remote_ms"])).toBeGreaterThan(0)
+  expect(Number(counted?.["seam.unattributed.remote_ms"] ?? 0), JSON.stringify(seamKeys)).toBeLessThan(
+    Number(counted?.remote_ms) * 0.05,
+  )
 })
 
 /** @failure An old observed event fell outside Gitomic's default 50-event read,
