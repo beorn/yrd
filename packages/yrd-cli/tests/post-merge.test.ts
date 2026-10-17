@@ -9,7 +9,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, exist
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
-import { createPostMerge } from "../src/post-merge.ts"
+import { createPostMerge, readPostMergeIssueDiagnostics } from "../src/post-merge.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { Conflict } from "../../yrd-queue-core/src/git.ts"
@@ -198,6 +198,8 @@ it.each([
   { mode: "close-stop" },
   { mode: "append-conflict" },
   { mode: "append-error" },
+  { mode: "cold-replay" },
+  { mode: "declaration-edit" },
 ] as const)(
   "preserves the real merge queue while exercising post-merge $mode behavior",
   async ({ mode }) => {
@@ -451,6 +453,12 @@ it.each([
         )
         .find((action) => action.branch === "task/first" && action.status === "failed")
       expect(failedAction).toBeDefined()
+      expect(readPostMergeIssueDiagnostics(workdir)).toContainEqual(
+        expect.objectContaining({
+          branch: "task/first",
+          providerId: failedAction!.providerId,
+        }),
+      )
       const environments = join(workdir, "environments")
       mkdirSync(environments, { recursive: true })
       for (const branch of ["first", "second", "refs"]) {
@@ -496,6 +504,7 @@ it.each([
         .map((line) => line.split("\t"))
       expect(calls).toHaveLength(2)
       expect(calls.find(([key]) => key === "issue-first")?.[2]).toBe(failedAction!.providerId)
+      expect(readPostMergeIssueDiagnostics(workdir)).toEqual([])
       return
     }
     expect(merged).toContain("task/second")
@@ -550,6 +559,50 @@ it.each([
       )
     }
     expect(durable("task/refs")).toEqual([])
+    const migratedCalls = join(root, "migrated-close-calls")
+    if (mode === "declaration-edit") {
+      await git(["fetch", "--quiet", "origin", "main"])
+      await git(["merge", "--quiet", "--ff-only", "origin/main"])
+      writeFileSync(
+        join(repo, "issues.yml"),
+        JSON.stringify({
+          resolve: ["sh", "-c", 'printf \'{"keys":["different-backend-key"]}\\n\''],
+          close: [
+            "sh",
+            "-c",
+            closeScript,
+            "close",
+            "<key>",
+            "<reason>",
+            "<id>",
+            migratedCalls,
+            closeReady,
+            closeRelease,
+          ],
+        }),
+      )
+      await git(["add", "issues.yml"])
+      await git(["commit", "--quiet", "-m", "change provider declaration after fulfilled closes"])
+      await git(["push", "--quiet", "origin", "main"])
+    }
+    if (mode === "cold-replay") {
+      const reading = await readBranchHistory(store, "main", "task/first")
+      if (store.backend.publish === undefined || reading.history?.state.tip === undefined)
+        throw new Error("fixture lacks cold custody publisher")
+      await store.backend.publish(
+        store.repo,
+        [
+          { ref: "refs/yrd-archive/main/task/first", expect: "0".repeat(40), oid: reading.history.state.tip },
+          { ref: reading.ref, expect: reading.history.state.tip, oid: null },
+        ],
+        "origin",
+      )
+      expect(
+        (await readBranchHistory(store, "main", "task/first")).history!.events.some(
+          (event) => trailer(event, "Issue-Effect") !== undefined,
+        ),
+      ).toBe(true)
+    }
     // Startup catch-up over real registered worktrees replays unchanged merged history; it must not resend a fulfilled close.
     const environments = join(workdir, "environments")
     mkdirSync(environments, { recursive: true })
@@ -605,6 +658,9 @@ it.each([
       diagnostics.join(" "),
     ).toBe(0)
     replayStop.abort()
+    expect(existsSync(migratedCalls), "a declaration edit must not migrate fulfilled closes to another backend").toBe(
+      false,
+    )
     await vi.waitFor(
       () => {
         const currentCalls = readFileSync(closeCalls, "utf8").trim().split("\n").filter(Boolean)
