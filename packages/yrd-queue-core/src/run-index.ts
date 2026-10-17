@@ -37,12 +37,24 @@ export type RunIndexLookup =
   | Readonly<{ kind: "known"; number: number; record: RunIndexRecord }>
   | Readonly<{ kind: "unknown"; number: number; knownThrough: number }>
 
-/** Bring the index along with the event queue's existing fetch, including on a cold clone. */
+/**
+ * Bring the index along with the event queue's own read, including on a cold clone.
+ *
+ * The read NAMES the index ref as a gitomic `fetch:` extra, and that is what holds the two refs together where
+ * only one of them is written. The index moves on every allocation; the queue ref need not. `createEventQueue`
+ * creates it, a submit leases it at its own tip, and a numbered verifying push carries only the change ref and
+ * the index ref — though a published merge stages a merge-fenced event on the queue ref, so a first durable
+ * publication can move it too. The local private refs arrive by separate fetches, so a held queue ref proves
+ * nothing about the index: a fetch skipped on it would leave the index an allocation behind, and the append
+ * would allocate a run number the remote already holds, publishing as a final Conflict. A read naming extras
+ * keeps gitomic's fetch, so this read always sees the remote's own index tip. Only this one read gains the
+ * extra; every plain queue read stays skippable.
+ */
 export function queueReadWithRunIndex(
   store: QueueLocation,
   queue: string,
 ): Readonly<{
-  store: QueueLocation
+  store: QueueLocation & Readonly<{ fetch: readonly string[] }>
   tip(): Oid
 }> {
   const indexRef = runIndexRef(queue)
@@ -53,6 +65,7 @@ export function queueReadWithRunIndex(
   return {
     store: {
       ...store,
+      fetch: [indexRef],
       backend: {
         ...store.backend,
         fetchRefs: async (repo, refs, remote, options) => {
@@ -79,7 +92,7 @@ export function queueReadWithRunIndex(
   }
 }
 
-/** Stage an index successor locally; the event publisher leases both refs in one push. */
+/** Stage an index successor locally; the event publisher leases the change ref and the index ref in one push. */
 export async function stageRunIndexEntry(
   store: QueueLocation,
   queue: string,

@@ -23,6 +23,7 @@ import {
   resetQueueFormatCache,
   runIndexRef,
   readConfig,
+  readEventQueue,
   readStatus,
   refAt,
   selectionFor,
@@ -590,6 +591,93 @@ describe("event submit", () => {
       runIndexRef("main"),
     ])
     expect(after).not.toBe(before)
+  })
+
+  /**
+   * @failure a numbered append whose queue read skips its fetch — because the queue ref is already held —
+   *          leaves the private index ref one allocation behind, so it allocates a run number the remote already
+   *          holds and its publish dies as a final Conflict.
+   * @level   l2 (real queue, real remote, two clones)
+   * @consumer every yrd run-number allocation
+   * @reach none
+   * @testonly the second clone stands in for a second host; the private refs are gitomic's own namespace
+   */
+  it("a numbered append allocates from the remote's index tip when the queue ref is already held (29746)", async () => {
+    const w = await world()
+    const first = await branchWithCommit(w, "task/numbered-first", "first.txt")
+    await submit(w.git, "origin", {
+      branch: "task/numbered-first",
+      submitter: "author",
+      target: { branch: "main", remote: "origin" },
+    })
+    const firstStatus = await readStatus(store(w), "main", "task/numbered-first")
+    if (firstStatus.tip === undefined) throw new Error("fixture submission has no change tip")
+    const allocated = await appendNumberedChangeEvent(
+      store(w),
+      "main",
+      "task/numbered-first",
+      firstStatus.tip,
+      { type: "verifying", at: new Date(), commit: first },
+      { id: "opaque-run-1", startedAt: "2026-09-27T12:00:00.000Z", host: "hh", actor: "yrd" },
+    )
+    expect(allocated.number).toBe(1)
+
+    // A second host allocates run 2, so the remote moves the change ref and the index ref together. The
+    // queue ref does not move: its submit leases it at its own tip, and a verifying push carries only
+    // the change ref and the index ref.
+    const elsewhere = join(dirname(w.work), "second-host")
+    await gitIn(dirname(w.work))(["clone", "--quiet", w.remote, elsewhere])
+    const elsewhereGit = gitIn(elsewhere)
+    await elsewhereGit(["config", "user.email", "queue@yrd.test"])
+    await elsewhereGit(["config", "user.name", "yrd"])
+    const elsewhereWorld = { ...w, git: elsewhereGit, work: elsewhere }
+    const second = await branchWithCommit(elsewhereWorld, "task/numbered-second", "second.txt")
+    await submit(elsewhereGit, "origin", {
+      branch: "task/numbered-second",
+      submitter: "author",
+      target: { branch: "main", remote: "origin" },
+    })
+    const secondStatus = await readStatus(store(elsewhereWorld), "main", "task/numbered-second")
+    if (secondStatus.tip === undefined) throw new Error("second host has no change tip")
+    const took = await appendNumberedChangeEvent(
+      store(elsewhereWorld),
+      "main",
+      "task/numbered-second",
+      secondStatus.tip,
+      { type: "verifying", at: new Date(), commit: second },
+      { id: "opaque-run-2", startedAt: "2026-09-27T12:01:00.000Z", host: "elsewhere", actor: "yrd" },
+    )
+    expect(took.number).toBe(2)
+
+    // Here: ONE plain read of the queue. At this head that read is HELD and fetches nothing — the queue ref came
+    // over with the first submit — so this is the state that matters: the queue ref equals the remote's and the
+    // private index ref is still exactly where run 1 left it.
+    await readEventQueue(store(w), "main")
+    const privateRef = (ref: string): string =>
+      `refs/gitomic/fetched/origin/${ref.startsWith("refs/") ? ref.slice("refs/".length) : ref}`
+    const held = async (ref: string): Promise<string> =>
+      (await w.git(["rev-parse", "--verify", privateRef(ref)])).trim()
+    const remote = async (ref: string): Promise<string> =>
+      (await w.git(["ls-remote", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
+    expect(await held(queueRef("main"))).toBe(await remote(queueRef("main")))
+    expect(await held(runIndexRef("main"))).not.toBe(await remote(runIndexRef("main")))
+
+    // The next numbered append must read the remote's own index tip: holding the queue ref is not enough.
+    const thirdStatus = await readStatus(store(w), "main", "task/numbered-first")
+    if (thirdStatus.tip === undefined) throw new Error("clone lost its change tip")
+    const third = await appendNumberedChangeEvent(
+      store(w),
+      "main",
+      "task/numbered-first",
+      thirdStatus.tip,
+      { type: "verifying", at: new Date(), commit: first },
+      { id: "opaque-run-3", startedAt: "2026-09-27T12:02:00.000Z", host: "hh", actor: "yrd" },
+    )
+    expect(third.number).toBe(3)
+    expect(await lookupRunIndex(store(w), "main", 3)).toMatchObject({
+      kind: "known",
+      record: { id: "opaque-run-3" },
+    })
   })
 
   it("refuses allocation when the remote queue survives but its index is missing (26193)", async () => {
