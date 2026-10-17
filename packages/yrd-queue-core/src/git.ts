@@ -841,9 +841,10 @@ export function createLegacyBackend(
       gitExecutable,
       remoteTimeoutMs: GIT_ROOT_INVOCATION_MS,
     })
-    const { fetchRefs, listRefs, fetchRemote, compareAndSwapRemote, publish } = backend
+    const { fetchRefs, fetchedTip, listRefs, fetchRemote, compareAndSwapRemote, publish } = backend
     if (
       fetchRefs === undefined ||
+      fetchedTip === undefined ||
       listRefs === undefined ||
       fetchRemote === undefined ||
       compareAndSwapRemote === undefined ||
@@ -854,6 +855,7 @@ export function createLegacyBackend(
     return {
       backend,
       fetchRefs: fetchRefs.bind(backend),
+      fetchedTip: fetchedTip.bind(backend),
       listRefs: listRefs.bind(backend),
       fetchRemote: fetchRemote.bind(backend),
       compareAndSwapRemote: compareAndSwapRemote.bind(backend),
@@ -892,6 +894,9 @@ export function createLegacyBackend(
         (env) => makeReader(env).listRefs(repo, prefix, remote),
       )
     },
+    // `fetchedTip` runs a `rev-parse` of its own, so it takes the same per-call seam label the other
+    // remote operations do: a round that attributes processes by seam must see it.
+    fetchedTip: (repo, ref, remote) => readerForCall().reader.fetchedTip(repo, ref, remote),
     fetchRemote: (repo, ref, remote) => readerForCall().reader.fetchRemote(repo, ref, remote),
     compareAndSwapRemote: (repo, ref, next, expected, remote) =>
       readerForCall().reader.compareAndSwapRemote(repo, ref, next, expected, remote),

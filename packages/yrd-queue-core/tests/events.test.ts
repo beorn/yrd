@@ -87,6 +87,10 @@ function remoteMemStore(repo: string) {
       }
       return found
     },
+    // This fixture's "remote" is the mem store itself and it keeps no gitomic private fetched
+    // namespace, so it cannot prove any oid is already held: `undefined` is the contract's "fetch",
+    // which is what every read here has always done (gitomic asks fetchedTip before skipping a fetch).
+    fetchedTip: async () => undefined,
   }
   const store = { repo, backend: proxy }
   return {

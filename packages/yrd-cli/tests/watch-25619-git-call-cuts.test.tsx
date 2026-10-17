@@ -189,6 +189,10 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
         }
         return found
       },
+      // The proxy's "remote" is the mem store itself and it keeps no gitomic private fetched
+      // namespace, so nothing is provably held: `undefined` is the contract's "fetch", which is what
+      // this fixture's reads have always done (gitomic asks fetchedTip before skipping a fetch).
+      fetchedTip: async () => undefined,
     }
     const localStore = { repo: "/repo", backend: proxyBackend }
     const store = { repo: "/repo", remote: "origin", backend: proxyBackend }
