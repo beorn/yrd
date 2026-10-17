@@ -13,7 +13,7 @@ import {
   type TransientPush5xx,
   type TransientPushAttempt,
 } from "./transient-push.ts"
-import { readEventAt, readEventChain } from "./event-read.ts"
+import { readEventChain } from "./event-read.ts"
 
 import {
   appendChangeEvent,
@@ -27,8 +27,8 @@ import {
   readChangeEvents,
   queueResumedAfter,
   queueRef,
-  readEventQueue,
   readEventOps,
+  readEventQueueWithChain,
   readStatus,
   QUEUE_RUN_WRITER,
   writeQueueEvent,
@@ -245,6 +245,21 @@ function noticeReason(reason: string): string {
 }
 
 /**
+ * The half of `eventNoticeOwed` a caller can decide WITHOUT the ending event: a recorded notice settles the
+ * entry, and so does a floor that calls this ending old. Everything else — the migration marker, the ending's own
+ * `Time:` — lives on the ending, so a `false` here is the caller's signal to go and read for it (29729).
+ */
+export function noticeSettledLocally(
+  eventId: string,
+  notices: EventChange["notices"],
+  recipient: string,
+  floor: Readonly<{ notBefore: Date; present: ReadonlySet<string> }>,
+): boolean {
+  if (notices?.[`${eventId}:${recipient}`] !== undefined) return true
+  return floor.present.has(eventId)
+}
+
+/**
  * Whether one entry is still owed a notice for an ending (27198).
  *
  * A migrated ending was already told by the old queue. A fresh ending needs its
@@ -253,6 +268,8 @@ function noticeReason(reason: string): string {
  * exactly at `notBefore`), is owed. `present` resolves the same-millisecond tie:
  * an ending that already existed at the mint instant is OLD, one recorded after
  * it — even in the same millisecond — is NEW.
+ *
+ * `noticeSettledLocally` is the part of this answer that needs no ending; the rest needs it.
  */
 export function eventNoticeOwed(
   ending: Pick<Event, "id" | "props">,
@@ -261,13 +278,56 @@ export function eventNoticeOwed(
   floor: Readonly<{ notBefore: Date; present: ReadonlySet<string> }>,
 ): boolean {
   if (ending.props.some(([key]) => key === "Migrated-From")) return false
-  if (notices?.[`${ending.id}:${recipient}`] !== undefined) return false
-  if (floor.present.has(ending.id)) return false
+  if (noticeSettledLocally(ending.id, notices, recipient, floor)) return false
   const time = ending.props.find(([key]) => key === EVENT_TRAILERS.time)?.[1]
   if (time === undefined || !Number.isFinite(Date.parse(time))) {
     throw new Error(`ending event ${ending.id} has no valid Time: to weigh against its notify floor`)
   }
   return Date.parse(time) >= floor.notBefore.getTime()
+}
+
+/**
+ * What the round knows of its own queue ref without reading it again (29729, @cto a787e279): the
+ * projection the round already holds, advanced by each of its own writes. `tip` is the tip the round
+ * believes it is writing on — a marker keying the CAS-refused streak, never the CAS base, which Gitomic
+ * takes from the live ref and re-projects on every attempt, so a rival's move is absorbed by the retry.
+ *
+ * These facts go STALE, and another round is what makes them stale: the round lock is a per-workdir flock, so a
+ * second round on another clone or host holds a different one and can record a notice between this round's read
+ * and its tell (@cto 2005254e, B1). So only the half that decides nothing on its own — `noticeSettledLocally` —
+ * is decided from here; a notice this state does not already settle is re-decided on a fresh read before it is told.
+ */
+/**
+ * Residual, named not hidden (@cto 2005254e): `noticeSettledLocally` decides from a recorded notice and the
+ * notify floor's present set only. An entry settled by anything else — a `Migrated-From` move, or a
+ * `Time:` before the recipient's floor — therefore costs one fresh read every round and never tells.
+ * TRIGGER: a second merged-direct recipient, because every historical entry becomes that kind the day it is
+ * added. Not live today: the six observed entries each carry a `supervisor` notice, and `supervisor` is the
+ * only merged-direct recipient. CURE: carry each entry's ending props from the seed — they never change
+ * once written — and decide with `eventNoticeOwed` itself. The after side's `seam.noticeOwed` count is
+ * the measurement that would show it.
+ */
+type KnownQueue = {
+  tip: string
+  observed: Record<string, Readonly<{ id: string; branch?: string }>>
+  notices: Record<
+    string,
+    Readonly<{ id: string; for: string; to: string; result: "delivered" | "refused" | "failed"; reason?: string }>
+  >
+}
+
+/**
+ * The state a direct notice is decided on must still map this commit to the observed event it wrote (29729). A
+ * round takes this on the FRESH read it makes before an owed notice's tell, never on the state it seeded from
+ * (@cto 2005254e): the seed is exactly what a rival round on another workdir can leave behind, so this is how a
+ * ref rewritten out from under the round stays a loud refusal instead of a skipped or doubled notice.
+ */
+export function observedEntryHeld(
+  known: Readonly<{ observed: Readonly<Record<string, Readonly<{ id: string }>>> }>,
+  commit: string,
+  eventId: string,
+): boolean {
+  return known.observed[commit]?.id === eventId
 }
 
 type SettledNotice = Readonly<{ result: "delivered" | "refused" | "failed"; reason?: string }>
@@ -905,25 +965,36 @@ export async function eventQueueRun(
     const next = at < 0 ? undefined : history[at + 1]
     return next !== undefined && next.type === "opened" && !owned.has(next.id) ? next.id : undefined
   }
-  const tellDirect = async (commit: string, eventId: string): Promise<void> => {
-    if (!options.notify?.some((entry) => entry.on.includes("merged-direct"))) return
+  /**
+   * Tell the recipients of one direct merge (29729, @cto 2005254e). Every entry the round's own known state can
+   * settle — a recorded notice, or a floor that calls this ending old — is settled there for free, so a round
+   * whose direct merges are all notified reads the queue ref ZERO times. An entry that state does NOT settle earns
+   * exactly one fresh read, and the guard and the owed decision are both taken again on what that read says: a
+   * rival round that recorded the notice between this round's read and this tell is seen and stays quiet, so the
+   * window is the one notify command base had, never the seed-to-write span.
+   */
+  const tellDirect = async (knownQueue: KnownQueue, commit: string, eventId: string): Promise<void> => {
     const ref = queueRef(queue)
-    const recorded = await withRemoteSeamGap("directNoticeRead", () => readEventQueue(store, queue))
-    if (recorded.observed[commit]?.id !== eventId) {
-      throw new Error(`event queue ${url}#${queue}: direct notice lost observed ${commit} at ${eventId}`)
-    }
-    const observed = await readEventAt(await openEvents({ ...store, ref }), eventId, ref, store.repo)
-    if (observed.type !== "observed") {
-      throw new Error(`${ref} in ${store.repo}: direct notice event ${eventId} is ${observed.type}, expected observed`)
-    }
     for (const entry of options.notify ?? []) {
       if (!entry.on.includes("merged-direct")) continue
-      const state = await withRemoteSeamGap("directNoticeRead", () => readEventQueue(store, queue))
-      if (state.observed[commit]?.id !== eventId) {
+      const key = `${eventId}:${entry.name}`
+      if (noticeSettledLocally(eventId, knownQueue.notices, entry.name, floorFor(entry.name))) continue
+      const fresh = await withRemoteSeamGap("noticeOwed", () => readEventQueueWithChain(store, queue))
+      // The read IS the known state from here on: it is newer than the round's seed, and it is the state this
+      // decision, the guard and the next CAS marker are all taken on.
+      knownQueue.tip = fresh.queue.tip
+      knownQueue.observed = { ...fresh.queue.observed }
+      knownQueue.notices = { ...fresh.queue.notices }
+      if (!observedEntryHeld(knownQueue, commit, eventId)) {
         throw new Error(`event queue ${url}#${queue}: direct notice lost observed ${commit} at ${eventId}`)
       }
-      const key = `${eventId}:${entry.name}`
-      if (!eventNoticeOwed(observed, state.notices, entry.name, floorFor(entry.name))) continue
+      const observed = fresh.events.find((event) => event.id === eventId)
+      if (observed?.type !== "observed") {
+        throw new Error(
+          `${ref} in ${store.repo}: direct notice event ${eventId} is ${observed?.type ?? "absent"}, expected observed`,
+        )
+      }
+      if (!eventNoticeOwed(observed, knownQueue.notices, entry.name, floorFor(entry.name))) continue
       const final = await settleEventNotice(
         { options, git, target, log, url, queue },
         entry,
@@ -936,7 +1007,9 @@ export async function eventQueueRun(
         },
         { about: queue, branch: queue, head: commit, id: eventId, text: `direct merge ${commit} observed on ${queue}` },
       )
-      await runTransaction("notified", state.tip, () =>
+      // The write's own result is the tip the round believes it is writing on next: on an append it is the
+      // new tip; on a no-op a rival wrote that exact key first, and the round keeps what the write returned.
+      const written = await runTransaction("notified", knownQueue.tip, () =>
         writeQueueEvent(store, queue, {
           type: "notified",
           by: "yrd-run",
@@ -950,6 +1023,14 @@ export async function eventQueueRun(
           },
         }),
       )
+      knownQueue.tip = written
+      knownQueue.notices[key] = {
+        id: written,
+        for: eventId,
+        to: entry.name,
+        result: final.result,
+        ...(final.reason === undefined ? {} : { reason: final.reason }),
+      }
     }
   }
   if (observation.contract === "root-v1" && observation.outcome !== "observed") {
@@ -1078,7 +1159,17 @@ export async function eventQueueRun(
     }
     notifyFloors = queueState.notifyFloors
   }
-  for (const [commit, observed] of Object.entries(queueState.observed)) await tellDirect(commit, observed.id)
+  // 29729: the direct-notice loop settles from the projection the round has just read (readOps, above), advanced
+  // by the round's own writes, and reads the queue ref only for the entry that state says is still owed a notice
+  // (@cto 2005254e). A round whose direct merges are all notified reads it zero times.
+  const knownQueue: KnownQueue = {
+    tip: queueState.tip,
+    observed: { ...queueState.observed },
+    notices: { ...queueState.notices },
+  }
+  for (const [commit, observed] of Object.entries(queueState.observed)) {
+    await tellDirect(knownQueue, commit, observed.id)
+  }
   for (const [branch, defect] of invalid) {
     log.write({
       kind: "observation",
@@ -1126,16 +1217,15 @@ export async function eventQueueRun(
     target,
     queueState.declaration,
     histories,
-    new Set(Object.keys(queueState.observed)),
+    new Set(Object.keys(knownQueue.observed)),
   )
   directMerges = direct.map((commit) => commit.commit)
-  let directMarker = queueState.tip
   let directMarkerAt: Date | undefined
   for (const commit of direct) {
     const observedAt = new Date()
     const observed = await runTransaction(
       "observed",
-      directMarker,
+      knownQueue.tip,
       () =>
         writeQueueEvent(store, queue, {
           type: "observed",
@@ -1146,7 +1236,11 @@ export async function eventQueueRun(
         }),
       directMarkerAt,
     )
-    directMarker = observed
+    knownQueue.tip = observed
+    knownQueue.observed[commit.commit] = {
+      id: observed,
+      ...(commit.branch === undefined ? {} : { branch: commit.branch }),
+    }
     directMarkerAt = observedAt
     log.write({
       kind: "merged-direct",
@@ -1157,7 +1251,7 @@ export async function eventQueueRun(
       subject: commit.subject,
       why: commit.why,
     })
-    await tellDirect(commit.commit, observed)
+    await tellDirect(knownQueue, commit.commit, observed)
   }
   if (direct.length > 0) {
     operational = await withRemoteSeam("afterDirect", () => readOps())
