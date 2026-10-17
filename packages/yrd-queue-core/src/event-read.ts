@@ -287,20 +287,3 @@ async function readMultiPrefixInventory(
   }
   return chainsUnder("refs/", { ...store, backend: captured, limit: EVENT_READ_LIMIT, complete: true })
 }
-
-/** Resolve a receipt from its exact commit, independent of the chain's length. */
-export async function readEventAt(chain: Chain, id: string, ref: string, repo: string): Promise<Event> {
-  let events: Event[]
-  try {
-    events = await chain.events({ at: id, limit: 1 })
-  } catch (error) {
-    throw new Error(`${ref} in ${repo}: cannot read event ${id}; check event identity and repository access`, {
-      cause: error,
-    })
-  }
-  const event = events[0]
-  if (events.length !== 1 || event?.id !== id) {
-    throw new Error(`${ref} in ${repo}: event ${id} was not found at its exact identity`)
-  }
-  return event
-}

@@ -67,7 +67,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import type { CheckedTree, CheckSpec, Git, PauseRecord, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
 import { resolveGitSelection } from "../src/git.ts"
 import * as verifying from "../src/verifying.ts"
-import { appendChangeEvent, appendPublishedMerge } from "../src/events.ts"
+import { appendChangeEvent, appendPublishedMerge, QUEUE_RUN_WRITER } from "../src/events.ts"
 import { eventNoticeOwed } from "../src/event-run.ts"
 import { settledBaseCommit } from "../src/settled-base.ts"
 import { prepareWorktree, SetupFailed } from "../src/worktree.ts"
@@ -3845,8 +3845,10 @@ it("settles a direct-merge notice on the queue chain across an empty journal", a
   expect(messages(w)).toEqual([
     { change: direct, record: "merged-direct", endingId: observed?.id, endedAt: expect.any(String) },
   ])
-  // 29697 row 1: a round that settles a direct notice reads the queue chain from the observed loop, and those
-  // reads carry the caller's own name — never `unattributed`, whose bar is its SHARE of `remote_ms` (@cto c6505435).
+  // 29697 row 1: a round attributes its remote calls to a caller, and its bar is `unattributed`'s SHARE of
+  // `remote_ms`, never the absence of a key (@cto c6505435). The positive anchor here is the round's own
+  // pre-pick read: 29729 leaves a quiet round naming no `seam.noticeOwed` at all, which is a fact about an
+  // absent read and cannot carry this row by itself (@cto 2005254e).
   const counted = logRecords(restarted).at(-1)
   const seamKeys = Object.keys(counted ?? {}).filter((key) => key.startsWith("seam."))
   const shares = JSON.stringify({
@@ -3854,11 +3856,293 @@ it("settles a direct-merge notice on the queue chain across an empty journal", a
     remote_ms: counted?.remote_ms,
     unattributed_ms: counted?.["seam.unattributed.remote_ms"],
   })
-  expect(seamKeys, shares).toContain("seam.directNoticeRead.ls-remote")
-  expect(Number(counted?.["seam.directNoticeRead.remote_ms"])).toBeGreaterThan(0)
+  expect(seamKeys.filter((key) => key.startsWith("seam.prePick.")).length, shares).toBeGreaterThan(0)
   expect(Number(counted?.["seam.unattributed.remote_ms"] ?? 0), JSON.stringify(seamKeys)).toBeLessThan(
     Number(counted?.remote_ms) * 0.05,
   )
+})
+
+/** @failure 29729: a quiet round — six observed direct commits, every one of them already notified by an earlier
+ * round — re-read its own queue ref once per entry: six list+fetch pairs for work that round had nothing left to
+ * settle. The loop decides from the projection the round already holds, and reads only where that state says a
+ * notice is still owed (@cto 2005254e).
+ * @level l2 @consumer Hab's yrd service
+ */
+it("settles six notified direct commits in a quiet round without reading the queue ref", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  // The first round records the notify floors; the baseline is the same queue's second round, quiet and with
+  // nothing observed yet. It is this round with the six settled entries taken out, so a quiet round that settles
+  // them locally must spawn exactly its git processes and no more.
+  await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "recorder", on: ["merged-direct"], run: w.notifier }],
+  } satisfies QueueRunOptions)
+  const baseline = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "recorder", on: ["merged-direct"], run: w.notifier }],
+  } satisfies QueueRunOptions)
+  const directs = [
+    await pushAroundQueue(w, "direct-1.txt"),
+    await pushAroundQueue(w, "direct-2.txt"),
+    await pushAroundQueue(w, "direct-3.txt"),
+    await pushAroundQueue(w, "direct-4.txt"),
+    await pushAroundQueue(w, "direct-5.txt"),
+    await pushAroundQueue(w, "direct-6.txt"),
+  ]
+  const options = {
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "recorder", on: ["merged-direct"], run: w.notifier }],
+  } satisfies QueueRunOptions
+
+  const settling = await queueRun(options)
+
+  expect(settling.directMerges).toEqual(directs)
+  const state = await readEventQueue(store, "main")
+  expect(Object.keys(state.observed).sort()).toEqual([...directs].sort())
+  for (const commit of directs) {
+    expect(state.notices[`${state.observed[commit]?.id}:recorder`], commit).toMatchObject({
+      for: state.observed[commit]?.id,
+      to: "recorder",
+      result: "delivered",
+    })
+  }
+  expect(messages(w)).toHaveLength(directs.length)
+  // The quiet round: nothing new to merge, and every notice already recorded.
+  const quiet = await queueRun({ ...options, workdir: join(w.workdir, "quiet-journal") })
+
+  expect(quiet.directMerges).toEqual([])
+  expect(messages(w)).toHaveLength(directs.length)
+  const seamKeys = seamKeysNamed(quiet)
+  // THE LIVE DEFECT. Every one of the loop's reads is a git process, and the round's own `remote-calls` row counts
+  // them, so this is the measurement: six settled entries add nothing to a round that settles them locally.
+  // RED by revert: at 6fc34049 each settled entry re-read the ref, and this count came back 6 higher.
+  const counted = logRecords(quiet).find((row) => row.kind === "remote-calls")
+  const reference = logRecords(baseline).find((row) => row.kind === "remote-calls")
+  expect(reference?.processes, JSON.stringify(reference)).toBeGreaterThan(0)
+  expect(counted?.processes, JSON.stringify(counted)).toBe(reference?.processes)
+  expect(
+    seamKeys.filter((key) => key.startsWith("seam.noticeOwed.")),
+    JSON.stringify(seamKeys),
+  ).toEqual([])
+  expect(
+    seamKeys.filter((key) => key.startsWith("seam.unattributed.")),
+    JSON.stringify(seamKeys),
+  ).toEqual([])
+
+  // The settling round names its own writes and its own reads, so the quiet round above cannot pass this row by
+  // measuring nothing (@cto c6505435).
+  const settlingCounted = logRecords(settling).find((row) => row.kind === "remote-calls")
+  expect(
+    Object.keys(settlingCounted ?? {}).filter((key) => key.startsWith("seam.observed.")).length,
+    JSON.stringify(settlingCounted),
+  ).toBeGreaterThan(0)
+  expect(settlingCounted?.["seam.noticeOwed.ls-remote"], JSON.stringify(settlingCounted)).toBe(6)
+  expect(settlingCounted?.["seam.noticeOwed.fetch"], JSON.stringify(settlingCounted)).toBe(6)
+})
+
+/** @failure 29729: the known state settles only what it can — a recorded notice, or a floor that calls the ending
+ * old. An entry it cannot settle earns exactly ONE fresh read, and the guard and the owed decision are both
+ * re-taken on that read before the tell, so the window is the one notify command base had (@cto 2005254e).
+ * @level l2 @consumer merge queue notification recipient
+ */
+it("reads the queue ref exactly once before it tells an owed direct notice", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const direct = await pushAroundQueue(w, "direct-owed.txt")
+  const options = {
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "recorder", on: ["merged-direct"], run: w.notifier }],
+  } satisfies QueueRunOptions
+
+  const outcome = await queueRun(options)
+
+  expect(outcome.directMerges).toEqual([direct])
+  expect(messages(w)).toHaveLength(1)
+  const counted = logRecords(outcome).at(-1)
+  const seamKeys = Object.keys(counted ?? {}).filter((key) => key.startsWith("seam."))
+  expect(counted?.["seam.noticeOwed.ls-remote"], JSON.stringify(seamKeys)).toBe(1)
+  expect(counted?.["seam.noticeOwed.fetch"], JSON.stringify(seamKeys)).toBe(1)
+})
+
+/** @failure 29729: A2 settles from the queue state the round read at its own loop entry, so a rival that moves the
+ * queue ref before the notice write must still give exactly one tell and one record — the write retries against the
+ * live tip rather than the round trusting its stale read.
+ * @level l2 @consumer merge queue notification recipient
+ */
+it("settles one direct notice when a rival moves the queue ref before the notice write", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const direct = await pushAroundQueue(w, "direct-rival.txt")
+  const ref = queueRef("main")
+  // The rival lands while this round is publishing its own queue write, after the round seeded its known state
+  // and before its own tell - the window another workdir's round opens (@cto 2005254e, B1).
+  const rivalAsked = join(w.workdir, "rival-asked")
+  writeFileSync(w.notifier, `#!/bin/sh\ncat >> "${w.notifyLog}"\ntouch "${rivalAsked}"\n`)
+  chmodSync(w.notifier, 0o755)
+  let moved = 0
+  using publication = beforeGitomicPublish(async (_repo, updates, remote) => {
+    if (remote !== "origin" || moved > 0 || !updates.some((update) => update.ref === ref)) return
+    if (!existsSync(rivalAsked)) return
+    moved++
+    // A move that leaves the effective ops state exactly as the round read it: pause and release, both landed.
+    await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "rival move", at: new Date() })
+    await writeQueueEvent(store, "main", { type: "resumed", by: "operator", reason: "rival move", at: new Date() })
+  })
+  const options = {
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "recorder", on: ["merged-direct"], run: w.notifier }],
+  } satisfies QueueRunOptions
+
+  const outcome = await queueRun(options)
+
+  expect(outcome).toMatchObject({ exitCode: 0, directMerges: [direct] })
+  expect(moved).toBe(1)
+  const state = await readEventQueue(store, "main")
+  const observed = state.observed[direct]
+  if (observed === undefined) throw new Error("fixture did not observe the direct merge")
+  const chain = await (await openEvents({ ...store, ref })).events()
+  // One record: the rival's move is kept and the notice is appended above the live tip, never over the stale one.
+  expect(chain.filter((event) => event.type === "notified").map((event) => event.id)).toEqual([
+    state.notices[`${observed.id}:recorder`]?.id,
+  ])
+  // The rival's own move is on the chain, so this row really did settle over a moved ref.
+  expect(
+    chain.filter((event) => event.props.some(([key, value]) => key === "Reason" && value === "rival move")),
+  ).toHaveLength(2)
+  expect(state.notices[`${observed.id}:recorder`]).toMatchObject({
+    for: observed.id,
+    to: "recorder",
+    result: "delivered",
+  })
+  // One tell: the notice was sent once, for this observed event.
+  expect(messages(w)).toEqual([
+    { change: direct, record: "merged-direct", endingId: observed.id, endedAt: expect.any(String) },
+  ])
+})
+
+/** @failure 29729: another round can record the notice between this round's own read of the queue and its tell —
+ * the round lock is a per-workdir flock, so that is legal and not exotic. Deciding from the seeded state alone
+ * tells the recipient a second time, which is the B1 stop condition. The entry the known state cannot settle is
+ * re-decided on a fresh read, so the round stays quiet and the rival's one tell and one record stand alone
+ * (@cto 2005254e, B1).
+ * @level l2 @consumer merge queue notification recipient
+ */
+it("does not tell a direct notice a rival round recorded after its own queue read", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  // A first round records the floors, so this round's first write to the queue ref is its own `observed` event:
+  // the rival lands after this round has read the queue, which is B1's ordering.
+  await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "recorder", on: ["merged-direct"], run: w.notifier }],
+  } satisfies QueueRunOptions)
+  const direct = await pushAroundQueue(w, "direct-b1.txt")
+  const options = {
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "recorder", on: ["merged-direct"], run: w.notifier }],
+  } satisfies QueueRunOptions
+  const ref = queueRef("main")
+  let rivalObserved: string | undefined
+  using _publication = beforeGitomicPublish(async (_repo, updates, remote) => {
+    if (remote !== "origin" || rivalObserved !== undefined || !updates.some((update) => update.ref === ref)) return
+    // Round B, seeded after round A read the queue: it observes the same direct merge and tells the recipient
+    // through the same notifier a settling round runs.
+    rivalObserved = await writeQueueEvent(store, "main", {
+      type: "observed",
+      by: QUEUE_RUN_WRITER,
+      at: new Date(),
+      commit: direct,
+    })
+    spawnSync(w.notifier, {
+      input: `${JSON.stringify({
+        change: direct,
+        record: "merged-direct",
+        endingId: rivalObserved,
+        endedAt: new Date().toISOString(),
+      })}\n`,
+    })
+    await writeQueueEvent(store, "main", {
+      type: "notified",
+      by: QUEUE_RUN_WRITER,
+      at: new Date(),
+      notice: { for: rivalObserved, to: "recorder", key: `${rivalObserved}:recorder`, result: "delivered" },
+    })
+  })
+
+  const outcome = await queueRun(options)
+
+  // The round's own write deduped onto the rival's observed event, so this row really did run B1's interleaving.
+  const state = await readEventQueue(store, "main")
+  expect(state.observed[direct]?.id).toBe(rivalObserved)
+  // One tell and one record: the rival's. The round under test added neither.
+  expect(messages(w)).toEqual([
+    { change: direct, record: "merged-direct", endingId: rivalObserved, endedAt: expect.any(String) },
+  ])
+  expect(outcome).toMatchObject({ exitCode: 0, directMerges: [direct] })
+  const chain = await (await openEvents({ ...store, ref })).events()
+  expect(chain.filter((event) => event.type === "notified")).toHaveLength(1)
+})
+
+/** @failure 29729: the guard has to be real on the read a notice's decision is taken on. The first entry's tell is
+ * where a rival rewrites the queue ref, so at the second entry's fresh read the observed record is gone: the round
+ * must refuse loudly rather than tell a recipient about an ending its own queue no longer holds (@cto 2005254e).
+ * @level l2 @consumer merge queue notification recipient
+ */
+it("refuses the second direct notice when the publish hook drops its observed entry before the fresh read", async () => {
+  const w = await world({ notifyNames: ["first", "second"] })
+  await createWorldEventQueue(w)
+  // Record the floors first, so this round's own first write to the queue ref is its `observed` event and the
+  // second is the first entry's notice: the first tell has run by the time the rewrite below lands.
+  await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [
+      { name: "first", on: ["merged-direct"], run: w.notifier },
+      { name: "second", on: ["merged-direct"], run: w.notifier },
+    ],
+  } satisfies QueueRunOptions)
+  const ref = queueRef("main")
+  const before = (await gitIn(w.remote)(["rev-parse", ref])).trim()
+  await pushAroundQueue(w, "direct-rewritten.txt")
+  const options = {
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [
+      { name: "first", on: ["merged-direct"], run: w.notifier },
+      { name: "second", on: ["merged-direct"], run: w.notifier },
+    ],
+  } satisfies QueueRunOptions
+  let queueWrites = 0
+  let rewound = 0
+  using _publication = beforeGitomicPublish(
+    async (_repo, updates, remote) => {
+      if (remote !== "origin" || !updates.some((update) => update.ref === ref)) return
+      queueWrites++
+    },
+    undefined,
+    async (_repo, updates, remote) => {
+      if (remote !== "origin" || queueWrites !== 2 || rewound > 0 || !updates.some((u) => u.ref === ref)) return
+      rewound++
+      await gitIn(w.remote)(["update-ref", ref, before])
+    },
+  )
+
+  await expect(queueRun(options)).rejects.toThrow(/direct notice lost observed/)
+  expect(rewound).toBe(1)
+  // The first recipient was told and the second was not: at 6fc34049 the second tell landed before the throw.
+  expect(messages(w)).toHaveLength(1)
 })
 
 /** @failure An old observed event fell outside Gitomic's default 50-event read,

@@ -1163,9 +1163,21 @@ export async function createEventQueue(
 
 /** Read and validate the queue declaration and its current operator stop. */
 export async function readEventQueue(store: QueueReadStore, queue: string): Promise<EventQueue> {
+  return (await readEventQueueWithChain(store, queue)).queue
+}
+
+/**
+ * The queue's projection AND the chain it was projected from, out of ONE read of the ref (29729). A round that
+ * owes a direct notice needs both halves: the notice the chain records, and the ending event's own trailers to
+ * weigh against the recipient's floor. Together they are what a second read of the same ref used to buy.
+ */
+export async function readEventQueueWithChain(
+  store: QueueReadStore,
+  queue: string,
+): Promise<Readonly<{ queue: EventQueue; events: readonly Event[] }>> {
   const ref = queueRef(queue)
   const events = await readEventChain(await openEvents({ ...store, ref }))
-  return eventQueueFromHistory(store, queue, events)
+  return { queue: eventQueueFromHistory(store, queue, events), events }
 }
 
 /** One projection and validation policy, independent of how its exact tip was acquired. */
