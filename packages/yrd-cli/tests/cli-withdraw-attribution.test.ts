@@ -9,9 +9,10 @@
  * @testonly none
  */
 import { permitCensus } from "./support/permit-census.ts"
+import { spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { delimiter, dirname, join, resolve } from "node:path"
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
 import { createEventStore, readStatus, submit, writeQueueEvent } from "@yrd/queue-core"
 import * as removely from "removely"
@@ -103,7 +104,7 @@ async function queueWithChanges(...branches: readonly string[]): Promise<string>
   roots.push(root)
   const seed = gitIn(root)
   const remote = join(root, "remote.git")
-  const work = join(root, "work")
+  const work = join(root, "work tree's")
   await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
   await seed(["clone", "--quiet", remote, work])
   const git = gitIn(work)
@@ -150,7 +151,7 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
   // 29399: ending a change does not prove that a surviving origin branch has dated custody.
   // The existing drop cases allow event custody alone; withdrawal cannot retire an ended change.
   it("retires merged and cancelled origin branches archive-first without replacing their endings", async () => {
-    const merged = "task/retire-merged"
+    const merged = "task/retire-merged'quoted"
     const cancelled = "task/retire-cancelled"
     const work = await queueWithChanges(merged, cancelled)
     const git = gitIn(work)
@@ -177,20 +178,27 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
       expect(before.status).toBe(status)
       const archive = `refs/archive/${new Date().toISOString().slice(0, 10)}/dev-retirer/${branch}`
       expect((await git(["ls-remote", "origin", archive])).trim()).toBe("")
-      const retired = await yrd(
-        work,
-        "drop",
-        branch,
-        "--retire",
-        "--tip",
-        head,
-        "--reason",
-        "retire the already-ended origin pointer",
-        "--submitter",
-        "@dev/retirer",
-        "--json",
-      )
-      expect(retired.exitCode, retired.report).toBe(0)
+      // 29721: copying the hint must preserve standalone authority, cwd and shell
+      // arguments. The previous direct argv call could not detect a broken recipe.
+      const ended = await yrd(work, "withdraw", branch)
+      expect(ended.exitCode, ended.report).toBe(1)
+      const printed = ended.stderr.split("retire it with: ")[1]?.trim()
+      expect(printed, ended.report).toBeDefined()
+      // Supply the two values the operator is asked to fill, then execute the
+      // recipe verbatim through the actual standalone entry, outside any repo.
+      const command = printed!
+        .replace(/'?<observed-full-oid>'?/u, head)
+        .replace(/'?<why>'?/u, "retire-ended-pointer")
+      const retired = spawnSync("sh", ["-c", command], {
+        cwd: dirname(work),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${resolve(import.meta.dirname, "../../../bin")}${delimiter}${process.env["PATH"] ?? ""}`,
+          YRD_DEFAULT_SUBMITTER: "@dev/retirer",
+        },
+      })
+      expect(retired.status, `${retired.stdout}\n${retired.stderr}`).toBe(0)
       expect((await git(["ls-remote", "origin", archive])).trim()).toBe(`${head}\t${archive}`)
       expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
       const after = await readStatus(store, "main", branch)
