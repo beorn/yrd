@@ -896,6 +896,83 @@ describe("event submit", () => {
   })
 
   /**
+   * @failure One issue cited as `#N` in one commit and as its own path in the next refuses the whole
+   *          branch as conflicting bindings, so a reviewed history has to be rewritten to submit (29456).
+   * @level   l2 (real git history through issueOf)
+   * @consumer every submitter who cites one issue in two spellings; @dev/1's task/29456-source-revise-r4
+   */
+  it("resolves one issue cited as #N and as its path to the path form, and still refuses two issue numbers (29456)", async () => {
+    const w = await world()
+    const canonical = "@ag/code/29456-ag-quota-one-typed-reader-per-provider"
+    await branchWithCommit(w, "task/29456-source-revise-r4", "change.txt")
+    await w.git(["checkout", "--quiet", "task/29456-source-revise-r4"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "first\n\nRefs: #29456"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", `second\n\nRefs: ${canonical}`])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(await issueOf(w.git, "task/29456-source-revise-r4", head, w.target)).toEqual({
+      issue: canonical,
+      source: "binding",
+      commit: head,
+    })
+    // The declared-issue check uses the same comparison, so a declared short form is not a conflict.
+    expect(await issueOf(w.git, "task/29456-source-revise-r4", head, w.target, "#29456")).toEqual({
+      issue: canonical,
+      source: "binding",
+      commit: head,
+    })
+    // The whole submit opens, rather than refusing and sending the submitter to rewrite history.
+    const submitted = await submit(w.git, "origin", {
+      branch: "task/29456-source-revise-r4",
+      submitter: "author",
+      target: { remote: "origin", branch: "main" },
+    })
+    expect(submitted.issue?.issue).toBe(canonical)
+    expect((await readStatus(store(w), "main", "task/29456-source-revise-r4")).issue).toBe(canonical)
+
+    await w.git(["checkout", "--quiet", "main"])
+    await branchWithCommit(w, "task/two-numbers", "change.txt")
+    await w.git(["checkout", "--quiet", "task/two-numbers"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "first\n\nRefs: #29456"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "second\n\nRefs: @ag/code/29457-another-issue"])
+    const two = (await w.git(["rev-parse", "HEAD"])).trim()
+    await expect(issueOf(w.git, "task/two-numbers", two, w.target)).rejects.toThrow(
+      "conflicting issue bindings for task/two-numbers: #29456",
+    )
+  })
+
+  /**
+   * @failure Two different issues whose numbers merely match are read as one issue, so a branch binding
+   *          both submits instead of refusing; ids are unique inside a scope, not across scopes (29716).
+   * @level   l2 (real git history through issueOf)
+   * @consumer every branch binding two issues that share a number in different scopes
+   */
+  it("still refuses an equal number in a different scope, and admits a renamed slug in one scope (29716)", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/cross-scope", "change.txt")
+    await w.git(["checkout", "--quiet", "task/cross-scope"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "first\n\nRefs: @ag/code/29456-ag-quota"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "second\n\nRefs: @ag/harness/29456-other"])
+    const crossScope = (await w.git(["rev-parse", "HEAD"])).trim()
+    await expect(issueOf(w.git, "task/cross-scope", crossScope, w.target)).rejects.toThrow(
+      "conflicting issue bindings for task/cross-scope: @ag/code/29456-ag-quota",
+    )
+
+    // One scope, one number: a renamed slug is ONE issue, and the first binding's spelling stands.
+    await w.git(["checkout", "--quiet", "main"])
+    await branchWithCommit(w, "task/renamed-slug", "change.txt")
+    await w.git(["checkout", "--quiet", "task/renamed-slug"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "first\n\nRefs: @ag/code/29456-old-slug"])
+    const firstSpelling = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "second\n\nRefs: @ag/code/29456-new-slug"])
+    const renamedHead = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(await issueOf(w.git, "task/renamed-slug", renamedHead, w.target)).toEqual({
+      issue: "@ag/code/29456-old-slug",
+      source: "binding",
+      commit: firstSpelling,
+    })
+  })
+
+  /**
    * @failure A Refs trailer linking a follow-up issue refuses the whole branch as
    *          conflicting bindings, and the refusal named neither the trailer that
    *          binds nor the line that keeps the link without binding it (27300).

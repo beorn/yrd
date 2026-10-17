@@ -1493,6 +1493,41 @@ export function issueFromBranchName(branch: string): string | undefined {
 }
 
 /**
+ * The issue number a resolved reference names, or `undefined` when it names none: `#N`, a bare `N`, or
+ * a path whose last segment starts `N-`. Those are the spellings one issue is cited in (29456), so the
+ * number — not the spelling — is what says whether two references are the same issue.
+ */
+function issueNumberOf(reference: string): string | undefined {
+  const hashed = /^#(\d+)$/u.exec(reference)
+  if (hashed !== null) return hashed[1]
+  return /^\d+$/u.test(reference) ? reference : issueFromBranchName(reference)
+}
+
+/** Whether a reference is the path spelling of an issue (`@scope/leaf/29456-…`), which wins over `#N`. */
+function isPathIssue(reference: string): boolean {
+  return reference.includes("/")
+}
+
+/** The scope a path spelling sits in (`@i/10-yrd` for `@i/10-yrd/29716-…`), or `undefined` for a spelling that carries none. */
+function issueScope(reference: string): string | undefined {
+  return isPathIssue(reference) ? reference.split("/").slice(0, -1).join("/") : undefined
+}
+
+/**
+ * Whether two resolved references name the same issue, in whatever spelling each is written. An equal
+ * number is not sufficient on its own: ids are unique inside a scope and not across scopes, so two paths
+ * in different scopes (`@ag/code/29456-x` and `@ag/harness/29456-y`) are two issues and stay a conflict.
+ * What this admits is `#N` beside a path, or two paths in one scope — one issue whose slug was renamed.
+ */
+function sameIssue(left: string, right: string): boolean {
+  const number = issueNumberOf(left)
+  if (number === undefined || number !== issueNumberOf(right)) return false
+  const leftScope = issueScope(left)
+  const rightScope = issueScope(right)
+  return leftScope === undefined || rightScope === undefined || leftScope === rightScope
+}
+
+/**
  * Read a branch's unresolved binding candidates in Git's history order.
  * Callers that can resolve many references in one read use this instead of
  * invoking a resolver while walking each branch.
@@ -1552,6 +1587,12 @@ export async function issueOf(
     const commit = candidate.commit
     if (binding === undefined) binding = { issue, source: "binding", commit }
     else if (binding.issue !== issue) {
+      if (sameIssue(binding.issue, issue)) {
+        // One issue in two spellings (`#N` and its path, or one scope's renamed slug) is ONE binding;
+        // only a different issue is a conflict. The path form is the resolved spelling, so it wins.
+        if (isPathIssue(issue) && !isPathIssue(binding.issue)) binding = { issue, source: "binding", commit }
+        continue
+      }
       const trailer = candidate.trailer ?? "Refs/Resolves"
       throw new Error(
         `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${issue} at ${commit}; ` +
@@ -1563,7 +1604,11 @@ export async function issueOf(
   }
   if (binding !== undefined) {
     const canonicalDeclared = declared === undefined ? undefined : await canonicalIssue(declared, branch, resolveIssue)
-    if (canonicalDeclared !== undefined && canonicalDeclared !== binding.issue) {
+    if (
+      canonicalDeclared !== undefined &&
+      canonicalDeclared !== binding.issue &&
+      !sameIssue(binding.issue, canonicalDeclared)
+    ) {
       throw new Error(
         `declared issue ${canonicalDeclared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}; fix trailer at ${binding.commit}`,
       )
