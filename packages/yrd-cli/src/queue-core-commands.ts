@@ -1052,46 +1052,20 @@ export async function coreQueueCommand(
         io,
         env,
         selection,
-        onEnvironmentClosed: async (closed) => {
-          // Every skip names the path and the missing field (29720 review):
-          // an env retirement nobody is told about must still say so here.
-          if (closed.branch === undefined) {
-            io.stderr(`yrd: environment ${closed.path} retired; no env-retired tell (branch not named)\n`)
-            return
-          }
-          if (closed.proof === undefined) {
-            io.stderr(`yrd: environment ${closed.path} retired; no env-retired tell (proof not named)\n`)
-            return
-          }
-          let change: EventChange
-          try {
-            change = await readStatus(eventStore, config.target.branch, closed.branch)
-          } catch (cause) {
-            if (cause instanceof Error && cause.message.startsWith(`missing event chain for ${closed.branch}`)) {
-              io.stderr(
-                `yrd: environment ${closed.path} retired; no change record for ${closed.branch}, nobody to tell\n`,
-              )
-              return
-            }
-            throw cause
-          }
-          // Merged changes only: a withdrawn (cancelled) branch's environment
-          // close is the author's own act, and the notice's "now that it has
-          // landed" would be false for it.
-          if (change.status !== "merged") {
-            io.stderr(
-              `yrd: environment ${closed.path} retired for ${closed.branch} (${change.status}); no env-retired tell (merged changes only)\n`,
-            )
-            return
-          }
-          await tellEnvRetired(
-            { config, git, repo, targetSha: outcome.target, workdir, tempRoot, env },
-            { ...closed, branch: closed.branch, proof: closed.proof },
-            change,
-            outcome.run,
-            io,
-          )
-        },
+        onEnvironmentClosed: envRetiredTeller({
+          notify: config.notify,
+          // The no-chain case is the reader's own result, never matched message
+          // text: readStatus throws on exactly this undefined history.
+          readChange: (branch) =>
+            withRemoteSeam("envRetiredHistory", async () => {
+              await readEventQueue(eventStore, config.target.branch)
+              const { history } = await readBranchHistory(eventStore, config.target.branch, branch)
+              return history?.state
+            }),
+          tell: (closed, change) =>
+            tellEnvRetired({ config, git, repo, targetSha: outcome.target, workdir, tempRoot, env }, closed, change, outcome.run, io),
+          io,
+        }),
       })
       await retireMergedComponentAuthors({
         authors: componentAuthors,
@@ -5510,6 +5484,55 @@ async function tellRetiredRoot(
  * MERGED and that branch and proof can be named — every other close is
  * skipped there, by name.
  */
+/** The one line a retirement nobody wants env-retired for gets, whoever notices first. */
+function noEnvRetiredEntryLine(path: string): string {
+  return `yrd: no notify entry in .yrd.yml wants env-retired, so nobody was told; the retired environment ${path} is on the record\n`
+}
+
+/**
+ * The round's env-retired teller (29720, @cto REVISE 0773295f): subscribers
+ * are checked before ANY chain read, the no-chain case comes from the
+ * reader's own result (an undefined change), and only a merged change is
+ * told — a withdrawn close is the author's own act and "now that it has
+ * landed" would be false for it. Every skip names the path and the reason.
+ */
+export function envRetiredTeller(deps: {
+  notify: QueueConfig["notify"]
+  readChange: (branch: string) => Promise<EventChange | undefined>
+  tell: (
+    closed: Readonly<{ branch: string; head?: string; path: string; proof: NonNullable<ClosedEnvironment["proof"]> }>,
+    change: EventChange,
+  ) => Promise<void>
+  io: YrdCliIO
+}): (closed: ClosedEnvironment) => Promise<void> {
+  return async (closed) => {
+    if (!deps.notify.some((entry) => entry.on.includes("env-retired"))) {
+      deps.io.stderr(noEnvRetiredEntryLine(closed.path))
+      return
+    }
+    if (closed.branch === undefined) {
+      deps.io.stderr(`yrd: environment ${closed.path} retired; no env-retired tell (branch not named)\n`)
+      return
+    }
+    if (closed.proof === undefined) {
+      deps.io.stderr(`yrd: environment ${closed.path} retired; no env-retired tell (proof not named)\n`)
+      return
+    }
+    const change = await deps.readChange(closed.branch)
+    if (change === undefined) {
+      deps.io.stderr(`yrd: environment ${closed.path} retired; no change record for ${closed.branch}, nobody to tell\n`)
+      return
+    }
+    if (change.status !== "merged") {
+      deps.io.stderr(
+        `yrd: environment ${closed.path} retired for ${closed.branch} (${change.status}); no env-retired tell (merged changes only)\n`,
+      )
+      return
+    }
+    await deps.tell({ ...closed, branch: closed.branch, proof: closed.proof }, change)
+  }
+}
+
 async function tellEnvRetired(
   context: OutsideRoundTellContext,
   closed: Readonly<{ branch: string; head?: string; path: string; proof: NonNullable<ClosedEnvironment["proof"]> }>,
@@ -5533,9 +5556,7 @@ async function tellEnvRetired(
         retainUntil: closed.proof.retainUntil,
       }),
     {
-      none:
-        "yrd: no notify entry in .yrd.yml wants env-retired, so nobody was told;" +
-        ` the retired environment ${closed.path} is on the record\n`,
+      none: noEnvRetiredEntryLine(closed.path),
       failed: (each) =>
         `yrd: could not tell ${each.name} about the retired environment ${closed.path}: ${each.failure ?? "no reason given"}\n`,
     },

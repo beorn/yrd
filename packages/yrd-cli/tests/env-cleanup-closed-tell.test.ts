@@ -233,6 +233,33 @@ it("reports a consumed close request once, with its proof", async () => {
   expect(closed[0]?.proof?.manifest).toBe(PROOF.manifest)
 })
 
+it("a throwing tell at a consumed close request is named tell-failed and never undoes the close", async () => {
+  const w = await world(new Date().toISOString())
+  const uid = process.getuid?.()
+  if (uid === undefined) throw new Error("this close-request arm needs a real unix uid")
+  writeCloseRequest(w.workdir, {
+    name: "env-fresh",
+    path: w.env,
+    requester: "@dev/4",
+    uid,
+    at: "2026-10-16T21:25:42.050Z",
+    predicate: "direct-admission",
+    options: { noRehome: true },
+    head: w.head,
+    ending: { remote: w.remote, queue: "main", branch: w.branch, event: "a".repeat(40) },
+  })
+  const rows = await runRound(w, "tell-request-throws", [w.branch], async () => {
+    throw new Error("fixture request tell boom")
+  })
+  expect(
+    rows.some((row) => row.result === "closed" && row.path === w.env),
+    JSON.stringify(rows),
+  ).toBe(true)
+  const failed = rows.find((row) => row.result === "tell-failed" && row.path === w.env)
+  expect(failed, JSON.stringify(rows)).toBeDefined()
+  expect(String(failed?.why)).toContain("telling about it failed: fixture request tell boom")
+})
+
 it("a throwing tell is named tell-failed and never undoes the close", async () => {
   const w = await world(OLD)
   const rows = await runRound(w, "tell-throws", [w.branch], async () => {
