@@ -9,6 +9,7 @@ import type { GitWorktreeStore } from "git-super/worktree"
 import {
   collectMovedGitlinks,
   drop,
+  changesRef,
   seamProcess,
   createEventStore,
   createLocalEventStore,
@@ -112,7 +113,7 @@ export async function retireIssueBranches(
     reason: string
     detail?: string
     archiveRef?: string
-    custody?: Readonly<{ kind: "published-main"; ref: string; tip: string }>
+    custody?: Readonly<{ kind: "published-main" | "event"; ref: string; tip: string; archive?: string }>
   }
   const eligible: Row[] = []
   const removed: Row[] = []
@@ -145,80 +146,130 @@ export async function retireIssueBranches(
     local: boolean
     originHead?: string
     remote: string
-    target: string
-    targetRef: string
-    ownQueue: boolean
+    commonDirectory: string
   }
   const candidates: Candidate[] = []
   const seenStores = new Set<string>()
-  const visit = async (repository: string, path: string, commit: string): Promise<void> => {
-    const childGit = gitIn(repository, undefined, selection, { env })
+  const seenCheckouts = new Set<string>()
+  const notMaterialized: { repo: string; path: string; reason: "not-materialized" }[] = []
+  const origins = new Map<string, Promise<ReadonlyMap<string, string>>>()
+  const defaults = new Map<string, Promise<string>>()
+  const targets = new Map<string, Promise<{ target: string; targetRef: string; ownQueue: boolean }>>()
+  const defaultBranch = (git: Git, remote: string): Promise<string> => {
+    let reading = defaults.get(remote)
+    if (reading === undefined) {
+      reading = remoteHead(git, remote)
+      defaults.set(remote, reading)
+    }
+    return reading
+  }
+  const collect = async (repository: string, path: string, childGit: Git, commonDirectory: string): Promise<void> => {
+    if (seenStores.has(commonDirectory)) return
+    seenStores.add(commonDirectory)
+    const heads = await listRefs("refs/heads/", createLocalEventStore(repository, selection))
+    const remote = await remoteUrl(childGit, path === "" ? eventStore.remote : "origin")
+    let advertisement = origins.get(remote)
+    if (advertisement === undefined) {
+      advertisement = listRefs("refs/heads/", createEventStore(repository, remote, selection))
+      origins.set(remote, advertisement)
+    }
+    const remoteHeads = await advertisement
+    const targetBranch = path === "" ? config.target.branch : await defaultBranch(childGit, remote)
+    const counts = { repo: repository, target: 0, unrelated: 0, unnumbered: 0 }
+    excluded.push(counts)
+    for (const [ref, head] of new Map([...remoteHeads, ...heads])) {
+      const branch = ref.slice("refs/heads/".length)
+      const bound =
+        io.branchIssue !== undefined || /^(task|exp)\//u.test(branch)
+          ? branchIssue(branch, path === "" ? reading.histories.get(branch)?.state.issue : undefined)
+          : undefined
+      if (branch === targetBranch) counts.target++
+      else if (bound !== issue) {
+        if (bound === undefined) {
+          counts.unnumbered++
+          unnumbered.push({ repo: repository, branch, head })
+        } else counts.unrelated++
+      } else
+        candidates.push({
+          repo: repository,
+          path,
+          git: childGit,
+          commonDirectory,
+          branch,
+          head,
+          local: heads.has(ref),
+          originHead: remoteHeads.get(ref),
+          remote,
+        })
+    }
+  }
+  const missing = (path: string): boolean => {
     try {
-      if (
-        !existsSync(join(repository, ".git")) ||
-        realpathSync((await childGit(["rev-parse", "--show-toplevel"])).trim()) !== realpathSync(repository)
-      ) {
+      lstatSync(path)
+      return false
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return true
+      throw cause
+    }
+  }
+  const visit = async (repository: string, path: string, commit: string, moduleStore?: string): Promise<void> => {
+    try {
+      if (missing(join(repository, ".git"))) {
+        if (moduleStore !== undefined && missing(moduleStore)) {
+          notMaterialized.push({ repo: repository, path, reason: "not-materialized" })
+          return
+        }
+        throw new Error(
+          `${repository}: checkout Git pointer is absent${moduleStore === undefined ? "" : `; existing module store ${moduleStore} cannot be inspected through it`}`,
+        )
+      }
+      const canonical = realpathSync(repository)
+      if (seenCheckouts.has(canonical)) return
+      const childGit = gitIn(repository, undefined, selection, { env })
+      if (realpathSync((await childGit(["rev-parse", "--show-toplevel"])).trim()) !== canonical) {
         throw new Error(`registered repository ${repository} is not materialized at its named path`)
       }
-      inspected.push(repository)
       const metadata = await inspectCheckoutGitMetadata(repository)
-      if (!seenStores.has(metadata.commonDirectory)) {
-        seenStores.add(metadata.commonDirectory)
-        const heads = await listRefs("refs/heads/", createLocalEventStore(repository, selection))
-        const remote = path === "" ? eventStore.remote : await remoteUrl(childGit, "origin")
-        const origins = await listRefs("refs/heads/", createEventStore(repository, remote, selection))
-        const targetBranch = path === "" ? config.target.branch : await originHead(childGit)
-        const counts = { repo: repository, target: 0, unrelated: 0, unnumbered: 0 }
-        excluded.push(counts)
-        const selected: { branch: string; head: string; local: boolean; originHead?: string }[] = []
-        for (const [ref, head] of new Map([...origins, ...heads])) {
-          const branch = ref.slice("refs/heads/".length)
-          const bound =
-            io.branchIssue !== undefined || /^(task|exp)\//u.test(branch)
-              ? branchIssue(branch, path === "" ? reading.histories.get(branch)?.state.issue : undefined)
-              : undefined
-          if (branch === targetBranch) counts.target++
-          else if (bound !== issue) {
-            if (bound === undefined) {
-              counts.unnumbered++
-              unnumbered.push({ repo: repository, branch, head })
-            } else counts.unrelated++
-          } else selected.push({ branch, head, local: heads.has(ref), originHead: origins.get(ref) })
-        }
-        if (selected.length > 0) {
-          const targetRef = `refs/heads/${targetBranch}`
-          const target = await readRemoteCommit(childGit, remote, targetRef)
-          if (target === undefined) {
-            throw new Error(`registered repository ${repository} has no ${remote}#${targetBranch}`)
-          }
-          const ownQueue =
-            path !== "" && (await readConfig(childGit, target, { remote, branch: targetBranch })) !== undefined
-          candidates.push(
-            ...selected.map((row) => ({
-              ...row,
-              repo: repository,
-              path,
-              git: childGit,
-              remote,
-              target,
-              targetRef,
-              ownQueue,
-            })),
-          )
-        }
-      }
-      // Even a shared root store can have distinct materialized component author stores.
+      seenCheckouts.add(canonical)
+      inspected.push(repository)
+      await collect(repository, path, childGit, metadata.commonDirectory)
       for (const child of await readCommitSubmodules(seamProcess(childGit, repository), repository, commit)) {
-        await visit(join(repository, child.path), path === "" ? child.path : `${path}/${child.path}`, child.target)
+        await visit(
+          join(repository, child.path),
+          path === "" ? child.path : `${path}/${child.path}`,
+          child.target,
+          join(metadata.gitDirectory, "modules", child.name),
+        )
       }
     } catch (cause) {
       failed.push({ repo: repository, path, branch: "", head: commit, reason: "unreadable", detail: String(cause) })
     }
   }
+  const targetFor = (candidate: Candidate) => {
+    const key = `${candidate.commonDirectory}\0${candidate.remote}`
+    let target = targets.get(key)
+    if (target === undefined) {
+      target = (async () => {
+        const branch =
+          candidate.path === "" ? config.target.branch : await defaultBranch(candidate.git, candidate.remote)
+        const targetRef = `refs/heads/${branch}`
+        const tip = await readRemoteCommit(candidate.git, candidate.remote, targetRef)
+        if (tip === undefined) throw new Error(`${candidate.repo}: published ${candidate.remote}#${branch} is absent`)
+        return {
+          target: tip,
+          targetRef,
+          ownQueue:
+            candidate.path !== "" &&
+            (await readConfig(candidate.git, tip, { remote: candidate.remote, branch })) !== undefined,
+        }
+      })()
+      targets.set(key, target)
+    }
+    return target
+  }
   try {
     await visit(authorRepo, "", (await authorGit(["rev-parse", "HEAD"])).trim())
     for (const root of await registeredWorktrees(authorGit)) {
-      if (realpathSync(root.path) === realpathSync(authorRepo)) continue
       if (root.head === undefined) {
         failed.push({
           repo: root.path,
@@ -246,33 +297,34 @@ export async function retireIssueBranches(
       if (!candidate.local && !origin) continue
       const { repo, path, branch, head } = candidate
       const row = { repo, path, branch, head }
-      if (candidate.ownQueue || (path === "" && isOpen(reading.histories.get(branch)?.state.status ?? "draft"))) {
-        kept.push({
-          ...row,
-          reason: "held",
-          detail: candidate.ownQueue
-            ? `component owns a queue at ${candidate.remote}#${candidate.targetRef}; its ending event must authorize retirement`
-            : "root change is still open",
-        })
-        continue
-      }
-      const arm = path === "" ? [...kept, ...failed].find((arm) => arm.path !== "") : undefined
-      if (arm !== undefined) {
-        kept.push({
-          ...row,
-          reason: "held",
-          detail: `child ${arm.repo} ${arm.branch}: ${arm.detail ?? arm.reason}; root kept for retry`,
-        })
-        continue
-      }
       try {
+        const custody = await targetFor(candidate)
+        if (custody.ownQueue || (path === "" && isOpen(reading.histories.get(branch)?.state.status ?? "draft"))) {
+          kept.push({
+            ...row,
+            reason: "held",
+            detail: custody.ownQueue
+              ? `component owns a queue at ${candidate.remote}#${custody.targetRef}; its ending event must authorize retirement`
+              : "root change is still open",
+          })
+          continue
+        }
+        const arm = path === "" ? (failed[0] ?? kept.find((arm) => arm.path !== "")) : undefined
+        if (arm !== undefined) {
+          kept.push({
+            ...row,
+            reason: "held",
+            detail: `${arm.path === "" ? "store" : "child"} ${arm.repo} ${arm.branch}: ${arm.detail ?? arm.reason}; root kept for retry`,
+          })
+          continue
+        }
         const retire = createLandedBranchRetirement({
           repo,
           git: candidate.git,
           selection,
           remote: candidate.remote,
-          target: candidate.target,
-          targetRef: candidate.targetRef,
+          target: custody.target,
+          targetRef: custody.targetRef,
           ...(path === "" ? { queue: config.target.branch } : {}),
         })
         const result = await retire({
@@ -295,9 +347,11 @@ export async function retireIssueBranches(
           reason: result.reason,
           ...(result.detail === undefined ? {} : { detail: result.detail }),
           archiveRef: result.archiveRef,
-          ...(result.custody === "main"
-            ? { custody: { kind: "published-main" as const, ref: candidate.targetRef, tip: candidate.target } }
-            : {}),
+          ...(result.event === undefined
+            ? result.custody === "main"
+              ? { custody: { kind: "published-main" as const, ref: custody.targetRef, tip: custody.target } }
+              : {}
+            : { custody: { kind: "event" as const, ...result.event } }),
         }
         if (result.outcome === "eligible") eligible.push(output)
         else if (result.outcome === "removed") removed.push(output)
@@ -316,6 +370,7 @@ export async function retireIssueBranches(
     apply: request.apply === true,
     mode,
     inspected,
+    notMaterialized,
     excluded,
     unnumbered,
     eligible,
@@ -468,10 +523,15 @@ export async function retireComponentBranch(
           attemptedArchive = archiveRef
           const archive = ensureArchiveRef(repo, archiveRef, request.tip)
           if (!archive.ok) throw new Error(archive.reason)
-          await publishRetirementArchive(createEventStore(repo, remote, selection), {
-            archive: archiveRef,
-            head: request.tip,
-          })
+          try {
+            await publishRetirementArchive(createEventStore(repo, remote, selection), {
+              branch: request.branch,
+              archive: archiveRef,
+              head: request.tip,
+            })
+          } catch (cause) {
+            throw new Error(`${cause instanceof Error ? cause.message : String(cause)}; local refs kept`, { cause })
+          }
           result = await retireLocalBranch({ ...retirement, protections })
         }
       } else result = await retireLocalBranch({ ...retirement, protections })
@@ -872,10 +932,15 @@ export async function releaseRetainedCheckouts(
     for (const { row, remote } of candidates) {
       const archive = ensureArchiveRef(row.repo, row.archiveRef, row.head)
       if (!archive.ok) throw new Error(archive.reason)
-      await publishRetirementArchive(createEventStore(row.repo, remote, input.selection), {
-        archive: row.archiveRef,
-        head: row.head,
-      })
+      try {
+        await publishRetirementArchive(createEventStore(row.repo, remote, input.selection), {
+          branch: row.branch,
+          archive: row.archiveRef,
+          head: row.head,
+        })
+      } catch (cause) {
+        throw new Error(`${cause instanceof Error ? cause.message : String(cause)}; local refs kept`, { cause })
+      }
     }
     for (const candidate of candidates) {
       const { row } = candidate
@@ -1617,7 +1682,8 @@ export function createLandedBranchRetirement(
     Omit<LocalBranchRetirementResult, "archiveRef"> & {
       archiveRef?: string
       /** What held the tip when it was removed: main (ancestry), a recorded landing, or the origin archive (closed). */
-      custody?: "main" | "landing" | "origin"
+      custody?: "main" | "landing" | "origin" | "event"
+      event?: Readonly<{ ref: string; tip: string; archive?: string }>
     }
   > => {
     const { repo, git, target } = store
@@ -1655,10 +1721,11 @@ export function createLandedBranchRetirement(
           outcome: candidate.dryRun ? ("eligible" as const) : ("removed" as const),
           reason: reason ?? "merged by ancestry",
         }
+    let ending: Awaited<ReturnType<typeof drop>> | undefined
     if (origin && !candidate.dryRun && landed.outcome === "removed" && remoteTip !== undefined) {
       const eventStore = createEventStore(repo, store.remote, store.selection)
       if (store.queue !== undefined) {
-        await drop(eventStore, {
+        ending = await drop(eventStore, {
           queue: store.queue,
           branch: candidate.branch,
           by: candidate.actor,
@@ -1678,7 +1745,10 @@ export function createLandedBranchRetirement(
         kind: "observation",
         branch: candidate.branch,
         scope: "branch-retirement",
-        reason: `${repo}: retired origin ${candidate.branch}@${candidate.tip}; ${store.targetRef}@${target} contains its exact tip`,
+        reason:
+          ending === undefined
+            ? `${repo}: retired origin ${candidate.branch}@${candidate.tip}; ${store.targetRef}@${target} contains its exact tip`
+            : `${repo}: retired origin ${candidate.branch}@${candidate.tip}; ending ${ending.event}${ending.archive === undefined ? "" : `; archive ${ending.archive}`}`,
       })
     }
     return {
@@ -1686,7 +1756,16 @@ export function createLandedBranchRetirement(
       ...(origin && !local && remoteTip === undefined && !candidate.dryRun
         ? { detail: `already retired: origin ${candidate.branch} is absent; this run deleted no ref` }
         : {}),
-      custody: "main",
+      custody: ending === undefined ? "main" : "event",
+      ...(ending === undefined || store.queue === undefined
+        ? {}
+        : {
+            event: {
+              ref: changesRef(store.queue, candidate.branch),
+              tip: ending.event,
+              ...(ending.archive === undefined ? {} : { archive: ending.archive }),
+            },
+          }),
     }
   }
 }

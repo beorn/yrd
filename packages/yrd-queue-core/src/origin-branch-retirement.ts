@@ -6,30 +6,46 @@ export type OriginRetirementAuthority =
   | Readonly<{ kind: "event"; ref: string; tip: string }>
   | Readonly<{ kind: "published-main"; ref: string; tip: string }>
 
-/** One origin archive publication, also used when the caller removes no origin branch. */
-export async function publishRetirementArchive(
+/** Prepare one archive lease and its custody readback, alone or inside an ending-event push. */
+export async function prepareRetirementArchive(
   store: QueueLocation,
-  input: Readonly<{ archive: string; head: string; authority?: OriginRetirementAuthority }>,
-): Promise<void> {
-  const { archive, head, authority } = input
-  const publish = store.backend.publish
-  if (publish === undefined) throw new Error(`${store.repo}: Gitomic backend lacks archive publication`)
+  input: Readonly<{ branch: string; archive: string; head: string }>,
+) {
+  const { branch, archive, head } = input
+  const subject = `${branch}@${head} at ${store.remote}`
   const previous = (await listRefs(archive, store)).get(archive)
   if (previous !== undefined && previous !== head) {
-    throw new Error(`${store.repo}: archive ${archive} holds ${previous}, not ${head}; it is never overwritten`)
+    throw new Error(`${subject}: archive ${archive} holds ${previous}, not ${head}; it is never overwritten`)
   }
+  return {
+    update: { ref: archive, expect: previous ?? null, oid: head },
+    async verify(): Promise<void> {
+      const observed = (await listRefs(archive, store)).get(archive)
+      if (observed !== head) {
+        throw new Error(`${subject}: archive ${archive} did not read back as ${head}; found ${observed ?? "absent"}`)
+      }
+    },
+  }
+}
+
+/** Publish the core archive step alone; ending events use its same preparation and readback. */
+export async function publishRetirementArchive(
+  store: QueueLocation,
+  input: Readonly<{ branch: string; archive: string; head: string; authority?: OriginRetirementAuthority }>,
+): Promise<void> {
+  const { branch, head, authority } = input
+  const publish = store.backend.publish
+  if (publish === undefined) throw new Error(`${branch}@${head} at ${store.remote}: backend lacks archive publication`)
+  const archive = await prepareRetirementArchive(store, input)
   await publish(
     store.repo,
     [
       ...(authority === undefined ? [] : [{ ref: authority.ref, expect: authority.tip, oid: authority.tip }]),
-      { ref: archive, expect: previous ?? "0".repeat(head.length), oid: head },
+      { ...archive.update, expect: archive.update.expect ?? "0".repeat(head.length) },
     ],
     store.remote,
   )
-  const observed = (await listRefs(archive, store)).get(archive)
-  if (observed !== head) {
-    throw new Error(`${store.repo}: archive ${archive} did not read back as ${head}; found ${observed ?? "absent"}`)
-  }
+  await archive.verify()
 }
 
 export async function retireOriginBranch(
@@ -69,7 +85,7 @@ export async function retireOriginBranch(
     }
   }
   if (archive !== undefined) {
-    await publishRetirementArchive(store, { archive, head, authority })
+    await publishRetirementArchive(store, { branch, archive, head, authority })
   }
   await protect()
   await publish(

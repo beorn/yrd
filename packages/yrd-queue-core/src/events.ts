@@ -1,7 +1,7 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
 import { Conflict, RetriesExhausted } from "./git.ts"
 import { ARCHIVE_REF_PREFIX, archiveRefFor } from "git-super/archive-ref"
-import { retireOriginBranch } from "./origin-branch-retirement.ts"
+import { prepareRetirementArchive, retireOriginBranch } from "./origin-branch-retirement.ts"
 import { readCommitSubmodules, type CommitGitlink } from "git-super/commit-graph"
 import { listRefs, openEvents } from "./git.ts"
 import { publishWithTransientRetry } from "./transient-push.ts"
@@ -2451,26 +2451,32 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
       throw new Error(`${branch}: drop --retire requires an already-ended change; found ${state.status}`)
     }
   }
-  let archiveUpdate: AlsoRef | undefined
   if (archive !== undefined) {
     if (!archive.ref.startsWith(`${ARCHIVE_REF_PREFIX}/`) || !COMMIT_OID.test(archive.tip)) {
       throw new TypeError(`local retirement ${branch}: expected an archive ref and full commit oid`)
     }
-    const previous = (await listRefs(archive.ref, store)).get(archive.ref)
-    if (previous !== undefined && previous !== archive.tip) {
-      throw new Error(
-        `local retirement ${branch}: archive ${archive.ref} already holds ${previous}, not ${archive.tip}`,
-      )
-    }
-    archiveUpdate = { ref: archive.ref, expect: previous ?? null, oid: archive.tip }
   }
+  const preparedArchive =
+    archive === undefined
+      ? undefined
+      : await prepareRetirementArchive(store, {
+          branch,
+          archive: archive.ref,
+          head: archive.tip,
+        })
+  const archiveUpdate = preparedArchive?.update
   const verifyCustody = async (eventTip: string): Promise<void> => {
-    if (archive === undefined) return
-    const [archives, events] = await Promise.all([listRefs(archive.ref, store), listRefs(ref, store)])
-    if (archives.get(archive.ref) !== archive.tip || events.get(ref) !== eventTip) {
+    if (preparedArchive === undefined) return
+    try {
+      await preparedArchive.verify()
+    } catch (cause) {
+      throw new Error(`${cause instanceof Error ? cause.message : String(cause)}; local refs kept`, { cause })
+    }
+    const event = (await listRefs(ref, store)).get(ref)
+    if (event !== eventTip) {
       throw new Error(
-        `local retirement ${branch}: origin custody did not read back; ${archive.ref} expected ${archive.tip}, ` +
-          `read ${archives.get(archive.ref) ?? "absent"}; ${ref} expected ${eventTip}, read ${events.get(ref) ?? "absent"}; keep the local branch`,
+        `${branch}@${archive?.tip} at ${store.remote}: ending ${ref} expected ${eventTip}, ` +
+          `read ${event ?? "absent"}; local refs kept`,
       )
     }
   }
@@ -2582,7 +2588,7 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
     const disposition = { ref: archiveUpdate.ref, expect: archiveUpdate.expect ?? "0".repeat(head.length), oid: head }
     await store.backend.publish(store.repo, [{ ref, expect: selectedTip, oid: selectedTip }, disposition], store.remote)
     await verifyCustody(selectedTip)
-    return { queue, branch, event: state.ending.id, head }
+    return { queue, branch, event: state.ending.id, head, archive: archive.ref }
   }
   const at = new Date()
   const keptHead = retiringEnded ? state.commit : head
@@ -2634,7 +2640,14 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   if (head !== undefined && archive === undefined) {
     await deleteCandidateRefsForShas(gitIn(store.repo, undefined, store.selection), store.repo, store.remote, [head])
   }
-  return { queue, branch, event: written, head: keptHead, ...(main === undefined ? {} : { main }) }
+  return {
+    queue,
+    branch,
+    event: written,
+    head: keptHead,
+    ...(main === undefined ? {} : { main }),
+    ...(archive === undefined ? {} : { archive: archive.ref }),
+  }
 }
 
 type ChangeHistory = Readonly<{ state: EventChange; events: readonly Event[] }>
