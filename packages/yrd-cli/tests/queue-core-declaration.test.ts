@@ -78,6 +78,14 @@ vi.mock("node:fs", async (original) => {
 
 vi.mock("removely", async (original) => ({ ...(await original<typeof import("removely")>()) }))
 
+async function permitCensus() {
+  const actual = await vi.importActual<typeof import("removely")>("removely")
+  const observed = await actual.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2000 })
+  const permitted = { ...observed, rows: [], coverage: { ...observed.coverage, complete: true, unreadable: [] } }
+  const spy = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue(permitted)
+  return { spy, permitted }
+}
+
 const roots: string[] = []
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
@@ -2389,6 +2397,8 @@ describe("a queue is the selected origin branch carrying config", () => {
     using census = vi
       .spyOn(removely, "inspectProcessCwds")
       .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    // Linux close admission reads the raw census, separately from the cwd projection.
+    using rawCensus = (await permitCensus()).spy
     const run = capture(repo)
     expect(await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], run.io), run.stderr()).toBe(
       0,
@@ -3961,13 +3971,6 @@ describe("drop --local --release-checkout", () => {
       ...(component ? ["--submodules"] : []),
     ]
     return { repo, git, branch, tip, child, checkoutFiles, argv }
-  }
-  async function permitCensus() {
-    const actual = await vi.importActual<typeof import("removely")>("removely")
-    const observed = await actual.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2000 })
-    const permitted = { ...observed, rows: [], coverage: { ...observed.coverage, complete: true, unreadable: [] } }
-    const spy = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue(permitted)
-    return { spy, permitted }
   }
   async function credentialOrigin(repo: string) {
     const git = gitIn(repo)
