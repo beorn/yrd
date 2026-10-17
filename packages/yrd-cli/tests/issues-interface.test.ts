@@ -9,10 +9,11 @@
  * @testonly none
  * @consumer Yrd's issue reads (slice Y1, in-process) · Tent, staffing and tools through the CLI
  */
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
+import { safeRemoveSync } from "removely"
 import { afterAll, describe, expect, it } from "vitest"
 import { runYrdProcess } from "../src/cli.ts"
 import { runIssuesVerb } from "../src/issues/run.ts"
@@ -20,10 +21,11 @@ import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
 const PROVIDER = resolve(import.meta.dirname, "support/fake-issues-provider.ts")
 const BUN = process.execPath
+const TMP = realpathSync(tmpdir())
 const roots: string[] = []
 
 afterAll(() => {
-  for (const root of roots) rmSync(root, { force: true, recursive: true })
+  for (const root of roots) safeRemoveSync(root, { within: TMP, allowedRoots: [TMP], allowMissing: true })
 })
 
 const GIT_ENV = {
