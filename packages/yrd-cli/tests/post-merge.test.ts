@@ -12,7 +12,7 @@ import { afterEach, expect, it, vi } from "vitest"
 import { createPostMerge } from "../src/post-merge.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
-import { createEventQueue, createEventStore, readConfig, readStatus, submit } from "@yrd/queue-core"
+import { createEventQueue, createEventStore, readBranchHistory, readConfig, readStatus, submit, trailer } from "@yrd/queue-core"
 import { safeRemoveSync } from "removely"
 const roots: string[] = []
 afterEach(() => {
@@ -183,7 +183,9 @@ it("attempts the provider and cleanup even when its derived artifact directory i
   expect(reports.join(" ")).toContain("post-merge evidence unavailable")
 })
 
-it("merges a second submitted change while the startup provider remains blocked, then reaps it on stop", async () => {
+it.each([{ mode: "stop" }, { mode: "completion" }] as const)(
+  "preserves the real merge queue while exercising post-merge $mode behavior",
+  async ({ mode }) => {
   const root = world(),
     remote = join(root, "remote.git"),
     repo = join(root, "author"),
@@ -194,17 +196,35 @@ it("merges a second submitted change while the startup provider remains blocked,
   await seed(["clone", "--quiet", remote, repo])
   const git = gitIn(repo),
     ready = join(root, "ready"),
-    finished = join(root, "finished")
+    release = join(root, "release"),
+    finished = join(root, "finished"),
+    closeCalls = join(root, "close-calls.jsonl")
   await git(["config", "user.email", "provider@yrd.test"])
   await git(["config", "user.name", "fixture"])
   await git(["checkout", "--quiet", "-b", "main"])
   const script =
-    'printf "%s" "$$" > "$1"; turns=0; while test "$turns" -lt 400; do turns=$((turns+1)); sleep .1; done; touch "$2"'
+    mode === "stop"
+      ? 'printf "%s" "$$" > "$1"; turns=0; while test "$turns" -lt 400; do turns=$((turns+1)); sleep .1; done; touch "$2"'
+      : 'printf "%s" "$$" > "$1"; while ! test -f "$2"; do sleep .05; done; touch "$3"'
+  const fakeProvider = join(import.meta.dirname, "support", "fake-issues-provider.ts")
+  const closeScript =
+    'printf "%s\\t%s\\t%s\\n" "$1" "$2" "$3" >> "$4"; printf \'{"applied":true}\\n\''
   writeFileSync(
     join(repo, ".yrd.yml"),
-    JSON.stringify({ issuesProvider: { update: ["sh", "-c", script, "provider", ready, finished] } }),
+    JSON.stringify({
+      issuesProvider: {
+        update: mode === "stop" ? ["sh", "-c", script, "provider", ready, finished] : ["sh", "-c", script, "provider", ready, release, finished],
+      },
+    }),
   )
-  await git(["add", ".yrd.yml"])
+  writeFileSync(
+    join(repo, "issues.yml"),
+    JSON.stringify({
+      resolve: [process.execPath, fakeProvider, "resolve", "<raw>"],
+      close: ["sh", "-c", closeScript, "close", "<key>", "<reason>", "<id>", closeCalls],
+    }),
+  )
+  await git(["add", ".yrd.yml", "issues.yml"])
   await git(["commit", "--quiet", "-m", "queue"])
   await git(["push", "--quiet", "origin", "main"])
   const target = (await git(["rev-parse", "HEAD"])).trim(),
@@ -212,11 +232,11 @@ it("merges a second submitted change while the startup provider remains blocked,
   if (config === undefined) throw Error("fixture queue lost config")
   const store = createEventStore(repo, "origin", git.selection)
   await createEventQueue(store, "main", target, config, new Date())
-  const queue = async (branch: string) => {
+  const queue = async (branch: string, message: string) => {
     await git(["checkout", "--quiet", "-b", branch, "origin/main"])
     writeFileSync(join(repo, branch.replaceAll("/", "-") + ".txt"), branch)
     await git(["add", "."])
-    await git(["commit", "--quiet", "-m", branch])
+    await git(["commit", "--quiet", "-m", message])
     const submitted = await submit(git, "origin", {
       branch,
       submitter: "fixture",
@@ -225,7 +245,7 @@ it("merges a second submitted change while the startup provider remains blocked,
     await git(["checkout", "--quiet", "main"])
     return submitted
   }
-  await queue("task/first")
+  await queue("task/first", "first\n\nCloses: issue-first")
   const stop = new AbortController(),
     merged: string[] = [],
     diagnostics: string[] = []
@@ -246,50 +266,156 @@ it("merges a second submitted change while the startup provider remains blocked,
           command: "up",
           intervalSeconds: 0,
           stop: stop.signal,
-          terminate: {
-            on: (handler) => {
-              terminate = handler
-              return () => {
-                terminate = undefined
+          ...(mode === "stop"
+            ? {
+                terminate: {
+                  on: (handler: (signal?: NodeJS.Signals) => void) => {
+                    terminate = handler
+                    return () => {
+                      terminate = undefined
+                    }
+                  },
+                  reraise: () => {
+                    const pid = Number(readFileSync(ready, "utf8"))
+                    try {
+                      process.kill(pid, 0)
+                      aliveAtReraise = true
+                    } catch (error) {
+                      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+                      aliveAtReraise = false
+                    }
+                    stop.abort()
+                  },
+                },
               }
-            },
-            reraise: () => {
-              const pid = Number(readFileSync(ready, "utf8"))
-              try {
-                process.kill(pid, 0)
-                aliveAtReraise = true
-              } catch (error) {
-                if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
-                aliveAtReraise = false
-              }
-              stop.abort()
-            },
-          },
+            : {}),
           afterRound: async (outcome) => {
             rounds++
             merged.push(...outcome.merged)
             await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 10000 })
             expect(existsSync(finished)).toBe(false)
-            if (merged.includes("task/first") && !merged.includes("task/second")) await queue("task/second")
-            if (merged.includes("task/second")) terminate?.("SIGTERM")
-            else if (rounds > 3) stop.abort()
+            if (mode === "stop") {
+              if (merged.includes("task/first") && !merged.includes("task/second")) {
+                await queue("task/second", "second")
+              }
+              if (merged.includes("task/second")) terminate?.("SIGTERM")
+              else if (rounds > 3) stop.abort()
+              return
+            }
+            if (merged.includes("task/first") && !merged.includes("task/second")) {
+              await queue("task/second", "second\n\nCloses: issue-second")
+            }
+            if (merged.includes("task/second") && !merged.includes("task/refs")) {
+              await queue("task/refs", "Fixes everything\n\nCloses issue-colonless\n\nRefs: issue-refs")
+            }
+            if (merged.includes("task/refs")) {
+              writeFileSync(release, "go")
+              await vi.waitFor(() => {
+                const calls = existsSync(closeCalls)
+                  ? readFileSync(closeCalls, "utf8").trim().split("\n").filter(Boolean)
+                  : []
+                expect(calls).toHaveLength(2)
+              }, { timeout: 5000 })
+              stop.abort()
+            } else if (rounds > 3) stop.abort()
           },
         },
-        { workdir, json: true },
+        { workdir, json: true, projectRoot: repo },
       ),
       diagnostics.join(" "),
     ).toBe(0)
   } finally {
     stop.abort()
   }
+  if (mode === "stop") {
+    expect(merged).toContain("task/second")
+    expect(aliveAtReraise).toBe(false)
+    expect((await readStatus(store, "main", "task/second")).status).toBe("merged")
+    const attempts = readdirSync(join(workdir, "post-merge"))
+      .filter((n) => n.endsWith(".json"))
+      .map((n) => attemptAt(join(workdir, "post-merge", n)))
+    expect(attempts).toHaveLength(1)
+    expect(attempts[0]).toMatchObject({ status: "failed", timedOut: false })
+    expect(attempts[0]!.signal).not.toBeNull()
+    expect(existsSync(finished)).toBe(false)
+    return
+  }
   expect(merged).toContain("task/second")
-  expect(aliveAtReraise).toBe(false)
+  expect(merged).toContain("task/refs")
   expect((await readStatus(store, "main", "task/second")).status).toBe("merged")
+  expect((await readStatus(store, "main", "task/refs")).status).toBe("merged")
   const attempts = readdirSync(join(workdir, "post-merge"))
     .filter((n) => n.endsWith(".json"))
     .map((n) => attemptAt(join(workdir, "post-merge", n)))
-  expect(attempts).toHaveLength(1)
-  expect(attempts[0]).toMatchObject({ status: "failed", timedOut: false })
-  expect(attempts[0]!.signal).not.toBeNull()
-  expect(existsSync(finished)).toBe(false)
-}, 60000)
+  expect(attempts.length).toBeGreaterThan(0)
+  expect(attempts.every((attempt) => attempt.status === "succeeded")).toBe(true)
+  expect(existsSync(finished)).toBe(true)
+  const calls = readFileSync(closeCalls, "utf8").trim().split("\n").map((line) => line.split("\t"))
+  expect(calls.map(([key, reason]) => [key, reason])).toEqual([
+    ["issue-first", "completed"],
+    ["issue-second", "completed"],
+  ])
+  const effects = await Promise.all(["task/first", "task/second", "task/refs"].map((branch) => readBranchHistory(store, "main", branch)))
+  const byBranch = new Map(["task/first", "task/second", "task/refs"].map((branch, index) => [branch, effects[index]!.history!]))
+  const durable = (branch: string) =>
+    byBranch
+      .get(branch)!
+      .events.flatMap((event) => {
+        const value = trailer(event, "Issue-Effect")
+        return value === undefined ? [] : [JSON.parse(value) as Record<string, unknown>]
+      })
+  for (const [branch, key] of [["task/first", "issue-first"], ["task/second", "issue-second"]] as const) {
+    const history = byBranch.get(branch)!
+    const mergeSha = history.state.merge!
+    const mergedEvent = history.state.ending!.id
+    const committerTime = await git(["show", "-s", "--format=%cI", mergeSha])
+    expect(durable(branch)).toContainEqual(
+      expect.objectContaining({
+        mergedEvent,
+        mergeSha,
+        mergeCommitterTime: committerTime,
+        verb: "close",
+        semanticEnding: "completed",
+        issueKey: key,
+      }),
+    )
+  }
+  expect(durable("task/refs")).toEqual([])
+  // Startup catch-up over real registered worktrees replays unchanged merged history; it must not resend a fulfilled close.
+  const environments = join(workdir, "environments")
+  mkdirSync(environments, { recursive: true })
+  await git(["worktree", "add", "--quiet", join(environments, "first"), "task/first"])
+  await git(["worktree", "add", "--quiet", join(environments, "second"), "task/second"])
+  await git(["worktree", "add", "--quiet", join(environments, "refs"), "task/refs"])
+  const callCount = calls.length
+  const replayStop = new AbortController()
+  let replayAttemptStart = readdirSync(join(workdir, "post-merge")).filter((name) => name.endsWith(".json")).length
+  expect(
+    await coreQueueCommand(
+      repo,
+      {
+        cwd: repo,
+        stdout: () => {},
+        stderr: (s) => diagnostics.push(s),
+        localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
+      },
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: replayStop.signal,
+        afterRound: async () => replayStop.abort(),
+      },
+      { workdir, json: true, projectRoot: repo },
+    ),
+    diagnostics.join(" "),
+  ).toBe(0)
+  replayStop.abort()
+  await vi.waitFor(() => {
+    const current = readdirSync(join(workdir, "post-merge")).filter((name) => name.endsWith(".json")).length
+    if (current > replayAttemptStart) replayAttemptStart = current
+    const currentCalls = readFileSync(closeCalls, "utf8").trim().split("\n").filter(Boolean)
+    expect(currentCalls).toHaveLength(callCount)
+  }, { timeout: 5000 })
+},
+  60000,
+)
