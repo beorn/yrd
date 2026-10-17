@@ -17,6 +17,7 @@ export const ISSUES_CODES = {
   providerMissing: "yrd-issues-provider-missing",
   providerFailed: "yrd-issues-provider-failed",
   providerNotJson: "yrd-issues-provider-not-json",
+  providerInvalidResult: "yrd-issues-provider-invalid-result",
   providerTimedOut: "yrd-issues-provider-timed-out",
   providerStalled: "yrd-issues-provider-stalled",
 } as const
@@ -25,6 +26,7 @@ export type IssuesCode = (typeof ISSUES_CODES)[keyof typeof ISSUES_CODES]
 
 /** Each verb's positional operands, in order. `<id>` is the write verbs' replay key and comes from `--id`. */
 export const ISSUES_VERBS = {
+  resolve: ["raw"],
   view: ["key"],
   list: [],
   create: ["title", "body"],

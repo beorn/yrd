@@ -1,7 +1,7 @@
 /**
  * `yrd issues <verb>` — the one reader of a project's issues declaration (design `issues-interface` rev 6 § 4–§ 6,
  * @cto ruling 0e9e794e). It finds the project, reads `issues.yml` from one pinned commit of `main`, and runs the
- * provider argv declared for the verb. It holds no issue semantics: the provider's JSON is passed back whole.
+ * provider argv declared for the verb. Resolve validates opaque keys; other provider JSON is passed back whole.
  *
  * Never a clone, a fetch or a working-tree read: the declaration in force is the one committed on `main`.
  */
@@ -291,6 +291,25 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
     parsed = JSON.parse(result.stdout)
   } catch {
     return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "exit 0 but stdout is not JSON")
+  }
+  if (verb === "resolve") {
+    const keys =
+      typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+        ? (parsed as { keys?: unknown }).keys
+        : undefined
+    if (
+      !Array.isArray(keys) ||
+      keys.length === 0 ||
+      !keys.every((key) => typeof key === "string" && key.length > 0) ||
+      new Set(keys).size !== keys.length
+    ) {
+      return fail(
+        1,
+        ISSUES_CODES.providerInvalidResult,
+        `${verb} ${command}`,
+        "exit 0 but expected {keys: [...]} with at least one nonempty string and no duplicate keys",
+      )
+    }
   }
   return {
     ok: true,

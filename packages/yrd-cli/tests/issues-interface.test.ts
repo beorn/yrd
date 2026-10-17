@@ -100,6 +100,43 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
 const ALL_READS = { view: provider("json", "<key>"), list: provider("json") }
 
 describe("yrd issues", () => {
+  // CTO 6ef56c77: the provider owns key grammar; both input and returned identities stay opaque here.
+  it("resolve preserves the raw operand and opaque provider keys without a replay id", async () => {
+    const raw = " -one.md, two / 三\nnext "
+    const root = project({ "issues.yml": declare({ resolve: provider("resolve", "<raw>", "key, with space", "四") }) })
+    const ran = await yrd(root, "issues", "resolve", "--", raw)
+    expect(ran.exitCode, ran.stderr).toBe(0)
+    expect(envelopeOf(ran)).toEqual({
+      declaration: { repository: root, commit: git(root, "rev-parse", "main"), path: "issues.yml" },
+      verb: "resolve",
+      result: { keys: [raw, "key, with space", "四"] },
+    })
+    expect((await yrd(root, "issues", "resolve", "--id", "event", "raw")).exitCode).toBe(2)
+  })
+
+  it("resolve fails loudly on non-JSON, malformed, empty or duplicate provider keys", async () => {
+    const root = project({ "issues.yml": declare({ resolve: provider("reply", "<raw>") }) })
+    for (const result of [
+      null,
+      [],
+      {},
+      { keys: "one" },
+      { keys: [] },
+      { keys: [""] },
+      { keys: [1] },
+      { keys: ["one", "one"] },
+    ]) {
+      const ran = await yrd(root, "issues", "resolve", JSON.stringify(result))
+      expect(ran.exitCode, JSON.stringify({ result, ran })).toBe(1)
+      expect(ran.stdout).toBe("")
+      expect(ran.stderr).toContain("yrd-issues-provider-invalid-result: resolve")
+    }
+    const nonJson = await yrd(root, "issues", "resolve", "not JSON")
+    expect(nonJson.exitCode).toBe(1)
+    expect(nonJson.stdout).toBe("")
+    expect(nonJson.stderr).toContain("yrd-issues-provider-not-json: resolve")
+  })
+
   it("view prints one envelope naming the root and main's commit (rules: discovery, envelope)", async () => {
     const root = project({ "issues.yml": declare(ALL_READS) })
     const ran = await yrd(root, "issues", "view", "29644")
@@ -216,12 +253,12 @@ describe("yrd issues", () => {
     expect(embeddedRan.stderr).toContain('reopen element "--id=<id>" embeds <id>')
   })
 
-  it("fails loudly for a verb the file does not declare (rule: absent verb is unsupported)", async () => {
+  it.each(["list", "resolve"])("fails loudly for undeclared %s (rule: absent verb is unsupported)", async (verb) => {
     const root = project({ "issues.yml": declare({ view: provider("json", "<key>") }) })
-    const ran = await yrd(root, "issues", "list")
+    const ran = await yrd(root, "issues", verb, ...(verb === "resolve" ? ["raw"] : []))
     expect(ran.exitCode).toBe(1)
     expect(ran.stderr).toContain(
-      `list is not declared in ${root}@${git(root, "rev-parse", "main")}:issues.yml (unsupported)`,
+      `${verb} is not declared in ${root}@${git(root, "rev-parse", "main")}:issues.yml (unsupported)`,
     )
   })
 
