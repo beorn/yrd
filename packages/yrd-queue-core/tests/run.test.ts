@@ -1293,6 +1293,8 @@ it("stops an event queue at a stuck change", async () => {
   const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
 
   expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/a"], merged: [] })
+  // 29697 row 4: the round's own stuck `paused` write names its caller, never `unattributed` (@cto c6505435).
+  expect(seamKeysNamed(outcome)).toContain("seam.stuckPausedWrite.ls-remote")
   expect(await remoteTarget(w)).toBe(w.target)
   expect((await readStatus(store, "main", "task/b")).status).toBe("queued")
 })
@@ -1381,6 +1383,9 @@ it("retries a stuck event change after an operator resumes the queue", async () 
   const resumed = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
 
   expect(resumed).toMatchObject({ exitCode: 0, merged: ["task/stuck-first"], stuck: [] })
+  // 29697 row 3: the round's queue-resumed probe reads the chain under its caller's own name, on both the paused
+  // ring and the standing-stuck check (@cto c6505435).
+  expect(seamKeysNamed(held, resumed)).toContain("seam.resumeRead.ls-remote")
   expect((await readStatus(store, "main", "task/stuck-first")).status).toBe("merged")
   expect((await readStatus(store, "main", "task/behind")).status).toBe("queued")
 })
@@ -2074,6 +2079,9 @@ it("mints a later-added notify entry at now instead of backfilling the passed en
   await submitCommit(w, "task/after-latecomer", "two.txt")
   const second = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [recorder, latecomer] })
   expect(second).toMatchObject({ exitCode: 0, merged: ["task/after-latecomer"] })
+  // 29697 row 2: the round that records a CHANGED notify set reads the queue chain under its caller's own name,
+  // never `unattributed`, whose bar is its SHARE of `remote_ms` (@cto c6505435).
+  expect(seamKeysNamed(second)).toContain("seam.notifyFloorsChainRead.ls-remote")
 
   // Exactly the new ending is delivered to the added entry; the passed one is never replayed.
   const lines = readFileSync(latecomerLog, "utf8").trim().split("\n")
@@ -2555,6 +2563,8 @@ it("keeps an unlanded merge publication retryable and judges the next change", a
       count: 1,
     }),
   )
+  // 29697 row 6: the readback of a target that moved under a failed publication names its own caller.
+  expect(seamKeysNamed(outcome)).toContain("seam.movedTargetReadback.ls-remote")
 })
 
 const GITHUB_5XX = [
@@ -3145,6 +3155,9 @@ it("reconciles a merge Conflict with no named refs and judges the next change", 
       count: 1,
     }),
   )
+  // 29697 row 5: the readback of the change chain after a queue-tip Conflict names its own caller, never
+  // `unattributed` (@cto c6505435). The sibling "missing change chain" test fakes this read, so it can carry no seam key.
+  expect(seamKeysNamed(outcome)).toContain("seam.conflictChainReadback.ls-remote")
 })
 
 /** @failure 25708: losing the push acknowledgement after acceptance could replay a merge or stop the service.
@@ -4222,6 +4235,13 @@ function logRecords(outcome: QueueRunOutcome): readonly Record<string, unknown>[
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line) as Record<string, unknown>)
+}
+
+/** Every seam key any round of a run named in its own journal row, so a site can prove its own attribution (29697). */
+function seamKeysNamed(...outcomes: readonly QueueRunOutcome[]): readonly string[] {
+  return outcomes.flatMap((outcome) =>
+    logRecords(outcome).flatMap((record) => Object.keys(record).filter((key) => key.startsWith("seam."))),
+  )
 }
 
 /** The log path an ended `check` row named, for one branch, phase and check name. */
