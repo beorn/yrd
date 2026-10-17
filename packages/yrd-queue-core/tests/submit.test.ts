@@ -963,6 +963,20 @@ describe("event submit", () => {
         await expect(attempt).rejects.toThrow("other-issue")
         await expect(attempt).rejects.toThrow(first)
         if (kind === "later binding") await expect(attempt).rejects.toThrow(head)
+        if (kind === "declared issue") {
+          // 25047: the declared value cannot be folded to the binding, so the refusal must
+          // name the two exits the code allows rather than only the trailer rewrite.
+          let message = ""
+          try {
+            await attempt
+          } catch (cause) {
+            message = cause instanceof Error ? cause.message : String(cause)
+          }
+          expect(message).toContain("Yrd compares issue keys exactly")
+          expect(message).toContain("omit --issue to use the binding")
+          expect(message).toContain("pass it exactly as bound: first-issue")
+          expect(message).toContain(`fix trailer at ${first}`)
+        }
       }
       // This is the publication boundary: neither composition nor any root/pin push may start.
       expect(calls.some((args) => args[0] === "rebase" || args[0] === "push" || args.includes("--show-toplevel"))).toBe(

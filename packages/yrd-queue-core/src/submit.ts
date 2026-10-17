@@ -1553,7 +1553,10 @@ export async function issueOf(
     const canonicalDeclared = declared === undefined ? undefined : declared
     if (canonicalDeclared !== undefined && canonicalDeclared !== binding.issue) {
       throw new Error(
-        `declared issue ${canonicalDeclared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}; fix trailer at ${binding.commit}`,
+        `declared issue ${canonicalDeclared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}; ` +
+          `Yrd compares issue keys exactly, so the declared value must equal the binding; ` +
+          `omit --issue to use the binding, or pass it exactly as bound: ${binding.issue}; ` +
+          `or fix trailer at ${binding.commit}`,
       )
     }
     return binding

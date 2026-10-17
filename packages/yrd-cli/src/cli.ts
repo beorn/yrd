@@ -124,7 +124,7 @@ const SUBMITTER_HELP = `the submitter and result recipient; else ${DEFAULT_SUBMI
 // no notice, so this help must not reuse the "result recipient" wording.
 const WITHDRAW_SUBMITTER_HELP = `the actor who ends the change, recorded as By:; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
 const ISSUE_HELP =
-  "the issue, checked against the branch's first Refs/Resolves binding; unbound legacy name fallback is reported"
+  "the issue; needed only when the commits carry no Refs/Resolves binding; checked against the branch's first such binding; unbound legacy name fallback is reported"
 const DRY_RUN_HELP = "preview admission and push nothing; fetches the queue tip into refs/gitomic/fetched/"
 const QUEUE_HELP = "a branch at origin or <repo>#<branch> address; defaults to origin/HEAD inside a clone"
 
