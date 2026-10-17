@@ -1034,7 +1034,9 @@ export async function eventQueueRun(
   if (options.notify !== undefined) {
     if (known === undefined || !sameNameSet(declaredNames, recordedNames)) {
       const ref = queueRef(queue)
-      const chainEvents = await readEventChain(await openEvents({ ...store, ref }))
+      const chainEvents = await withRemoteSeamGap("notifyFloorsChainRead", async () =>
+        readEventChain(await openEvents({ ...store, ref })),
+      )
       const now = new Date(options.now?.() ?? Date.now())
       const floors = Object.create(null) as Record<string, Readonly<{ notBefore: Date; present: readonly string[] }>>
       if (known === undefined) {
@@ -1165,7 +1167,10 @@ export async function eventQueueRun(
     log.write({ kind: "pause", reason: operational.stop.reason, by: operational.stop.by, sha: operational.stop.sha })
     const pendingStuck: string[] = []
     for (const [branch, history] of histories) {
-      if (history.state.status === "stuck" && !(await queueResumedAfter(store, queue, branch, history))) {
+      if (
+        history.state.status === "stuck" &&
+        !(await withRemoteSeamGap("resumeRead", () => queueResumedAfter(store, queue, branch, history)))
+      ) {
         pendingStuck.push(branch)
       }
     }
@@ -1397,15 +1402,17 @@ export async function eventQueueRun(
       })
       return
     }
-    await writeQueueEvent(store, queue, {
-      type: "paused",
-      at: new Date(),
-      by: "yrd",
-      cause: "stuck",
-      change: { branch, head, event },
-      reason,
-      next: next === undefined ? stuckCures(branch) : `${next}; ${stuckCures(branch)}`,
-    })
+    await withRemoteSeamGap("stuckPausedWrite", () =>
+      writeQueueEvent(store, queue, {
+        type: "paused",
+        at: new Date(),
+        by: "yrd",
+        cause: "stuck",
+        change: { branch, head, event },
+        reason,
+        next: next === undefined ? stuckCures(branch) : `${next}; ${stuckCures(branch)}`,
+      }),
+    )
   }
   let transientProbe: string | undefined
   const standing = remaining.find((change) => change.status === "stuck")
@@ -1416,7 +1423,9 @@ export async function eventQueueRun(
     if (
       !retryNamedStuck &&
       !retryTransient &&
-      !(await queueResumedAfter(store, queue, standing.branch, histories.get(standing.branch)))
+      !(await withRemoteSeamGap("resumeRead", () =>
+        queueResumedAfter(store, queue, standing.branch, histories.get(standing.branch)),
+      ))
     ) {
       const stuckEvent = histories.get(standing.branch)?.events.findLast((event) => event.type === "stuck")
       if (stuckEvent === undefined) {
@@ -1794,7 +1803,7 @@ export async function eventQueueRun(
       }
       let after: EventChange
       try {
-        const present = (await refsList(ref)).get(ref)
+        const present = (await withRemoteSeamGap("conflictChainReadback", () => refsList(ref))).get(ref)
         if (present === undefined) {
           log.write({
             kind: "warning",
@@ -1896,7 +1905,7 @@ export async function eventQueueRun(
         })
         return undefined
       }
-      const movedTarget = (await refsList(targetRef)).get(targetRef)
+      const movedTarget = (await withRemoteSeamGap("movedTargetReadback", () => refsList(targetRef))).get(targetRef)
       if (movedTarget === undefined) {
         throw new Error(`event queue ${url}#${queue}: target disappeared after component publication`, { cause: error })
       }
