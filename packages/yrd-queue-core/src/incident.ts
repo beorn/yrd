@@ -45,7 +45,7 @@ export function incidentTrailers(incident: Incident): readonly (readonly [string
 
 /** ADR-0007's compact form, used in the existing result slot of list rows. */
 export function incidentLine(incident: Incident): string {
-  return `${incident.code}: ${incident.subject}; evidence: ${incident.evidence}; next: ${incident.next}; owner: ${incident.owner}`
+  return `${incident.code}: ${incident.subject}; evidence: ${incident.evidence}; recorded guidance: ${incident.next}; owner: ${incident.owner}`
 }
 
 /** ADR-0007's full form: one field per line, subject first. */
@@ -55,7 +55,7 @@ export function incidentLines(incident: Incident): readonly string[] {
     `code: ${incident.code}`,
     `via: ${incident.via}`,
     `evidence: ${incident.evidence}`,
-    `next: ${incident.next}`,
+    `recorded guidance: ${incident.next}`,
     `owner: ${incident.owner}`,
   ]
 }

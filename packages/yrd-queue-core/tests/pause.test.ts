@@ -11,8 +11,47 @@ import { type Git } from "../src/git.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { pauseRef } from "../src/refs.ts"
 import { createEventQueue, createEventStore, readConfig, readEventOps, selectionFor } from "../src/index.ts"
+import { incidentLine, incidentLines, incidentTrailers } from "../src/incident.ts"
+import { stuckCures } from "../src/pause.ts"
 
 const roots: string[] = []
+
+describe("portable queue guidance", () => {
+  /** @failure Shared event guidance is presented as an executable recipe in the reader's clone.
+   * @level l0 @consumer incident displays and immutable event trailers
+   * Existing pause authority cases do not distinguish recorded guidance from current actions; no new seam.
+   */
+  it.each(["run yrd queue resume", "repair the queue setup"])(
+    "labels recorded guidance without changing its bytes: %s",
+    (next) => {
+      const incident = {
+        code: "queue-setup",
+        subject: "the queue setup failed",
+        via: "the queue",
+        evidence: "/producer/log.jsonl",
+        next,
+        owner: "the queue operator",
+      }
+      const before = JSON.stringify(incidentTrailers(incident))
+      expect(incidentLine(incident)).toContain(`recorded guidance: ${next}`)
+      expect(incidentLines(incident)).toContain(`recorded guidance: ${next}`)
+      expect(JSON.stringify(incidentTrailers(incident))).toBe(before)
+      expect(incidentTrailers(incident)).toContainEqual(["Next", next])
+    },
+  )
+
+  /** @failure A newly persisted common cure binds a shared event to an executable command.
+   * @level l0 @consumer event-run's common Next suffix
+   */
+  it("keeps common stuck guidance portable prose", () => {
+    const guidance = stuckCures("task/change")
+    expect(guidance).toContain("task/change")
+    expect(guidance).toMatch(/withdraw/u)
+    expect(guidance).toMatch(/resume/u)
+    expect(guidance).not.toMatch(/\byrd\s+(queue|merge)\b/u)
+  })
+})
+
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
