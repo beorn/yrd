@@ -338,6 +338,42 @@ describe("yrd issues", () => {
     expect(outcome).toMatchObject({ ok: false, exitCode: 1, code: "yrd-issues-provider-timed-out" })
   })
 
+  it("reaps a stopped write provider and names the owner stop rather than a provider fault", async () => {
+    const root = project({ "issues.yml": declare({ close: provider("stall", "<key>", "<reason>", "<id>") }) })
+    const stop = new AbortController()
+    let pid: number | undefined
+    const outcome = await runIssuesVerb({
+      verb: "close",
+      args: ["opaque-key", "completed"],
+      id: "owner-stop",
+      cwd: root,
+      signal: stop.signal,
+      timeoutMs: 1000,
+      stderr: (text) => {
+        const match = /started pid=(\d+)/u.exec(text)
+        if (match !== null) {
+          pid = Number(match[1])
+          stop.abort("queue shutdown fixture")
+        }
+      },
+    })
+    expect(pid).toBeGreaterThan(0)
+    let reaped = false
+    try {
+      process.kill(pid!, 0)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+      reaped = true
+    }
+    expect(reaped).toBe(true)
+    expect(outcome).toMatchObject({
+      ok: false,
+      exitCode: 1,
+      code: "yrd-issues-provider-failed",
+      message: expect.stringContaining("stopped: queue shutdown fixture"),
+    })
+  })
+
   it("passes --timeout-ms to the provider bound, and refuses a non-positive one with exit 2 (rule: CLI timeout)", async () => {
     const root = project({ "issues.yml": declare({ list: provider("sleep") }) })
     const ran = await yrd(root, "issues", "list", "--timeout-ms", "300")
