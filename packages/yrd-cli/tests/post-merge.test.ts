@@ -209,10 +209,12 @@ it.each([
   { mode: "reuse-pending" },
   { mode: "blob-mismatch" },
   { mode: "observed-ff" },
+  { mode: "provider-lost-reply" },
 ] as const)(
   "preserves the real merge queue while exercising post-merge $mode behavior",
   async ({ mode }) => {
-    const reconcileAfterQueue = mode.startsWith("append-") || mode === "reuse-pending" || mode === "concurrent"
+    const reconcileAfterQueue =
+      mode.startsWith("append-") || mode === "reuse-pending" || mode === "concurrent" || mode === "provider-lost-reply"
     const expectedCloses = mode === "observed-ff" ? 3 : 2
     const root = world(),
       remote = join(root, "remote.git"),
@@ -242,7 +244,9 @@ it.each([
       (mode === "close-stop" ? 'printf "%s" "$$" > "$5"; while ! test -f "$6"; do sleep .05; done; ' : "") +
       'printf "%s\\t%s\\t%s\\n" "$1" "$2" "$3" >> "$4"; ' +
       (mode === "concurrent" ? 'while ! test -f "$6"; do sleep .05; done; ' : "") +
-      "printf '{\"applied\":true}\\n'"
+      (mode === "provider-lost-reply"
+        ? 'if ! test -f "$5"; then touch "$5"; exit 7; fi; printf \'{"noChange":true}\\n\''
+        : "printf '{\"applied\":true}\\n'")
     writeFileSync(
       join(repo, ".yrd.yml"),
       JSON.stringify({
@@ -434,6 +438,43 @@ it.each([
       expect(attempts[0]).toMatchObject({ status: "failed", timedOut: false })
       expect(attempts[0]!.signal).not.toBeNull()
       expect(existsSync(finished)).toBe(false)
+      return
+    }
+    if (mode === "provider-lost-reply") {
+      const mergedReading = await readBranchHistory(store, "main", "task/first")
+      const action = {
+        ...context,
+        target: mergedReading.history!.state.merge!,
+        merged: ["task/first"],
+        projectRoot: repo,
+        queueBranch: "main",
+      }
+      for (let restart = 0; restart < 3; restart++) {
+        await using runner = createPostMerge({
+          workdir,
+          cwd: repo,
+          git,
+          store,
+          cleanup: async () => {},
+          report: (message) => diagnostics.push(message),
+        })
+        runner.nudge(action)
+        await runner[Symbol.asyncDispose]()
+        const { history } = await readBranchHistory(store, "main", "task/first")
+        expect(history!.events.filter((event) => readIssueEffect(event) !== undefined)).toHaveLength(
+          restart === 0 ? 0 : 1,
+        )
+        expect(history!.state.status).toBe("merged")
+      }
+      expect(existsSync(closeReady), "provider applied before its first failed reply").toBe(true)
+      expect(diagnostics.join(" ")).toContain("provider ended with exit 7")
+      const calls = readFileSync(closeCalls, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => line.split("\t"))
+      expect(calls).toHaveLength(2)
+      expect(calls[0]).toEqual(calls[1])
+      expect(readPostMergeIssueDiagnostics(workdir)).toEqual([])
       return
     }
     if (mode === "reuse-pending") {
