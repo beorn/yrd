@@ -4400,7 +4400,7 @@ it.each(["published", "observed"] as const)(
     await w.git(["add", ".gitmodules"])
     await w.git(["update-index", "--add", "--cacheinfo", `160000,${pins[0]!.target},${pins[0]!.path}`])
     await w.git(["commit", "--quiet", "-m", "actual root landing with component"])
-    const landed = (await w.git(["rev-parse", "HEAD"])).trim()
+    let landed = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["checkout", "--quiet", "main"])
     let endingId: string | undefined
     if (producer === "published") {
@@ -4416,7 +4416,10 @@ it.each(["published", "observed"] as const)(
         opsFences: [],
       })
     } else {
-      await w.git(["merge", "--ff-only", landed])
+      // A true merge has its own delivered tree. A fast-forward observed after
+      // another target commit instead belongs to the submitted head itself.
+      await w.git(["merge", "--no-ff", landed, "-m", "observed root merge with component"])
+      landed = (await w.git(["rev-parse", "HEAD"])).trim()
       await w.git(["push", "--quiet", "origin", "main"])
       const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
       expect(outcome.merged).toEqual([branch])
