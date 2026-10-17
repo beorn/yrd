@@ -26,6 +26,7 @@ import {
   privateStoreVerifyCommand,
 } from "./env-commands.ts"
 import {
+  CloseRequestAlreadyStandsError,
   ENV_CLOSE_PREDICATE,
   MAX_COVERAGE_ATTEMPTS,
   closeRequestFile,
@@ -88,11 +89,47 @@ const FRESH_ENVIRONMENT_GRACE_MS = 24 * 60 * 60 * 1000
  * restarts the service and restarts the sweep, so under landing churn the tail
  * of the registry — the backlog this change exists to retire — starves.
  */
-type CleanupProgress = { cursor: number; hint: string | undefined; loaded: boolean }
+type CleanupProgress = {
+  cursor: number
+  hint: string | undefined
+  loaded: boolean
+  /**
+   * The last row written per path, as `result\u0000why`, so a kept folder is written once per CHANGE of
+   * reason rather than once per round (log-retention ruling 2026-10-16, "Not archival": ~50 unchanged keeps
+   * reprinted every 2 minutes is writer volume, not signal). It is PERSISTED beside the resume cursor, in the
+   * hint file this sweep already writes (extended, never a new state kind — @chief accepted the judgement call
+   * 2026-10-16), so a restart, or a landing that advances the vendor/yrd pin, does not reprint the registry
+   * either. It is bounded to the registry the round walked, so a retired environment leaves no entry behind.
+   */
+  reported: Map<string, string>
+}
 
 /** Where the hint lives: the run's existing state dir, not a new config key. */
 function cursorHintPath(workdir: string): string {
   return join(workdir, "state", "yrd", "environment-cleanup.json")
+}
+
+/**
+ * The last-row map as the sweep's own state file carries it. An absent field is
+ * the shape of a file written before the map existed — nothing reported, which
+ * reprints once and is not a fault. Any other shape is uncertainty about the
+ * document and throws, so the caller names the file and its reason exactly as it
+ * does for a malformed cursor: guessing here would hide the next suppression.
+ */
+function reportedFromState(parsed: unknown): Map<string, string> {
+  const field = (parsed as { reported?: unknown }).reported
+  if (field === undefined) return new Map()
+  if (typeof field !== "object" || field === null || Array.isArray(field)) {
+    throw new Error("reported state is not a map of environment path to last row")
+  }
+  const reported = new Map<string, string>()
+  for (const [path, key] of Object.entries(field)) {
+    if (typeof key !== "string") {
+      throw new Error(`reported state for ${JSON.stringify(path)} is not a last-row key`)
+    }
+    reported.set(path, key)
+  }
+  return reported
 }
 
 /**
@@ -446,6 +483,26 @@ function privateRefusalIn(cause: unknown): PrivateStoreRefusalError | PrivateChe
 }
 
 /**
+ * One cause as a REASON, never `Error: <message>`.
+ *
+ * The sweep uses `throw new Error(<keep reason>)` as control flow — `fresh: opened …`, `held`,
+ * `opening lifetime standing`, `eligible; yielding to the next queue round` — and its catch records what it
+ * caught. Stringifying the Error there printed `kept: Error: fresh: opened …`, so a benign keep read as a
+ * failure (#29679 defect 1, round1-merge.log:112). The reason TEXT itself is unchanged; the Error wrapper is.
+ */
+function reasonText(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause)
+}
+
+/** The standing-request refusal at any depth of a cause chain, or undefined for any other cause. */
+function closeRequestAlreadyStands(cause: unknown): CloseRequestAlreadyStandsError | undefined {
+  for (let at: unknown = cause; at instanceof Error; at = at.cause) {
+    if (at instanceof CloseRequestAlreadyStandsError) return at
+  }
+  return undefined
+}
+
+/**
  * One named class from a cause that IS a typed private refusal at any depth, or undefined for any other cause.
  * Read from the guard's own structured payload — never from message prose, and never a second `modules/<name>`
  * derivation — so the sweep reports `kept: private checkout; store <store>; retire with <command>` for the tree,
@@ -551,7 +608,20 @@ async function fileTerminalCloseRequests(
         `${alreadyStood ? "close request already stood" : "close request"} ${file} after terminal ending of ${row.branch}`,
       )
     } catch (cause) {
-      input.record(row.path, "file-failed", String(cause))
+      // #29679 defect 2: a request that already STANDS is a no-op, not a failure — nothing was written and
+      // nothing failed. It is reported as `filed`, naming the standing file, exactly like the same-options
+      // path above; the standing request is never overwritten (hand-start-1827.log:38).
+      const stood = closeRequestAlreadyStands(cause)
+      if (stood !== undefined) {
+        input.record(
+          row.path,
+          "filed",
+          `close request already stood ${stood.file} from ${stood.standing.requester} with a different ending; ` +
+            `left as it stands after terminal ending of ${row.branch}`,
+        )
+        continue
+      }
+      input.record(row.path, "file-failed", reasonText(cause))
     }
   }
 }
@@ -572,7 +642,7 @@ async function fileTerminalCloseRequests(
  */
 export function createEnvironmentCleanup() {
   const cache = new Map<string, CachedEnvironment>()
-  const progress: CleanupProgress = { cursor: 0, hint: undefined, loaded: false }
+  const progress: CleanupProgress = { cursor: 0, hint: undefined, loaded: false, reported: new Map() }
   return (input: Parameters<typeof cleanupEnvironments>[0]) => cleanupEnvironments(input, cache, progress)
 }
 
@@ -680,6 +750,15 @@ async function cleanupEnvironments(
   let closed = 0
   let kept = 0
   const record = (path: string, result: string, why: string): void => {
+    // A kept folder is written once per CHANGE of reason, never once per round (#29679 row 5, log-retention
+    // ruling "Not archival"): a live registry reprinted ~50 unchanged keeps every 2 minutes, which is writer
+    // volume and buries the rows that moved. The count still advances (`preserve`'s kept++), so the round's
+    // footer keeps reporting the coverage it walked; only the unchanged row is withheld. Every other result
+    // is an event and is always written.
+    const key = `${result}\u0000${why}`
+    const unchanged = result === "kept" && progress.reported.get(path) === key
+    progress.reported.set(path, key)
+    if (unchanged) return
     const row = {
       kind: "observation",
       run: outcome.run,
@@ -795,6 +874,86 @@ async function cleanupEnvironments(
   }
   // File before census so a round that cannot certify still leaves the request
   // for the next consume.
+  // The sweep's own state — the resume cursor (ruling 27723) and the last row written per path
+  // (#29679 row 5) — is read HERE, before any kept row is produced, and written by `persistState` on
+  // every round that reaches a verdict. Kept rows are produced above the batch: terminal close-request
+  // filing, and the census refusal that preserves the WHOLE registry in one breath. Loading this later,
+  // or persisting it only on the batch path, leaves a refused registry unremembered, so every restart
+  // reprints it — the flood this rule exists to remove (@dev/review2, 2026-10-17).
+  const hintPath = cursorHintPath(workdir)
+  if (!progress.loaded) {
+    progress.loaded = true
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(hintPath, "utf8"))
+      const hint =
+        typeof parsed === "object" && parsed !== null && "cursorEnv" in parsed
+          ? (parsed as { cursorEnv?: unknown }).cursorEnv
+          : undefined
+      if (typeof hint !== "string") throw new Error("no cursorEnv string")
+      // The last-row map comes from the SAME document as the cursor: one state
+      // file, one read. A malformed map throws with the cursor, so the whole
+      // document is named and the sweep reprints once, never silently forgets.
+      progress.reported = reportedFromState(parsed)
+      const index = inventory.rows.findIndex((row) => row.name === hint)
+      if (index < 0) {
+        record(
+          hintPath,
+          "cursor-reset",
+          "resume hint names " + JSON.stringify(hint) + ", no longer a registered environment",
+        )
+        progress.cursor = 0
+      } else progress.cursor = index
+    } catch (cause) {
+      const missing = (cause as NodeJS.ErrnoException).code === "ENOENT"
+      progress.cursor = 0
+      const reason = missing
+        ? "absent (first run), starting at index 0"
+        : "unreadable (" + String(cause) + "), starting at index 0"
+      io.stderr("yrd: environment cleanup resume hint " + hintPath + ": " + reason + "\n")
+      if (!missing) record(hintPath, "cursor-reset", String(cause))
+    }
+  }
+  /**
+   * Write the sweep's own state: the resume cursor and the last row written per path, in ONE file. It
+   * bounds the map to the registry this round walked, so a retired environment leaves no entry behind.
+   */
+  const persistState = (): void => {
+    const live = new Set(inventory.rows.map((row) => row.path))
+    progress.reported = new Map([...progress.reported].filter(([path]) => live.has(path)))
+    // The retained cursor outlives the registry that set it: a round stops its batch at the registry's
+    // last row and closes an environment, so the NEXT, smaller registry has no row at that index. The
+    // batch re-normalizes the cursor only at its END, and the early verdicts — the withdrawal return and
+    // the census refusal — persist BEFORE that. Normalize HERE, against the registry this round actually
+    // walked, so every verdict persists the same bounded map instead of indexing past the end and saving
+    // nothing, which reprints every unchanged keep on the restart (@dev/review2, 2026-10-17).
+    const row = inventory.rows[progress.cursor % inventory.rows.length]
+    if (row === undefined) {
+      // The empty registry returned long before any caller reaches this point, so a missing row here is a
+      // moved guard, never a normal state: loud, never the silent no-write that reprints the registry.
+      throw new Error(
+        `environment cleanup state: cursor ${progress.cursor} has no row in a ${inventory.rows.length}-row registry for ${registry}`,
+      )
+    }
+    progress.cursor %= inventory.rows.length
+    const cursorEnv = row.name
+    progress.hint = cursorEnv
+    try {
+      mkdirSync(dirname(hintPath), { recursive: true })
+      atomicWriteFileSync(
+        hintPath,
+        JSON.stringify({
+          cursorEnv,
+          runId: outcome.run,
+          at: new Date().toISOString(),
+          reported: Object.fromEntries(progress.reported),
+        }) + "\n",
+      )
+    } catch (cause) {
+      // A hint we cannot write is named, never silent; the sweep itself stands.
+      record(hintPath, "cursor-write-failed", String(cause))
+    }
+  }
+  // for the next consume.
   await fileTerminalCloseRequests({
     workdir,
     rows: inventory.rows,
@@ -828,16 +987,22 @@ async function cleanupEnvironments(
   })
   // Withdrawal records only its exact terminal intent. The queue service is
   // the sole consumer; an interactive withdrawal must not sweep other jobs.
-  if (input.withdrawn !== undefined) return proofs
+  if (input.withdrawn !== undefined) {
+    persistState()
+    return proofs
+  }
   let snapshot: ProcessCwdProjection
   try {
     snapshot = await census()
   } catch (cause) {
-    for (const row of inventory.rows) preserve(row.path, String(cause))
+    for (const row of inventory.rows) preserve(row.path, reasonText(cause))
     appendFileSync(
       outcome.log,
       `${JSON.stringify({ kind: "observation", run: outcome.run, at: new Date().toISOString(), scope: "environment-cleanup", registry, closed, kept, deferred: 0, remaining: inventory.rows.length - closed, ...(censusReceipt === undefined ? {} : { census: censusReceipt }) })}\n`,
     )
+    // A refusal preserves the WHOLE registry with one reason: the map must remember it here, or the next
+    // round writes the same ~50 rows again (@dev/review2, 2026-10-17).
+    persistState()
     return proofs
   }
   // 22894: a close no caller here could certify is consumed BEFORE the cursor
@@ -847,39 +1012,6 @@ async function cleanupEnvironments(
   closed += requests.closed
   const lookups = 0
   const startedAt = Date.now()
-  // The hint is read once per process, before the first offset. A hint that
-  // cannot be trusted starts the sweep at index 0 and is NAMED, never silently
-  // ignored (ruling 27723). A plain first run has no file: that is not a fault,
-  // so it is named on stderr only and adds no row to a bare run.
-  const hintPath = cursorHintPath(workdir)
-  if (!progress.loaded) {
-    progress.loaded = true
-    try {
-      const parsed: unknown = JSON.parse(readFileSync(hintPath, "utf8"))
-      const hint =
-        typeof parsed === "object" && parsed !== null && "cursorEnv" in parsed
-          ? (parsed as { cursorEnv?: unknown }).cursorEnv
-          : undefined
-      if (typeof hint !== "string") throw new Error("no cursorEnv string")
-      const index = inventory.rows.findIndex((row) => row.name === hint)
-      if (index < 0) {
-        record(
-          hintPath,
-          "cursor-reset",
-          "resume hint names " + JSON.stringify(hint) + ", no longer a registered environment",
-        )
-        progress.cursor = 0
-      } else progress.cursor = index
-    } catch (cause) {
-      const missing = (cause as NodeJS.ErrnoException).code === "ENOENT"
-      progress.cursor = 0
-      const reason = missing
-        ? "absent (first run), starting at index 0"
-        : "unreadable (" + String(cause) + "), starting at index 0"
-      io.stderr("yrd: environment cleanup resume hint " + hintPath + ": " + reason + "\n")
-      if (!missing) record(hintPath, "cursor-reset", String(cause))
-    }
-  }
   // Resume where the last round ran out of budget, so a row that keeps failing
   // a cheap check cannot starve the tail of the registry.
   const offset = inventory.rows.length === 0 ? 0 : progress.cursor % inventory.rows.length
@@ -1030,26 +1162,13 @@ async function cleanupEnvironments(
       } else if ("kept" in result && result.kept === row.path) preserve(row.path, output.trim())
       else throw new Error(`unproven close result ${output}`)
     } catch (cause) {
-      preserve(row.path, namedPrivateStoreRefusal(cause, row.path) ?? String(cause))
+      preserve(row.path, namedPrivateStoreRefusal(cause, row.path) ?? reasonText(cause))
     }
   }
   progress.cursor = stoppedAt < 0 ? 0 : (offset + stoppedAt) % inventory.rows.length
-  // The hint is written in the same step as the round row that reports what the
-  // round did, so a restart resumes at the next environment (ruling 27723).
-  const cursorEnv = inventory.rows[progress.cursor]?.name
-  progress.hint = cursorEnv
-  if (cursorEnv !== undefined) {
-    try {
-      mkdirSync(dirname(hintPath), { recursive: true })
-      atomicWriteFileSync(
-        hintPath,
-        JSON.stringify({ cursorEnv, runId: outcome.run, at: new Date().toISOString() }) + "\n",
-      )
-    } catch (cause) {
-      // A hint we cannot write is named, never silent; the sweep itself stands.
-      record(hintPath, "cursor-write-failed", String(cause))
-    }
-  }
+  // The state is written in the same step as the round row that reports what the round did, so a
+  // restart resumes at the next environment (ruling 27723) with the map the round actually wrote.
+  persistState()
   appendFileSync(
     outcome.log,
     `${JSON.stringify({

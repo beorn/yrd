@@ -4,7 +4,8 @@
  *
  * The command surface is
  * `yrd queue submit|withdraw|run|up|stop|start|pause|resume|list|stats|show|health`,
- * `yrd drop`, `yrd merge`, `yrd check`, `yrd env open|list|close`, `yrd logs prune`, with `yrd submit` and
+ * `yrd drop`, `yrd merge`, `yrd check`, `yrd env open|list|close`, `yrd logs prune`, `yrd issues <verb>`
+ * (the project's issues declaration, run from `./issues/`, never from the queue core), with `yrd submit` and
  * `yrd list` as the aliases of the two used most, `yrd watch` as
  * `queue list --watch`, and `yrd bay` as `env`'s until flag day's word is
  * retired. Every
@@ -58,6 +59,13 @@ import { retireRetiredRoot } from "./retire-root.ts"
 import { formatQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { legendLines } from "./watch-words.ts"
+import {
+  ISSUES_CLOSE_REASONS,
+  ISSUES_DECLARATION_PATH,
+  ISSUES_VERBS,
+  ISSUES_VERB_NAMES,
+  ISSUES_WRITE_VERBS,
+} from "./issues/declaration.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 
 /** The seat a submit names. Never the git author: the fleet's git identity
@@ -1227,8 +1235,19 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .option("--fresh", "ask the remote instead of the queue-owned local status store")
     .option("--queue <value>", QUEUE_HELP)
+    .option(
+      "--project-root <path>",
+      "after branch output, show at most four newest distinct issues through this project's issues.yml view " +
+        "(yrd issues view, killed at 10 s); --all and an absent root make no issue reads",
+    )
     .action(async (branch, options) => {
-      const { all, json, queue, fresh } = options as { all?: boolean; json?: boolean; queue?: string; fresh?: boolean }
+      const { all, json, queue, fresh, projectRoot } = options as {
+        all?: boolean
+        json?: boolean
+        queue?: string
+        fresh?: boolean
+        projectRoot?: string
+      }
       const location = await resolveQueueLocation(cwd(), queue, env, "reader")
       const taken = await coreQueueCommand(
         location.repo,
@@ -1247,6 +1266,7 @@ function buildProgram(
           queue: location.queue,
           workdir: location.workdir,
           ...(fresh === true ? {} : { localStatusStore: localStatusStore(location) }),
+          ...(projectRoot === undefined ? {} : { projectRoot }),
         },
       )
       setExit(taken)
@@ -1590,6 +1610,54 @@ function buildProgram(
         "(each skipped path is named), 1 when a mirror could not be created, fetched or locked.",
     )
     .action(async (options) => setExit(await refreshMirrors(options as MirrorRefreshOptions, io)))
+
+  const issues = program
+    .command("issues")
+    .description(`run a verb of the project's ${ISSUES_DECLARATION_PATH}, read from main, and print its JSON envelope`)
+  issues.helpCommand(false)
+  issues.addHelpSection(
+    "On every verb:",
+    `${ISSUES_DECLARATION_PATH} is read from the commit main names in the project root's origin when that origin is ` +
+      "a local repository, else in the root itself; never a clone, a fetch or the working tree. stdout is one JSON " +
+      "object {declaration, verb, result}; diagnostics and the provider's stderr go to stderr. Exits 0 ok, " +
+      "1 refused or failed with a named cause, 2 bad arguments.",
+  )
+  for (const verb of ISSUES_VERB_NAMES) {
+    const operands: readonly string[] = ISSUES_VERBS[verb]
+    const write = ISSUES_WRITE_VERBS.has(verb)
+    const command = issues
+      .command([verb, ...operands.map((operand) => `<${operand}>`)].join(" "))
+      .description(
+        verb === "close"
+          ? `the declared ${verb}; <reason> is ${ISSUES_CLOSE_REASONS.join(" or ")}`
+          : `the declared ${verb}${write ? "" : " (a read)"}`,
+      )
+      .option("--project-root <path>", "the project root; default the toplevel of the current repository")
+      .option("--timeout-ms <n>", "kill the provider after this many milliseconds (yrd-issues-provider-timed-out)", int)
+    // NO OPTION IS ACCEPTED AND IGNORED: a read takes no replay key, so --id is refused on it.
+    if (write) command.option("--id <id>", "the event's replay key; required, the provider dedupes on it")
+    command.action(async (...received: unknown[]) => {
+      const args = received.slice(0, operands.length) as string[]
+      const options = received[operands.length] as Readonly<{ projectRoot?: string; id?: string; timeoutMs?: number }>
+      const { runIssuesVerb } = await import("./issues/run.ts")
+      const outcome = await runIssuesVerb({
+        verb,
+        args,
+        cwd: cwd(),
+        env,
+        stderr: (text) => io.stderr(text),
+        ...(options.id === undefined ? {} : { id: options.id }),
+        ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      })
+      if (outcome.ok) {
+        io.stdout(`${JSON.stringify(outcome.envelope)}\n`)
+        return
+      }
+      io.stderr(`yrd issues: ${outcome.message}\n`)
+      setExit(outcome.exitCode)
+    })
+  }
 
   addExamples(program, name)
   return program

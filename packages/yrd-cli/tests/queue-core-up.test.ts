@@ -747,8 +747,13 @@ describe("yrd queue up, the service", () => {
       const missingOther = join(dirname(path), "retired-work", "not-created")
       const addresses = [join(path, "working"), path, alias, missingChild, sibling]
       for (const address of addresses) {
+        // The reason NAMES the address, so each address here is a CHANGE of reason. A kept folder is written
+        // once per change of reason per path, and that memory now outlives the process (#29679 row 5), so
+        // addresses that resolve onto one environment with the SAME reason — the symlink alias below does —
+        // are counted in the round footer and not reprinted. This test's subject is which addresses protect,
+        // and the row it asserts on is the sweep saying it saw the use.
         uses.mockResolvedValue([
-          { path: address, reason: "declared working directory" },
+          { path: address, reason: `declared working directory (${address})` },
           ...(address === sibling ? [{ path: missingOther, reason: "retired declared working directory" }] : []),
         ])
         const stop = new AbortController()
