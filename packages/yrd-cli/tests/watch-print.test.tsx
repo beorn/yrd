@@ -528,36 +528,42 @@ describe("the flow page: four bands, one row per change", () => {
     }
     const paused = { ...snap(120), queue: "example.test/selected#release" }
     const options = {
-      columns: 480,
+      columns: 80,
       color: false,
       formatCommand: (argv: readonly string[]) =>
         formatYrdCommand(io, [...argv, "--queue", paused.queue], "/viewer/worktree"),
     }
-    const printed = await printListing(paused, options)
-    expect(printed).toContain(`viewer /viewer/worktree yrd queue resume --queue ${paused.queue}`)
+    // Full viewer recipes must survive the actual terminal width, including wrapped tokens.
+    const visible = (text: string) => text.replace(/[│┃\s]/gu, "")
+    for (const columns of [80, 120]) {
+      const printed = await printListing(paused, { ...options, columns })
+      expect(visible(printed)).toContain(visible(`viewer /viewer/worktree yrd queue resume --queue ${paused.queue}`))
 
-    const stuck = await printListing(
-      {
-        ...paused,
-        stopped: { ...paused.stopped!, change: `task/incident@${"1".repeat(40)}` },
-      },
-      options,
-    )
-    expect(stuck).toContain(`viewer /viewer/worktree yrd merge <fix> --queue ${paused.queue}`)
-    expect(stuck).toContain(`viewer /viewer/worktree yrd queue withdraw task/incident --queue ${paused.queue}`)
-    expect(stuck).toContain(`viewer /viewer/worktree yrd queue resume --queue ${paused.queue}`)
-
-    const stopped = await printListing(
-      {
-        ...paused,
-        stopped: null,
-        runner: {
-          journalDir: "/runner/logs",
-          service: { kind: "stopped", graceful: true, why: "service stopped", cause: "operator stop" },
+      const stuck = await printListing(
+        {
+          ...paused,
+          stopped: { ...paused.stopped!, change: `task/incident@${"1".repeat(40)}` },
         },
-      },
-      options,
-    )
-    expect(stopped).toContain(`viewer /viewer/worktree yrd queue up --queue ${paused.queue}`)
+        { ...options, columns },
+      )
+      expect(visible(stuck)).toContain(visible(`viewer /viewer/worktree yrd merge <fix> --queue ${paused.queue}`))
+      expect(visible(stuck)).toContain(
+        visible(`viewer /viewer/worktree yrd queue withdraw task/incident --queue ${paused.queue}`),
+      )
+      expect(visible(stuck)).toContain(visible(`viewer /viewer/worktree yrd queue resume --queue ${paused.queue}`))
+
+      const stopped = await printListing(
+        {
+          ...paused,
+          stopped: null,
+          runner: {
+            journalDir: "/runner/logs",
+            service: { kind: "stopped", graceful: true, why: "service stopped", cause: "operator stop" },
+          },
+        },
+        { ...options, columns },
+      )
+      expect(visible(stopped)).toContain(visible(`viewer /viewer/worktree yrd queue up --queue ${paused.queue}`))
+    }
   })
 })

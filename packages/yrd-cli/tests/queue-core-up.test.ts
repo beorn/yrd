@@ -2799,7 +2799,15 @@ describe("yrd queue up, the service", () => {
     expect(await w.git(["ls-remote", "--refs", "origin", ref])).toContain(ref)
 
     const listed = capture(w.work)
-    expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    const displayedCommands: { argv: readonly string[]; cwd: string }[] = []
+    const listedIO = {
+      ...listed.io,
+      formatYrdCommand(argv: readonly string[], cwd: string) {
+        displayedCommands.push({ argv, cwd })
+        return `viewer ${cwd} yrd ${argv.join(" ")}`
+      },
+    }
+    expect(await coreQueueCommand(w.work, listedIO, { command: "list" }, { workdir: w.workdir })).toBe(0)
     // The pause is the loudest state on the page and it LEADS it, once; the
     // runner's row says the WORD paused and what lifts the stop, never the
     // record's own sentence a second time (watch-frame.tsx).
@@ -2819,7 +2827,14 @@ describe("yrd queue up, the service", () => {
     const runnerBoxEnd = page.findIndex((line, i) => i > runnerBoxStart && (line.includes("╰") || line.trim() === ""))
     const runnerBox = page.slice(runnerBoxStart, runnerBoxEnd === -1 ? undefined : runnerBoxEnd + 1).join("\n")
     expect(runnerBox, listed.stdout()).toContain("paused")
-    expect(runnerBox, listed.stdout()).toContain("resume: yrd queue resume")
+    const selectedQueue = `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`
+    expect(displayedCommands).toContainEqual({
+      argv: ["queue", "resume", "--queue", selectedQueue],
+      cwd: w.work,
+    })
+    expect(runnerBox.replace(/[│┃\s]/gu, ""), listed.stdout()).toContain(
+      `to resume: viewer ${w.work} yrd queue resume --queue ${selectedQueue}`.replace(/\s/gu, ""),
+    )
     expect(runnerBox, listed.stdout()).not.toContain("refs/yrd/main/runner")
     const listedJson = capture(w.work)
     expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
