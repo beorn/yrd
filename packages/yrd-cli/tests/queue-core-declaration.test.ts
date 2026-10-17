@@ -1869,6 +1869,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         }
         const after = await measure("three-store-trace")
         expect(after["ls-remote"]).toBe(before["ls-remote"])
+        if (before.fetch === undefined) throw new Error("one-store trace lacks expected fetch calls")
         // A warm fetched queue ref can save a read; extra stores must never add one.
         expect(after.fetch).toBeLessThanOrEqual(before.fetch)
 
