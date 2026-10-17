@@ -121,6 +121,18 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
     expect(shown.stderr, shown.report).not.toContain("issue info")
   })
 
+  // Whole-history queries caused the provider process storm (29673). A missing
+  // project directory makes the pre-fix unwanted reads fail before any process
+  // starts, so this regression can fail without repeating the host outage.
+  it("whole-history show emits every change without attempting optional issue reads", async () => {
+    const work = await queueWithIssueChange()
+    const missingProject = join(scratch("yrd-issue-display-unused-project-"), "absent")
+    const shown = await yrd(work, "queue", "show", "--all", "--json", "--fresh", "--project-root", missingProject)
+    expect(shown.exitCode, shown.report).toBe(0)
+    expect(JSON.parse(shown.stdout).changes).toHaveLength(1)
+    expect(shown.stderr, shown.report).not.toContain("issue info unavailable")
+  })
+
   it("says out loud when the declaration in force still holds issuesProvider.read, and never runs it (rule: retired key said out loud)", async () => {
     const marker = join(scratch("yrd-issue-display-retired-"), "ran")
     const work = await queueWithIssueChange(
