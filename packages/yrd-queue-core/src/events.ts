@@ -1,4 +1,5 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
+import { createHash } from "node:crypto"
 import { shellQuote } from "git-super/shell-command"
 import { Conflict, RetriesExhausted } from "./git.ts"
 import { ARCHIVE_REF_PREFIX, archiveRefFor } from "git-super/archive-ref"
@@ -85,6 +86,7 @@ export const EVENT_TRAILERS = {
   floors: "Floors",
   gitlinks: "Gitlinks",
   componentAuthors: "Component-Authors",
+  issueEffect: "Issue-Effect",
 } as const
 const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 /** Only the run path that atomically publishes the target may write merged with this producer. */
@@ -239,6 +241,19 @@ export type NoticeWrite = Readonly<{
   reason?: string
 }>
 
+/** A completed provider write, retained as neutral history on the branch's existing event chain. */
+export type AppliedIssueEffect = Readonly<{
+  kind: "issue-effect-v1"
+  mergedEvent: Oid
+  mergeSha: Oid
+  mergeCommitterTime: string
+  verb: "close" | "comment"
+  semanticEnding?: "completed" | "not_planned"
+  issueKey: string
+  providerId: string
+  declaration: Readonly<{ path: "issues.yml"; blob: Oid }>
+}>
+
 type ChangeInputDetails = Readonly<{
   queueTip: string
   at: Date
@@ -256,6 +271,7 @@ type ChangeInputDetails = Readonly<{
   retry?: Readonly<{ retried: 1; reason?: string }>
   deferred?: DeferredWrite
   notice?: NoticeWrite
+  issueEffect?: AppliedIssueEffect
   run?: string
   landedGitlinks?: readonly CommitGitlink[]
   componentAuthors?: readonly ComponentAuthor[]
@@ -360,7 +376,9 @@ function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [str
   if (type === "deferred" && details.deferred === undefined) {
     throw new TypeError("deferred needs check and window detail")
   }
-  if (type === "notified" && details.notice === undefined) throw new TypeError("notified needs notice detail")
+  if (type === "notified" && details.notice === undefined && details.issueEffect === undefined) {
+    throw new TypeError("notified needs notice or issue-effect detail")
+  }
   if (details.deferred !== undefined) {
     if (type !== "deferred" || details.commit === undefined) throw new TypeError("deferred needs kept Commit:")
     if (details.reason !== details.deferred.reason) throw new TypeError("deferred Reason: must match its detail")
@@ -372,13 +390,22 @@ function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [str
     }
   }
   if (details.notice !== undefined) {
-    if (type !== "notified") throw new TypeError("notice detail belongs on notified")
+    if (type !== "notified" || details.issueEffect !== undefined) {
+      throw new TypeError("notice detail belongs on notified and cannot share an issue effect")
+    }
     if (details.notice.key !== `${details.notice.for}:${details.notice.to}`) {
       throw new TypeError("notified has invalid Key:")
     }
     if (details.notice.result !== "delivered" && details.reason !== details.notice.reason) {
       throw new TypeError("refused or failed notice needs matching Reason:")
     }
+  }
+  if (details.issueEffect !== undefined) {
+    if (type !== "notified" || details.notice !== undefined) {
+      throw new TypeError("issue effect belongs on notified and cannot share a notice")
+    }
+    if (details.reason !== undefined) throw new TypeError("issue effect cannot carry Reason:")
+    checkedIssueEffect(details.issueEffect, "changeInput")
   }
   if (details.retry !== undefined && type !== "stuck") throw new TypeError("Retried: belongs on stuck")
   if (
@@ -415,6 +442,9 @@ function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [str
     const notice = details.notice
     props.push([EVENT_TRAILERS.for, notice.for], [EVENT_TRAILERS.to, notice.to])
     props.push([EVENT_TRAILERS.result, notice.result], [EVENT_TRAILERS.key, notice.key])
+  }
+  if (details.issueEffect !== undefined) {
+    props.push([EVENT_TRAILERS.issueEffect, JSON.stringify(checkedIssueEffect(details.issueEffect, "changeInput"))])
   }
   return props
 }
@@ -500,6 +530,106 @@ function requiredProp(event: EventShape, key: string): string {
   const value = prop(event, key)
   if (value === undefined || value.trim() === "") throw new Error(`event ${event.id} (${event.type}) needs ${key}:`)
   return value
+}
+
+function checkedIssueEffect(value: unknown, where: string): AppliedIssueEffect {
+  const refuse = (detail: string): never => {
+    throw new Error(`${where} has invalid ${EVENT_TRAILERS.issueEffect}: ${detail}`)
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) refuse("expected an object")
+  const raw = value as Record<string, unknown>
+  if (raw.kind !== "issue-effect-v1") refuse("unknown kind")
+  if (
+    typeof raw.mergedEvent !== "string" ||
+    !COMMIT_OID.test(raw.mergedEvent) ||
+    typeof raw.mergeSha !== "string" ||
+    !COMMIT_OID.test(raw.mergeSha)
+  ) {
+    refuse("mergedEvent and mergeSha must be commit ids")
+  }
+  if (
+    typeof raw.mergeCommitterTime !== "string" ||
+    Number.isNaN(Date.parse(raw.mergeCommitterTime)) ||
+    new Date(raw.mergeCommitterTime).toISOString() !== raw.mergeCommitterTime
+  ) {
+    refuse("mergeCommitterTime must be an ISO instant")
+  }
+  if (raw.verb !== "close" && raw.verb !== "comment") refuse("verb must be close or comment")
+  if (raw.verb === "close") {
+    if (raw.semanticEnding !== "completed" && raw.semanticEnding !== "not_planned") {
+      refuse("close needs semanticEnding completed or not_planned")
+    }
+  } else if (raw.semanticEnding !== undefined) {
+    refuse("comment cannot carry semanticEnding")
+  }
+  if (typeof raw.issueKey !== "string" || raw.issueKey.trim() === "") refuse("issueKey must be nonempty")
+  if (typeof raw.providerId !== "string") refuse("providerId must be a string")
+  if (typeof raw.declaration !== "object" || raw.declaration === null || Array.isArray(raw.declaration)) {
+    refuse("declaration must name its committed source")
+  }
+  const declaration = raw.declaration as Record<string, unknown>
+  if (declaration.path !== "issues.yml" || typeof declaration.blob !== "string" || !COMMIT_OID.test(declaration.blob)) {
+    refuse("declaration needs issues.yml and a blob id")
+  }
+  const identity = JSON.stringify([raw.mergeSha, raw.verb, raw.semanticEnding ?? null, raw.issueKey])
+  const expectedId = `yrd1-${createHash("sha256").update(identity).digest("hex")}`
+  if (raw.providerId !== expectedId) refuse(`providerId must be ${expectedId}`)
+  const expectedKeys = [
+    "kind",
+    "mergedEvent",
+    "mergeSha",
+    "mergeCommitterTime",
+    "verb",
+    ...(raw.semanticEnding === undefined ? [] : ["semanticEnding"]),
+    "issueKey",
+    "providerId",
+    "declaration",
+  ].sort()
+  if (JSON.stringify(Object.keys(raw).sort()) !== JSON.stringify(expectedKeys)) refuse("unexpected fields")
+  if (JSON.stringify(Object.keys(declaration).sort()) !== JSON.stringify(["blob", "path"])) {
+    refuse("unexpected declaration fields")
+  }
+  return {
+    kind: "issue-effect-v1",
+    mergedEvent: raw.mergedEvent as Oid,
+    mergeSha: raw.mergeSha as Oid,
+    mergeCommitterTime: raw.mergeCommitterTime as string,
+    verb: raw.verb as AppliedIssueEffect["verb"],
+    ...(raw.semanticEnding === undefined
+      ? {}
+      : { semanticEnding: raw.semanticEnding as AppliedIssueEffect["semanticEnding"] }),
+    issueKey: raw.issueKey as string,
+    providerId: raw.providerId as string,
+    declaration: { path: "issues.yml", blob: declaration.blob as Oid },
+  }
+}
+
+function readIssueEffect(event: EventShape): AppliedIssueEffect | undefined {
+  const serialized = prop(event, EVENT_TRAILERS.issueEffect)
+  if (serialized === undefined) return undefined
+  if (event.type !== "notified") {
+    throw new Error(`event ${event.id}: ${EVENT_TRAILERS.issueEffect}: belongs on notified`)
+  }
+  for (const field of [
+    EVENT_TRAILERS.for,
+    EVENT_TRAILERS.to,
+    EVENT_TRAILERS.key,
+    EVENT_TRAILERS.result,
+    EVENT_TRAILERS.reason,
+  ]) {
+    if (prop(event, field) !== undefined) throw new Error(`event ${event.id}: issue effect cannot carry ${field}:`)
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(serialized)
+  } catch (cause) {
+    throw new Error(`event ${event.id}: malformed ${EVENT_TRAILERS.issueEffect}: ${String(cause)}`, { cause })
+  }
+  const effect = checkedIssueEffect(parsed, `event ${event.id}`)
+  if (JSON.stringify(effect) !== serialized) {
+    throw new Error(`event ${event.id}: ${EVENT_TRAILERS.issueEffect}: must use canonical JSON`)
+  }
+  return effect
 }
 
 function positiveMs(event: EventShape, key: string): number {
@@ -722,6 +852,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
   const at = requireCause(event)
   const landedGitlinks = readLandedGitlinks(event)
   const componentAuthors = readComponentAuthors(event)
+  const issueEffect = event.type === "notified" ? readIssueEffect(event) : undefined
   checkedRows(event)
   const recipients = event.props.filter(([key]) => key === EVENT_TRAILERS.recipient)
   if (recipients.length > 1) throw new Error(`event ${event.id} repeats ${EVENT_TRAILERS.recipient}:`)
@@ -736,7 +867,8 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
     event.type !== "merged" &&
     event.type !== "failed" &&
     event.type !== "stuck" &&
-    event.type !== "verifying"
+    event.type !== "verifying" &&
+    issueEffect === undefined
   ) {
     throw new Error(`event ${event.id}: ${LANDING_IN_PROGRESS}`)
   }
@@ -810,7 +942,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
     case "deferred":
       return deferChange(state, event, next, at)
     case "notified":
-      return settleNotice(state, event)
+      return issueEffect === undefined ? settleNotice(state, event) : { ...state, tip: event.id }
     case "archived": {
       if ((state.status !== "merged" && state.status !== "cancelled") || state.endedAt === undefined) {
         throw new Error(`event ${event.id} cannot archive ${state.status}`)
@@ -3114,7 +3246,7 @@ export function adoptedChange(event: EventShape): ChangeSegment {
 
 /** Read every opened segment while leaving the normal list's current fold unchanged. */
 export function enumerateChangeSegments(events: readonly Event[], ref: string, repo: string): readonly ChangeSegment[] {
-  assertCompleteChangeChain(events, ref, repo)
+  project(events, ref, repo)
   const segments: ChangeSegment[] = []
   let state = initial
   let opened: Oid | undefined
@@ -3173,6 +3305,27 @@ export function enumerateChangeSegments(events: readonly Event[], ref: string, r
 export function project(events: readonly Event[], ref: string, repo: string): EventChange {
   assertCompleteChangeChain(events, ref, repo)
   const state = events.reduce(evolve, initial)
+  const earlierMerges = new Map<string, string>()
+  const issueEffectIds = new Set<string>()
+  for (const event of events) {
+    if (event.type === "merged") earlierMerges.set(event.id, keptCommit(event))
+    const effect = readIssueEffect(event)
+    if (effect === undefined) continue
+    if (event.writer !== QUEUE_RUN_WRITER) {
+      throw new Error(`${ref}: issue effect ${event.id} needs writer ${QUEUE_RUN_WRITER}`)
+    }
+    const mergeSha = earlierMerges.get(effect.mergedEvent)
+    if (mergeSha === undefined) {
+      throw new Error(`${ref}: issue effect ${event.id} does not name an earlier merged event ${effect.mergedEvent}`)
+    }
+    if (mergeSha !== effect.mergeSha) {
+      throw new Error(`${ref}: issue effect ${event.id} mergeSha does not match merged event ${effect.mergedEvent}`)
+    }
+    if (issueEffectIds.has(effect.providerId)) {
+      throw new Error(`${ref}: duplicate issue effect ${effect.providerId}`)
+    }
+    issueEffectIds.add(effect.providerId)
+  }
   return events.some((event) => event.type === "opened")
     ? state
     : diagnose(state, `${ref}: malformed history has no opened event`)

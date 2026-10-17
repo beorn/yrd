@@ -37,6 +37,7 @@ import {
   mergedHistoryCommits,
   queueFormat,
   queueRef,
+  project,
   readChangeEvents,
   readBranchHistory,
   readEventOps,
@@ -51,6 +52,36 @@ import {
 
 const A = "a".repeat(40)
 const B = "b".repeat(40)
+const MERGED_EVENT = "c".repeat(40)
+const EFFECT_EVENT = "d".repeat(40)
+const ISSUE_EFFECT = {
+  kind: "issue-effect-v1",
+  mergedEvent: MERGED_EVENT,
+  mergeSha: A,
+  mergeCommitterTime: "2026-09-22T13:59:00.000Z",
+  verb: "close",
+  semanticEnding: "completed",
+  issueKey: "wk/issue/314",
+  providerId: "yrd1-93f1c4a38c9fddde33e2db50dd48bb4b93a883296ea4a1302871f51ad5b149fa",
+  declaration: { path: "issues.yml", blob: B },
+} as const
+
+function changeChain(...events: Event[]): Event[] {
+  return events.map((item, index): Event => {
+    const previous = events[index - 1]
+    return {
+      ...item,
+      parent: previous?.id ?? null,
+      props: item.props.map(([key, value]): [string, string] =>
+        key === "Queue" && previous !== undefined ? [key, previous.id] : [key, value],
+      ),
+    }
+  })
+}
+
+function issueEffectEvent(effect: Readonly<Record<string, unknown>>, id = EFFECT_EVENT): Event {
+  return { ...event("notified", id, [["Issue-Effect", JSON.stringify(effect)]], [A]), writer: QUEUE_RUN_WRITER }
+}
 
 function remoteMemStore(repo: string) {
   const backend = createMemBackend()
@@ -881,6 +912,130 @@ describe("ADR-0016 event fold", () => {
       lastNotifiable: { id: B, kind: "merged" },
       notices: { [`${B}:@dev/2`]: { result: "delivered" } },
     })
+  })
+
+  it("keeps a typed issue effect neutral across a later branch reuse and validates its merge reference", () => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    const effect = issueEffectEvent(ISSUE_EFFECT)
+    const original = changeChain(opened, merged)
+    const withEffect = changeChain(opened, merged, effect)
+    const beforeEffect = project(original, "refs/yrd/q/changes/task/reused", "fixture")
+    const afterEffect = project(withEffect, "refs/yrd/q/changes/task/reused", "fixture")
+
+    expect(afterEffect).toMatchObject({
+      status: beforeEffect.status,
+      at: beforeEffect.at,
+      endedAt: beforeEffect.endedAt,
+      ending: beforeEffect.ending,
+      tip: EFFECT_EVENT,
+    })
+    expect(afterEffect.notices).toEqual(beforeEffect.notices)
+
+    const reopened = event("opened", "e".repeat(40), [["Commit", B]], [B])
+    const reused = project(changeChain(opened, merged, effect, reopened), "refs/yrd/q/changes/task/reused", "fixture")
+    expect(reused).toMatchObject({ status: "queued", commit: B, tip: reopened.id })
+    expect(withEffect.map((row) => row.id)).toContain(EFFECT_EVENT)
+  })
+
+  it("allows an older validated effect while the reused branch is in merging", () => {
+    const oldOpened = event("opened", A, [["Commit", A]], [A])
+    const oldMerged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    const reopened = event("opened", "f".repeat(40), [["Commit", B]], [B])
+    const verifying = event("verifying", "1".repeat(40), [["Commit", B]], [B])
+    const checking = event("checking", "2".repeat(40))
+    const merging = event("merging", "3".repeat(40), [["Commit", B]], [B])
+    const effect = issueEffectEvent(ISSUE_EFFECT, "4".repeat(40))
+    const prefix = changeChain(oldOpened, oldMerged, reopened, verifying, checking, merging)
+    const atMerging = project(prefix, "refs/yrd/q/changes/task/reused", "fixture")
+
+    expect(atMerging.status).toBe("merging")
+    const afterEffect = project(
+      changeChain(oldOpened, oldMerged, reopened, verifying, checking, merging, effect),
+      "refs/yrd/q/changes/task/reused",
+      "fixture",
+    )
+    expect(afterEffect).toMatchObject({
+      status: atMerging.status,
+      at: atMerging.at,
+      endedAt: atMerging.endedAt,
+      candidate: atMerging.candidate,
+      tip: effect.id,
+    })
+  })
+
+  it.each([
+    ["missing", { mergedEvent: "f".repeat(40) }, "earlier merged event"],
+    ["wrong kind", { mergedEvent: A }, "does not name an earlier merged event"],
+    [
+      "wrong sha",
+      {
+        mergeSha: B,
+        providerId: "yrd1-ad2873d572ef06b4ec828dc845a0897912b5b47eb936cef79981e088f0529002",
+      },
+      "does not match merged event",
+    ],
+  ])("refuses an issue effect with a %s merge reference", (_name, override, message) => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    const effect = issueEffectEvent({ ...ISSUE_EFFECT, ...override })
+    expect(() => project(changeChain(opened, merged, effect), "refs/yrd/q/changes/task/bad-ref", "fixture")).toThrow(
+      message,
+    )
+  })
+
+  it("refuses a forward issue-effect merge reference", () => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const effect = issueEffectEvent(ISSUE_EFFECT, "e".repeat(40))
+    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    expect(() =>
+      project(changeChain(opened, effect, merged), "refs/yrd/q/changes/task/forward-ref", "fixture"),
+    ).toThrow(/earlier merged event/u)
+  })
+
+  it("validates issue-effect merge references when enumerating public change segments", () => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    const effect = issueEffectEvent({ ...ISSUE_EFFECT, mergedEvent: "f".repeat(40) })
+
+    expect(() =>
+      enumerateChangeSegments(
+        changeChain(opened, merged, effect),
+        "refs/yrd/q/changes/task/segments-bad-ref",
+        "fixture",
+      ),
+    ).toThrow(/earlier merged event/u)
+  })
+
+  it("refuses a duplicate issue-effect identity on one branch chain", () => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    const first = issueEffectEvent(ISSUE_EFFECT)
+    const second = issueEffectEvent(ISSUE_EFFECT, "e".repeat(40))
+    expect(() =>
+      project(changeChain(opened, merged, first, second), "refs/yrd/q/changes/task/duplicate-effect", "fixture"),
+    ).toThrow(/duplicate issue effect/u)
+  })
+
+  it("serializes the typed issue effect on the existing notified event", () => {
+    const written = changeInput("notified", {
+      queueTip: A,
+      at: new Date("2026-09-22T14:01:00.000Z"),
+      issueEffect: ISSUE_EFFECT,
+    })
+    expect(written.props).toContainEqual(["Issue-Effect", JSON.stringify(ISSUE_EFFECT)])
+    expect(written.props?.some(([key]) => ["For", "To", "Key", "Result"].includes(key))).toBe(false)
+  })
+
+  it("rejects a reason on an issue-effect notification", () => {
+    expect(() =>
+      changeInput("notified", {
+        queueTip: A,
+        at: new Date("2026-09-22T14:01:00.000Z"),
+        issueEffect: ISSUE_EFFECT,
+        reason: "audit",
+      }),
+    ).toThrow(/issue effect cannot carry Reason/u)
   })
 
   it("settles multiple recipients for a stuck event while keeping the stop in place", () => {
