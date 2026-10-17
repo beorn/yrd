@@ -203,9 +203,25 @@ function pinRef(sha: string): string {
  * `refs/remotes/origin/main`, then the ref. The compose reads main through git-super's refresh cache, and a derive
  * that trusted a cached observation forked from the main an earlier round had just published (27176, 2026-10-02
  * 18:02 PDT) — the derive step reads it fresh here, on derivation rounds only. Returns `undefined` when the store is
- * absent; an unreadable main fails with the store and query. A fetch that fails leaves the stored ref and is
- * reported to `onStale`.
+ * absent; an unreadable main fails with the store and query. A fetch that fails is RECORDED through `onStale` and
+ * then REFUSED: this throws `ComponentMainStale` instead of returning the stored ref, because a ref this round
+ * cannot prove current is the 27176 fork (2026-10-02 18:02 PDT) and reading it is what produced that fork. The
+ * caller decides how to surface the refusal; nothing here proceeds on the stored ref (29750, @cto ruling: refuse
+ * by name, never prove-and-continue).
  */
+/** A component-main refresh that failed: the stored ref cannot stand in for main, so the reader refuses (29750). */
+export class ComponentMainStale extends Error {
+  constructor(
+    readonly store: string,
+    readonly why: string,
+  ) {
+    super(
+      `refreshing refs/remotes/origin/main in ${store} failed (${why}); the derivation refuses rather than reading a stored ref it cannot prove current`,
+    )
+    this.name = "ComponentMainStale"
+  }
+}
+
 export async function readComponentMain(
   gitIn: (cwd: string) => Git,
   store: string,
@@ -224,7 +240,9 @@ export async function readComponentMain(
       "+refs/heads/main:refs/remotes/origin/main",
     ])
   } catch (error) {
-    await onStale(error instanceof Error ? (error.message.split("\n")[0] ?? error.message) : String(error))
+    const why = error instanceof Error ? (error.message.split("\n")[0] ?? error.message) : String(error)
+    await onStale(why)
+    throw new ComponentMainStale(store, why)
   }
   try {
     return (await storeGit(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main^{commit}"])).trim()

@@ -30,7 +30,7 @@ import { dirname, join } from "node:path"
 import type { Process } from "@yrd/process"
 import { composeGitlinkCarrier } from "git-super/gitlink-carrier"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckResult } from "./check.ts"
-import { readComponentMain } from "./reference.ts"
+import { ComponentMainStale, readComponentMain } from "./reference.ts"
 import { gitIn, resolveGitSelection, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
 
 /** The name the derive runs, logs and ends a change under. */
@@ -181,7 +181,17 @@ export async function deriveInWorktree(options: DeriveInWorktree): Promise<Deriv
   for (const path of [...changedPaths].sort()) {
     const child = gitAt(join(cwd, path))
     const from = (await child(["rev-parse", "HEAD"])).trim()
-    const main = await rebaseDerivationOnComponentMain({ child, cwd, derive, from, path, repo: options.repo, gitAt })
+    const main = await rebaseDerivationOnComponentMain({
+      candidate,
+      child,
+      cwd,
+      derive,
+      from,
+      path,
+      ran,
+      repo: options.repo,
+      gitAt,
+    })
     if (main !== undefined && (await child(["status", "--porcelain=v1", "--untracked-files=all"])).trim() === "") {
       // THE DEFERRED ROUND REUSES WHAT IT PUBLISHED. Main already holds this exact derivation — the earlier round
       // of this change published it and the root land was deferred — so the pin is main, no sibling commit is
@@ -236,11 +246,13 @@ export async function deriveInWorktree(options: DeriveInWorktree): Promise<Deriv
  */
 async function rebaseDerivationOnComponentMain(
   options: Readonly<{
+    candidate: string
     child: Git
     cwd: string
     derive: DeriveSpec
     from: string
     path: string
+    ran: Readonly<{ result: CheckResult; start: string; end: string }>
     repo: string
     gitAt: (path: string) => Git
   }>,
@@ -251,9 +263,18 @@ async function rebaseDerivationOnComponentMain(
   // observation (git-super's refresh window), and the recompose that follows reads a fresh one — deriving against the
   // cached main is how the two forks met. One fetch per derived submodule, on derivation rounds only.
   const store = join(options.repo, path)
-  const main = await readComponentMain(options.gitAt, store, (why) =>
-    note(`refreshing ${store} refs/remotes/origin/main failed (${why}); reading the stored ref`),
-  )
+  let main: string | undefined
+  try {
+    main = await readComponentMain(options.gitAt, store, (why) =>
+      note(`refreshing ${store} refs/remotes/origin/main failed (${why}); the derivation refuses (29750)`),
+    )
+  } catch (error) {
+    // 29750 (@cto ruling: refuse by name, never prove-and-continue): the stored ref may be older than the main an
+    // earlier round published, which is the 27176 fork. The derive stops the change by name instead of deriving on
+    // a ref it cannot prove current, and the refusal keeps the log line onStale just wrote.
+    if (error instanceof ComponentMainStale) throw new DeriveFailed(options.candidate, error.message, options.ran)
+    throw error
+  }
   if (main === undefined) {
     await note(
       `no reference store with a main at ${store}; the derived commit stays on the merged pin ${from.slice(0, 12)}`,
