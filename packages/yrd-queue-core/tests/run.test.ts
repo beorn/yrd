@@ -4284,7 +4284,11 @@ it("bounds an observed upper stack after a rival records its lower merge", async
   writeFileSync(join(w.work, "upper.txt"), "upper")
   await w.git(["add", "upper.txt"])
   await w.git(["commit", "--quiet", "-m", "upper"])
-  await submit(w.git, "origin", { branch: upperBranch, submitter: "fixture", target: { remote: "origin", branch: "main" } })
+  await submit(w.git, "origin", {
+    branch: upperBranch,
+    submitter: "fixture",
+    target: { remote: "origin", branch: "main" },
+  })
   await w.git(["checkout", "--quiet", "main"])
   await w.git(["merge", "--quiet", "--ff-only", upperBranch])
   await w.git(["push", "--quiet", "origin", "main"])
@@ -4295,7 +4299,11 @@ it("bounds an observed upper stack after a rival records its lower merge", async
     if (selected?.expect === undefined) return
     injected = true
     await appendChangeEvent(store, "main", lowerBranch, selected.expect, {
-      type: "merged", at: new Date(), commit: lower, base: w.target, reason: `observed on target at ${lower}`,
+      type: "merged",
+      at: new Date(),
+      commit: lower,
+      base: w.target,
+      reason: `observed on target at ${lower}`,
     })
   })
   const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })

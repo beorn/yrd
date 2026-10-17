@@ -1382,7 +1382,11 @@ export async function eventQueueRun(
         head: change.commit,
         reason: `change advanced to ${current.status} at ${current.tip ?? "no tip"} while this round recorded its target merge: ${error instanceof Error ? error.message : String(error)}`,
       })
-      if (current.status === "merged") observedMerged.push(branch)
+      if (current.status === "merged") {
+        if (current.merge === undefined) throw new Error(`validated merged change ${branch} has no merge commit`)
+        recordedMergePoints.add(current.merge)
+        observedMerged.push(branch)
+      }
     }
   }
   const open: {
