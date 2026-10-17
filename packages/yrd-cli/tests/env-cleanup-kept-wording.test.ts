@@ -7,6 +7,11 @@
  *   (2) a close request that already STOOD was reported as `file-failed`
  *       (hand-start-1827.log:38) — nothing failed and nothing was written, the request simply already
  *       stood. It is a no-op that must name the standing request, never a failure.
+ *   (5) every round reprinted every unchanged keep: ~50 folders every 2 minutes is writer volume, not
+ *       signal (log-retention ruling, 2026-10-16, "Not archival"). A kept folder is written once per CHANGE
+ *       of reason, and the map that remembers the last row per path is PERSISTED in the sweep's own state
+ *       file, so a restart or a landing that advances the vendor/yrd pin does not reprint the registry
+ *       either (@chief accepted that carrier, 2026-10-16).
  * @level   l2 (a real bare remote, real retained worktrees, real close-request files, a real open record)
  * @consumer the queue round's post-judgment environment cleanup
  * @reach   fs-walk <fixture-only: the registry, environment and close-request trees this fixture makes under the OS temp root>
@@ -26,6 +31,7 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, expect, it, vi } from "vitest"
+import * as removely from "removely"
 import type { QueueConfig } from "@yrd/queue-core"
 import { remoteUrl } from "@yrd/queue-core"
 import { createEnvironmentCleanup } from "../src/env-cleanup.ts"
@@ -149,8 +155,39 @@ function configFor(head: string): QueueConfig {
   }
 }
 
+/**
+ * One more environment under `.bays/`, opened `at`. An opening record older than the grace window makes
+ * the row eligible for the sweep, so a charged row can be closed and the registry can shrink.
+ */
+async function addEnvironment(w: Awaited<ReturnType<typeof world>>, name: string, at: string): Promise<string> {
+  const env = join(w.repo, ".bays", name)
+  await w.git(["worktree", "add", "--quiet", "-b", `task/${name}`, env, "HEAD"])
+  const envGitDir = (await w.git(["-C", env, "rev-parse", "--absolute-git-dir"])).trim()
+  writeEnvOpenRecord(envGitDir, { version: 1, lifetime: "job", at })
+  return env
+}
+
+/** A census that cannot rule out a holder: the WHOLE registry is refused with this one reason. */
+function refusalCensus(): Awaited<ReturnType<typeof removely.inspectProcessCwds>> {
+  return {
+    mechanism: "proc",
+    complete: false,
+    rows: [],
+    unreadable: [
+      {
+        pid: 999999,
+        uid: process.getuid?.(),
+        comm: "fixture-ghost",
+        denied: ["process"],
+        issues: [{ source: "process", resource: "cwd", reason: "denied", code: "EACCES" }],
+      },
+    ],
+  }
+}
+
 async function runRound(
   w: Awaited<ReturnType<typeof world>>,
+  cleanup: ReturnType<typeof createEnvironmentCleanup>,
   run: string,
   merged: readonly string[],
 ): Promise<readonly Record<string, unknown>[]> {
@@ -158,7 +195,7 @@ async function runRound(
     ref: `refs/yrd/changes/${w.branch}`,
     history: { state: { status: "merged", commit: w.head, tip: "b".repeat(40) }, events: [] },
   })
-  await createEnvironmentCleanup()({
+  await cleanup({
     repo: w.repo,
     git: w.git,
     config: configFor(w.head),
@@ -167,13 +204,56 @@ async function runRound(
     selection: w.git.selection,
     outcome: { run, log: join(w.workdir, "journal.jsonl"), merged, target: w.head } as never,
   })
-  return cleanupRows(w.workdir)
+  // Rounds share one journal, so only the rows THIS round wrote are its own.
+  return cleanupRows(w.workdir).filter((row) => row.run === run)
 }
+
+it("writes a refused registry once across fresh processes, with the environments still protected", async () => {
+  const at = new Date().toISOString()
+  const w = await world(at)
+  // A census that cannot rule out a holder refuses coverage for the WHOLE registry: every registered
+  // environment is preserved with that one reason BEFORE the batch runs (the census catch in
+  // env-cleanup.ts). That is the shape the live service hits on a busy host — ~50 folders, every round.
+  const census = vi.mocked(removely.inspectProcessCwds)
+  try {
+    census.mockResolvedValue({
+      mechanism: "proc",
+      complete: false,
+      rows: [],
+      unreadable: [
+        {
+          pid: 999999,
+          uid: process.getuid?.(),
+          comm: "fixture-ghost",
+          denied: ["process"],
+          issues: [{ source: "process", resource: "cwd", reason: "denied", code: "EACCES" }],
+        },
+      ],
+    })
+    const first = await runRound(w, createEnvironmentCleanup(), "refused-1", [])
+    const kept = first.filter((row) => row.result === "kept" && row.path === w.env)
+    expect(kept, JSON.stringify(first)).toHaveLength(1)
+    expect(String(kept[0]?.why), "the refusal names the pid it could not read").toContain("could not read pid 999999")
+    expect(existsSync(w.env), "the environment is protected, never removed on a refusal").toBe(true)
+
+    // A FRESH process meets the same refusal for the same folder with the same reason. The row is written
+    // once per change of reason ACROSS processes (#29679 row 5): no second row, and the round still counts
+    // the coverage it walked. Nothing is persisted on the refusal path today, so this reprints.
+    const restarted = await runRound(w, createEnvironmentCleanup(), "refused-2", [])
+    expect(
+      restarted.filter((row) => row.result === "kept" && row.path === w.env),
+      JSON.stringify(restarted),
+    ).toEqual([])
+    expect(restarted.find((row) => row.run === "refused-2" && "kept" in row)?.kept).toBe(1)
+  } finally {
+    census.mockResolvedValue({ mechanism: "proc", complete: true, rows: [], unreadable: [] })
+  }
+})
 
 it("names a kept environment's keep reason without an Error: prefix", async () => {
   const at = new Date().toISOString()
   const w = await world(at)
-  const rows = await runRound(w, "cleanup-kept-wording", [])
+  const rows = await runRound(w, createEnvironmentCleanup(), "cleanup-kept-wording", [])
 
   const kept = rows.find((row) => row.result === "kept" && row.path === w.env)
   expect(kept, JSON.stringify(rows)).toBeDefined()
@@ -202,7 +282,7 @@ it("reports a close request that already stands as a no-op naming it, never file
   }).file
   expect(existsSync(standing), "the request stands before the round").toBe(true)
 
-  const rows = await runRound(w, "cleanup-close-request-wording", [w.branch])
+  const rows = await runRound(w, createEnvironmentCleanup(), "cleanup-close-request-wording", [w.branch])
 
   expect(
     rows.filter((row) => row.result === "file-failed"),
@@ -213,4 +293,115 @@ it("reports a close request that already stands as a no-op naming it, never file
   expect(String(filed?.why)).toContain("close request already stood")
   expect(String(filed?.why), "the standing request is named by the file it stands in").toContain(standing)
   expect(String(filed?.why)).not.toContain("Error: ")
+})
+
+it("writes a kept folder once per CHANGE of reason, never once per round", async () => {
+  const at = new Date().toISOString()
+  const w = await world(at)
+  const cleanup = createEnvironmentCleanup()
+  const keptRows = (rows: readonly Record<string, unknown>[]): readonly Record<string, unknown>[] =>
+    rows.filter((row) => row.result === "kept" && row.path === w.env)
+
+  const first = await runRound(w, cleanup, "changed-once-1", [])
+  expect(keptRows(first), JSON.stringify(first)).toHaveLength(1)
+  expect(String(keptRows(first)[0]?.why)).toBe(`fresh: opened ${at}`)
+
+  // The next round sees the same folder with the same reason: it writes no row and prints nothing.
+  const second = await runRound(w, cleanup, "changed-once-2", [])
+  expect(keptRows(second), JSON.stringify(second)).toEqual([])
+  // …and still reports the coverage it walked, so the footer is not a silent downgrade.
+  const footer = second.find((row) => row.run === "changed-once-2" && "kept" in row)
+  expect(footer?.kept, JSON.stringify(second)).toBe(1)
+
+  // The map is PERSISTED — in the state file this sweep already writes for its resume cursor, never a new
+  // file kind. So a fresh process (a restart, or a landing that advances the vendor/yrd pin) does not
+  // reprint the registry either: the same reason writes no row, and the round still COUNTS what it walked.
+  const stateFile = join(w.workdir, "state", "yrd", "environment-cleanup.json")
+  const state = JSON.parse(readFileSync(stateFile, "utf8")) as { reported?: Record<string, string> }
+  expect(state.reported, "the last row written per path is part of the sweep's own state file").toMatchObject({
+    [w.env]: expect.stringContaining("fresh: opened"),
+  })
+  const restarted = await runRound(w, createEnvironmentCleanup(), "changed-once-3", [])
+  expect(keptRows(restarted), JSON.stringify(restarted)).toEqual([])
+  expect(restarted.find((row) => row.run === "changed-once-3" && "kept" in row)?.kept).toBe(1)
+
+  // A different reason is a different row: the rule is per change of reason, not per folder forever.
+  const later = new Date(Date.now() + 1_000).toISOString()
+  const envGitDir = (await w.git(["-C", w.env, "rev-parse", "--absolute-git-dir"])).trim()
+  writeEnvOpenRecord(envGitDir, { version: 1, lifetime: "job", at: later })
+  const changed = await runRound(w, cleanup, "changed-once-4", [])
+  expect(keptRows(changed), JSON.stringify(changed)).toHaveLength(1)
+  expect(String(keptRows(changed)[0]?.why)).toBe(`fresh: opened ${later}`)
+})
+
+/**
+ * @failure #29679 row 5, second revise (@dev/review2, 2026-10-17): `persistState` indexed
+ *          `inventory.rows[progress.cursor]` and returned SILENTLY when that retained cursor sat past the
+ *          end of a shrunken registry. A round that stops its batch at the registry's last row and closes
+ *          an environment leaves the next, smaller registry with no row at that index; the census refusal
+ *          persists BEFORE the batch re-normalizes the cursor, so the refusal map was never saved and the
+ *          next process reprinted every unchanged keep. The sweep's own close supplies the shrink — no
+ *          external race is required.
+ * @level   l2 — a real bare remote, nine real retained worktrees, a real shrunken registry across rounds
+ * @consumer the queue round's post-judgment environment cleanup, on a host that refuses census coverage
+ * @reach   fs-walk <fixture-only: the registry, environments and state this fixture makes under the OS temp root>
+ * @testonly none — the census and close seams are the module mocks this file already carries.
+ */
+it("persists a refused registry even when the retained cursor points past a shrunken registry", async () => {
+  const fresh = new Date().toISOString()
+  const stale = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString()
+  const w = await world(fresh)
+  // Eight more environments whose opening records are PAST the grace window, so the first charged row is
+  // eligible and the sweep closes it, shrinking the registry from nine rows to eight. `env-fresh` sorts
+  // last and is never charged: the batch STOPS at it, leaving the cursor on index 8 of nine.
+  const added: string[] = []
+  for (let index = 0; index < 8; index++) added.push(await addEnvironment(w, `env-${index}`, stale))
+
+  const cleanup = createEnvironmentCleanup()
+  const census = vi.mocked(removely.inspectProcessCwds)
+  try {
+    // Round 1 fills the batch, closes exactly one environment and stops with the cursor on the last row.
+    const first = await runRound(w, cleanup, "stale-cursor-1", [])
+    expect(
+      first.filter((row) => row.result === "closed").map((row) => row.path),
+      JSON.stringify(first),
+    ).toEqual([added[0]])
+    // The sweep's OWN close retires the environment: the registry it leaves is one row smaller.
+    await w.git(["worktree", "remove", "--force", added[0]!])
+    const stateFile = join(w.workdir, "state", "yrd", "environment-cleanup.json")
+    expect(
+      (JSON.parse(readFileSync(stateFile, "utf8")) as { cursorEnv?: string }).cursorEnv,
+      "the round persists its cursor on the registry's last row",
+    ).toBe("env-fresh")
+
+    // Round 2, the SAME process, meets a refusal for the SMALLER registry: the cursor still reads 8 from the
+    // nine-row round and the batch has not re-normalized it. Normalizing inside `persistState` is what saves
+    // the refusal map here; without it nothing is written and the restart reprints.
+    census.mockResolvedValue(refusalCensus())
+    const refused = await runRound(w, cleanup, "stale-cursor-2", [])
+    const surviving = added.slice(1)
+    for (const path of surviving) {
+      expect(
+        refused.find((row) => row.result === "kept" && row.path === path),
+        JSON.stringify(refused),
+      ).toBeDefined()
+    }
+    const saved = JSON.parse(readFileSync(stateFile, "utf8")) as { reported?: Record<string, string> }
+    expect(
+      saved.reported?.[surviving[0]!],
+      "the refusal reason is persisted, so a restart does not reprint it",
+    ).toContain("could not read pid 999999")
+
+    // Round 3 is a FRESH process meeting the same refusal: every surviving environment is unchanged, so the
+    // round writes no kept row for it — the flood this rule exists to remove — and still counts its coverage.
+    const restarted = await runRound(w, createEnvironmentCleanup(), "stale-cursor-3", [])
+    expect(
+      restarted.filter((row) => row.result === "kept"),
+      JSON.stringify(restarted),
+    ).toEqual([])
+    // The refusal preserves the WHOLE eight-row registry — the seven survivors plus `env-fresh`.
+    expect(restarted.find((row) => row.run === "stale-cursor-3" && "kept" in row)?.kept).toBe(surviving.length + 1)
+  } finally {
+    census.mockResolvedValue({ mechanism: "proc", complete: true, rows: [], unreadable: [] })
+  }
 })
