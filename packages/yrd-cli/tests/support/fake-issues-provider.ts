@@ -1,4 +1,5 @@
 /**
+ * @fakes @yrd/cli
  * A stand-in issues provider for `yrd issues` tests. The first argument picks the behaviour; the rest are echoed.
  *   json   print {"argv": [...rest]} and exit 0
  *   text   print a line that is not JSON and exit 0
