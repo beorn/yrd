@@ -41,7 +41,7 @@ import {
   type GitObjectContext,
 } from "git-super/process"
 import type { QueueObservation } from "./remote.ts"
-import { remoteSeam } from "./remote-calls.ts"
+import { remoteSeam, withRemoteSeamGap } from "./remote-calls.ts"
 
 /** Attribution written on a merge made by a queue round. */
 export function mergedBy(queue: string, run: string): string {
@@ -1113,7 +1113,9 @@ export async function refAt(
 /** Fetch one remote commit through Gitomic's private namespace. */
 export async function readRemoteCommit(git: Git, remote: string, ref: string): Promise<string | undefined> {
   const { repo, fetchRefs } = await remoteRefReader(git, remote, ref)
-  return (await fetchRefs(repo, ref, remote)).get(ref)
+  // The read itself is the call site (29697, @cto R2): one exact ref costs one round trip, and the batched
+  // read beside it is the cut a ranking can make — so it is named for the operation, never for a layer.
+  return withRemoteSeamGap("remoteRead", async () => (await fetchRefs(repo, ref, remote)).get(ref))
 }
 
 /**
@@ -1126,7 +1128,7 @@ export async function readRemoteCommits(
   refs: readonly string[],
 ): Promise<ReadonlyMap<string, string>> {
   const { repo, fetchRefs } = await remoteRefReader(git, remote, refs.join(" "))
-  return fetchRefs(repo, [...refs], remote, { absent: "omit" })
+  return withRemoteSeamGap("remoteRead", () => fetchRefs(repo, [...refs], remote, { absent: "omit" }))
 }
 
 /** The repository store and the backend fetch every remote ref read here goes through. */

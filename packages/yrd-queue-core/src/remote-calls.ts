@@ -25,6 +25,14 @@ export function remoteSeam(): string | undefined {
   return seamScope.getStore()
 }
 
+/**
+ * Label a call site that no step names (29697): a step's own name always wins, so this fills the gap between
+ * steps and can never mask a caller that already has one. The name is the call site's own, never a layer.
+ */
+export function withRemoteSeamGap<T>(name: string, action: () => T): T {
+  return seamScope.getStore() === undefined ? withRemoteSeam(name, action) : action()
+}
+
 export type RemoteCalls = Readonly<{
   /** git processes that wrote an event file. */
   processes: number

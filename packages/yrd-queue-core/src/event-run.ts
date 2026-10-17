@@ -71,6 +71,7 @@ import { queueRefPrefix, runIndexRef } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
 import { revertedPathsFinding, revertedPathsReason, revertGuardAction } from "./revert-guard.ts"
 import { publishCheckedChildren } from "./publication.ts"
+import { withRemoteSeam, withRemoteSeamGap } from "./remote-calls.ts"
 import { SETUP, SetupFailed, discardWorktree } from "./worktree.ts"
 import { installInputsChanged } from "./install-inputs.ts"
 import { WorktreePool } from "./pool.ts"
@@ -404,7 +405,9 @@ export async function eventQueueRun(
     runnerMarkerAt?: Date,
   ): Promise<T> => {
     try {
-      return await operation()
+      // The transaction's own site names this store write where no step is current (29697, @cto R2): a gap
+      // filler, so a step's label still wins wherever one is set and what stays unnamed stays measured.
+      return await withRemoteSeamGap(site, operation)
     } catch (error) {
       if (!(error instanceof RetriesExhausted)) throw error
       const ref = queueRef(queue)
@@ -474,16 +477,14 @@ export async function eventQueueRun(
       prepared({ oid, ...(number === undefined ? {} : { number }) })
     }
     if (runNumber !== undefined) {
-      return { oid: await appendChangeEvent(args[0], args[1], args[2], args[3], args[4], onPrepared) }
+      return {
+        oid: await withRemoteSeamGap("changeAppend", () =>
+          appendChangeEvent(args[0], args[1], args[2], args[3], args[4], onPrepared),
+        ),
+      }
     }
-    const written = await appendNumberedChangeEvent(
-      args[0],
-      args[1],
-      args[2],
-      args[3],
-      args[4],
-      runIdentity,
-      onPrepared,
+    const written = await withRemoteSeamGap("changeAppend", () =>
+      appendNumberedChangeEvent(args[0], args[1], args[2], args[3], args[4], runIdentity, onPrepared),
     )
     recordRunNumber(written.number)
     return { oid: written.event, number: written.number }
@@ -591,7 +592,7 @@ export async function eventQueueRun(
       }
       // A rival may advance again between our status and its selected history.
       // Re-read once inside this round; a second move is still a loud error.
-      latest = await readStatus(store, queue, branch)
+      latest = await readChange(branch)
       if (latest.tip === undefined || latest.tip === current.tip) throw readError
       log.write({
         kind: "warning",
@@ -616,12 +617,15 @@ export async function eventQueueRun(
 
   log.write({ kind: "queue", queue: queueName(options.target, url) })
   const prefix = queueRefPrefix(queue)
-  const advertised = await listRefs(prefix, store)
+  // Named at its own call site (29697, @cto R2): a store call that falls outside a step stays a call site
+  // somebody can rank and cut, never an attributed layer. Defined before its first use, below.
+  const refsList = (ref: string) => withRemoteSeamGap("refsList", () => listRefs(ref, store))
+  const advertised = await refsList(prefix)
   const legacyRef = `${prefix}/override`
   const legacyOid = advertised.get(legacyRef)
   if (legacyOid !== undefined) throw new LegacyOverridePresent(legacyRef, legacyOid)
   const targetRef = `refs/heads/${queue}`
-  const target = (await listRefs(targetRef, store)).get(targetRef)
+  const target = (await refsList(targetRef)).get(targetRef)
   if (target === undefined) throw new Error(`event queue ${url}#${queue}: missing target ${targetRef}`)
   if (target !== options.targetSha) {
     throw new Error(
@@ -645,6 +649,24 @@ export async function eventQueueRun(
   /** The line as this round read it (25669), stated on every outcome once the line is read. */
   const read: { line?: RoundLine } = {}
   const branches: string[] = []
+  /**
+   * `timedStep` under the round's remote seam: the step's own name labels every remote call it starts, so the
+   * round's `remote-calls` row answers "who" and not only "how much" (29697 row 1). The seam rides the async
+   * scope, so a git-super child started inside the step inherits it (git.ts `seamEnvironment`).
+   */
+  const seamStep = <T>(
+    about: Readonly<
+      { name: string; phase: string } & ({ branch: string; head: string } | { target: string; base: string })
+    >,
+    work: () => Promise<T>,
+  ): Promise<T> => timedStep(log, about, () => withRemoteSeam(about.name, work))
+  /**
+   * The round's own store operations, each named for the operation it is (29697, @cto R2): where a step wraps
+   * the call, the step's name is the caller and wins; where nothing does, the operation is still a call site
+   * somebody can rank and cut. A layer name would attribute every unnamed store call by construction instead.
+   */
+  const readChange = (branch: string) => withRemoteSeamGap("changeRead", () => readStatus(store, queue, branch))
+  const readOps = () => withRemoteSeamGap("opsRead", () => readEventOps(store, git, queue, target))
   const deleteMergedBranch = async (branch: string, head?: string): Promise<void> => {
     if (head === undefined) {
       log.write({ branch, kind: "branch-kept", saw: "unread", reason: "no submitted commit recorded" })
@@ -653,15 +675,18 @@ export async function eventQueueRun(
     }
     const ref = `refs/heads/${branch}`
     try {
-      if (store.backend.publish === undefined) {
+      const publishMergedBranch = store.backend.publish
+      if (publishMergedBranch === undefined) {
         throw new Error("Gitomic backend lacks publish for merged branch deletion")
       }
-      await store.backend.publish(store.repo, [{ ref, expect: head, oid: null }], options.target.remote)
+      await withRemoteSeam("retire", () =>
+        publishMergedBranch.call(store.backend, store.repo, [{ ref, expect: head, oid: null }], options.target.remote),
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       let saw: string
       try {
-        saw = (await readRemoteCommit(git, options.target.remote, ref)) ?? "absent"
+        saw = (await withRemoteSeam("retire", () => readRemoteCommit(git, options.target.remote, ref))) ?? "absent"
       } catch (readError) {
         saw = `unread (${readError instanceof Error ? readError.message : String(readError)})`
       }
@@ -724,7 +749,7 @@ export async function eventQueueRun(
     existingEnding?: Event,
   ): Promise<void> => {
     if ((options.notify?.length ?? 0) === 0) return
-    const change = await readStatus(store, queue, branch)
+    const change = await readChange(branch)
     if (change.commit === undefined) {
       throw new Error(`event queue ${url}#${queue}: ${branch} notice has no submitted commit`)
     }
@@ -852,7 +877,7 @@ export async function eventQueueRun(
    * otherwise undefined, and the caller's conflict stands. A tip moved any other way is still the loud stop.
    */
   const openedAfter = async (branch: string, expected: string): Promise<string | undefined> => {
-    const latest = await readStatus(store, queue, branch)
+    const latest = await readChange(branch)
     if (latest.tip === undefined || latest.tip === expected) return undefined
     const history = await readChangeEvents(store, queue, branch, latest.tip)
     const at = history.findIndex((event) => event.id === expected)
@@ -910,7 +935,7 @@ export async function eventQueueRun(
     return result(observation.outcome === "invalid" ? 2 : 0)
   }
 
-  let operational = await readEventOps(store, git, queue, target)
+  let operational = await withRemoteSeam("roundOpen", () => readOps())
   // No override can expire or need a reminder when the table is empty. Keep
   // the round's injected clock for its stop window until a clock act is due.
   const clock =
@@ -962,9 +987,9 @@ export async function eventQueueRun(
       }
     }
   }
-  operational = await readEventOps(store, git, queue, target)
+  operational = await withRemoteSeam("prePick", () => readOps())
   let queueState = operational.queue
-  const { histories, invalid } = await listChangeHistories(store, queue)
+  const { histories, invalid } = await withRemoteSeam("prePick", () => listChangeHistories(store, queue))
   // 27198: ONE queue-level `notify-floors` snapshot per run, before any ending
   // delivery. The first snapshot is a migration: it mints every declared name at
   // the queue's created instant, and refuses loudly unless the declared name set
@@ -1025,7 +1050,7 @@ export async function eventQueueRun(
           floors,
         }),
       )
-      operational = await readEventOps(store, git, queue, target)
+      operational = await withRemoteSeam("floorsRefresh", () => readOps())
       queueState = operational.queue
     }
     notifyFloors = queueState.notifyFloors
@@ -1068,7 +1093,7 @@ export async function eventQueueRun(
         )
       ) {
         await tell(branch, latest.kind, latest.id, ending)
-        changes.set(branch, await readStatus(store, queue, branch))
+        changes.set(branch, await readChange(branch))
       }
     }
   }
@@ -1112,7 +1137,7 @@ export async function eventQueueRun(
     await tellDirect(commit.commit, observed)
   }
   if (direct.length > 0) {
-    operational = await readEventOps(store, git, queue, target)
+    operational = await withRemoteSeam("afterDirect", () => readOps())
     queueState = operational.queue
   }
   if (operational.stop !== undefined && options.foreground !== true) {
@@ -1166,7 +1191,7 @@ export async function eventQueueRun(
         title: `merged ${branch}`,
         run: log.id,
       })
-      const ended = await readStatus(store, queue, branch)
+      const ended = await readChange(branch)
       if (ended.status !== "merged" || ended.tip !== written || ended.ending?.id !== written) {
         throw new Error(
           `event queue ${url}#${queue}: observed merge for ${branch} wrote ${written} but read back ${ended.status} at ${ended.tip ?? "no tip"}`,
@@ -1186,7 +1211,7 @@ export async function eventQueueRun(
     } catch (error) {
       let current
       try {
-        current = await readStatus(store, queue, branch)
+        current = await readChange(branch)
       } catch (readError) {
         throw new AggregateError(
           [error, readError],
@@ -1246,7 +1271,7 @@ export async function eventQueueRun(
         reason: "deleted",
         title: `${branch} absent from remote`,
       })
-      const ended = await readStatus(store, queue, branch)
+      const ended = await readChange(branch)
       if (ended.status !== "cancelled" || ended.reason !== "deleted" || ended.commit !== head || ended.tip !== tip) {
         throw new Error(
           `event queue ${url}#${queue}: deleted branch ${branch} wrote ${tip} but read back ${ended.status} at ${ended.tip ?? "no tip"}`,
@@ -1257,7 +1282,7 @@ export async function eventQueueRun(
     } catch (error) {
       let current
       try {
-        current = await readStatus(store, queue, branch)
+        current = await readChange(branch)
       } catch (readError) {
         throw new AggregateError(
           [error, readError],
@@ -1274,10 +1299,10 @@ export async function eventQueueRun(
     }
   }
   const repaired = await repairMissingBranchHeads(
-    await listRefs("refs/heads/", store),
+    await refsList("refs/heads/"),
     open.map(({ branch, since }) => ({ branch, openedAt: since.getTime() })),
     store.remote,
-    (exact) => listRefs(exact, store),
+    (exact) => refsList(exact),
     options.now ?? Date.now,
     options.branchDeletionGraceMs,
   )
@@ -1333,7 +1358,7 @@ export async function eventQueueRun(
     reason: string,
     next?: string,
   ): Promise<void> => {
-    const current = await readEventOps(store, git, queue, target)
+    const current = await readOps()
     if (
       current.stop?.cause === "stuck" &&
       current.stop.change?.branch === branch &&
@@ -1472,7 +1497,7 @@ export async function eventQueueRun(
     marker: string,
     reason?: string,
   ): Promise<QueueRunOutcome | undefined> => {
-    const current = await readStatus(store, queue, branch)
+    const current = await readChange(branch)
     if (current.tip !== marker) {
       log.write({
         kind: "discarded",
@@ -1577,7 +1602,7 @@ export async function eventQueueRun(
     try {
       child = await publishWithTransientRetry(
         () =>
-          timedStep(log, { branch, head, name: "publish", phase: "merge" }, () =>
+          seamStep({ branch, head, name: "publish", phase: "merge" }, () =>
             publishCheckedChildren({
               git,
               cwd: options.repo,
@@ -1599,7 +1624,7 @@ export async function eventQueueRun(
         },
       )
     } catch (error) {
-      const after = await readStatus(store, queue, branch)
+      const after = await readChange(branch)
       const rival = await rivalOrThrow(branch, marker, after, error)
       log.write({ kind: "discarded", branch, head, reason: discardedJudgementReason(rival, error) })
       return result(failed.length > 0 ? 1 : 0, observedMerged, failed)
@@ -1634,7 +1659,7 @@ export async function eventQueueRun(
     try {
       const stagedMerge = await publishWithTransientRetry<StagedEvent>(
         (prepared) =>
-          timedStep(log, { branch, head, name: "merge", phase: "merge" }, () =>
+          seamStep({ branch, head, name: "merge", phase: "merge" }, () =>
             appendOwnedMergeOnce(
               (staged) => {
                 preparedMerge = staged.oid
@@ -1708,7 +1733,7 @@ export async function eventQueueRun(
       // keep their original error. Only a publication attempt can be unknown.
       if (preparedMerge === undefined && !(error instanceof Conflict)) throw error
       if (error instanceof Conflict && error.refs.includes(queueRef(queue)) && !error.refs.includes(ref)) {
-        const fresh = await readEventOps(store, git, queue, target)
+        const fresh = await readOps()
         if (fresh.queue.tip === queueState.tip) throw error
         log.write({
           kind: "warning",
@@ -1746,7 +1771,7 @@ export async function eventQueueRun(
       }
       let after: EventChange
       try {
-        const present = (await listRefs(ref, store)).get(ref)
+        const present = (await refsList(ref)).get(ref)
         if (present === undefined) {
           log.write({
             kind: "warning",
@@ -1759,7 +1784,7 @@ export async function eventQueueRun(
           })
           return undefined
         }
-        after = await readStatus(store, queue, branch)
+        after = await readChange(branch)
       } catch (readError) {
         log.write({
           kind: "warning",
@@ -1848,7 +1873,7 @@ export async function eventQueueRun(
         })
         return undefined
       }
-      const movedTarget = (await listRefs(targetRef, store)).get(targetRef)
+      const movedTarget = (await refsList(targetRef)).get(targetRef)
       if (movedTarget === undefined) {
         throw new Error(`event queue ${url}#${queue}: target disappeared after component publication`, { cause: error })
       }
@@ -1946,7 +1971,7 @@ export async function eventQueueRun(
       return result(0, observedMerged, [], [], [branch])
     }
     const branchRef = `refs/heads/${branch}`
-    if (selectedChange.status !== "merging" && !(await listRefs(branchRef, store)).has(branchRef)) {
+    if (selectedChange.status !== "merging" && !(await refsList(branchRef)).has(branchRef)) {
       await endDeletedChange({ ...selectedChange, tip })
       continue
     }
@@ -1964,7 +1989,7 @@ export async function eventQueueRun(
     mkdirSync(join(options.workdir, "worktrees", log.id), { recursive: true })
     let verified: Awaited<ReturnType<typeof verifyCandidate>>
     try {
-      verified = await timedStep(log, { branch, head, name: "compose", phase: "submit" }, () =>
+      verified = await seamStep({ branch, head, name: "compose", phase: "submit" }, () =>
         verifyCandidate({
           git,
           repo: options.repo,
@@ -2029,7 +2054,7 @@ export async function eventQueueRun(
     }
     try {
       if (verified.state === "failed") {
-        await timedStep(log, { branch, head, name: "remove", phase: "deprovision" }, () =>
+        await seamStep({ branch, head, name: "remove", phase: "deprovision" }, () =>
           discardWorktree(verified.failedWorktree),
         )
         const ended = await appendOwnedChange(store, queue, branch, tip, {
@@ -2294,7 +2319,7 @@ export async function eventQueueRun(
           const setupAbout = { branch, head, name: SETUP, phase }
           let worktree
           try {
-            worktree = await timedStep(log, { branch, head, name: "prepare", phase }, () =>
+            worktree = await seamStep({ branch, head, name: "prepare", phase }, () =>
               pool.borrow({
                 role: "candidate",
                 commit: candidate,
@@ -2396,7 +2421,7 @@ export async function eventQueueRun(
           } finally {
             if (worktree !== undefined) {
               try {
-                await timedStep(log, { branch, head, name: "remove", phase: "deprovision" }, () => pool.give(worktree))
+                await seamStep({ branch, head, name: "remove", phase: "deprovision" }, () => pool.give(worktree))
               } catch (error) {
                 log.write({
                   kind: "warning",
@@ -2781,7 +2806,7 @@ export async function eventQueueRun(
       }
       let current
       try {
-        current = await readStatus(store, queue, branch)
+        current = await readChange(branch)
       } catch (readError) {
         throw new AggregateError(
           [error, readError],
