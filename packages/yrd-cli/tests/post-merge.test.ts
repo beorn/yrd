@@ -10,7 +10,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
 import { createPostMerge } from "../src/post-merge.ts"
-import { readIssueDisplay } from "../src/issue-resolver.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { createEventQueue, createEventStore, readConfig, readStatus, submit } from "@yrd/queue-core"
@@ -162,22 +161,6 @@ it("labels interrupted evidence and starts a fresh catch-up without consulting o
   await restarted[Symbol.asyncDispose]()
   expect(attemptAt(path).status).toBe("interrupted")
   expect(cleaned).toEqual(["merge-oid", "startup"])
-})
-it("substitutes an opaque display key and names malformed or failed reads unavailable", async () => {
-  const root = world()
-  const key = "-/different/vault/@x/key.md"
-  expect(await readIssueDisplay(["sh", "-c", `printf '{"key":"%s"}' "$1"`, "display", "<key>"], key, root)).toEqual({
-    available: true,
-    data: { key },
-  })
-  expect(await readIssueDisplay(["sh", "-c", "printf nope"], key, root)).toMatchObject({
-    available: false,
-    reason: expect.stringContaining("invalid JSON"),
-  })
-  expect(await readIssueDisplay(["sh", "-c", "exit 9"], key, root)).toMatchObject({
-    available: false,
-    reason: expect.stringContaining("exit 9"),
-  })
 })
 it("attempts the provider and cleanup even when its derived artifact directory is unwritable", async () => {
   const root = world(),

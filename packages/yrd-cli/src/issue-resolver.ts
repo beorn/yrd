@@ -1,47 +1,44 @@
-import { createProcess } from "@yrd/process"
+import { runIssuesVerb } from "./issues/run.ts"
 
-/** Display transport only: provider keys and payloads have no Yrd issue semantics. */
+/** The display read's bound: a provider still running at 10 s is killed and the issue shows unavailable. */
+export const ISSUE_DISPLAY_TIMEOUT_MS = 10_000
+
+/**
+ * Display transport only: provider keys and payloads have no Yrd issue semantics. The read is the issues
+ * interface's `view`, run in-process through `runIssuesVerb` against the project root's `issues.yml`
+ * (@cto rulings c4cd9763 / b59e0e09); it no longer runs `.yrd.yml`'s `issuesProvider.read`.
+ */
 export async function readIssueDisplay(
-  command: readonly string[],
-  key: string,
-  cwd: string,
-  env?: NodeJS.ProcessEnv,
+  input: Readonly<{
+    key: string
+    /** The project whose `issues.yml` declares `view`. */
+    projectRoot: string
+    /** Where the provider runs. */
+    cwd: string
+    env?: NodeJS.ProcessEnv
+    /** Where the provider's stderr passes through. */
+    stderr?: (text: string) => void
+    timeoutMs?: number
+  }>,
 ): Promise<Readonly<{ available: true; data: unknown } | { available: false; reason: string }>> {
-  const argv = command.map((part) => (part === "<key>" ? key : part))
-  const label = "issuesProvider.read " + JSON.stringify(command) + " for " + JSON.stringify(key)
-  await using process = createProcess({ cwd, env })
   try {
-    const result = await process.run({ argv, cwd, timeoutMs: 10_000 })
-    if (
-      result.exitCode !== 0 ||
-      result.signal !== null ||
-      result.timedOut ||
-      result.stalled ||
-      result.escapedDescendant ||
-      result.sweepFailure !== undefined ||
-      result.outputTruncation !== undefined
-    ) {
-      return {
-        available: false,
-        reason:
-          "issue info unavailable: " +
-          label +
-          ": exit " +
-          result.exitCode +
-          ", signal " +
-          result.signal +
-          ", timeout " +
-          result.timedOut +
-          "; " +
-          result.stderr.trim(),
-      }
-    }
-    try {
-      return { available: true, data: JSON.parse(result.stdout) }
-    } catch {
-      return { available: false, reason: "issue info unavailable: " + label + ": invalid JSON" }
-    }
+    const outcome = await runIssuesVerb({
+      verb: "view",
+      args: [input.key],
+      projectRoot: input.projectRoot,
+      cwd: input.cwd,
+      timeoutMs: input.timeoutMs ?? ISSUE_DISPLAY_TIMEOUT_MS,
+      ...(input.env === undefined ? {} : { env: input.env }),
+      ...(input.stderr === undefined ? {} : { stderr: input.stderr }),
+    })
+    return outcome.ok
+      ? { available: true, data: outcome.envelope.result }
+      : { available: false, reason: `issue info unavailable: ${outcome.message}` }
   } catch (error) {
-    return { available: false, reason: "issue info unavailable: " + label + ": " + String(error) }
+    // A reader fault (not a provider's) still only costs the decoration, and says why.
+    return {
+      available: false,
+      reason: `issue info unavailable: view ${JSON.stringify(input.key)}: ${error instanceof Error ? error.message : String(error)}`,
+    }
   }
 }
