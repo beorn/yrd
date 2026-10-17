@@ -4014,7 +4014,10 @@ describe("drop --local --release-checkout", () => {
       expect(hint, output.stderr()).toBeDefined()
       if (context === "unreadable") {
         expect(hint).toContain(`cannot read the author superproject at ${outside}`)
-        expect(hint).toContain("gitfile does not point to a valid repository")
+        // Git versions word a broken gitfile differently; preserve the failed read and cause.
+        expect(hint).toContain(`git rev-parse --show-superproject-working-tree in ${outside}`)
+        expect(hint).toMatch(/exited \d+: fatal: \S/u)
+        expect(hint).toContain("Run from the superproject that vendors it.")
         expect(hint).not.toContain("&& yrd")
       } else if (author === undefined) {
         expect(hint).not.toContain("&& yrd")
