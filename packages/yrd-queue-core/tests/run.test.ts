@@ -1084,6 +1084,14 @@ it("closes the round's journal with every remote call it made, counted from git'
     expect.objectContaining({ oldestBranch: "task/event-counted", waiting: 1 }),
   ])
   const counted = rows.at(-1)
+  // 29697 row 1: the round attributes its remote calls to a caller. `unattributed` is a measurement gap, not a
+  // bucket: what is left unnamed is what no call site named, and the bar is its SHARE, never the absence of the
+  // key (@cto R2) — a layer name would satisfy an absence check by construction and could never be cut.
+  const seamKeys = Object.keys(counted ?? {}).filter((key) => key.startsWith("seam."))
+  const unattributedMs = Number(counted?.["seam.unattributed.remote_ms"] ?? 0)
+  expect(unattributedMs, JSON.stringify(seamKeys)).toBeLessThan(Number(counted?.remote_ms) * 0.05)
+  expect(seamKeys).toContain("seam.merge.push")
+  expect(Number(counted?.["seam.merge.remote_ms"])).toBeGreaterThan(0)
   expect(counted).toMatchObject({
     kind: "remote-calls",
     unreadable: 0,

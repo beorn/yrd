@@ -1113,6 +1113,9 @@ export async function refAt(
 /** Fetch one remote commit through Gitomic's private namespace. */
 export async function readRemoteCommit(git: Git, remote: string, ref: string): Promise<string | undefined> {
   const { repo, fetchRefs } = await remoteRefReader(git, remote, ref)
+  // It carries no name (29697, @cto R2): this function has thirty-one callers, so a name on this line would label
+  // every one of them by construction and a new caller could never show up as unattributed. The round's own
+  // probes name themselves where they are called, in event-run.ts.
   return (await fetchRefs(repo, ref, remote)).get(ref)
 }
 

@@ -25,6 +25,16 @@ export function remoteSeam(): string | undefined {
   return seamScope.getStore()
 }
 
+/**
+ * Label a call that no step names (29697, @cto R2), written at the CALLER's line and never inside a function
+ * several callers share: a name written there labels every one of those callers by construction, and a new caller
+ * then never shows as unattributed, so the ranking cannot say which line to cut. A step's own name always wins
+ * wherever one is current, so this only fills the gap and never masks a caller that already has one.
+ */
+export function withRemoteSeamGap<T>(name: string, action: () => T): T {
+  return seamScope.getStore() === undefined ? withRemoteSeam(name, action) : action()
+}
+
 export type RemoteCalls = Readonly<{
   /** git processes that wrote an event file. */
   processes: number
