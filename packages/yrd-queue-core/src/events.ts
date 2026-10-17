@@ -2419,6 +2419,18 @@ async function appendDecision(
 
 /** End a branch and publish its disposition atomically: remote deletion, or custody for local retirement. */
 export async function drop(store: QueueLocation, request: DropRequest): Promise<Dropped> {
+  try {
+    return await dropBranch(store, request)
+  } catch (cause) {
+    if (request.localArchive === undefined) throw cause
+    throw new Error(
+      `${request.branch}@${request.localArchive.tip} at ${store.remote}: ${cause instanceof Error ? cause.message : String(cause)}; local refs kept`,
+      { cause },
+    )
+  }
+}
+
+async function dropBranch(store: QueueLocation, request: DropRequest): Promise<Dropped> {
   const { queue, branch } = request
   const format = await queueFormat(store, queue)
   if (format === "legacy") {
@@ -2467,16 +2479,12 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   const archiveUpdate = preparedArchive?.update
   const verifyCustody = async (eventTip: string): Promise<void> => {
     if (preparedArchive === undefined) return
-    try {
-      await preparedArchive.verify()
-    } catch (cause) {
-      throw new Error(`${cause instanceof Error ? cause.message : String(cause)}; local refs kept`, { cause })
-    }
+    await preparedArchive.verify()
     const event = (await listRefs(ref, store)).get(ref)
     if (event !== eventTip) {
       throw new Error(
         `${branch}@${archive?.tip} at ${store.remote}: ending ${ref} expected ${eventTip}, ` +
-          `read ${event ?? "absent"}; local refs kept`,
+          `read ${event ?? "absent"}`,
       )
     }
   }

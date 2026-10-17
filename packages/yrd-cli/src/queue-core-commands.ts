@@ -899,7 +899,7 @@ export async function coreQueueCommand(
           options.json,
           report,
           [
-            `local retirement in ${authorRepo}: retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}`,
+            `${request.command === "drop-local" ? "local" : "origin"} retirement in ${authorRepo}: retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}`,
             ...report.failed.map((row) => `${row.branch}: ${row.reason}`),
           ].join("\n"),
         )
@@ -1961,7 +1961,8 @@ export async function coreQueueCommand(
         options.json,
         dropped,
         `dropped ${request.branch} at ${dropped.head.slice(0, 12)}; ending ${dropped.event.slice(0, 12)} kept its commit` +
-          (dropped.archive === undefined ? "" : `; origin archive ${dropped.archive}`),
+          (dropped.archive === undefined ? "" : `; origin archive ${dropped.archive}`) +
+          (dropped.main === undefined ? "" : `; published main ${dropped.main.ref}@${dropped.main.tip}`),
       )
       return 0
     }

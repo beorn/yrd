@@ -15,7 +15,7 @@ export async function prepareRetirementArchive(
   const subject = `${branch}@${head} at ${store.remote}`
   const previous = (await listRefs(archive, store)).get(archive)
   if (previous !== undefined && previous !== head) {
-    throw new Error(`${subject}: archive ${archive} holds ${previous}, not ${head}; it is never overwritten`)
+    throw new Error(`${subject}: archive ${archive} already holds ${previous}, not ${head}; it is never overwritten`)
   }
   return {
     update: { ref: archive, expect: previous ?? null, oid: head },
@@ -37,14 +37,21 @@ export async function publishRetirementArchive(
   const publish = store.backend.publish
   if (publish === undefined) throw new Error(`${branch}@${head} at ${store.remote}: backend lacks archive publication`)
   const archive = await prepareRetirementArchive(store, input)
-  await publish(
-    store.repo,
-    [
-      ...(authority === undefined ? [] : [{ ref: authority.ref, expect: authority.tip, oid: authority.tip }]),
-      { ...archive.update, expect: archive.update.expect ?? "0".repeat(head.length) },
-    ],
-    store.remote,
-  )
+  try {
+    await publish(
+      store.repo,
+      [
+        ...(authority === undefined ? [] : [{ ref: authority.ref, expect: authority.tip, oid: authority.tip }]),
+        { ...archive.update, expect: archive.update.expect ?? "0".repeat(head.length) },
+      ],
+      store.remote,
+    )
+  } catch (cause) {
+    throw new Error(
+      `${branch}@${head} at ${store.remote}: archive publication failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    )
+  }
   await archive.verify()
 }
 
