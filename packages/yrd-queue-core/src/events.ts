@@ -2478,8 +2478,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
         })
   const archiveUpdate = preparedArchive?.update
   const verifyCustody = async (eventTip: string): Promise<void> => {
-    if (preparedArchive === undefined) return
-    await preparedArchive.verify()
+    if (archive === undefined) return
     const event = (await listRefs(ref, store)).get(ref)
     if (event !== eventTip) {
       throw new Error(
@@ -2585,16 +2584,15 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
   }
   if (state.ending !== undefined && !retiringEnded) {
     if (head === undefined) throw new Error(`${branchRef} in ${store.repo}: ended branch is absent`)
-    if (store.backend.publish === undefined) {
-      throw new Error("Gitomic backend lacks publish for dropped branch deletion")
-    }
     if (selectedTip === null) throw new Error(`${ref} in ${store.repo}: ended change has no chain tip`)
     if (archive === undefined) {
+      if (store.backend.publish === undefined) {
+        throw new Error("Gitomic backend lacks publish for dropped branch deletion")
+      }
       return { queue, branch, head, event: state.ending.id, archive: await retire(selectedTip, head) }
     }
-    if (archiveUpdate === undefined) throw new Error(`${branch}: local retirement has no archive update`)
-    const disposition = { ref: archiveUpdate.ref, expect: archiveUpdate.expect ?? "0".repeat(head.length), oid: head }
-    await store.backend.publish(store.repo, [{ ref, expect: selectedTip, oid: selectedTip }, disposition], store.remote)
+    if (preparedArchive === undefined) throw new Error(`${branch}: local retirement has no archive update`)
+    await preparedArchive.publish({ kind: "event", ref, tip: selectedTip })
     await verifyCustody(selectedTip)
     return { queue, branch, event: state.ending.id, head, archive: archive.ref }
   }
@@ -2641,6 +2639,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
   })
   const written = result.events.findLast((event) => event.type === "cancelled")?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: dropped event was not written`)
+  await preparedArchive?.verify()
   await verifyCustody(written)
   if (retiringEnded && head !== undefined && archive === undefined) {
     return { queue, branch, event: written, head: keptHead, archive: await retire(written, head) }

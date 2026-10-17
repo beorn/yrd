@@ -1440,10 +1440,10 @@ describe("the queue-format boundary", () => {
   // @failure Local retirement deletes the remote branch or has no origin archive/event custody (28791).
   // @level l1
   // @consumer Yrd local branch retirement; positional drop continues to delete the remote branch.
-  it.each(["draft", "submitted"] as const)(
+  it.each(["draft", "submitted", "ended-publication-refused"] as const)(
     "archives a %s local retirement without deleting the remote branch",
     async (state) => {
-      const { store, location } = remoteMemStore(`yrd-local-retirement-${state}`)
+      const { store, location, beforeNextPublish } = remoteMemStore(`yrd-local-retirement-${state}`)
       const target = await open({ ...store, ref: "refs/heads/lab" })
       const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
       const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
@@ -1488,6 +1488,18 @@ describe("the queue-format boundary", () => {
       })
       expect(await drop(location, request)).toEqual(result)
       expect((await listRefs("refs/", store)).get(`refs/heads/${branch}`)).toBe(head)
+      if (state === "ended-publication-refused") {
+        beforeNextPublish(async () => {
+          throw new Error("fixture refused archive publication")
+        })
+        await expect(drop(location, request)).rejects.toThrow(
+          "archive publication failed: fixture refused archive publication",
+        )
+        const retained = await listRefs("refs/", store)
+        expect(retained.get(`refs/heads/${branch}`)).toBe(head)
+        expect(retained.get(archiveRef)).toBe(head)
+        expect(retained.get(changesRef("lab", branch))).toBe(result.event)
+      }
     },
   )
 

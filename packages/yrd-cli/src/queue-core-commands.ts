@@ -1720,6 +1720,9 @@ export async function coreQueueCommand(
           options.json,
           report,
           `issue ${report.issue}: inspected ${report.inspected.length} repositories in ${authorRepo}; eligible ${report.eligible.length}, retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}\n${mode}` +
+            report.notMaterialized
+              .map((row) => `\nSkipped ${row.repo}: not materialized (checkout Git pointer and private store absent)`)
+              .join("") +
             report.excluded
               .map(
                 (row) =>

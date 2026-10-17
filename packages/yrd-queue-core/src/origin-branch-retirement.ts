@@ -13,17 +13,39 @@ export async function prepareRetirementArchive(
 ) {
   const { branch, archive, head } = input
   const subject = `${branch}@${head} at ${store.remote}`
+  const publish = store.backend.publish
+  if (publish === undefined) throw new Error(`${subject}: backend lacks archive publication`)
   const previous = (await listRefs(archive, store)).get(archive)
   if (previous !== undefined && previous !== head) {
     throw new Error(`${subject}: archive ${archive} already holds ${previous}, not ${head}; it is never overwritten`)
   }
+  const update = { ref: archive, expect: previous ?? null, oid: head }
+  const verify = async (): Promise<void> => {
+    const observed = (await listRefs(archive, store)).get(archive)
+    if (observed !== head) {
+      throw new Error(`${subject}: archive ${archive} did not read back as ${head}; found ${observed ?? "absent"}`)
+    }
+  }
   return {
-    update: { ref: archive, expect: previous ?? null, oid: head },
-    async verify(): Promise<void> {
-      const observed = (await listRefs(archive, store)).get(archive)
-      if (observed !== head) {
-        throw new Error(`${subject}: archive ${archive} did not read back as ${head}; found ${observed ?? "absent"}`)
+    update,
+    verify,
+    async publish(authority?: OriginRetirementAuthority): Promise<void> {
+      try {
+        await publish(
+          store.repo,
+          [
+            ...(authority === undefined ? [] : [{ ref: authority.ref, expect: authority.tip, oid: authority.tip }]),
+            { ...update, expect: update.expect ?? "0".repeat(head.length) },
+          ],
+          store.remote,
+        )
+      } catch (cause) {
+        throw new Error(
+          `${subject}: archive publication failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+          { cause },
+        )
       }
+      await verify()
     },
   }
 }
@@ -33,26 +55,8 @@ export async function publishRetirementArchive(
   store: QueueLocation,
   input: Readonly<{ branch: string; archive: string; head: string; authority?: OriginRetirementAuthority }>,
 ): Promise<void> {
-  const { branch, head, authority } = input
-  const publish = store.backend.publish
-  if (publish === undefined) throw new Error(`${branch}@${head} at ${store.remote}: backend lacks archive publication`)
   const archive = await prepareRetirementArchive(store, input)
-  try {
-    await publish(
-      store.repo,
-      [
-        ...(authority === undefined ? [] : [{ ref: authority.ref, expect: authority.tip, oid: authority.tip }]),
-        { ...archive.update, expect: archive.update.expect ?? "0".repeat(head.length) },
-      ],
-      store.remote,
-    )
-  } catch (cause) {
-    throw new Error(
-      `${branch}@${head} at ${store.remote}: archive publication failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-      { cause },
-    )
-  }
-  await archive.verify()
+  await archive.publish(input.authority)
 }
 
 export async function retireOriginBranch(

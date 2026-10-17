@@ -1831,7 +1831,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       }
       const argv = ["bun", "yrd", "drop", "--issue", issue, "--submodules", "--submitter", "fixture", "--json"]
       let held = mode === "retry"
-      const run = async (flags: string[]) => {
+      const run = async (flags: string[], format: "json" | "human" = "json") => {
         const out = capture(repo)
         out.io.branchIssue = ({ branch, recordedIssue }) =>
           recordedIssue ?? (branch.startsWith("task/1234-") ? issue : undefined)
@@ -1839,7 +1839,8 @@ describe("a queue is the selected origin branch carrying config", () => {
           protections: held && branch === childBranch ? ["fixture child hold"] : [],
           evidence: [],
         })
-        const exit = await runYrdProcess([...argv, ...flags], out.io)
+        const args = format === "json" ? argv : argv.filter((arg) => arg !== "--json")
+        const exit = await runYrdProcess([...args, ...flags], out.io)
         return { exit, out }
       }
       if (mode === "ended") {
@@ -1879,6 +1880,9 @@ describe("a queue is the selected origin branch carrying config", () => {
           failed: [],
           notMaterialized: [expect.objectContaining({ repo: join(absent, "child"), reason: "not-materialized" })],
         })
+        const human = await run(["--dry-run"], "human")
+        expect(human.exit, human.out.stderr()).toBe(0)
+        expect(human.out.stdout()).toContain(`Skipped ${join(absent, "child")}: not materialized`)
 
         // A prunable root registration still needs a subject and holds every root.
         const missing = join(dirname(repo), "prunable-author")
