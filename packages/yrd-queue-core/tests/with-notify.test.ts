@@ -1,5 +1,33 @@
 import { describe, expect, it } from "vitest"
-import { messageFor } from "../src/with-notify.ts"
+import { messageFor, notifyEnvRetired } from "../src/with-notify.ts"
+
+describe("env-retired dispatch (29720)", () => {
+  it("answers one none delivery when no entry names env-retired, without touching git", async () => {
+    const handed = await notifyEnvRetired(
+      {
+        git: (() => {
+          throw new Error("git must not run when nobody wants the occasion")
+        }) as never,
+        notify: [],
+        repo: "/r",
+        targetSha: "a".repeat(40),
+        workdir: "/w",
+        tempRoot: "/t",
+      },
+      {
+        record: "env-retired",
+        change: "task/thing@abcdef1234567890abcdef1234567890abcdef12",
+        endingId: "q-run9:/w/thing",
+        endedAt: "2026-10-17T00:00:00.000Z",
+        submitter: "@dev/3",
+        environment: "/w/thing",
+        proof: "/retained/thing/manifest.json",
+        retainUntil: "2026-10-24T00:00:00.000Z",
+      },
+    )
+    expect(handed).toEqual([{ delivery: "none", name: "none" }])
+  })
+})
 
 describe("messageFor deferred timing relation", () => {
   const base = {

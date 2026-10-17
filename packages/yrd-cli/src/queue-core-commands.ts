@@ -142,6 +142,7 @@ import {
   parseUntil,
   type OverrideFact,
   type OverrideEntry,
+  type OutsideRound,
   type RetiredRootNotice,
   type QueueReadStore,
   type OverrideTable,
@@ -1052,19 +1053,44 @@ export async function coreQueueCommand(
         env,
         selection,
         onEnvironmentClosed: async (closed) => {
-          if (closed.branch === undefined || closed.proof === undefined) return
-          try {
-            const change = await readStatus(eventStore, config.target.branch, closed.branch)
-            await tellEnvRetired(
-              { config, git, repo, targetSha: outcome.target, workdir, tempRoot, env },
-              closed,
-              change,
-              outcome.run,
-              io,
-            )
-          } catch (error) {
-            io.stderr(`yrd: could not tell about the retired environment ${closed.path}: ${String(error)}\n`)
+          // Every skip names the path and the missing field (29720 review):
+          // an env retirement nobody is told about must still say so here.
+          if (closed.branch === undefined) {
+            io.stderr(`yrd: environment ${closed.path} retired; no env-retired tell (branch not named)\n`)
+            return
           }
+          if (closed.proof === undefined) {
+            io.stderr(`yrd: environment ${closed.path} retired; no env-retired tell (proof not named)\n`)
+            return
+          }
+          let change: EventChange
+          try {
+            change = await readStatus(eventStore, config.target.branch, closed.branch)
+          } catch (cause) {
+            if (cause instanceof Error && cause.message.startsWith(`missing event chain for ${closed.branch}`)) {
+              io.stderr(
+                `yrd: environment ${closed.path} retired; no change record for ${closed.branch}, nobody to tell\n`,
+              )
+              return
+            }
+            throw cause
+          }
+          // Merged changes only: a withdrawn (cancelled) branch's environment
+          // close is the author's own act, and the notice's "now that it has
+          // landed" would be false for it.
+          if (change.status !== "merged") {
+            io.stderr(
+              `yrd: environment ${closed.path} retired for ${closed.branch} (${change.status}); no env-retired tell (merged changes only)\n`,
+            )
+            return
+          }
+          await tellEnvRetired(
+            { config, git, repo, targetSha: outcome.target, workdir, tempRoot, env },
+            { ...closed, branch: closed.branch, proof: closed.proof },
+            change,
+            outcome.run,
+            io,
+          )
         },
       })
       await retireMergedComponentAuthors({
@@ -2330,21 +2356,10 @@ export async function coreQueueCommand(
               io,
               env,
               selection,
-              onEnvironmentClosed: async (closed) => {
-                if (closed.branch === undefined || closed.proof === undefined) return
-                try {
-                  const change = await readStatus(eventStore, config.target.branch, closed.branch)
-                  await tellEnvRetired(
-                    { config, git, repo, targetSha: target, workdir, tempRoot, env },
-                    closed,
-                    change,
-                    runId,
-                    io,
-                  )
-                } catch (error) {
-                  io.stderr(`yrd: could not tell about the retired environment ${closed.path}: ${String(error)}\n`)
-                }
-              },
+              // No onEnvironmentClosed here: the withdrawn path returns before
+              // the sweep and the request consumer (env-cleanup.ts), so a
+              // callback would never run — and a withdrawn close is the
+              // author's own act, not a retirement to announce (29720).
             })
             for (const branch of retired) {
               if ((await refAt(authorGit, `refs/heads/${branch}`)) === undefined) {
@@ -5262,6 +5277,60 @@ function gitlinks(listing: string): readonly Readonly<{ path: string; sha: strin
   return rows
 }
 
+/** The outside-round facts every tell outside a round is built from. */
+type OutsideRoundTellContext = Readonly<{
+  config: QueueConfig
+  git: Git
+  repo: string
+  targetSha: string
+  workdir: string
+  tempRoot: string
+  env?: NodeJS.ProcessEnv
+  populateReference?: boolean
+}>
+
+type TellDelivery = Readonly<{ name: string; delivery: string; failure?: string }>
+
+/** The `OutsideRound` every outside-round tell dispatches through, built once here. */
+function outsideRoundOf(context: OutsideRoundTellContext): OutsideRound {
+  return {
+    git: context.git,
+    notify: context.config.notify,
+    repo: context.repo,
+    targetSha: context.targetSha,
+    workdir: context.workdir,
+    tempRoot: context.tempRoot,
+    ...(context.config.setup === undefined ? {} : { setup: context.config.setup }),
+    ...(context.env === undefined ? {} : { env: context.env }),
+    ...(context.populateReference === undefined ? {} : { populateReference: context.populateReference }),
+  }
+}
+
+/**
+ * Run one outside-round dispatch and say, on stderr, what each entry
+ * answered — the one shape the override, retired-root and env-retired tells
+ * share (29720 review). Never throws: a thrown dispatch is one failed
+ * delivery named "notify", exactly as each caller spelled it before.
+ */
+async function handToEntries(
+  context: OutsideRoundTellContext,
+  run: (outside: OutsideRound) => Promise<readonly TellDelivery[]>,
+  wording: Readonly<{ none: string; failed: (each: TellDelivery) => string }>,
+  io: YrdCliIO,
+): Promise<readonly TellDelivery[]> {
+  let handed: readonly TellDelivery[]
+  try {
+    handed = await run(outsideRoundOf(context))
+  } catch (error) {
+    handed = [{ delivery: "failed", failure: error instanceof Error ? error.message : String(error), name: "notify" }]
+  }
+  for (const each of handed) {
+    if (each.delivery === "none") io.stderr(wording.none)
+    else if (each.delivery === "failed") io.stderr(wording.failed(each))
+  }
+  return handed
+}
+
 /** Where the verb journals each override notice it handed out: beside the run journals, never among them (`logs/*.jsonl` are runs). */
 const OVERRIDE_NOTIFY_JOURNAL = "override-notify.jsonl"
 
@@ -5273,52 +5342,23 @@ const OVERRIDE_NOTIFY_JOURNAL = "override-notify.jsonl"
  * record that stands in its place.
  */
 async function tellOverride(
-  context: Readonly<{
-    config: QueueConfig
-    git: Git
-    repo: string
-    targetSha: string
-    workdir: string
-    tempRoot: string
-    env?: NodeJS.ProcessEnv
-    populateReference?: boolean
-  }>,
+  context: OutsideRoundTellContext,
   action: "set" | "clear" | "replace",
   entry: OverrideEntry,
   io: YrdCliIO,
-): Promise<readonly Readonly<{ name: string; delivery: string; failure?: string }>[]> {
+): Promise<readonly TellDelivery[]> {
   const { config } = context
   const notice = overrideNotice(entry, action, `${config.target.branch}@${context.targetSha}`)
-  let handed: readonly Readonly<{ name: string; delivery: string; failure?: string }>[]
-  try {
-    handed = await notifyOutsideRound(
-      {
-        git: context.git,
-        notify: config.notify,
-        repo: context.repo,
-        targetSha: context.targetSha,
-        workdir: context.workdir,
-        tempRoot: context.tempRoot,
-        ...(config.setup === undefined ? {} : { setup: config.setup }),
-        ...(context.env === undefined ? {} : { env: context.env }),
-        ...(context.populateReference === undefined ? {} : { populateReference: context.populateReference }),
-      },
-      notice,
-    )
-  } catch (error) {
-    handed = [{ delivery: "failed", failure: error instanceof Error ? error.message : String(error), name: "notify" }]
-  }
-  for (const told of handed) {
-    if (told.delivery === "none") {
-      io.stderr(
-        `yrd: no notify entry in .yrd.yml wants override events, so nobody was told; the override's own record ${entry.record.slice(0, 12)} is the notice\n`,
-      )
-    } else if (told.delivery === "failed") {
-      io.stderr(
+  const handed = await handToEntries(
+    context,
+    (outside) => notifyOutsideRound(outside, notice),
+    {
+      none: `yrd: no notify entry in .yrd.yml wants override events, so nobody was told; the override's own record ${entry.record.slice(0, 12)} is the notice\n`,
+      failed: (told) =>
         `yrd: could not tell ${told.name} about the override (it stands): ${told.failure ?? "no reason given"}\n`,
-      )
-    }
-  }
+    },
+    io,
+  )
   try {
     appendFileSync(
       join(context.workdir, OVERRIDE_NOTIFY_JOURNAL),
@@ -5444,96 +5484,44 @@ export function sweepRetiredRoot(workdir: string): RetiredRootReading | RetiredR
  * unremembered so the next tick retries it (@dev/2 review, 28481 layer 3).
  */
 async function tellRetiredRoot(
-  context: Readonly<{
-    config: QueueConfig
-    git: Git
-    repo: string
-    targetSha: string
-    workdir: string
-    tempRoot: string
-    env?: NodeJS.ProcessEnv
-    populateReference?: boolean
-  }>,
+  context: OutsideRoundTellContext,
   reading: RetiredRootReading,
   io: YrdCliIO,
 ): Promise<boolean> {
-  let handed: readonly Readonly<{ name: string; delivery: string; failure?: string }>[]
-  try {
-    handed = await notifyRetiredRoot(
-      {
-        git: context.git,
-        notify: context.config.notify,
-        repo: context.repo,
-        targetSha: context.targetSha,
-        workdir: context.workdir,
-        tempRoot: context.tempRoot,
-        ...(context.config.setup === undefined ? {} : { setup: context.config.setup }),
-        ...(context.env === undefined ? {} : { env: context.env }),
-        ...(context.populateReference === undefined ? {} : { populateReference: context.populateReference }),
-      },
-      reading.notice,
-    )
-  } catch (error) {
-    handed = [{ delivery: "failed", failure: error instanceof Error ? error.message : String(error), name: "notify" }]
-  }
-  let told = true
-  for (const each of handed) {
-    if (each.delivery === "none") {
-      io.stderr(
+  const handed = await handToEntries(
+    context,
+    (outside) => notifyRetiredRoot(outside, reading.notice),
+    {
+      none:
         "yrd: no notify entry in .yrd.yml wants retired-root-written, so nobody was told;" +
-          ` the ${reading.active ? "live" : "cleared"} retired root ${reading.notice.address} is on the record\n`,
-      )
-    } else if (each.delivery === "failed") {
-      told = false
-      io.stderr(
+        ` the ${reading.active ? "live" : "cleared"} retired root ${reading.notice.address} is on the record\n`,
+      failed: (each) =>
         `yrd: could not tell ${each.name} about the retired root ${reading.notice.address}: ${each.failure ?? "no reason given"}\n`,
-      )
-    }
-  }
-  return told
+    },
+    io,
+  )
+  return handed.every((each) => each.delivery !== "failed")
 }
 
 /**
  * Tell the declaration's notify entries that post-merge cleanup retired one
- * author environment (29720), so its author hears where the folder went
- * instead of finding it gone. Never throws and never gates: the close
- * already happened, and a failed delivery is named on stderr like every
- * other housekeeping tell. The caller reads the change for its submitter;
- * a close whose branch or proof cannot be named is not announced here (the
- * round log's environment-cleanup rows still record it).
+ * merged change's author environment (29720), so its author hears where the
+ * folder went instead of finding it gone. Never throws and never gates: the
+ * close already happened. The caller has already established the change
+ * MERGED and that branch and proof can be named — every other close is
+ * skipped there, by name.
  */
 async function tellEnvRetired(
-  context: Readonly<{
-    config: QueueConfig
-    git: Git
-    repo: string
-    targetSha: string
-    workdir: string
-    tempRoot: string
-    env?: NodeJS.ProcessEnv
-    populateReference?: boolean
-  }>,
-  closed: ClosedEnvironment,
+  context: OutsideRoundTellContext,
+  closed: Readonly<{ branch: string; head?: string; path: string; proof: NonNullable<ClosedEnvironment["proof"]> }>,
   change: EventChange,
   run: string,
   io: YrdCliIO,
 ): Promise<void> {
-  if (closed.branch === undefined || closed.proof === undefined) return
-  let handed: readonly Readonly<{ name: string; delivery: string; failure?: string }>[]
-  try {
-    handed = await notifyEnvRetired(
-      {
-        git: context.git,
-        notify: context.config.notify,
-        repo: context.repo,
-        targetSha: context.targetSha,
-        workdir: context.workdir,
-        tempRoot: context.tempRoot,
-        ...(context.config.setup === undefined ? {} : { setup: context.config.setup }),
-        ...(context.env === undefined ? {} : { env: context.env }),
-        ...(context.populateReference === undefined ? {} : { populateReference: context.populateReference }),
-      },
-      {
+  await handToEntries(
+    context,
+    (outside) =>
+      notifyEnvRetired(outside, {
         record: "env-retired",
         change: `${closed.branch}@${closed.head ?? change.commit ?? ""}`,
         endingId: `${run}:${closed.path}`,
@@ -5544,23 +5532,16 @@ async function tellEnvRetired(
         environment: closed.path,
         proof: closed.proof.manifest,
         retainUntil: closed.proof.retainUntil,
-      },
-    )
-  } catch (error) {
-    handed = [{ delivery: "failed", failure: error instanceof Error ? error.message : String(error), name: "notify" }]
-  }
-  for (const each of handed) {
-    if (each.delivery === "none") {
-      io.stderr(
+      }),
+    {
+      none:
         "yrd: no notify entry in .yrd.yml wants env-retired, so nobody was told;" +
-          ` the retired environment ${closed.path} is on the record\n`,
-      )
-    } else if (each.delivery === "failed") {
-      io.stderr(
+        ` the retired environment ${closed.path} is on the record\n`,
+      failed: (each) =>
         `yrd: could not tell ${each.name} about the retired environment ${closed.path}: ${each.failure ?? "no reason given"}\n`,
-      )
-    }
-  }
+    },
+    io,
+  )
 }
 
 function runOptions(

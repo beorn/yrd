@@ -424,12 +424,23 @@ async function consumeCloseRequests(
       journal(file, request, request.path, "closed", `closed at the request of ${request.requester}`, fingerprint)
       dropCloseRequest(staged)
       closed++
-      await input.onEnvironmentClosed?.({
-        ...(ending === undefined ? {} : { branch: ending.branch }),
-        head: request.head,
-        path: request.path,
-        ...(closedProof === undefined ? {} : { proof: closedProof }),
-      })
+      try {
+        await input.onEnvironmentClosed?.({
+          ...(ending === undefined ? {} : { branch: ending.branch }),
+          head: request.head,
+          path: request.path,
+          ...(closedProof === undefined ? {} : { proof: closedProof }),
+        })
+      } catch (cause) {
+        journal(
+          file,
+          request,
+          request.path,
+          "tell-failed",
+          `closed, but telling about it failed: ${reasonText(cause)}`,
+          fingerprint,
+        )
+      }
       // One close per round, like every other removal here: a waiting merge is
       // judged before another removal (@i/10-yrd eligibility discipline).
       break
@@ -1196,12 +1207,19 @@ async function cleanupEnvironments(
         closed++
         cache.delete(row.path)
         record(row.path, "closed", "native retained removal proof accepted")
-        await input.onEnvironmentClosed?.({
-          ...(row.branch === undefined ? {} : { branch: row.branch }),
-          head,
-          path: row.path,
-          ...(closedProof === undefined ? {} : { proof: closedProof }),
-        })
+        // Telling never gates the close (29720): the close is already
+        // committed, so a telling failure is named here, at the source, and
+        // never rethrown into the sweep's keep bookkeeping.
+        try {
+          await input.onEnvironmentClosed?.({
+            ...(row.branch === undefined ? {} : { branch: row.branch }),
+            head,
+            path: row.path,
+            ...(closedProof === undefined ? {} : { proof: closedProof }),
+          })
+        } catch (cause) {
+          record(row.path, "tell-failed", `closed, but telling about it failed: ${reasonText(cause)}`)
+        }
       } else if ("kept" in result && result.kept === row.path) preserve(row.path, output.trim())
       else throw new Error(`unproven close result ${output}`)
     } catch (cause) {
