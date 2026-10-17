@@ -867,6 +867,35 @@ describe("event submit", () => {
   })
 
   /**
+   * @failure A branch whose history spells one issue as `#N` in one commit and by its full path in the
+   *          next refuses, and the refusal neither said that Yrd compares issue keys exactly nor gave the
+   *          way out (29716, the #undead recurrence of 24991 and 25719 after yrd 95e40a89 retired the
+   *          resolver).
+   * @level   l2 (real git history through issueOf)
+   * @consumer every submitter whose trailers spell one issue two ways
+   */
+  it("refuses two keys bound on one branch, and says keys compare exactly with the way out (29716)", async () => {
+    const w = await world()
+    const path = "@ag/code/29456-ag-quota-one-typed-reader-per-provider"
+    await branchWithCommit(w, "task/two-keys", "change.txt")
+    await w.git(["checkout", "--quiet", "task/two-keys"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "bind\n\nRefs: #29456"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", `work\n\nRefs: ${path}`])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const message = await issueOf(w.git, "task/two-keys", head, w.target).then(
+      () => "",
+      (cause: unknown) => (cause instanceof Error ? cause.message : String(cause)),
+    )
+    // Both keys are named, so a reader can see which two spellings met.
+    expect(message).toContain("#29456")
+    expect(message).toContain(path)
+    // The refusal says what Yrd's comparison is, and it never claims sameness it cannot know.
+    expect(message).toContain("compares issue keys exactly")
+    // It gives the way out: rewrite one trailer to the other key when they name one issue.
+    expect(message).toMatch(/rewrite .*trailer/u)
+  })
+
+  /**
    * @failure A Refs trailer linking a follow-up issue refuses the whole branch as
    *          conflicting bindings, and the refusal named neither the trailer that
    *          binds nor the line that keeps the link without binding it (27300).
