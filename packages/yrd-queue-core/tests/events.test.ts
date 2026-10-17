@@ -920,7 +920,7 @@ describe("ADR-0016 event fold", () => {
     const effect = {
       ...issueEffectEvent(ISSUE_EFFECT),
       props: issueEffectEvent(ISSUE_EFFECT).props.map(([key, value]) =>
-        key === "Time" ? [key, "2026-09-22T14:01:00.000Z"] as [string, string] : [key, value] as [string, string],
+        key === "Time" ? ([key, "2026-09-22T14:01:00.000Z"] as [string, string]) : ([key, value] as [string, string]),
       ),
     }
     const original = changeChain(opened, merged)
@@ -1017,10 +1017,13 @@ describe("ADR-0016 event fold", () => {
     ["providerId mismatch", (raw: Record<string, unknown>) => ({ ...raw, providerId: "yrd1-wrong" })],
     ["non-canonical JSON", (raw: Record<string, unknown>) => Object.fromEntries(Object.entries(raw).reverse())],
     ["extra field", (raw: Record<string, unknown>) => ({ ...raw, extra: true })],
-    ["missing field", (raw: Record<string, unknown>) => {
-      const { declaration: _declaration, ...rest } = raw
-      return rest
-    }],
+    [
+      "missing field",
+      (raw: Record<string, unknown>) => {
+        const { declaration: _declaration, ...rest } = raw
+        return rest
+      },
+    ],
     ["wrong verb-ending pairing", (raw: Record<string, unknown>) => ({ ...raw, verb: "comment" })],
     ["empty key", (raw: Record<string, unknown>) => ({ ...raw, issueKey: " " })],
     ["non-ISO time", (raw: Record<string, unknown>) => ({ ...raw, mergeCommitterTime: "yesterday" })],
