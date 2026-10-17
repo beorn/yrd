@@ -18,10 +18,17 @@ const CLOSED: ClosedEnvironment = {
   head: "c".repeat(40),
   path: "/repo/.bays/env-fresh",
   proof: {
-    manifest: "/retained/env-fresh/manifest.json",
+    path: "/repo/.bays/env-fresh",
+    head: "c".repeat(40),
+    repositories: ["/repo"],
+    modules: "none",
     retained: "/retained/env-fresh",
+    manifest: "/retained/env-fresh/manifest.json",
+    createdAt: "2026-10-17T00:00:00.000Z",
     retainUntil: "2026-10-24T00:00:00.000Z",
-  },
+    writerLocks: [],
+    createdWriterLocks: [],
+  } as NonNullable<ClosedEnvironment["proof"]>,
 }
 
 function change(status: EventChange["status"]): EventChange {
