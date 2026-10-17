@@ -416,6 +416,40 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
     expect(readFileSync(join(logDir, "derive-base.log"), "utf8")).toContain("reuses it, no commit written")
   })
 
+  it("a failed component-main refresh refuses the derivation by name instead of reading the stored ref", async () => {
+    // 29750 (@cto ruling: refuse by name, never prove-and-continue). Before this, a failed refresh was recorded in
+    // derive-base.log and the derive then read the STORED refs/remotes/origin/main and built on it - the 27176 fork
+    // reached through a failed refresh. The stored ref here is a real, readable main at the merged pin, so a derive
+    // that reads it succeeds quietly; this row can only pass if the reader refuses.
+    const w = await world({ componentMain: "descends" })
+    const lib = rawGitIn(join(w.work, "lib"), undefined, undefined, { env: w.env })
+    const pin = (await w.git(["rev-parse", `${w.head}:lib`])).trim()
+    expect((await lib(["rev-parse", "refs/remotes/origin/main"])).trim()).toBe(pin)
+    await w.git(["checkout", "--quiet", "task/bump"])
+    await w.git(["submodule", "--quiet", "update", "--init", "lib"])
+    // The refresh cannot succeed: the store's remote is gone. The stored ref stays readable, which is the trap.
+    await lib(["remote", "set-url", "origin", join(w.root, "no-such-remote.git")])
+    const logDir = join(w.root, "logs", "stale")
+    mkdirSync(logDir, { recursive: true })
+    const failure = await deriveInWorktree({
+      cwd: w.work,
+      repo: w.work,
+      candidate: w.head,
+      targetHead: w.target,
+      derive: { run: deriveScript(w.root), logDir, tmpdir: join(w.root, "tmp") },
+      env: w.env,
+    }).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(DeriveFailed)
+    if (!(failure instanceof DeriveFailed)) throw new Error("expected DeriveFailed")
+    expect(failure.message).toMatch(/refreshing refs\/remotes\/origin\/main in .* failed/u)
+    expect(failure.message).toMatch(/refuses rather than reading a stored ref it cannot prove current/u)
+    const log = readFileSync(join(logDir, "derive-base.log"), "utf8")
+    expect(log).toContain("the derivation refuses")
+    // Nothing was derived on the stored ref: no commit was built on main, and the change keeps its pin.
+    expect(log).not.toContain("built on main")
+    expect((await lib(["rev-parse", "HEAD"])).trim()).toBe(pin)
+  })
+
   it("a recompose the component refuses sticks the change by name, never the run", async () => {
     const w = await world({ componentMain: "forks" })
     const failure = await compose(w, deriveScript(w.root), "forked").catch((error: unknown) => error)
