@@ -13,22 +13,19 @@ import type { EventChange } from "@yrd/queue-core"
 import { envRetiredTeller } from "../src/queue-core-commands.ts"
 import type { ClosedEnvironment } from "../src/env-cleanup.ts"
 
+// The proof shape is git-super's retention report, opaque to the teller: it
+// only requires one to be present and passes it through untouched.
+const PROOF = {
+  manifest: "/retained/env-fresh/manifest.json",
+  retained: "/retained/env-fresh",
+  retainUntil: "2026-10-24T00:00:00.000Z",
+} as unknown as NonNullable<ClosedEnvironment["proof"]>
+
 const CLOSED: ClosedEnvironment = {
   branch: "task/env-fresh",
   head: "c".repeat(40),
   path: "/repo/.bays/env-fresh",
-  proof: {
-    path: "/repo/.bays/env-fresh",
-    head: "c".repeat(40),
-    repositories: ["/repo"],
-    modules: "none",
-    retained: "/retained/env-fresh",
-    manifest: "/retained/env-fresh/manifest.json",
-    createdAt: "2026-10-17T00:00:00.000Z",
-    retainUntil: "2026-10-24T00:00:00.000Z",
-    writerLocks: [],
-    createdWriterLocks: [],
-  } as NonNullable<ClosedEnvironment["proof"]>,
+  proof: PROOF,
 }
 
 function change(status: EventChange["status"]): EventChange {
