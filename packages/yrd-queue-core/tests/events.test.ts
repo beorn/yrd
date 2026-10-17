@@ -917,14 +917,15 @@ describe("ADR-0016 event fold", () => {
   it("keeps a typed issue effect neutral across a later branch reuse and validates its merge reference", () => {
     const opened = event("opened", A, [["Commit", A]], [A])
     const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
-    const effect = {
-      ...issueEffectEvent(ISSUE_EFFECT),
-      props: issueEffectEvent(ISSUE_EFFECT).props.map(([key, value]) =>
+    const effect = issueEffectEvent(ISSUE_EFFECT)
+    const laterEffect = {
+      ...effect,
+      props: effect.props.map(([key, value]) =>
         key === "Time" ? ([key, "2026-09-22T14:01:00.000Z"] as [string, string]) : ([key, value] as [string, string]),
       ),
     }
     const original = changeChain(opened, merged)
-    const withEffect = changeChain(opened, merged, effect)
+    const withEffect = changeChain(opened, merged, laterEffect)
     const beforeEffect = project(original, "refs/yrd/q/changes/task/reused", "fixture")
     const afterEffect = project(withEffect, "refs/yrd/q/changes/task/reused", "fixture")
 
@@ -939,9 +940,12 @@ describe("ADR-0016 event fold", () => {
     expect(afterEffect.notices).toEqual(beforeEffect.notices)
 
     const reopened = event("opened", "e".repeat(40), [["Commit", B]], [B])
-    const reused = project(changeChain(opened, merged, effect, reopened), "refs/yrd/q/changes/task/reused", "fixture")
+    const reused = project(
+      changeChain(opened, merged, laterEffect, reopened),
+      "refs/yrd/q/changes/task/reused",
+      "fixture",
+    )
     expect(reused).toMatchObject({ status: "queued", commit: B, tip: reopened.id })
-    expect(withEffect.map((row) => row.id)).toContain(EFFECT_EVENT)
   })
 
   it("allows an older validated effect while the reused branch is in merging", () => {
@@ -952,22 +956,30 @@ describe("ADR-0016 event fold", () => {
     const checking = event("checking", "2".repeat(40))
     const merging = event("merging", "3".repeat(40), [["Commit", B]], [B])
     const effect = issueEffectEvent(ISSUE_EFFECT, "4".repeat(40))
+    const laterEffect = {
+      ...effect,
+      props: effect.props.map(([key, value]) =>
+        key === "Time" ? ([key, "2026-09-22T14:01:00.000Z"] as [string, string]) : ([key, value] as [string, string]),
+      ),
+    }
     const prefix = changeChain(oldOpened, oldMerged, reopened, verifying, checking, merging)
     const atMerging = project(prefix, "refs/yrd/q/changes/task/reused", "fixture")
 
     expect(atMerging.status).toBe("merging")
+    expect(atMerging.at).toEqual(new Date("2026-09-22T14:00:00.000Z"))
+    expect(atMerging.endedAt).toBeUndefined()
+    expect(atMerging.lastNotifiable).toBeUndefined()
     const afterEffect = project(
-      changeChain(oldOpened, oldMerged, reopened, verifying, checking, merging, effect),
+      changeChain(oldOpened, oldMerged, reopened, verifying, checking, merging, laterEffect),
       "refs/yrd/q/changes/task/reused",
       "fixture",
     )
-    expect(afterEffect).toMatchObject({
-      status: atMerging.status,
-      at: atMerging.at,
-      endedAt: atMerging.endedAt,
-      candidate: atMerging.candidate,
-      tip: effect.id,
-    })
+    expect(afterEffect.status).toBe(atMerging.status)
+    expect(afterEffect.at).toEqual(atMerging.at)
+    expect(afterEffect.endedAt).toEqual(atMerging.endedAt)
+    expect(afterEffect.lastNotifiable).toEqual(atMerging.lastNotifiable)
+    expect(afterEffect.candidate).toBe(atMerging.candidate)
+    expect(afterEffect.tip).toBe(laterEffect.id)
   })
 
   it.each([
@@ -999,47 +1011,64 @@ describe("ADR-0016 event fold", () => {
     ).toThrow(/earlier merged event/u)
   })
 
-  it.each([
-    ["Reason", [["Reason", "audit"]]],
-    ["For", [["For", "a".repeat(40)]]],
-    ["To", [["To", "@dev/2"]]],
-    ["Key", [["Key", "issue"]]],
-    ["Result", [["Result", "delivered"]]],
-  ] as const)("refuses Issue-Effect with a legacy %s field", (_name, extra) => {
-    const opened = event("opened", A, [["Commit", A]], [A])
-    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
-    const base = issueEffectEvent(ISSUE_EFFECT)
-    const effect = { ...base, props: [...base.props, ...extra] }
-    expect(() => project(changeChain(opened, merged, effect), "refs/yrd/q/changes/task/refusal", "fixture")).toThrow()
-  })
-
-  it.each([
-    ["providerId mismatch", (raw: Record<string, unknown>) => ({ ...raw, providerId: "yrd1-wrong" })],
-    ["non-canonical JSON", (raw: Record<string, unknown>) => Object.fromEntries(Object.entries(raw).reverse())],
-    ["extra field", (raw: Record<string, unknown>) => ({ ...raw, extra: true })],
-    [
-      "missing field",
-      (raw: Record<string, unknown>) => {
+  type ReaderRefusal = Readonly<{
+    name: string
+    legacyTrailer?: readonly [string, string]
+    alter?: (raw: Record<string, unknown>) => Record<string, unknown>
+    writer?: string
+    expected: RegExp
+  }>
+  const readerRefusals: readonly ReaderRefusal[] = [
+    { name: "Reason", legacyTrailer: ["Reason", "audit"], expected: /cannot carry Reason/u },
+    { name: "For", legacyTrailer: ["For", A], expected: /cannot carry For/u },
+    { name: "To", legacyTrailer: ["To", "recipient@example.invalid"], expected: /cannot carry To/u },
+    { name: "Key", legacyTrailer: ["Key", "issue"], expected: /cannot carry Key/u },
+    { name: "Result", legacyTrailer: ["Result", "delivered"], expected: /cannot carry Result/u },
+    {
+      name: "providerId mismatch",
+      alter: (raw) => ({ ...raw, providerId: "yrd1-wrong" }),
+      expected: /providerId must be/u,
+    },
+    {
+      name: "non-canonical JSON",
+      alter: (raw) => Object.fromEntries(Object.entries(raw).reverse()),
+      expected: /must use canonical JSON/u,
+    },
+    { name: "extra field", alter: (raw) => ({ ...raw, extra: true }), expected: /unexpected fields/u },
+    {
+      name: "missing field",
+      alter: (raw) => {
         const { declaration: _declaration, ...rest } = raw
         return rest
       },
-    ],
-    ["wrong verb-ending pairing", (raw: Record<string, unknown>) => ({ ...raw, verb: "comment" })],
-    ["empty key", (raw: Record<string, unknown>) => ({ ...raw, issueKey: " " })],
-    ["non-ISO time", (raw: Record<string, unknown>) => ({ ...raw, mergeCommitterTime: "yesterday" })],
-  ] as const)("reader refuses %s", (_name, alter) => {
-    const opened = event("opened", A, [["Commit", A]], [A])
-    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
-    const effect = issueEffectEvent(alter(ISSUE_EFFECT as unknown as Record<string, unknown>))
-    expect(() => project(changeChain(opened, merged, effect), "refs/yrd/q/changes/task/refusal", "fixture")).toThrow()
-  })
+      expected: /declaration must name its committed source/u,
+    },
+    {
+      name: "wrong verb-ending pairing",
+      alter: (raw) => ({ ...raw, verb: "comment" }),
+      expected: /comment cannot carry semanticEnding/u,
+    },
+    { name: "empty key", alter: (raw) => ({ ...raw, issueKey: " " }), expected: /issueKey must be nonempty/u },
+    {
+      name: "non-ISO time",
+      alter: (raw) => ({ ...raw, mergeCommitterTime: "yesterday" }),
+      expected: /mergeCommitterTime must be an ISO instant/u,
+    },
+    { name: "wrong writer", writer: "yrd", expected: /needs writer/u },
+  ]
 
-  it("reader refuses an issue effect from the wrong writer", () => {
+  it.each(readerRefusals)("reader refuses $name", ({ legacyTrailer, alter, writer, expected }) => {
     const opened = event("opened", A, [["Commit", A]], [A])
     const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
-    const effect = { ...issueEffectEvent(ISSUE_EFFECT), writer: "yrd" }
-    expect(() => project(changeChain(opened, merged, effect), "refs/yrd/q/changes/task/writer", "fixture")).toThrow(
-      /needs writer/u,
+    const effectValue = alter === undefined ? ISSUE_EFFECT : alter(ISSUE_EFFECT as unknown as Record<string, unknown>)
+    const base = issueEffectEvent(effectValue)
+    const effect = {
+      ...base,
+      ...(writer === undefined ? {} : { writer }),
+      props: legacyTrailer === undefined ? base.props : [...base.props, legacyTrailer],
+    }
+    expect(() => project(changeChain(opened, merged, effect), "refs/yrd/q/changes/task/refusal", "fixture")).toThrow(
+      expected,
     )
   })
 
