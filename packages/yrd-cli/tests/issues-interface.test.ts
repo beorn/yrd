@@ -317,6 +317,11 @@ describe("yrd issues", () => {
       noProgressTimeoutMs: 300,
       stderr: () => {},
     })
-    expect(outcome).toMatchObject({ ok: false, exitCode: 1, code: "yrd-issues-provider-stalled" })
+    expect(outcome).toMatchObject({
+      ok: false,
+      exitCode: 1,
+      code: "yrd-issues-provider-stalled",
+      message: expect.stringContaining("no output for 300 ms after "),
+    })
   })
 })

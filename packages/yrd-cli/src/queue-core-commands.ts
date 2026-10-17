@@ -4894,7 +4894,13 @@ export async function coreQueueCommand(
         const histories = [...changeHistories, ...directHistories]
         // Start display reads independently. The queue result is emitted before
         // waiting for this optional decoration; no decision consumes its payload.
-        // The read is the issues interface's `view` at --project-root; issuesProvider.read is no longer consulted.
+        // The read is the issues interface's `view` at --project-root; issuesProvider.read is no longer consulted,
+        // and a declaration in force that still holds it is told out loud (@cto 6a06588f).
+        if (config.issuesProvider?.read !== undefined) {
+          io.stderr(
+            "yrd: .yrd.yml issuesProvider.read: retired (29644 Y1) and ignored; the issue display is issues.yml's view, read by yrd queue show --project-root <root>; delete this key\n",
+          )
+        }
         const projectRoot = options.projectRoot
         const displayReads =
           projectRoot === undefined

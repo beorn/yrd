@@ -1,14 +1,15 @@
 /**
- * @failure  `yrd queue show`'s issue line is read through the issues interface (29644 Y1, @cto rulings c4cd9763 /
- *           b59e0e09). If `--project-root` did not reach the display read, show would decorate from the wrong
+ * @failure  `yrd queue show`'s issue line is read through the issues interface (29644 Y1, @cto rulings 0e9e794e /
+ *           b59e0e09 / 6a06588f). If `--project-root` did not reach the display read, show would decorate from the wrong
  *           project or not at all; if the read bypassed `runIssuesVerb`, a second reader of issue state would
- *           grow beside `yrd issues`; and if the 10 s bound did not kill the provider, one hung tracker would hold
- *           every `show` open.
+ *           grow beside `yrd issues`; if a declaration in force still holding `issuesProvider.read` were ignored in
+ *           silence, a retired mechanism would go unsaid; and if the 10 s bound did not kill the provider, one hung
+ *           tracker would hold every `show` open.
  * @level    l2 (a real queue in a real Git worktree, a real issues.yml project and provider process)
  * @consumer an operator or agent reading `yrd queue show` for a change bound to an issue
  * @testonly none
  */
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { safeRemoveSync } from "removely"
@@ -74,7 +75,7 @@ async function issuesProject(mode: string): Promise<string> {
 }
 
 /** A queue whose one change is bound to issue 29644. */
-async function queueWithIssueChange(): Promise<string> {
+async function queueWithIssueChange(extraYrdYml = ""): Promise<string> {
   const root = scratch("yrd-issue-display-queue-")
   const seed = gitIn(root)
   const remote = join(root, "remote.git")
@@ -85,7 +86,7 @@ async function queueWithIssueChange(): Promise<string> {
   await git(["config", "user.email", "queue@yrd.test"])
   await git(["config", "user.name", "yrd"])
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(work, ".yrd.yml"), "checks:\n  - verify:\n      run: test -f pass.txt\n")
+  writeFileSync(join(work, ".yrd.yml"), `checks:\n  - verify:\n      run: test -f pass.txt\n${extraYrdYml}`)
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
@@ -118,6 +119,19 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
     const shown = await yrd(work, "queue", "show", "task/one", "--json", "--fresh")
     expect(shown.exitCode, shown.report).toBe(0)
     expect(shown.stderr, shown.report).not.toContain("issue info")
+  })
+
+  it("says out loud when the declaration in force still holds issuesProvider.read, and never runs it (rule: retired key said out loud)", async () => {
+    const marker = join(scratch("yrd-issue-display-retired-"), "ran")
+    const work = await queueWithIssueChange(
+      `issuesProvider:\n  read: ${JSON.stringify(["sh", "-c", `touch ${JSON.stringify(marker)}`, "read", "<key>"])}\n`,
+    )
+    const shown = await yrd(work, "queue", "show", "task/one", "--json", "--fresh")
+    expect(shown.exitCode, shown.report).toBe(0)
+    expect(shown.stderr, shown.report).toContain(
+      "yrd: .yrd.yml issuesProvider.read: retired (29644 Y1) and ignored; the issue display is issues.yml's view, read by yrd queue show --project-root <root>; delete this key",
+    )
+    expect(existsSync(marker)).toBe(false)
   })
 
   it("names a failed read unavailable with the reader's cause (rule: failure shows unavailable)", async () => {

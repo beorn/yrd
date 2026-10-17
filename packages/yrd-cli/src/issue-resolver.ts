@@ -6,7 +6,7 @@ export const ISSUE_DISPLAY_TIMEOUT_MS = 10_000
 /**
  * Display transport only: provider keys and payloads have no Yrd issue semantics. The read is the issues
  * interface's `view`, run in-process through `runIssuesVerb` against the project root's `issues.yml`
- * (@cto rulings c4cd9763 / b59e0e09); it no longer runs `.yrd.yml`'s `issuesProvider.read`.
+ * (@cto rulings 0e9e794e / b59e0e09); it no longer runs `.yrd.yml`'s `issuesProvider.read`.
  */
 export async function readIssueDisplay(
   input: Readonly<{
