@@ -13,6 +13,11 @@ const [mode, ...rest] = process.argv.slice(2)
 if (mode === "json") {
   process.stderr.write("fake provider: applied\n")
   process.stdout.write(`${JSON.stringify({ argv: rest })}\n`)
+} else if (mode === "resolve") {
+  process.stdout.write(`${JSON.stringify({ keys: rest })}\n`)
+} else if (mode === "reply") {
+  if (rest[0] === undefined) throw new Error("reply requires stdout bytes")
+  process.stdout.write(rest[0])
 } else if (mode === "trace") {
   const [key, outputMarker, starts] = rest
   if (key === undefined || outputMarker === undefined || starts === undefined) {
