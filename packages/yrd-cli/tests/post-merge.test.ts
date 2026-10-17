@@ -10,7 +10,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
 import { createPostMerge, readPostMergeIssueDiagnostics } from "../src/post-merge.ts"
-import { coreQueueCommand } from "../src/queue-core-commands.ts"
+import { coreQueueCommand, readEventListing } from "../src/queue-core-commands.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { Conflict } from "../../yrd-queue-core/src/git.ts"
 import {
@@ -459,6 +459,30 @@ it.each([
           providerId: failedAction!.providerId,
         }),
       )
+      const deliveredTarget = (await git(["rev-parse", "origin/main"])).trim()
+      const failedListing = await readEventListing(git, config, repo, workdir, deliveredTarget, store, { all: true })
+      expect(failedListing.all.find((row) => row.branch === "task/first")?.diagnostic).toContain(
+        "stopped: queue shutdown fixture",
+      )
+      const failedPath = readdirSync(join(workdir, "post-merge"))
+        .filter((name) => name.endsWith(".json"))
+        .map((name) => join(workdir, "post-merge", name))
+        .find((path) =>
+          (JSON.parse(readFileSync(path, "utf8")) as { issueActions: Array<{ providerId: string }> }).issueActions.some(
+            (action) => action.providerId === failedAction!.providerId,
+          ),
+        )!
+      const failedEvidence = JSON.parse(readFileSync(failedPath, "utf8")) as {
+        issueActions: Array<{ diagnostic?: string }>
+      }
+      for (const action of failedEvidence.issueActions) {
+        if (action.diagnostic !== undefined) action.diagnostic += "; updated after cache warm"
+      }
+      writeFileSync(failedPath, JSON.stringify(failedEvidence))
+      const refreshedListing = await readEventListing(git, config, repo, workdir, deliveredTarget, store, { all: true })
+      expect(refreshedListing.all.find((row) => row.branch === "task/first")?.diagnostic).toContain(
+        "updated after cache warm",
+      )
       const environments = join(workdir, "environments")
       mkdirSync(environments, { recursive: true })
       for (const branch of ["first", "second", "refs"]) {
@@ -505,6 +529,19 @@ it.each([
       expect(calls).toHaveLength(2)
       expect(calls.find(([key]) => key === "issue-first")?.[2]).toBe(failedAction!.providerId)
       expect(readPostMergeIssueDiagnostics(workdir)).toEqual([])
+      const retriedListing = await readEventListing(git, config, repo, workdir, deliveredTarget, store, { all: true })
+      expect(retriedListing.all.find((row) => row.branch === "task/first")?.diagnostic ?? "").not.toContain(
+        "stopped: queue shutdown fixture",
+      )
+      const originalEvidence = readFileSync(failedPath, "utf8")
+      try {
+        for (const malformed of [null, { issueActions: "not an array" }, { issueActions: [{ status: "failed" }] }]) {
+          writeFileSync(failedPath, JSON.stringify(malformed))
+          expect(() => readPostMergeIssueDiagnostics(workdir)).toThrow(failedPath)
+        }
+      } finally {
+        writeFileSync(failedPath, originalEvidence)
+      }
       return
     }
     expect(merged).toContain("task/second")
@@ -597,6 +634,8 @@ it.each([
         ],
         "origin",
       )
+      await seed(["--git-dir", remote, "gc", "--prune=now"])
+      await git(["gc", "--prune=now"])
       expect(
         (await readBranchHistory(store, "main", "task/first")).history!.events.some(
           (event) => trailer(event, "Issue-Effect") !== undefined,

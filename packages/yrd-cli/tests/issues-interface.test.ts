@@ -160,6 +160,43 @@ describe("yrd issues", () => {
     expect(envelopeOf(ran).result).toEqual({ argv: ["k"] })
   })
 
+  it("pins a main ancestor declaration and refuses a non-ancestor without starting its provider", async () => {
+    const root = project({ "issues.yml": declare({ view: provider("json", "old", "<key>") }) })
+    const pin = git(root, "rev-parse", "HEAD")
+    git(root, "checkout", "--quiet", "-b", "unmerged")
+    writeFileSync(join(root, "issues.yml"), declare({ view: provider("json", "unmerged", "<key>") }))
+    git(root, "add", "issues.yml")
+    git(root, "commit", "--quiet", "-m", "unmerged declaration")
+    const unmerged = git(root, "rev-parse", "HEAD")
+    git(root, "checkout", "--quiet", "main")
+    writeFileSync(join(root, "issues.yml"), declare({ view: provider("json", "new", "<key>") }))
+    git(root, "add", "issues.yml")
+    git(root, "commit", "--quiet", "-m", "advance main declaration")
+    const pinned = await runIssuesVerb({
+      verb: "view",
+      args: ["key"],
+      cwd: root,
+      declarationCommit: pin,
+      stderr: () => {},
+    })
+    expect(pinned).toMatchObject({
+      ok: true,
+      envelope: { declaration: { commit: pin }, result: { argv: ["old", "key"] } },
+    })
+    let providerOutput = ""
+    const refused = await runIssuesVerb({
+      verb: "view",
+      args: ["key"],
+      cwd: root,
+      declarationCommit: unmerged,
+      stderr: (text) => {
+        providerOutput += text
+      },
+    })
+    expect(refused).toMatchObject({ ok: false, code: "yrd-issues-no-main" })
+    expect(providerOutput).toBe("")
+  })
+
   it.each([
     ["an absolute path", (path: string) => path],
     ["a file:// URL", (path: string) => pathToFileURL(path).href],
