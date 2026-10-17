@@ -208,10 +208,12 @@ it.each([
   { mode: "delivered-declaration" },
   { mode: "reuse-pending" },
   { mode: "blob-mismatch" },
+  { mode: "observed-ff" },
 ] as const)(
   "preserves the real merge queue while exercising post-merge $mode behavior",
   async ({ mode }) => {
     const reconcileAfterQueue = mode.startsWith("append-") || mode === "reuse-pending" || mode === "concurrent"
+    const expectedCloses = mode === "observed-ff" ? 3 : 2
     const root = world(),
       remote = join(root, "remote.git"),
       repo = join(root, "author"),
@@ -280,6 +282,11 @@ it.each([
     const queue = async (branch: string, message: string) => {
       await git(["checkout", "--quiet", "-b", branch, "origin/main"])
       writeFileSync(join(repo, branch.replaceAll("/", "-") + ".txt"), branch)
+      if (mode === "observed-ff" && branch === "task/first") {
+        writeFileSync(join(repo, "older.txt"), "older closing intent")
+        await git(["add", "older.txt"])
+        await git(["commit", "--quiet", "-m", "older\n\nCloses: issue-older"])
+      }
       if (mode === "delivered-declaration" && branch === "task/first") {
         writeFileSync(
           join(repo, "issues.yml"),
@@ -311,6 +318,9 @@ it.each([
       return submitted
     }
     await queue("task/first", "first\n\nCloses: issue-first")
+    if (mode === "observed-ff") {
+      await git(["push", "--quiet", "origin", "task/first:refs/heads/main"])
+    }
     const stop = new AbortController(),
       merged: string[] = [],
       diagnostics: string[] = []
@@ -393,7 +403,7 @@ it.each([
                     const calls = existsSync(closeCalls)
                       ? readFileSync(closeCalls, "utf8").trim().split("\n").filter(Boolean)
                       : []
-                    expect(calls, diagnostics.join(" ")).toHaveLength(2)
+                    expect(calls, diagnostics.join(" ")).toHaveLength(expectedCloses)
                   },
                   { timeout: 5000 },
                 )
@@ -716,6 +726,7 @@ it.each([
       .map((line) => line.split("\t"))
     expect(calls.map(([key, reason]) => [key, reason])).toEqual([
       [mode === "delivered-declaration" ? "delivered-issue-first" : "issue-first", "completed"],
+      ...(mode === "observed-ff" ? [["issue-older", "completed"]] : []),
       [mode === "delivered-declaration" ? "delivered-issue-second" : "issue-second", "completed"],
     ])
     const effects = await Promise.all(
