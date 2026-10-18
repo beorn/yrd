@@ -72,6 +72,7 @@ import { shellQuote } from "git-super/shell-command"
 import { readEnvOpenRecord } from "../src/env-open-record.ts"
 import { SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
+import { parseQueueAddress } from "../src/address.ts"
 import { eventHistoryEntries } from "../src/watch-change.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import type { WatchSource } from "../src/watch-pane.tsx"
@@ -886,7 +887,11 @@ describe("a queue is the selected origin branch carrying config", () => {
     const head = (await git(["rev-parse", "HEAD"])).trim()
     const at = new Date(Date.now() - 60_000)
     const queueTip = await createQueue(repo, queueBranch, head, at)
-    const logs = join(await workdirOf(git, { cwd: repo }), "logs")
+    const workdir = await workdirOf(git, {
+      cwd: repo,
+      address: parseQueueAddress(`${join(dirname(repo), "remote.git")}#${queueBranch}`),
+    })
+    const logs = join(workdir, "logs")
     const journals = ["task/sel'ected", "task/unrelated"].map((branch, index) => {
       const journal = openLog(logs, () => new Date(at.getTime() + index + 1))
       journal.write({ kind: "run", base: head })
@@ -914,7 +919,7 @@ describe("a queue is the selected origin branch carrying config", () => {
           repo,
           shown.io,
           { command: "show", branch: selected.branch },
-          { json: true, queue: queueBranch },
+          { json: true, queue: queueBranch, workdir },
         ),
         shown.stderr(),
       ).toBe(0)
@@ -937,7 +942,12 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(scoped.journal.fallbacks).toMatchObject({ count: 1, reasons: [{ count: 1 }] })
     const bulk = capture(repo)
     expect(
-      await coreQueueCommand(repo, bulk.io, { command: "show", all: true }, { json: true, queue: queueBranch }),
+      await coreQueueCommand(
+        repo,
+        bulk.io,
+        { command: "show", all: true },
+        { json: true, queue: queueBranch, workdir },
+      ),
       bulk.stderr(),
     ).toBe(0)
     const global = JSON.parse(bulk.stdout()) as typeof scoped
@@ -950,7 +960,12 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(Buffer.byteLength(shown.stdout())).toBeLessThan(Buffer.byteLength(bulk.stdout()))
     const again = capture(repo)
     expect(
-      await coreQueueCommand(repo, again.io, { command: "show", all: true }, { json: true, queue: queueBranch }),
+      await coreQueueCommand(
+        repo,
+        again.io,
+        { command: "show", all: true },
+        { json: true, queue: queueBranch, workdir },
+      ),
       again.stderr(),
     ).toBe(0)
     const settled = JSON.parse(again.stdout()) as typeof scoped
@@ -991,7 +1006,7 @@ describe("a queue is the selected origin branch carrying config", () => {
             repo,
             human.io,
             { command: "list", all: true, terms: [selected.branch] },
-            { queue: queueBranch },
+            { queue: queueBranch, workdir },
           ),
           human.stderr(),
         ).toBe(0)
@@ -1005,6 +1020,7 @@ describe("a queue is the selected origin branch carrying config", () => {
             { command: "list", all: true, watch: true },
             {
               queue: queueBranch,
+              workdir,
               watchSource: (source) => sources.push(source),
             },
           ),
@@ -1034,9 +1050,12 @@ describe("a queue is the selected origin branch carrying config", () => {
       }
       const inspected = spawnSync("/bin/sh", ["-c", inspections[0]!.recipe], { cwd: dirname(repo), encoding: "utf8" })
       expect(inspected.status, inspected.stderr).toBe(0)
-      const changes = (
-        JSON.parse(inspected.stdout) as { changes: { branch: string; diagnostics?: readonly object[] }[] }
-      ).changes
+      const inspectedData = JSON.parse(inspected.stdout) as {
+        changes: { branch: string; diagnostics?: readonly object[] }[]
+        journal: { dir: string }
+      }
+      expect(inspectedData.journal.dir).toBe(logs)
+      const changes = inspectedData.changes
       expect(changes).toHaveLength(1)
       expect(changes[0]!.branch).toBe(selected.branch)
       expect(changes[0]!.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining(guidance)]))
@@ -1066,7 +1085,11 @@ describe("a queue is the selected origin branch carrying config", () => {
     await git(["merge", "--quiet", "--no-ff", "-m", "landed twice", branch])
     const merge = (await git(["rev-parse", "HEAD"])).trim()
     await git(["push", "--quiet", "origin", queueBranch])
-    const logs = join(await workdirOf(git, { cwd: repo }), "logs")
+    const workdir = await workdirOf(git, {
+      cwd: repo,
+      address: parseQueueAddress(`${join(dirname(repo), "remote.git")}#${queueBranch}`),
+    })
+    const logs = join(workdir, "logs")
     for (const minutesAgo of [29, 19]) {
       const journal = openLog(logs, () => time(minutesAgo))
       journal.write({ kind: "run", base: target })
@@ -1091,7 +1114,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         repo,
         listed.io,
         { command: "list", latest: true, terms: [branch] },
-        { json: true, queue: queueBranch },
+        { json: true, queue: queueBranch, workdir },
       ),
     ).toBe(0)
     const current = (
@@ -1100,7 +1123,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(current).toEqual([expect.objectContaining({ head, duplicates: [expect.any(Object)] })])
     const shown = capture(repo)
     expect(
-      await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: queueBranch }),
+      await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: queueBranch, workdir }),
     ).toBe(0)
     const segments = (
       JSON.parse(shown.stdout()) as {
@@ -1125,7 +1148,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         repo,
         historical.io,
         { command: "list", all: true, terms: [branch] },
-        { json: true, queue: queueBranch },
+        { json: true, queue: queueBranch, workdir },
       ),
     ).toBe(0)
     const runs = (JSON.parse(historical.stdout()) as { changes: readonly { merge?: string; duplicates: unknown }[] })
@@ -1135,7 +1158,12 @@ describe("a queue is the selected origin branch carrying config", () => {
     for (const row of runs) expect(row.duplicates).toEqual(proof)
     const bulk = capture(repo)
     expect(
-      await coreQueueCommand(repo, bulk.io, { command: "show", all: true }, { json: true, queue: queueBranch }),
+      await coreQueueCommand(
+        repo,
+        bulk.io,
+        { command: "show", all: true },
+        { json: true, queue: queueBranch, workdir },
+      ),
     ).toBe(0)
     expect(
       (JSON.parse(bulk.stdout()) as { changes: readonly { branch: string }[] }).changes.filter(
@@ -1186,6 +1214,7 @@ describe("a queue is the selected origin branch carrying config", () => {
             { command: "list", all: true, watch: true },
             {
               queue: queueBranch,
+              workdir,
               watchSource: (source) => sources.push(source),
             },
           ),
@@ -1206,7 +1235,7 @@ describe("a queue is the selected origin branch carrying config", () => {
             repo,
             human.io,
             command === "list" ? { command, all: true, terms: [branch] } : { command, branch },
-            { queue: queueBranch },
+            { queue: queueBranch, workdir },
           ),
           human.stderr(),
         ).toBe(0)
