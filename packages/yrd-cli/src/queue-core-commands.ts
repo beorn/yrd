@@ -5720,7 +5720,7 @@ export function describeRun(
 /**
  * One line per change this round ended stuck, naming the cure the way
  * `queue list`/`queue show` already render a stuck row's incident
- * (`incidentLine`, ADR-0007's compact form) — `queue run`'s own summary line
+ * (the shared `incidentLine` formatter) — `queue run`'s own summary line
  * names only the branch (@i/10-yrd/24141 AC2).
  *
  * Read from this round's own log rather than the remote: the `end()` step
@@ -5741,7 +5741,7 @@ function stuckCureLines(outcome: QueueRunOutcome): readonly string[] {
     const reading = incidentIn(row ?? {})
     if (reading.kind === "incident") return `stuck ${branch}: ${incidentLine(reading.incident)}`
     const reason = reading.kind === "malformed" ? reading.reason : "no incident"
-    return `stuck ${branch}: ${reason} in this runs log (${outcome.log}); see yrd queue show ${branch}`
+    return `stuck ${branch}: ${reason} in this run's log (${outcome.log}); see yrd queue show ${branch}`
   })
 }
 
