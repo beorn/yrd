@@ -93,9 +93,10 @@ export type RunnerRun = Readonly<{
   activeStep?: ActiveRunnerStep
   steps?: readonly RunnerJournalStep[]
   /**
-   * The round's own closing `remote-calls` row (25570): this run's journal says
-   * its round ended. Absent while it executes, and absent on one that died —
-   * neither wrote the row.
+   * The round's own closing row (25570): either the counted `remote-calls` row or
+   * the warning that replaces it when git's trace is unreadable. This run's
+   * journal says its round ended. Absent while it executes, and absent on one
+   * that died — neither wrote the row.
    */
   ended?: true
   /** The line as this run read it, from its own `observation`/`line` record (25669), once it has. */
@@ -225,7 +226,8 @@ export function projectionFallbackReport(
   // hh-dev, 2026-10-18). Two run-owned facts can prove it instead:
   //   - the journal's own unterminated provisioning step, or
   //   - a lock taken at or before this run's start, over a journal that has not
-  //     written its closing `remote-calls` row.
+  //     written its closing row (`remote-calls`, or the warning that replaces it
+  //     when the trace is unreadable).
   // A completed run never qualifies — it has that row — so a newer round's lock
   // cannot hide an older run's genuinely missing projection (@yrd/29994 review).
   const latest = runner.latest
@@ -552,7 +554,7 @@ export type JournalHead = Readonly<{
   fields: Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks" | "effectiveChecks">
   /** Was a `run` record found at all. */
   headed: boolean
-  /** Did the round write its own closing `remote-calls` row (25570). */
+  /** Did the round write its own closing row (25570): `remote-calls`, or its unreadable-trace warning. */
   ended: boolean
   /** The process the HEADER names, which is the only pid a run in its preamble has. */
   pid?: number
@@ -739,7 +741,13 @@ export function readRunHeader(path: string, projected?: readonly LogRecord[]): J
   // still IN its preamble as well as one that died there, and only a pid tells
   // those apart.
   const died = runDiedInPreamble(records)
-  const ended = records.some((record) => record.kind === "remote-calls")
+  // One closing row ends the round, however it ends: the counted `remote-calls`
+  // row, or the warning that replaces it when git's trace is unreadable
+  // (queue-core/src/run.ts). Both prove the round finished, so neither may be
+  // read as a run still executing.
+  const ended = records.some(
+    (record) => record.kind === "remote-calls" || (record.kind === "warning" && record.subject === "remote-calls"),
+  )
   if (header === undefined) return { died, ended, fields: {}, headed: false }
   const resolved = records.find((record) => record.kind === "queue")?.queue ?? header.queue
   const pid = header.pid

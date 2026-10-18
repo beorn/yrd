@@ -435,6 +435,35 @@ describe("event queue observation refusals", () => {
       reason: "missing",
       runnerState: "provisioning",
     })
+
+    // The same run finished with an unreadable trace: run.ts replaces the
+    // closing `remote-calls` row with a warning under that subject, and that is
+    // proof the round ended too. The own lingering lock must not resurrect the
+    // not-yet-written word (@yrd/29994 review).
+    writeFileSync(
+      join(logs, `${pending}.jsonl`),
+      completedLines
+        .map((line) => {
+          const record = JSON.parse(line) as { kind?: string; run?: string; at?: string }
+          return record.kind === "remote-calls"
+            ? JSON.stringify({
+                kind: "warning",
+                subject: "remote-calls",
+                reason: "trace2 log unreadable",
+                run: record.run,
+                at: record.at,
+              })
+            : line
+        })
+        .join("\n") + "\n",
+    )
+    lock(startedAt - 2_000)
+    const unreadableTrace = await list()
+    expect(unreadableTrace.projectionFallback).toMatchObject({
+      run: pending,
+      reason: "missing",
+      runnerState: "provisioning",
+    })
   })
 
   // AC (28918): a source-changed artifact is repaired ONLY once its round's
