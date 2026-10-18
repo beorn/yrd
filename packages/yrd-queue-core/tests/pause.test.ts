@@ -10,9 +10,19 @@ import { afterAll, describe, expect, it } from "vitest"
 import { type Git } from "../src/git.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { pauseRef } from "../src/refs.ts"
-import { createEventQueue, createEventStore, readConfig, readEventOps, selectionFor } from "../src/index.ts"
+import {
+  appendChangeEvent,
+  createEventQueue,
+  createEventStore,
+  readConfig,
+  readEventOps,
+  readStatus,
+  selectionFor,
+  submit,
+  writeQueueEvent,
+} from "../src/index.ts"
 import { incidentLine, incidentTrailers } from "../src/incident.ts"
-import { stuckCures } from "../src/pause.ts"
+import { liftLine, stuckCures } from "../src/pause.ts"
 
 const roots: string[] = []
 
@@ -53,7 +63,14 @@ afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
 
-async function world(): Promise<{ writer: Git; reader: Git; created: string; target: string; other: string }> {
+async function world(): Promise<{
+  writer: Git
+  reader: Git
+  created: string
+  target: string
+  other: string
+  work: string
+}> {
   const root = mkdtempSync(join(tmpdir(), "yrd-m2-pause-"))
   roots.push(root)
   const remote = join(root, "remote.git")
@@ -83,8 +100,54 @@ async function world(): Promise<{ writer: Git; reader: Git; created: string; tar
     config,
     new Date(),
   )
-  return { writer, reader, created, target, other }
+  return { writer, reader, created, target, other, work }
 }
+
+/** @failure Reading an old Git event rewrites its Next or presents it as a current command.
+ * @level l1 @consumer a queue reader in another clone
+ * Pure incident tests cannot catch event-storage decoding or reader-side publication.
+ */
+it("reads historical Next from another clone without changing the Git event bytes", async () => {
+  const w = await world()
+  const branch = "task/historical-guidance"
+  await w.writer(["checkout", "--quiet", "-b", branch, w.target])
+  writeFileSync(join(w.work, "historical.txt"), "unmerged work\n")
+  await w.writer(["add", "historical.txt"])
+  await w.writer(["commit", "--quiet", "-m", "historical work"])
+  const head = (await w.writer(["rev-parse", "HEAD"])).trim()
+  await submit(w.writer, "origin", { branch, submitter: "@dev/1", target: { branch: "main", remote: "origin" } })
+  const writerStore = createEventStore(w.work, "origin", selectionFor(w.writer))
+  const opened = await readStatus(writerStore, "main", branch)
+  if (opened.tip === undefined) throw new Error("the historical change has no opened event")
+  const at = new Date("2025-01-02T03:04:05.000Z")
+  const event = await appendChangeEvent(writerStore, "main", branch, opened.tip, {
+    type: "stuck",
+    reason: "historical setup fault",
+    at,
+  })
+  const next = "cd '/old producer clone' && yrd queue resume --reason 'repair then retry'"
+  const paused = await writeQueueEvent(writerStore, "main", {
+    type: "paused",
+    cause: "stuck",
+    by: "yrd",
+    reason: "historical setup fault",
+    change: { branch, head, event },
+    next,
+    at,
+  })
+  const before = await w.writer(["cat-file", "commit", paused])
+  const { stop } = await readEventOps(
+    createEventStore(w.other, "origin", selectionFor(w.reader)),
+    w.reader,
+    "main",
+    w.target,
+  )
+  expect(stop?.next).toBe(next)
+  if (stop === undefined) throw new Error("the historical stuck event was not read")
+  expect(liftLine(stop, "origin", "main")).toContain(`recorded guidance: ${next}`)
+  expect(await w.reader(["cat-file", "commit", paused])).toBe(before)
+  expect((await w.reader(["ls-remote", "origin", "refs/yrd/main/queue"])).trim().split(/\s/u)[0]).toBe(paused)
+})
 
 function m2(created: string, actor = "yrd-ops-cutover", extra = ""): string {
   return `moved to event format at ${created}\n\nRecord: paused\nPaused-By: ${actor}\nPaused-At: 2026-09-27T00:40:59.853Z\nCause: maintenance${extra}\n`

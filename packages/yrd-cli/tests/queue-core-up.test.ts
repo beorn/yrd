@@ -6281,11 +6281,18 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
   // pages it — never overdue, which would say the writer died.
   it("a stopped line reads stopped, never overdue, across a long hold, heartbeat writes included", async () => {
     const w = await world()
+    // Publication is a separate boundary from the pure health builder: a
+    // producer-local formatter must not bind the shared document to this clone.
+    const viewer = join(dirname(w.work), "health-viewer")
+    await gitIn(dirname(w.work))(["clone", "--quiet", w.work, viewer])
+    const viewerHealth = join(viewer, "health")
+    mkdirSync(viewerHealth)
     const fault = brokenSetup(w.workdir)
     await redeclare(w, `setup: ${fault.command}\n`)
     const head = await oneChange(w, "task/stuck")
     using published = await publishedHealth(w.workdir)
     const run = capture(w.work)
+    run.io.formatYrdCommand = (argv, cwd) => `producer-host ${cwd} yrd ${argv.join(" ")}`
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
     const roundEnds: number[] = []
@@ -6313,6 +6320,14 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     )
     try {
       await vi.waitFor(() => expect(seen.length, run.stderr()).toBeGreaterThan(0), { timeout: 20_000 })
+      const bytes = readFileSync(join(w.workdir, QUEUE_HEALTH_DOCUMENT), "utf8")
+      expect(bytes, "published health must not contain the producing clone's command context").not.toContain(w.work)
+      expect(bytes).not.toContain("producer-host")
+      writeFileSync(join(viewerHealth, QUEUE_HEALTH_DOCUMENT), bytes)
+      const remoteReading = await readQueueHealth(viewerHealth, SERVICE, new Date(String(seen[0]?.facts?.writtenAt)))
+      expect(remoteReading.error?.code).toBe("queue-round-stuck")
+      expect(remoteReading.error?.resolution).toEqual(seen[0]?.error?.resolution)
+      expect(remoteReading.facts?.stopped).toEqual(seen[0]?.facts?.stopped)
       const heldSince = Date.now()
       const readings: QueueHealthDocument[] = []
       while (seen.length < 3) {
