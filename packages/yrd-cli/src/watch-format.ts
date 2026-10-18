@@ -116,7 +116,7 @@ export function diagnosticLines(
     // #28195: the listing states a revert finding in ONE line; `yrd queue show` renders the stored
     // reason itself, in full, for the one row asked.
     ...(row.revertWarning === undefined ? [] : [`${row.branch}@${row.head}: ⚠ ${revertWarningLine(row)}`]),
-    ...(row.diagnostics ?? []).flatMap((record) => {
+    ...(row.diagnostics ?? journal?.diagnostics ?? []).flatMap((record) => {
       const usable = (value: unknown): value is string => typeof value === "string" && value.trim() !== ""
       const text = usable(record.text) ? record.text : undefined
       const inspect = usable(record.inspect) ? record.inspect : undefined

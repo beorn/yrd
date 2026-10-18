@@ -963,7 +963,14 @@ describe("a queue is the selected origin branch carrying config", () => {
       inspect: "git -C '/other old path' show newer-ref",
     }
     selected.journal.write({ kind: "change", branch: selected.branch, head, reason: "change-ref-taken", ...guidance })
-    selected.journal.write({ kind: "change", branch: selected.branch, head, reason: "change-ref-contended", remote: "origin" })
+    selected.journal.write({
+      kind: "change",
+      branch: selected.branch,
+      head,
+      reason: "change-ref-contended",
+      remote: "origin",
+    })
+    selected.journal.finish()
     const rawJournal = readFileSync(selected.journal.path, "utf8")
     const remote = join(dirname(repo), "remote.git")
     const queue = `${remote}#${queueBranch}`
@@ -979,18 +986,34 @@ describe("a queue is the selected origin branch carrying config", () => {
       }
       let text: string
       if (command === "list") {
-        expect(await coreQueueCommand(repo, human.io, { command: "list", all: true, terms: [selected.branch] }, { queue: queueBranch }), human.stderr()).toBe(0)
+        expect(
+          await coreQueueCommand(
+            repo,
+            human.io,
+            { command: "list", all: true, terms: [selected.branch] },
+            { queue: queueBranch },
+          ),
+          human.stderr(),
+        ).toBe(0)
         text = human.stdout()
       } else {
         const sources: WatchSource[] = []
-        expect(await coreQueueCommand(repo, human.io, { command: "list", all: true, watch: true }, {
-          queue: queueBranch,
-          watchSource: (source) => sources.push(source),
-        }), human.stderr()).toBe(0)
+        expect(
+          await coreQueueCommand(
+            repo,
+            human.io,
+            { command: "list", all: true, watch: true },
+            {
+              queue: queueBranch,
+              watchSource: (source) => sources.push(source),
+            },
+          ),
+          human.stderr(),
+        ).toBe(0)
         expect(sources).toHaveLength(1)
         const source = sources[0]!
         const item = source.snapshot?.rows.find((item) => item.row.branch === selected.branch)
-        expect(item?.row.diagnostics).toHaveLength(2)
+        expect(item).toBeDefined()
         expect(source.open).toBeDefined()
         const detail = await source.open!(item!)
         expect(detail.row.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining(guidance)]))
@@ -998,7 +1021,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       }
       expect(inspections.length, command).toBeGreaterThan(0)
       for (const inspection of inspections) {
-        expect(inspection).toMatchObject({ argv: ["queue", "list", "--all", "--json", selected.branch, "--queue", queue], cwd: repo })
+        expect(inspection).toMatchObject({
+          argv: ["queue", "list", "--all", "--json", selected.branch, "--queue", queue],
+          cwd: repo,
+        })
         expect(text).toContain(inspection.recipe)
       }
       if (command === "list") {
@@ -1008,7 +1034,9 @@ describe("a queue is the selected origin branch carrying config", () => {
       }
       const inspected = spawnSync("/bin/sh", ["-c", inspections[0]!.recipe], { cwd: dirname(repo), encoding: "utf8" })
       expect(inspected.status, inspected.stderr).toBe(0)
-      const changes = (JSON.parse(inspected.stdout) as { changes: { branch: string; diagnostics?: readonly object[] }[] }).changes
+      const changes = (
+        JSON.parse(inspected.stdout) as { changes: { branch: string; diagnostics?: readonly object[] }[] }
+      ).changes
       expect(changes).toHaveLength(1)
       expect(changes[0]!.branch).toBe(selected.branch)
       expect(changes[0]!.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining(guidance)]))
@@ -1016,7 +1044,6 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect(await remoteGit(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(refs)
       expect(readFileSync(selected.journal.path, "utf8")).toBe(rawJournal)
     }
-
   }, 15_000)
 
   it("keeps an equal-head duplicate inspectable in list, show and watch after contradictory endings", async () => {

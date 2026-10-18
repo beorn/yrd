@@ -4347,7 +4347,9 @@ export async function coreQueueCommand(
           one.rows.flatMap((item) => (item.row.diagnostic === undefined ? [] : [item.row.branch])),
         )
         const recordedWarningBranches = new Set(
-          one.rows.flatMap((item) => (item.row.diagnostics?.length ? [item.row.branch] : [])),
+          one.rows.flatMap((item) =>
+            (item.row.diagnostics ?? journalFor(item, one.journals)?.diagnostics)?.length ? [item.row.branch] : [],
+          ),
         )
         return [
           listing,
@@ -4493,17 +4495,24 @@ export async function coreQueueCommand(
               journal,
               workdir,
             )
+            const diagnostics = item.row.diagnostics ?? journal?.diagnostics
             const notes = [
               detail.note,
               journalNote,
               ...(item.row.diagnostic === undefined
                 ? []
                 : [`Raw events: ${formatCommand(["queue", "show", item.row.branch, "--json"])}`]),
-              ...(item.row.diagnostics?.length
+              ...(diagnostics?.length
                 ? [`Inspect current fields: ${formatCommand(["queue", "list", "--all", "--json", item.row.branch])}`]
                 : []),
             ].filter((note) => note !== undefined)
-            return notes.length === 0 ? detail : { ...detail, note: notes.join("; ") }
+            return notes.length === 0
+              ? detail
+              : {
+                  ...detail,
+                  ...(diagnostics === undefined ? {} : { row: { ...detail.row, diagnostics } }),
+                  note: notes.join("; "),
+                }
           },
           snapshot: snapshotOf(first),
         }
