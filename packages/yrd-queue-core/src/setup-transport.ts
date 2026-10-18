@@ -97,9 +97,9 @@ export function setupStuckCode(fault: TransportFault | undefined): string {
 }
 
 export function setupStuckNext(fault: TransportFault | undefined): string {
-  if (fault === undefined) return "repair the queue setup, then run yrd queue run"
+  if (fault === undefined) return "repair the queue setup, then resume the queue"
   return (
     `nothing here is the change's fault: setup could not reach a remote (${fault.signature}), ` +
-    "and the round's one retry could not either; once the remote answers, run yrd queue run or resume the queue"
+    "and the round's one retry could not either; once the remote answers, resume the queue"
   )
 }

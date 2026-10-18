@@ -38,7 +38,11 @@ export function lineOf(rows: readonly WatchRow[]): Readonly<{ held: Row | undefi
 }
 
 /** The runner's line is read from the whole queue, never the selected rows. */
-export function runnerOf(snapshot: RunnerReading, now: Date): RunnerLine {
+export function runnerOf(
+  snapshot: RunnerReading,
+  now: Date,
+  formatCommand?: (argv: readonly string[]) => string,
+): RunnerLine {
   const { held, waiting } = lineOf(snapshot.unfiltered)
   const activeBranch = snapshot.runner?.latest?.activeStep?.branch
   const activeRow =
@@ -83,10 +87,15 @@ export function runnerOf(snapshot: RunnerReading, now: Date): RunnerLine {
 
   const queue = queueBranchOf(snapshot)
 
-  return runnerLine(snapshot.runner, now, {
-    ...(heldChange === undefined ? {} : { held: heldChange }),
-    ...(snapshot.stopped === undefined ? {} : { stopped: snapshot.stopped }),
-    ...(queue === undefined ? {} : { queue }),
-    waiting: waiting.length,
-  })
+  return runnerLine(
+    snapshot.runner,
+    now,
+    {
+      ...(heldChange === undefined ? {} : { held: heldChange }),
+      ...(snapshot.stopped === undefined ? {} : { stopped: snapshot.stopped }),
+      ...(queue === undefined ? {} : { queue }),
+      waiting: waiting.length,
+    },
+    formatCommand,
+  )
 }

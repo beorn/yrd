@@ -32,13 +32,15 @@ export type ListingPrintOptions = Readonly<{
   scope?: string
   /** The one-row notices `queue list <branch>` prints under a single match: the notice and the clocks. */
   trailer?: readonly string[]
+  /** Viewer-local executable, cwd and selected queue; never persisted in a reading. */
+  formatCommand?: (argv: readonly string[]) => string
 }>
 
 function listingPlan(snapshot: WatchSnapshot, options: ListingPrintOptions) {
   const columns = Math.max(40, options.columns)
   // The bands, their order and their rules all come from watch-frame.tsx: a
   // page that spelled them here is how the pane drifted last time.
-  const runner = runnerOf(snapshot, snapshot.at)
+  const runner = runnerOf(snapshot, snapshot.at, options.formatCommand)
   const rows = bandedRows(snapshot.rows, false)
   const queue = { digit: 1, label: formatStoredQueueAddress(snapshot.queue) }
   const layout = listLayout(rows, columns, snapshot.at, runner, queue, {
@@ -100,7 +102,12 @@ export function ListingPage({
             const key = `${item.row.branch}@${item.row.head}#${item.run?.id ?? item.row.run ?? String(index)}`
             return (
               <Box key={key} flexDirection="column" minWidth={0}>
-                <BandBreakRows brk={plan.before.get(index)} snapshot={snapshot} layout={layout} />
+                <BandBreakRows
+                  brk={plan.before.get(index)}
+                  snapshot={snapshot}
+                  layout={layout}
+                  formatCommand={options.formatCommand}
+                />
                 {separator === undefined ? null : (
                   <Text bold>
                     <TimeText text={separator} />
@@ -119,7 +126,12 @@ export function ListingPage({
           })}
           {last ? (
             <>
-              <BandBreakRows brk={plan.after} snapshot={snapshot} layout={layout} />
+              <BandBreakRows
+                brk={plan.after}
+                snapshot={snapshot}
+                layout={layout}
+                formatCommand={options.formatCommand}
+              />
               {rows.length === 0 ? <Text color="$fg-muted">nothing in line</Text> : null}
               {(options.trailer ?? []).map((line) => (
                 <Text key={line} wrap="truncate">

@@ -52,7 +52,7 @@ export function incidentLines(incident: Incident): readonly string[] {
     `code: ${incident.code}`,
     ...(incident.via === undefined ? [] : [`via: ${incident.via}`]),
     ...(incident.evidence === undefined ? [] : [`evidence: ${incident.evidence}`]),
-    ...(incident.next === undefined ? [] : [`next: ${incident.next}`]),
+    ...(incident.next === undefined ? [] : [`recorded guidance: ${incident.next}`]),
   ]
 }
 

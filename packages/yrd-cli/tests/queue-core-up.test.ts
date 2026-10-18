@@ -2764,6 +2764,13 @@ describe("yrd queue up, the service", () => {
 
     for (const dryRun of [true, false]) {
       const accepted = capture(w.work)
+      // A stopped submit must render its current action in the viewer's host
+      // context; the old bare-command assertion could not detect its loss.
+      const commands: { argv: readonly string[]; cwd: string }[] = []
+      accepted.io.formatYrdCommand = (argv, cwd) => {
+        commands.push({ argv, cwd })
+        return "host-selected-resume"
+      }
       expect(
         await coreQueueCommand(
           w.work,
@@ -2775,13 +2782,32 @@ describe("yrd queue up, the service", () => {
       ).toBe(0)
       expect(accepted.stderr()).toContain("paused by @chief")
       expect(accepted.stderr()).toContain("49 new failures on main")
-      expect(accepted.stderr()).toContain("yrd queue resume")
+      expect(accepted.stderr()).toContain("host-selected-resume")
+      expect(commands).toContainEqual({
+        argv: [
+          "queue",
+          "resume",
+          "--reason",
+          "<why>",
+          "--queue",
+          `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`,
+        ],
+        cwd: w.work,
+      })
     }
     const ref = changesRef("main", "task/one")
     expect(await w.git(["ls-remote", "--refs", "origin", ref])).toContain(ref)
 
     const listed = capture(w.work)
-    expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    const displayedCommands: { argv: readonly string[]; cwd: string }[] = []
+    const listedIO = {
+      ...listed.io,
+      formatYrdCommand(argv: readonly string[], cwd: string) {
+        displayedCommands.push({ argv, cwd })
+        return `viewer ${cwd} yrd ${argv.join(" ")}`
+      },
+    }
+    expect(await coreQueueCommand(w.work, listedIO, { command: "list" }, { workdir: w.workdir })).toBe(0)
     // The pause is the loudest state on the page and it LEADS it, once; the
     // runner's row says the WORD paused and what lifts the stop, never the
     // record's own sentence a second time (watch-frame.tsx).
@@ -2801,7 +2827,14 @@ describe("yrd queue up, the service", () => {
     const runnerBoxEnd = page.findIndex((line, i) => i > runnerBoxStart && (line.includes("╰") || line.trim() === ""))
     const runnerBox = page.slice(runnerBoxStart, runnerBoxEnd === -1 ? undefined : runnerBoxEnd + 1).join("\n")
     expect(runnerBox, listed.stdout()).toContain("paused")
-    expect(runnerBox, listed.stdout()).toContain("resume: yrd queue resume")
+    const selectedQueue = `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`
+    expect(displayedCommands).toContainEqual({
+      argv: ["queue", "resume", "--queue", selectedQueue],
+      cwd: w.work,
+    })
+    expect(runnerBox.replace(/[│┃\s]/gu, ""), listed.stdout()).toContain(
+      `to resume: viewer ${w.work} yrd queue resume --queue ${selectedQueue}`.replace(/\s/gu, ""),
+    )
     expect(runnerBox, listed.stdout()).not.toContain("refs/yrd/main/runner")
     const listedJson = capture(w.work)
     expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
@@ -4895,9 +4928,10 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       expect(document.error?.code).toBe("queue-round-stuck")
       expect(document.error?.cause).toContain(`task/stuck@${head}`)
       const body = document.error?.resolution.join("\n") ?? ""
-      expect(body).toContain("yrd queue withdraw task/stuck")
+      expect(body).toContain("withdraw task/stuck")
       expect(body).toContain("clears this reason")
-      expect(body).toContain("yrd queue resume")
+      expect(body).toContain("resume the queue")
+      expect(body).not.toContain(w.work)
       expect(body).not.toMatch(/clears on its own|next round|resets the spacing/u)
       expect(document.facts).toMatchObject({ stopped: { by: "yrd", cause: "stuck", change: `task/stuck@${head}` } })
       expect(document.facts?.stuckRounds).toBeUndefined()
@@ -5080,7 +5114,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       ),
       service.stderr(),
     ).toBe(0)
-    expect(seen[0]?.error?.resolution.join(" ")).toContain("yrd queue resume")
+    expect(seen[0]?.error?.resolution.join(" ")).toContain("resume the queue")
 
     const resumed = capture(w.work)
     expect(
@@ -5267,6 +5301,11 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
 
     for (const dryRun of [true, false]) {
       const accepted = capture(w.work)
+      const commands: { argv: readonly string[]; cwd: string }[] = []
+      accepted.io.formatYrdCommand = (argv, cwd) => {
+        commands.push({ argv, cwd })
+        return "host-stuck-remedy"
+      }
       expect(
         await coreQueueCommand(
           w.work,
@@ -5281,8 +5320,14 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
         stopped: { by: "yrd", cause: "stuck", change: `task/stuck@${stuckHead}` },
       })
       expect(accepted.stderr()).toContain(`task/stuck@${stuckHead}`)
-      expect(accepted.stderr()).toContain("yrd queue withdraw task/stuck")
-      expect(accepted.stderr()).toContain("yrd queue resume")
+      expect(accepted.stderr()).toContain("recorded guidance:")
+      expect(accepted.stderr()).toContain("host-stuck-remedy")
+      const queue = `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`
+      expect(commands).toContainEqual({ argv: ["queue", "withdraw", "task/stuck", "--queue", queue], cwd: w.work })
+      expect(commands).toContainEqual({
+        argv: ["queue", "resume", "--reason", "<why>", "--queue", queue],
+        cwd: w.work,
+      })
     }
     // Opened, and nothing more: no check ran at submit.
     expect(
