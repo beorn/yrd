@@ -77,10 +77,10 @@ export type RevertGuardGap = Readonly<{
   reason: string
 }>
 
-/** The one merge base the root tree was judged from, or why there is not exactly one. */
+/** Every best common ancestor read for the root proof, or an unjudged base. */
 export type RevertGuardBase =
   | Readonly<{ state: "single"; base: string }>
-  | Readonly<{ state: "ambiguous"; count: number }>
+  | Readonly<{ state: "multiple"; bases: readonly string[] }>
   | Readonly<{ state: "none" }>
 
 export type RevertGuardReport = Readonly<{
@@ -144,6 +144,11 @@ type Level = {
   readonly budget: { remaining: number }
 }
 
+type HistoryBoundary =
+  | Readonly<{ kind: "full-window" }>
+  | Readonly<{ kind: "bases"; bases: readonly string[] }>
+  | Readonly<{ kind: "unjudged" }>
+
 const GITLINK = "160000"
 const ABSENT = /^0+$/u
 
@@ -159,49 +164,52 @@ export async function detectReverted(options: RevertGuardOptions): Promise<Rever
   const bounds = options.bounds ?? REVERT_GUARD_BOUNDS
   const git = runnerFor(options.git).at(options.root)
   const report: Level["report"] = { gaps: [], paths: [], swallowed: [] }
-  const bases = await mergeBases(git, options.targetHead, options.head)
+  let bases: readonly string[] = []
+  try {
+    bases = await mergeBases(git, options.targetHead, options.head)
+  } catch (error) {
+    report.gaps.push({ kind: "unjudged", depth: 0, path: "", reason: `root merge base unreadable: ${detail(error)}` })
+  }
   const base: RevertGuardBase =
     bases.length === 1
       ? { base: bases[0] as string, state: "single" }
       : bases.length === 0
         ? { state: "none" }
-        : { count: bases.length, state: "ambiguous" }
-  if (base.state === "none") {
+        : { bases, state: "multiple" }
+  if (base.state === "none" && report.gaps.length === 0) {
     report.gaps.push({
       kind: "unjudged",
       depth: 0,
       path: "",
       reason: "no merge base between the target and the change",
     })
-  } else if (base.state === "ambiguous") {
-    report.gaps.push({ kind: "unjudged", depth: 0, path: "", reason: `base: ambiguous (${String(base.count)})` })
   }
-  await walk({
-    budget: { remaining: bounds.pathCap },
-    bounds,
-    candidate: options.candidate,
-    depth: 0,
-    dir: options.root,
-    git,
-    incoming: options.head,
-    prefix: "",
-    report,
-    target: options.targetHead,
-  })
-  // A base that is not exactly one cannot judge a path: the plan's rule is one
-  // ambiguous-base gap with NO per-path claim, so no claim rides on an unpicked base.
-  const judged = base.state === "single"
+  await walk(
+    {
+      budget: { remaining: bounds.pathCap },
+      bounds,
+      candidate: options.candidate,
+      depth: 0,
+      dir: options.root,
+      git,
+      incoming: options.head,
+      prefix: "",
+      report,
+      target: options.targetHead,
+    },
+    base.state === "none",
+  )
   return {
     base,
-    count: judged ? report.paths.length : 0,
+    count: report.paths.length,
     coverage: report.gaps.length > 0 ? "incomplete" : "complete",
     gaps: report.gaps,
-    paths: judged ? report.paths : [],
-    swallowed: judged ? report.swallowed : [],
+    paths: report.paths,
+    swallowed: report.swallowed,
   }
 }
 
-async function walk(level: Level): Promise<void> {
+async function walk(level: Level, skipHistory = false): Promise<void> {
   let toCandidate: readonly RawRow[]
   let toIncoming: readonly RawRow[]
   try {
@@ -292,16 +300,16 @@ async function walk(level: Level): Promise<void> {
     (row) =>
       row.oldMode !== GITLINK && row.newMode !== GITLINK && !(row.newSha === row.oldSha && row.newMode === row.oldMode),
   )
-  const base = judged.length === 0 ? undefined : await advanceBase(level)
-  const touched =
-    judged.length === 0
-      ? undefined
-      : await touchedPaths(
-          level,
-          base,
-          judged.map((row) => row.path),
-        )
-  for (const row of judged) await assessPath(level, row, base, touched)
+  if (judged.length === 0 || skipHistory) return
+  const boundary = await advanceBase(level)
+  if (boundary.kind === "unjudged") return
+  const revisions = [level.target, ...(boundary.kind === "bases" ? boundary.bases.map((base) => `^${base}`) : [])]
+  const touched = await touchedPaths(
+    level,
+    revisions,
+    judged.map((row) => row.path),
+  )
+  for (const row of judged) await assessPath(level, row, revisions, touched)
 }
 
 /**
@@ -319,7 +327,7 @@ async function walk(level: Level): Promise<void> {
  */
 async function touchedPaths(
   level: Level,
-  base: string | undefined,
+  revisions: readonly string[],
   paths: readonly string[],
 ): Promise<ReadonlySet<string> | undefined> {
   // `--stdin` is newline-delimited, so a path containing a newline cannot be expressed as a pathspec:
@@ -328,13 +336,12 @@ async function touchedPaths(
   // do. Serve the whole level from that per-path walk instead (the conservative proof), exactly as an
   // unreadable range does; it is bounded by P_max and the window, and a cap it cannot serve is named.
   if (paths.some((path) => path.includes("\n"))) return undefined
-  const revision = base === undefined ? level.target : `${base}..${level.target}`
   // The traversal is limited to the level's judged paths, fed on stdin so a compose with thousands of
   // changed paths never hits an argv limit and `--literal-pathspecs` keeps every path byte a name
   // rather than a pattern (a `*` or a leading `:` in a filename is a name, not a glob). `--no-renames`
   // is load-bearing: with rename detection a target that renamed a path away lists only the NEW name,
   // so a candidate that restores the OLD path's blob is wrongly called untouched and skipped (#28195).
-  const input = [revision, "--", ...paths].join("\n") + "\n"
+  const input = [...revisions, "--", ...paths].join("\n") + "\n"
   let out: string
   try {
     out = await level.git(
@@ -374,9 +381,9 @@ async function touchedPaths(
 }
 
 /**
- * The level's divergence base, or undefined when the whole window must be judged (#28557, #29963).
+ * The level's complete divergence boundary, full window, or an explicitly unjudged read.
  *
- * `mergeBases(target, candidate)`: a single base BELOW the target pin means the candidate pin
+ * `mergeBases(target, candidate)`: bases BELOW the target pin mean the candidate pin
  * diverged and never carried the target's later advance, so only advances after the base count.
  * When the candidate is a merge commit whose first parent is `target` (the root compose merge or a
  * component merge of `target` with the author branch), `mergeBases(target, candidate)` is `target`
@@ -384,14 +391,16 @@ async function touchedPaths(
  * fast-forward pin move keeps the full window (#27363). An unreadable base is a named `unjudged`
  * gap, never a silent widening or narrowing of the proof.
  */
-async function advanceBase(level: Level): Promise<string | undefined> {
+async function advanceBase(level: Level): Promise<HistoryBoundary> {
   try {
     const bases = await mergeBases(level.git, level.target, level.candidate)
-    if (bases.length === 1 && bases[0] !== level.target) return bases[0]
+    if (bases.length === 0) throw new Error("no merge base between candidate and target")
+    if (!bases.includes(level.target)) return { kind: "bases", bases }
     if (bases.length === 1 && bases[0] === level.target) {
       if (level.incoming !== level.candidate && level.incoming !== level.target) {
         const incomingBases = await mergeBases(level.git, level.target, level.incoming)
-        if (incomingBases.length === 1 && incomingBases[0] !== level.target) return incomingBases[0]
+        if (incomingBases.length === 0) throw new Error("no merge base between incoming and target")
+        if (!incomingBases.includes(level.target)) return { kind: "bases", bases: incomingBases }
       }
       const parents = ((await level.git(["cat-file", "commit", level.candidate])).split("\n\n")[0] ?? "")
         .split("\n")
@@ -402,11 +411,12 @@ async function advanceBase(level: Level): Promise<string | undefined> {
         const [otherParent] = nonTargetParents
         if (nonTargetParents.length === 1 && otherParent !== undefined) {
           const parentBases = await mergeBases(level.git, level.target, otherParent)
-          if (parentBases.length === 1 && parentBases[0] !== level.target) return parentBases[0]
+          if (parentBases.length === 0) throw new Error("no merge base between non-target parent and target")
+          if (!parentBases.includes(level.target)) return { kind: "bases", bases: parentBases }
         }
       }
     }
-    return undefined
+    return { kind: "full-window" }
   } catch (error) {
     level.report.gaps.push({
       kind: "unjudged",
@@ -414,16 +424,14 @@ async function advanceBase(level: Level): Promise<string | undefined> {
       path: level.prefix === "" ? "." : level.prefix,
       reason: `candidate/target base unreadable: ${detail(error)}`,
     })
-    // silent-fallback-allow: the unreadable base was just recorded as a named unjudged gap; undefined keeps the
-    // whole window under judgment, the conservative proof, rather than narrowing it.
-    return undefined
+    return { kind: "unjudged" }
   }
 }
 
 async function assessPath(
   level: Level,
   row: RawRow,
-  base: string | undefined,
+  revisions: readonly string[],
   touched: ReadonlySet<string> | undefined,
 ): Promise<void> {
   const full = level.prefix + row.path
@@ -446,12 +454,7 @@ async function assessPath(
   level.budget.remaining -= 1
   let viewed: readonly string[]
   try {
-    viewed = await firstParentTouching(
-      level.git,
-      base === undefined ? level.target : `${base}..${level.target}`,
-      level.bounds.window + 1,
-      row.path,
-    )
+    viewed = await firstParentTouching(level.git, revisions, level.bounds.window + 1, row.path)
   } catch (error) {
     level.report.gaps.push({
       kind: "unjudged",
@@ -547,11 +550,11 @@ async function entryAt(
 
 async function firstParentTouching(
   git: Git,
-  revision: string,
+  revisions: readonly string[],
   window: number,
   path: string,
 ): Promise<readonly string[]> {
-  const out = await git(["rev-list", "--first-parent", `--max-count=${String(window)}`, revision, "--", path])
+  const out = await git(["rev-list", "--first-parent", `--max-count=${String(window)}`, ...revisions, "--", path])
   return out
     .split("\n")
     .map((row) => row.trim())
@@ -608,7 +611,7 @@ export function revertedPathsFinding(report: RevertGuardReport | undefined):
   | undefined {
   if (report === undefined) return undefined
   const hit = report.paths.length > 0 || report.swallowed.length > 0
-  const unjudged = report.gaps.some((gap) => gap.kind === "unjudged") || report.base.state !== "single"
+  const unjudged = report.gaps.some((gap) => gap.kind === "unjudged") || report.base.state === "none"
   if (!hit && !unjudged) return undefined
   return {
     coverage: report.coverage,
@@ -635,6 +638,7 @@ export function revertedPathsReason(report: RevertGuardReport): string {
     swallowed: report.swallowed.slice(0, REVERTED_PATHS_PAYLOAD_CAP).map((row) => row.path),
     ...(gaps.length === 0 ? {} : { gaps }),
     ...(report.base.state === "single" ? {} : { base: report.base.state }),
+    ...(report.base.state === "multiple" ? { bases: report.base.bases } : {}),
   })
   const named = paths.slice(0, 8).join(", ")
   const gapText =
@@ -643,7 +647,8 @@ export function revertedPathsReason(report: RevertGuardReport): string {
       : `; gaps: ${report.gaps
           .map((gap) => (gap.path === "" ? gap.reason : `${gap.reason} [${gap.path}@d${String(gap.depth)}]`))
           .join(", ")}`
-  return `${String(paths.length)} reverted/swallowed path(s)${named === "" ? "" : `: ${named}`}; ${payload}${gapText}`
+  const undecidable = report.base.state === "none" || report.gaps.some((gap) => gap.kind === "unjudged")
+  return `${undecidable ? "revert audit undecidable; " : ""}${String(paths.length)} reverted/swallowed path(s)${named === "" ? "" : `: ${named}`}; ${payload}${gapText}`
 }
 
 /**
