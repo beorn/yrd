@@ -4381,10 +4381,12 @@ export async function coreQueueCommand(
         let eventInvalid = first.eventInvalid
         let journals = first.journals
         let seen: Readonly<{ drafts?: Readonly<{ unread: readonly string[] }> }> = first
+        const formatCommand = (argv: readonly string[]) =>
+          formatQueueCommand(io, formatStoredQueueAddress(first.queue), argv)
         const source: WatchSource = {
           id: first.queue,
           label: formatStoredQueueAddress(first.queue),
-          formatCommand: (argv) => formatQueueCommand(io, formatStoredQueueAddress(first.queue), argv),
+          formatCommand,
           resolveRunAddress: async (operand) => {
             const selected = parseQueueAddress(first.queue)
             if (selected.kind !== "remote") {
@@ -4464,7 +4466,7 @@ export async function coreQueueCommand(
                 row: item.row,
                 run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run, item.run?.number),
                 checks: [],
-                note: `Raw events: yrd queue show ${item.row.branch} --json`,
+                note: `Raw events: ${formatCommand(["queue", "show", item.row.branch, "--json"])}`,
               })
             }
             if (selected === undefined) throw new Error(`event change ${item.row.branch} left the selected listing`)

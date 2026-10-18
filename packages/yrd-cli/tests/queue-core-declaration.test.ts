@@ -74,6 +74,7 @@ import { SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { eventHistoryEntries } from "../src/watch-change.ts"
 import type { YrdCliIO } from "../src/types.ts"
+import type { WatchSource } from "../src/watch-pane.tsx"
 import { workdirOf } from "../src/workdir.ts"
 import type { QueueConfig } from "@yrd/queue-core"
 
@@ -1245,22 +1246,26 @@ describe("a queue is the selected origin branch carrying config", () => {
   it("lists an invalid chain by name beside healthy and no-opened chains, with show and fence parity", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
+    const queueBranch = "release"
+    const brokenBranch = "task/bro'ken"
+    await git(["branch", queueBranch])
+    await git(["push", "--quiet", "origin", queueBranch])
     const store = createEventStore(repo, "origin", git.selection)
     const head = (await git(["rev-parse", "HEAD"])).trim()
-    const queueTip = await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
+    const queueTip = await createQueue(repo, queueBranch, head, new Date("2026-09-22T14:00:00.000Z"))
     const at = new Date("2026-09-22T14:01:00.000Z")
     for (const [branch, input] of [
       ["task/healthy", changeInput("opened", { queueTip, at, commit: head, by: "yrd" })],
       ["task/old-drop", changeInput("cancelled", { queueTip, at, commit: head, reason: "dropped", by: "yrd" })],
-      ["task/broken", changeInput("failed", { queueTip, at, reason: "no opened event" })],
+      [brokenBranch, changeInput("failed", { queueTip, at, reason: "no opened event" })],
     ] as const) {
       await (
-        await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+        await openEvents({ ...store, ref: changesRef(queueBranch, branch), writer: "yrd" })
       ).append([input], { expect: null })
     }
     const listed = capture(repo)
     expect(
-      await coreQueueCommand(repo, listed.io, { command: "list", all: true }, { json: true, queue: "main" }),
+      await coreQueueCommand(repo, listed.io, { command: "list", all: true }, { json: true, queue: queueBranch }),
       listed.stderr(),
     ).toBe(0)
     const rows = (
@@ -1275,9 +1280,9 @@ describe("a queue is the selected origin branch carrying config", () => {
           diagnostic: expect.stringContaining("no opened event"),
         }),
         expect.objectContaining({
-          branch: "task/broken",
+          branch: brokenBranch,
           state: "invalid",
-          ref: changesRef("main", "task/broken"),
+          ref: changesRef(queueBranch, brokenBranch),
           tip: expect.stringMatching(/^[0-9a-f]{40}$/u),
           error: expect.stringContaining("needs an open change"),
           diagnostic: expect.stringContaining("needs an open change"),
@@ -1286,34 +1291,76 @@ describe("a queue is the selected origin branch carrying config", () => {
     )
     const bad = capture(repo)
     expect(
-      await coreQueueCommand(repo, bad.io, { command: "show", branch: "task/broken" }, { queue: "main" }),
+      await coreQueueCommand(repo, bad.io, { command: "show", branch: brokenBranch }, { queue: queueBranch }),
       bad.stderr(),
     ).toBe(0)
     expect(bad.stdout()).toContain("diagnostic:")
     expect(bad.stdout()).toContain("needs an open change")
     const good = capture(repo)
     expect(
-      await coreQueueCommand(repo, good.io, { command: "show", branch: "task/healthy" }, { queue: "main" }),
+      await coreQueueCommand(repo, good.io, { command: "show", branch: "task/healthy" }, { queue: queueBranch }),
       good.stderr(),
     ).toBe(0)
     expect(good.stdout()).toContain("task/healthy")
+    // A malformed row's raw-event remedy keeps the viewing host, checkout and queue (29721).
+    const watched = capture(repo)
+    const remote = join(dirname(repo), "remote.git")
+    const queue = `${remote}#${queueBranch}`
+    const commands: { argv: readonly string[]; cwd: string; recipe: string }[] = []
+    watched.io.formatYrdCommand = (argv, cwd) => {
+      const recipe = `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`
+      commands.push({ argv, cwd, recipe })
+      return recipe
+    }
+    const sources: WatchSource[] = []
+    expect(
+      await coreQueueCommand(
+        repo,
+        watched.io,
+        { command: "list", all: true, watch: true },
+        {
+          queue: queueBranch,
+          watchSource: (source) => sources.push(source),
+        },
+      ),
+      watched.stderr(),
+    ).toBe(0)
+    expect(sources).toHaveLength(1)
+    const source = sources[0]!
+    const broken = source.snapshot?.rows.find((item) => item.row.branch === brokenBranch)
+    expect(broken).toBeDefined()
+    expect(source.open).toBeDefined()
+    const detail = await source.open!(broken!)
+    expect(commands).toEqual([
+      { argv: ["queue", "show", brokenBranch, "--json", "--queue", queue], cwd: repo, recipe: expect.any(String) },
+    ])
+    const recipe = commands[0]!.recipe
+    expect(detail.note).toBe(`Raw events: ${recipe}`)
+    const remoteGit = gitIn(remote)
+    const beforeInspection = await remoteGit(["for-each-ref", "--format=%(refname) %(objectname)"])
+    const inspected = spawnSync("/bin/sh", ["-c", recipe], { cwd: dirname(repo), encoding: "utf8" })
+    expect(inspected.status, inspected.stderr).toBe(0)
+    expect(inspected.stdout).toContain(brokenBranch)
+    expect(inspected.stdout).toContain("needs an open change")
+    expect(await remoteGit(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(beforeInspection)
     // Submit's preview custody names the unreadable chain out loud and keeps its anchors (27510).
     using custodyWarning = vi.spyOn(console, "warn").mockImplementation(() => {})
-    await git(["checkout", "--quiet", "-b", "task/broken"])
+    await git(["checkout", "--quiet", "-b", brokenBranch])
     writeFileSync(join(repo, "broken.txt"), "cannot submit over unreadable chain\n")
     await git(["add", "broken.txt"])
     await git(["commit", "--quiet", "-m", "broken branch head"])
     const submitted = capture(repo)
-    expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], submitted.io)).toBe(2)
-    expect(submitted.stderr()).toContain("task/broken")
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", queueBranch, "--json"], submitted.io)).toBe(2)
+    expect(submitted.stderr()).toContain(brokenBranch)
     expect(submitted.stderr()).toContain("needs an open change")
     expect(custodyWarning).toHaveBeenCalledWith(
-      expect.stringContaining("preview custody keeps task/broken's anchors: its change history is unreadable"),
+      expect.stringContaining(`preview custody keeps ${brokenBranch}'s anchors: its change history is unreadable`),
     )
     const run = capture(repo)
-    expect(await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], run.io), run.stderr()).toBe(
-      0,
-    )
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", queueBranch, "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
     const journal = (JSON.parse(run.stdout()) as { log: string }).log
     const records = readFileSync(journal, "utf8")
       .trim()
@@ -1321,8 +1368,8 @@ describe("a queue is the selected origin branch carrying config", () => {
       .map((line) => JSON.parse(line) as Record<string, unknown>)
     expect(records.filter((row) => row.subject === "invalid-change-chain")).toEqual([
       expect.objectContaining({
-        branch: "task/broken",
-        ref: changesRef("main", "task/broken"),
+        branch: brokenBranch,
+        ref: changesRef(queueBranch, brokenBranch),
         error: expect.stringContaining("needs an open change"),
       }),
     ])
