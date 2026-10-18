@@ -45,9 +45,10 @@ function queuedSection(text: string): string {
 
 /**
  * A queued close is consumed under direct admission, which does NOT run the
- * sweep's ancestry check. A hold is therefore only a hold once the request is
- * withdrawn, and the help has to say so before a planner relies on the sweep's
- * "kept" reasoning.
+ * sweep's ancestry check. It does honor a recorded hold: a standing request
+ * against an environment whose `current.hold` is not null is journaled STALE
+ * and dropped without closing, so the hold stands. The help has to say so
+ * before a planner relies on the sweep's "kept" reasoning.
  */
 describe("the env close help says what a queued close does to a hold", () => {
   it("names direct admission, the ancestry-only keep, and the recorded hold", async () => {
