@@ -526,7 +526,8 @@ describe("the JSON runner is independent of selected change rows (#24570)", () =
       published: { signal: "fresh", claim: { Runner: "host/42", State: "checking" } },
     })
     expect(second.runner.published).toEqual(first.runner.published)
-    expect(first.runner.state).toBe("unpublished")
+    expect(first.runner.state).toBe("checking")
+    expect(second.runner.state).toBe("checking")
     expect(first.runner.service).toMatchObject({ kind: "absent" })
   })
 })
