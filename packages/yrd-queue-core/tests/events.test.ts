@@ -2308,6 +2308,77 @@ describe("the queue-format boundary", () => {
       expect((await git(["rev-parse", branchRef])).trim()).toBe(kept)
       expect(await git(["ls-remote", "origin"])).toBe(before)
     }
+
+    // Neither surviving-branch row proves recovery when only origin keeps the
+    // payload. Clear this disposable clone's custody after real remote deletion.
+    const archivedBranch = "task/race'archive-absent"
+    const archivedBranchRef = `refs/heads/${archivedBranch}`
+    await git(["checkout", "--quiet", "-b", archivedBranch, advanced])
+    writeFileSync(join(root, "archive-only"), "unique remote custody\n")
+    await git(["add", "archive-only"])
+    await git(["commit", "--quiet", "-m", "archive-only payload"])
+    const archivedHead = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["push", "--quiet", "origin", archivedBranchRef])
+    await git(["checkout", "--quiet", "--detach", advanced])
+    const archivedEventRef = changesRef("lab", archivedBranch)
+    const archivedChain = await openEvents({ ...location, ref: archivedEventRef })
+    const archivedStart = await archivedChain.append(
+      [changeInput("opened", { queueTip, at: new Date(), commit: archivedHead, by: "fixture" })],
+      { expect: null },
+    )
+    const archivedEnd = await archivedChain.append(
+      [changeInput("failed", { queueTip, at: new Date(), reason: "archive-only ending" })],
+      { expect: archivedStart.head },
+    )
+    const archive = archiveRefFor(archivedBranch, "fixture", "2000-01-01")
+    const archiveBackend: GitomicBackend = {
+      ...git.backend,
+      publish: async (repo, updates, remote) => {
+        await publish(repo, updates, remote)
+        if (!updates.some((update) => update.ref === archivedBranchRef && update.oid === null)) return
+        await publish(repo, [{ ref: archivedEventRef, expect: archivedEnd.head, oid: archivedStart.head }], remote)
+        const localCustody = (
+          await git(["for-each-ref", `--contains=${archivedHead}`, "--format=%(refname) %(objectname)"])
+        )
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+        await publish(
+          repo,
+          localCustody.map((line) => {
+            const [ref, expectedTip] = line.split(" ")
+            if (ref === undefined || expectedTip === undefined) throw new Error("local custody row malformed")
+            return { ref, expect: expectedTip, oid: null }
+          }),
+        )
+        await git(["reflog", "expire", "--expire=now", "--all"])
+        await git(["gc", "--prune=now", "--quiet"])
+      },
+    }
+    const archiveRefusal = await retireOriginBranch(
+      { ...location, backend: archiveBackend },
+      {
+        branch: archivedBranch,
+        head: archivedHead,
+        archive,
+        authority: { kind: "event", ref: archivedEventRef, tip: archivedEnd.head },
+      },
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+    expect(String(archiveRefusal)).toContain("change moved during retirement")
+    const absentObject = spawnSync("git", ["-C", root, "cat-file", "-e", archivedHead], { encoding: "utf8" })
+    expect([1, 128]).toContain(absentObject.status)
+    expect((await git(["for-each-ref", "--format=%(refname)", archivedBranchRef])).trim()).toBe("")
+    expect((await git(["ls-remote", "origin", archive])).trim()).toBe(`${archivedHead}\t${archive}`)
+    const recovery = /(git -C .+)$/u.exec(String(archiveRefusal))?.[1]
+    if (recovery === undefined) throw new Error("archive retirement supplied no recovery recipe")
+    const beforeRecovery = await git(["ls-remote", "origin"])
+    const recovered = spawnSync("/bin/sh", ["-c", recovery], { cwd: outside, encoding: "utf8" })
+    expect(recovered.status, recovered.stderr).toBe(0)
+    expect((await git(["rev-parse", archivedBranchRef])).trim()).toBe(archivedHead)
+    expect(await git(["ls-remote", "origin"])).toBe(beforeRecovery)
   })
 
   // @failure an ended retire tip behind its own kept link is refused, so a shipped head cannot be deleted (25671).
