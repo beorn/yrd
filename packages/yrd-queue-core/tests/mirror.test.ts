@@ -253,6 +253,32 @@ describe("refreshMirror", () => {
     expect(left.refreshedAt.getTime()).toBeGreaterThanOrEqual(created.refreshedAt.getTime())
   })
 
+  it("does not date a snapshot after a remote change its fetch did not acquire", async () => {
+    const { store, upstream, env } = host()
+    const work = await upstreamRepository(upstream, "child", env)
+    const url = `${HOSTED}child.git`
+    const created = await refreshMirror({ root: store, url, gitIn: through(env) })
+    let publishedAt: Date | undefined
+    const publishingGitIn = (cwd: string): Git => {
+      const git = gitIn(cwd, undefined, undefined, { env })
+      return async (args, input) => {
+        const result = await git(args, input)
+        if (args[0] === "fetch") {
+          const writer = gitIn(work, undefined, undefined, { env })
+          await writer(["branch", "task/just-opened"])
+          publishedAt = new Date()
+          await writer(["push", "--quiet", "origin", "task/just-opened"])
+        }
+        return result
+      }
+    }
+    const refreshed = await refreshMirror({ path: created.path, url, gitIn: publishingGitIn, maxAgeMs: 0 })
+    const local = gitIn(created.path, undefined, undefined, { env })
+    expect((await local(["for-each-ref", "--format=%(refname)", "refs/heads/task/just-opened"])).trim()).toBe("")
+    expect(publishedAt).toBeDefined()
+    expect(refreshed.refreshedAt.getTime()).toBeLessThanOrEqual(publishedAt!.getTime())
+  })
+
   it("a writer invalidating during fetch leaves the completed refresh uncertified", async () => {
     const { root, store, upstream, env } = host()
     await upstreamRepository(upstream, "child", env)

@@ -572,4 +572,37 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     // `--require-match` changes only the exit code, never the document.
     expect(JSON.parse(empty.stdout)).toMatchObject({ changes: [] })
   })
+
+  it("keeps a matched journal reason and counts omitted global incompleteness without exposing unrelated branches", async () => {
+    const work = await queueWithOneChange()
+    const git = gitIn(work)
+    await git(["checkout", "--quiet", "-b", "task/unrelated", "main"])
+    writeFileSync(join(work, "unrelated.txt"), "unrelated\n")
+    await git(["add", "."])
+    await git(["commit", "--quiet", "-m", "task/unrelated does its work"])
+    await git(["checkout", "--quiet", "main"])
+    await submit(git, "origin", {
+      branch: "task/unrelated",
+      submitter: "@dev/11",
+      target: { branch: "main", remote: "origin" },
+    })
+
+    // Both opening events have no Run trailer. A filtered answer keeps its own
+    // missing-journal reason, but tells consumers how many other facts it left out.
+    const result = await yrd(work, { color: false }, "list", "--json", "--require-match", "task/one")
+    expect(result.exitCode, result.report).toBe(0)
+    const document = JSON.parse(result.stdout) as {
+      changes: readonly { branch: string }[]
+      journal: { absent?: string }
+    }
+    expect(document.changes.map((change) => change.branch)).toEqual(["task/one"])
+    const absent = document.journal.absent ?? ""
+    expect(absent).toContain("task/one@")
+    expect(absent).toContain("has no Run trailer")
+    expect(absent).not.toContain("task/unrelated@")
+    const globalLines = absent
+      .split("; ")
+      .filter((line) => /global|incomplete/i.test(line) && /\b1\b/.test(line))
+    expect(globalLines).toHaveLength(1)
+  })
 })
