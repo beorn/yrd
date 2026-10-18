@@ -21,6 +21,7 @@ import {
   appendNumberedPublishedMerge,
   appendPublishedMerge,
   changesRef,
+  enumerateChangeSegments,
   expireQueueOverrides,
   EVENT_TRAILERS,
   listChangeHistories,
@@ -50,7 +51,14 @@ import {
   type CheckResult,
 } from "./check.ts"
 import { InvalidQueueConfig, UnknownConfigKey, queueName, readConfig } from "./config.ts"
-import { offTheTarget, readRemoteCommit, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
+import {
+  isAncestor,
+  offTheTarget,
+  readRemoteCommit,
+  type Git,
+  type GitInvocationOptions,
+  type GitRunner,
+} from "./git.ts"
 import {
   recentCasRefusalStreak,
   recentCasRefusals,
@@ -1295,13 +1303,16 @@ export async function eventQueueRun(
     }),
   )
   ordered.sort((left, right) => right.distance - left.distance)
-  const recordedMergePoints = new Set<string>()
-  for (const history of ordered.length === 0 ? [] : histories.values()) {
-    for (const event of history.events) {
-      if (event.type !== "merged") continue
-      const point = trailer(event, "Commit")
-      if (point === undefined) throw new Error(`validated merged event ${event.id} has no Commit`)
-      recordedMergePoints.add(point)
+  const deliveredCommits = new Set<string>()
+  for (const [branch, history] of ordered.length === 0 ? [] : histories) {
+    for (const segment of enumerateChangeSegments(history.events, changesRef(queue, branch), store.repo)) {
+      for (const event of segment.events) {
+        if (event.type !== "merged") continue
+        const point = trailer(event, "Commit")
+        if (point === undefined) throw new Error(`validated merged event ${event.id} has no Commit`)
+        deliveredCommits.add(point)
+        deliveredCommits.add(segment.head)
+      }
     }
   }
   for (const {
@@ -1336,7 +1347,15 @@ export async function eventQueueRun(
     let sourceBase = opened === undefined ? undefined : trailer(opened, "Base")
     if (sourceBase !== undefined) {
       const introduced = (await git(["rev-list", "--topo-order", `${sourceBase}..${change.commit}`])).trim().split("\n")
-      sourceBase = introduced.find((point) => recordedMergePoints.has(point)) ?? sourceBase
+      const deliveredBase = introduced.find((point) => deliveredCommits.has(point))
+      if (deliveredBase !== undefined) {
+        if (!(await isAncestor(git, deliveredBase, change.commit))) {
+          throw new Error(
+            `${branch}: recorded delivered source ${deliveredBase} is not an ancestor of submitted head ${change.commit}`,
+          )
+        }
+        sourceBase = deliveredBase
+      }
     }
     const selectedTip = change.tip
     try {
@@ -1360,7 +1379,8 @@ export async function eventQueueRun(
         )
       }
       changes.set(branch, ended)
-      recordedMergePoints.add(merge)
+      deliveredCommits.add(merge)
+      deliveredCommits.add(change.commit)
       observedMerged.push(branch)
       await tell(branch, "merged", written)
       log.write({
@@ -1391,7 +1411,9 @@ export async function eventQueueRun(
       })
       if (current.status === "merged") {
         if (current.merge === undefined) throw new Error(`validated merged change ${branch} has no merge commit`)
-        recordedMergePoints.add(current.merge)
+        if (current.commit === undefined) throw new Error(`validated merged change ${branch} has no submitted head`)
+        deliveredCommits.add(current.merge)
+        deliveredCommits.add(current.commit)
         observedMerged.push(branch)
       }
     }
