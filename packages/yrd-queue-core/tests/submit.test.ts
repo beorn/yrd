@@ -1531,27 +1531,29 @@ describe("event submit", () => {
 
   it("admits a judged policy warning and stores its label on the warning event", async () => {
     const w = await world()
+    const reason = "\n  external policy: keep 'literal' bytes\t\n\n"
     await branchWithCommit(w, "task/policy-warning", "one.txt")
     const submitted = await submit(w.git, "origin", {
       branch: "task/policy-warning",
       submitter: "@dev/2",
       issue: "@i/26273",
       target: { branch: "main", remote: "origin" },
-      admit: async () => ({ kind: "warn", reason: "Start 3 is not ticked; complete and tick it" }),
+      admit: async () => ({ kind: "warn", reason }),
     })
-    expect(submitted.admission).toEqual({ kind: "warn", reason: "Start 3 is not ticked; complete and tick it" })
+    expect(submitted.admission).toEqual({ kind: "warn", reason })
     expect(submitted.admissionWarning?.event).toBeDefined()
     const history = (await listChangeHistories(store(w), "main")).histories.get("task/policy-warning")
     expect(history?.events.map((event) => event.type)).toEqual(["opened", "admission-warning"])
     expect(history?.events.at(-1)?.props).toContainEqual(["Warning-Kind", "policy-warning"])
-    expect(history?.state.diagnostic).toContain("policy warning")
-    expect(history?.state.diagnostic).toContain("Start 3")
+    expect(history?.events.at(-1)?.props).toContainEqual(["Reason", reason])
+    expect(history?.state.diagnostic).toContain("target policy warning")
+    expect(history?.state.diagnostic).toContain(reason)
     const repeated = await submit(w.git, "origin", {
       branch: "task/policy-warning",
       submitter: "@dev/2",
       issue: "@i/26273",
       target: { branch: "main", remote: "origin" },
-      admit: async () => ({ kind: "warn", reason: "Start 3 is not ticked; complete and tick it" }),
+      admit: async () => ({ kind: "warn", reason }),
     })
     expect(repeated.retry).toBe(true)
     expect(repeated.admissionWarning).toBeUndefined()
