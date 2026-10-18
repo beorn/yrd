@@ -4117,9 +4117,7 @@ export async function coreQueueCommand(
                 ]),
               )
         const queue = queueName(config.target, await remoteUrl(git, config.target.remote))
-        const diagnostics = journalDiagnostics(
-          journals,
-          diagnosticKeys,
+        const diagnostics = journalDiagnostics(journals, diagnosticKeys, () =>
           formatQueueCommand(io, formatStoredQueueAddress(queue), [
             "list",
             ...(request.all === true ? ["--all"] : []),
@@ -6487,7 +6485,7 @@ function journalFact(
 function journalDiagnostics<Run extends JournalSummary>(
   journals: Journals<Run>,
   selectedKeys?: ReadonlySet<string>,
-  unfilteredCommand?: string,
+  unfilteredCommand?: () => string,
 ): Readonly<{ facts: Journals<Run>; omitted?: string }> {
   const { missingRunTrailers = [], absent: baseAbsent, ...base } = journals
   const selectedMissing =
@@ -6518,7 +6516,7 @@ function journalDiagnostics<Run extends JournalSummary>(
       : {
           // An unknown key is global too: it is not evidence that a selected
           // change is clean, and it must remain counted and inspectable.
-          omitted: `global journal incompleteness: ${omittedParts.join(", ")} outside or not attributable to the selected change identities; run ${unfilteredCommand} for unfiltered diagnostics`,
+          omitted: `global journal incompleteness: ${omittedParts.join(", ")} outside or not attributable to the selected change identities; run ${unfilteredCommand?.()} for unfiltered diagnostics`,
         }),
   }
 }
