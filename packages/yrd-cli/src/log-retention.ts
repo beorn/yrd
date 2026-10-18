@@ -64,7 +64,12 @@ export type ExpiredRoundOutput = Readonly<{ path: string; name: string; within: 
 export type RetentionRoot = string | Readonly<{ path: string; optional?: boolean }>
 
 /** What one scan saw: the expired entries, and any OPTIONAL roots that were not on disk (named, never silent). */
-export type RetentionScan = Readonly<{ entries: readonly ExpiredRoundOutput[]; missing: readonly string[] }>
+export type RetentionScan = Readonly<{
+  entries: readonly ExpiredRoundOutput[]
+  missing: readonly string[]
+  /** Directories whose names did not yield a start instant, so they were not selected and not descended into. */
+  unreadable: readonly string[]
+}>
 
 /** One round-output directory a sweep could not remove, with the error it raised. */
 export type RetentionFailure = Readonly<{ path: string; name: string; error: string }>
@@ -95,7 +100,11 @@ export type RetentionResult = Readonly<{
  * remove. The verb reports both, so it never re-derives them from the scan.
  */
 export type RetentionDrain = RetentionResult &
-  Readonly<{ selected: readonly ExpiredRoundOutput[]; planned: readonly ExpiredRoundOutput[] }>
+  Readonly<{
+    selected: readonly ExpiredRoundOutput[]
+    planned: readonly ExpiredRoundOutput[]
+    unreadable: readonly string[]
+  }>
 
 function rootOf(root: RetentionRoot): Readonly<{ path: string; optional: boolean }> {
   return typeof root === "string"
@@ -114,6 +123,7 @@ export function expiredRoundOutput(
   const cutoff = input.now.getTime() - windowMs
   const found: ExpiredRoundOutput[] = []
   const missing: string[] = []
+  const unreadable: string[] = []
   for (const root of input.roots) {
     const { path: within, optional } = rootOf(root)
     const stack: { directory: string; depth: number }[] = [{ directory: within, depth: 0 }]
@@ -147,12 +157,19 @@ export function expiredRoundOutput(
           if (started.getTime() <= cutoff) found.push({ path, name: entry.name, within, started })
           continue
         }
+        // A name that claims a run stamp (`q-` then a digit) but does not parse is named and not descended into.
+        // A plain container (`environments`, a bay, a check topic) has no stamp and is descended.
+        if (/(?:^|-)q-\d/u.test(entry.name)) {
+          unreadable.push(path)
+          continue
+        }
         if (current.depth < MAX_WALK_DEPTH) stack.push({ directory: path, depth: current.depth + 1 })
       }
     }
   }
   found.sort((left, right) => left.started.getTime() - right.started.getTime() || left.name.localeCompare(right.name))
-  return { entries: found, missing }
+  unreadable.sort((left, right) => left.localeCompare(right))
+  return { entries: found, missing, unreadable }
 }
 
 /** Remove a chosen list of round-output directories, oldest first, at most `limit` of them, through removely. */
@@ -257,6 +274,7 @@ export async function pruneRoundOutput(
     failuresOmitted,
     remaining: selected.filter((entry) => !removedPaths.has(entry.path)),
     missing: scan.missing,
+    unreadable: scan.unreadable,
   }
 }
 
@@ -296,7 +314,12 @@ export function retentionObservation(result: RetentionResult, input: Readonly<{ 
 /** The one place the human rendering of a prune lives, so it can be asserted without a terminal. */
 export function retentionHumanLines(
   result: RetentionResult,
-  input: Readonly<{ roots: readonly string[]; dryRun: boolean; listed: readonly ExpiredRoundOutput[] }>,
+  input: Readonly<{
+    roots: readonly string[]
+    dryRun: boolean
+    listed: readonly ExpiredRoundOutput[]
+    unreadable?: readonly string[]
+  }>,
 ): string[] {
   const days = Math.round(result.windowMs / (24 * 60 * 60 * 1000))
   return [
@@ -309,6 +332,9 @@ export function retentionHumanLines(
     ...(result.missing.length === 0
       ? []
       : [`yrd: log retention: no such optional root (absent, not an error): ${result.missing.join(", ")}`]),
+    ...((input.unreadable?.length ?? 0) === 0
+      ? []
+      : [`yrd: log retention: start time unreadable, named and not removed: ${input.unreadable?.join(", ")}`]),
     ...input.listed.map((entry) => entry.path),
   ]
 }

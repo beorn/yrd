@@ -83,18 +83,41 @@ describe("expiredRoundOutput (selection, by name only)", () => {
     const newRound = place(join(logs, round(ago(1))))
     const oldCheck = place(join(logs, "check", round(ago(9))))
     const oldEnv = place(join(logs, "environments", "fixer-28499", round(ago(10))))
-    // An environment NAMED with a round stamp (`<commit12>-q-…`) is not itself a round; only its run child is.
-    const namedEnv = place(join(logs, "environments", `abc123def456-${round(ago(20))}`, round(ago(1))))
+    // An environment NAMED with a round stamp (`<commit12>-q-…`) is itself the round; its child is not a second one.
+    const namedParent = join(logs, "environments", `abc123def456-${round(ago(20))}`)
+    const namedEnv = place(join(namedParent, round(ago(1))))
     const oldChecksFlat = place(join(checks, "fixer", round(ago(8))))
     const oldChecksDeep = place(join(checks, "dev", "8", "26673-thing@20eb", round(ago(8))))
 
     const found = expiredRoundOutput({ roots: [logs, checks], now: NOW }).entries
     const paths = found.map((entry) => entry.path).sort()
-    expect(paths).toEqual([oldRound, oldCheck, oldEnv, oldChecksFlat, oldChecksDeep].sort())
+    expect(paths).toEqual([oldRound, oldCheck, oldEnv, namedParent, oldChecksFlat, oldChecksDeep].sort())
     expect(paths).not.toContain(newRound)
     expect(paths).not.toContain(namedEnv)
     // Containment is per-root: every selection names the root removely must be given.
     for (const entry of found) expect(entry.within === logs || entry.within === checks).toBe(true)
+  })
+
+  /**
+   * @failure An environment directory named <commit>-q-<utc>-<id> is older than the window and prune reports selected 0.
+   * @level l2
+   * @consumer yrd logs prune
+   */
+  it("selects an old environment directory named <commit>-q-<utc>-<id> with no round child", () => {
+    const { logs } = tree("env-stamp")
+    const envDir = place(join(logs, "environments", `0010d72a646a-${round(ago(12))}`), "setup.log")
+    const found = expiredRoundOutput({ roots: [logs], now: NOW }).entries
+    expect(found.map((entry) => entry.path)).toEqual([envDir])
+    expect(found[0]?.started.toISOString()).toBe(ago(12).toISOString())
+  })
+
+  it("names a directory whose q- stamp cannot be read and does not select it", () => {
+    const { logs } = tree("unreadable")
+    const broken = join(logs, "environments", "broken-q-2026not-a-stamp")
+    place(broken, "setup.log")
+    const scan = expiredRoundOutput({ roots: [logs], now: NOW })
+    expect(scan.entries).toEqual([])
+    expect(scan.unreadable).toEqual([broken])
   })
 
   it("never selects the journals it sits beside, nor a plain file named like a round", () => {

@@ -621,10 +621,11 @@ export function journalKey(branch: string, head: string): string {
  * When a run started, read from its own id. `runId` mints
  * `q-<ISO with -:. removed>-<random>`, so the instant is IN the name and a
  * reader can window the files it opens without opening any of them.
- * Undefined for a name that is not one of ours.
+ * A retained environment directory is `<commit>-q-<stamp>-<tail>` and carries
+ * the same instant after the hyphen. Undefined for a name that is not one of ours.
  */
 export function runStartedAt(id: string): Date | undefined {
-  const stamp = /^q-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(\d{3})Z-/u.exec(id)
+  const stamp = /(?:^|-)q-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(\d{3})Z-/u.exec(id)
   if (stamp === null) return undefined
   const [, year, month, day, hour, minute, second, milliseconds] = stamp
   if ([year, month, day, hour, minute, second, milliseconds].some((part) => part === undefined)) return undefined
