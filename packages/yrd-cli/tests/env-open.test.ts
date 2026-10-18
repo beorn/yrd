@@ -92,7 +92,8 @@ function isolateHome(work: string): string {
 }
 
 async function world(setup: string, options: Readonly<{ declareSetup?: boolean }> = {}): Promise<World> {
-  const root = mkdtempSync(join(tmpdir(), "yrd-cli-env-open-"))
+  // Diagnostic assertions must distinguish reuse messages from a pathname containing "reus".
+  const root = mkdtempSync(join(tmpdir(), "yrd-cli-env-open-reus-"))
   roots.push(root)
   const seed = gitIn(root)
   const remote = join(root, "remote.git")
@@ -478,7 +479,7 @@ describe("yrd env open prepares the retained environment", () => {
     const bay = join(w.work, ".bays", "ready")
     expect(run.stdout().trim()).toBe(bay)
     expect(run.stderr()).toContain("cut from")
-    expect(run.stderr()).not.toMatch(/reus/iu)
+    expect(run.stderr()).not.toMatch(/^ready: reused /mu)
     expect(readFileSync(join(bay, "setup-ready.txt"), "utf8")).toBe(`${bay}\n`)
     expect((await gitIn(bay)(["branch", "--show-current"])).trim()).toBe("task/ready")
   })
@@ -626,7 +627,7 @@ describe("yrd env open prepares the retained environment", () => {
     expect((await opened(["rev-parse", "HEAD^{tree}"])).trim()).toBe(tree)
     expect((await opened(["log", "-1", "--format=%(trailers:key=Refs,valueonly)"])).trim()).toBe(issue)
     expect(JSON.parse(run.stdout())).toEqual({ base: before, path: bay, head, branch: "task/binding", name: "binding" })
-    expect(run.stderr()).not.toMatch(/reus/iu)
+    expect(run.stderr()).not.toMatch(/^binding: reused /mu)
     expect(readFileSync(join(bay, "setup-head.txt"), "utf8")).toBe(`${head}\n`)
   })
 
