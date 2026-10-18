@@ -3713,8 +3713,8 @@ export async function coreQueueCommand(
           const conflict = runnerConflictExit()
           if (conflict !== undefined) return conflict
           // A carrier that needs a remote ref owns its own startup condition.
-          // Keep the process and heartbeat alive while @chief activates an old
-          // queue's run index; no round may allocate a number before it exists.
+          // Keep the process and heartbeat alive while an existing
+          // queue awaits run-index activation; no round may allocate a number before it exists.
           if (!runIndexReady) {
             const precondition = await readRunIndexPrecondition(eventStore, config.target.branch)
             if (precondition.kind === "ready") {
@@ -3725,15 +3725,24 @@ export async function coreQueueCommand(
               if (precondition.kind === "corrupt") return stuck(precondition.message)
               if (precondition.kind === "missing") {
                 readFailure = undefined
-                const cure = `yrd runs activate <repo>@${config.target.branch}`
-                const why = `${requiredRunIndex} at ${config.target.remote} is absent for the existing queue; no round will run until @chief runs ${cure}`
+                const why = `${requiredRunIndex} at ${config.target.remote} is absent for the existing queue; no round will run until its run index is activated after the code carrier lands`
                 if (!runIndexWaitAnnounced) {
                   log?.warn?.(why, { ref: requiredRunIndex, remote: config.target.remote })
+                  let human = why
+                  if (options.json !== true) {
+                    const selected = parseQueueAddress(
+                      queueName(config.target, await remoteUrl(git, config.target.remote)),
+                    )
+                    human +=
+                      selected.kind === "remote"
+                        ? `\nActivate this queue: ${formatYrdCommand(io, ["runs", "activate", formatQueueAddress(selected)], io.cwd)}`
+                        : "\nThe selected repository has no portable remote address for activation; use its portable repository and queue identity after the carrier lands."
+                  }
                   emit(
                     io,
                     options.json,
                     { reason: "remote-precondition-missing", ref: requiredRunIndex, message: why },
-                    why,
+                    human,
                   )
                   runIndexWaitAnnounced = true
                 }
@@ -3745,7 +3754,7 @@ export async function coreQueueCommand(
                     code: "queue-remote-precondition-missing",
                     cause: why,
                     resolution: [
-                      `@chief: run ${cure} for this queue after its carrier lands.`,
+                      "Activate the run index for this queue after its code carrier lands.",
                       "No restart is needed. This service re-reads the remote ref and starts rounds when it appears.",
                     ],
                   },
@@ -3898,7 +3907,7 @@ export async function coreQueueCommand(
               const why = `${ref} at ${oid} remains on ${config.target.remote}; no queue round will run while it exists`
               if (legacyOverrideHeld !== `${ref}@${oid}`) {
                 log?.warn?.(why, { ref, oid, remote: config.target.remote })
-                io.stderr(`yrd: ${why}; @chief must verify, fold or delete the ref\n`)
+                io.stderr(`yrd: ${why}; verify, fold or delete the ref\n`)
                 legacyOverrideHeld = `${ref}@${oid}`
               }
               const alive = lineDocument(lastStop, 0)
@@ -3909,7 +3918,7 @@ export async function coreQueueCommand(
                   code: "legacy-override-present",
                   cause: why,
                   resolution: [
-                    `@chief: verify, fold or delete ${ref} at ${oid} before this queue judges another round.`,
+                    `Verify, fold or delete ${ref} at ${oid} before this queue judges another round.`,
                     "No restart is needed. This service re-reads the remote ref and resumes when it is absent.",
                   ],
                 },

@@ -10,7 +10,7 @@
  *           person's job again (plan § Commands: the service's three exits;
  *           § Milestones M7).
  * @level    l2 (a real remote and a clone under a temporary root;
- *           `coreQueueCommand` driven directly, no process boundary)
+ *           `coreQueueCommand` driven directly, plus copied CLI activation recipes)
  * @consumer hab, which runs `yrd queue up` as the service and relaunches it on
  *           a gitlink-move exit · the mechanic, who edits the target's declaration and
  *           expects the next round to read it
@@ -18,6 +18,7 @@
 
 import * as fs from "node:fs"
 import { execFileSync } from "node:child_process"
+import { shellQuote } from "git-super/shell-command"
 import {
   chmodSync,
   cpSync,
@@ -2444,103 +2445,148 @@ describe("yrd queue up, the service", () => {
    * @level l2 (real Git remote and the service loop)
    * @consumer Hab's Yrd service and @chief, who activates the index after the carrier lands
    */
-  it("waits on a missing remote runs index, then runs after activation without relaunch (26229)", async () => {
-    const w = await world()
-    const eventsRef = queueRef("main")
-    const indexRef = runIndexRef("main")
-    await w.git(["push", "--quiet", "origin", `:${indexRef}`])
-    expect(await w.git(["ls-remote", "--refs", "origin", eventsRef])).toContain(eventsRef)
-    expect(await w.git(["ls-remote", "--refs", "origin", indexRef])).toBe("")
-    const run = capture(w.work)
-    const stop = new AbortController()
-    let rounds = 0
-    let settled = false
-    const service = coreQueueCommand(
-      w.work,
-      run.io,
-      {
-        command: "up",
-        intervalSeconds: 0,
-        stop: stop.signal,
-        heartbeatIntervalMs: 100,
-        heartbeatGraceMs: 500,
-        afterRound: () => {
-          rounds += 1
-          stop.abort()
-        },
-      },
-      { json: true, workdir: w.workdir },
-    ).finally(() => {
-      settled = true
-    })
-    try {
-      await vi.waitFor(
-        async () => {
-          const health = await readQueueHealth(w.workdir, SERVICE)
-          expect(health, run.stderr()).toMatchObject({
-            state: "unhealthy",
-            verdict: { kind: "running" },
-            error: { code: "queue-remote-precondition-missing", cause: expect.stringContaining(indexRef) },
-          })
-          expect(health.error?.resolution.join(" ")).toContain("yrd runs activate")
-          expect(health.error?.resolution.join(" ")).toContain("@chief")
-        },
-        { timeout: 5_000 },
-      )
-      expect(settled, run.stderr()).toBe(false)
-      expect(rounds).toBe(0)
-      const logs = join(w.workdir, "logs")
-      expect(existsSync(logs) ? readdirSync(logs) : []).toEqual([])
-      await delay(700)
-      expect((await readQueueHealth(w.workdir, SERVICE)).error?.code).toBe("queue-remote-precondition-missing")
-
-      // A transport failure is unknown, not evidence that the index is still
-      // absent. Exercise the same remote read while its fixture remote is down.
+  it.each([false, true])(
+    "waits on a missing remote runs index, then runs after activation without relaunch (portableRemote=%s, 26229)",
+    async (portableRemote) => {
+      const w = await world()
+      const queue = "release"
       const remote = join(dirname(w.work), "remote.git")
-      const offline = `${remote}.offline`
-      renameSync(remote, offline)
+      const address = `yrd-precondition.test/org/queue@${queue}`
+      const target = (await w.git(["rev-parse", "HEAD"])).trim()
+      const config = await readConfig(w.git, target, { branch: queue, remote: "origin" })
+      if (config === undefined) throw new Error("activation fixture declaration is absent")
+      await w.git(["push", "--quiet", "origin", `${target}:refs/heads/${queue}`])
+      await createEventQueue(createEventStore(w.work, "origin", w.git.selection), queue, target, config, new Date())
+      const mainIndex = (await w.git(["ls-remote", "--refs", "origin", runIndexRef("main")])).trim()
+      if (portableRemote) {
+        await w.git(["config", `url.file://${remote}.insteadOf`, "https://yrd-precondition.test/org/queue.git"])
+        await w.git(["remote", "set-url", "origin", "https://yrd-precondition.test/org/queue.git"])
+      }
+      const eventsRef = queueRef(queue)
+      const indexRef = runIndexRef(queue)
+      await w.git(["push", "--quiet", "origin", `:${indexRef}`])
+      expect(await w.git(["ls-remote", "--refs", "origin", eventsRef])).toContain(eventsRef)
+      expect(await w.git(["ls-remote", "--refs", "origin", indexRef])).toBe("")
+      const run = capture(w.work)
+      const commands: { argv: readonly string[]; cwd: string; recipe: string }[] = []
+      run.io.formatYrdCommand = (argv, cwd) => {
+        const recipe = `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`
+        commands.push({ argv, cwd, recipe })
+        return recipe
+      }
+      const stop = new AbortController()
+      let rounds = 0
+      let settled = false
+      const service = coreQueueCommand(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          heartbeatIntervalMs: 100,
+          heartbeatGraceMs: 500,
+          afterRound: () => {
+            rounds += 1
+            stop.abort()
+          },
+        },
+        { queue, workdir: w.workdir },
+      ).finally(() => {
+        settled = true
+      })
       try {
         await vi.waitFor(
           async () => {
             const health = await readQueueHealth(w.workdir, SERVICE)
-            expect(health.facts?.roundReadFailure).toMatchObject({ ref: indexRef, count: expect.any(Number) })
-            expect(health.error?.code).not.toBe("queue-remote-precondition-missing")
+            expect(health, run.stderr()).toMatchObject({
+              state: "unhealthy",
+              verdict: { kind: "running" },
+              error: { code: "queue-remote-precondition-missing", cause: expect.stringContaining(indexRef) },
+            })
+            expect(health.error?.resolution.join(" ")).toContain("Activate the run index")
+            expect(health.error?.resolution.join(" ")).not.toMatch(/@chief|yrd runs activate/u)
+            expect(health.error?.cause).not.toMatch(/@chief|yrd runs activate/u)
           },
           { timeout: 5_000 },
         )
+        expect(settled, run.stderr()).toBe(false)
+        expect(rounds).toBe(0)
+        const logs = join(w.workdir, "logs")
+        expect(existsSync(logs) ? readdirSync(logs) : []).toEqual([])
+        await delay(700)
+        expect((await readQueueHealth(w.workdir, SERVICE)).error?.code).toBe("queue-remote-precondition-missing")
+
+        // A transport failure is unknown, not evidence that the index is still
+        // absent. Exercise the same remote read while its fixture remote is down.
+        const offline = `${remote}.offline`
+        renameSync(remote, offline)
+        try {
+          await vi.waitFor(
+            async () => {
+              const health = await readQueueHealth(w.workdir, SERVICE)
+              expect(health.facts?.roundReadFailure).toMatchObject({ ref: indexRef, count: expect.any(Number) })
+              expect(health.error?.code).not.toBe("queue-remote-precondition-missing")
+            },
+            { timeout: 5_000 },
+          )
+        } finally {
+          renameSync(offline, remote)
+        }
+        expect(rounds).toBe(0)
+        // Exercise the operator's exact step, not a direct call to its core.
+        const previous = { global: process.env.GIT_CONFIG_GLOBAL, state: process.env.XDG_STATE_HOME }
+        const global = join(dirname(w.work), "gitconfig")
+        writeFileSync(global, `[url "file://${remote}"]\n\tinsteadOf = https://yrd-precondition.test/org/queue.git\n`)
+        process.env.GIT_CONFIG_GLOBAL = global
+        process.env.XDG_STATE_HOME = join(dirname(w.work), "state")
+        try {
+          if (portableRemote) {
+            expect(commands).toHaveLength(1)
+            const action = commands[0]!
+            expect(action).toMatchObject({ argv: ["runs", "activate", address], cwd: w.work })
+            expect(run.stdout()).toContain(action.recipe)
+            const child = Bun.spawn(["/bin/sh", "-c", action.recipe], {
+              cwd: dirname(w.work),
+              env: { ...process.env, GIT_CONFIG_GLOBAL: global, XDG_STATE_HOME: join(dirname(w.work), "state") },
+              stdout: "pipe",
+              stderr: "pipe",
+            })
+            const [code, stdout, stderr] = await Promise.all([
+              child.exited,
+              new Response(child.stdout).text(),
+              new Response(child.stderr).text(),
+            ])
+            expect(code, stderr).toBe(0)
+            expect(stdout).toContain(indexRef)
+          } else {
+            expect(commands).toEqual([])
+            expect(run.stdout()).toContain("no portable remote address")
+            const activated = capture(w.work)
+            expect(
+              await runYrdProcess([process.execPath, "/usr/local/bin/yrd", "runs", "activate", address], activated.io),
+              activated.stderr(),
+            ).toBe(0)
+            expect(activated.stdout()).toContain(indexRef)
+          }
+          expect((await w.git(["ls-remote", "--refs", "origin", runIndexRef("main")])).trim()).toBe(mainIndex)
+        } finally {
+          if (previous.global === undefined) delete process.env.GIT_CONFIG_GLOBAL
+          else process.env.GIT_CONFIG_GLOBAL = previous.global
+          if (previous.state === undefined) delete process.env.XDG_STATE_HOME
+          else process.env.XDG_STATE_HOME = previous.state
+        }
+        expect(await service, run.stderr()).toBe(0)
+        expect(rounds).toBe(1)
+        expect(await w.git(["ls-remote", "--refs", "origin", indexRef])).toContain(indexRef)
+        expect((await readQueueHealth(w.workdir, SERVICE)).state).toBe("healthy")
       } finally {
-        renameSync(offline, remote)
+        stop.abort()
+        await service.catch(() => undefined)
       }
-      expect(rounds).toBe(0)
-      // Exercise the operator's exact step, not a direct call to its core.
-      const address = "yrd-precondition.test/org/queue@main"
-      const previous = { global: process.env.GIT_CONFIG_GLOBAL, state: process.env.XDG_STATE_HOME }
-      const global = join(dirname(w.work), "gitconfig")
-      writeFileSync(global, `[url "file://${remote}"]\n\tinsteadOf = https://yrd-precondition.test/org/queue.git\n`)
-      process.env.GIT_CONFIG_GLOBAL = global
-      process.env.XDG_STATE_HOME = join(dirname(w.work), "state")
-      try {
-        const activated = capture(w.work)
-        expect(
-          await runYrdProcess([process.execPath, "/usr/local/bin/yrd", "runs", "activate", address], activated.io),
-          activated.stderr(),
-        ).toBe(0)
-        expect(activated.stdout()).toContain(indexRef)
-      } finally {
-        if (previous.global === undefined) delete process.env.GIT_CONFIG_GLOBAL
-        else process.env.GIT_CONFIG_GLOBAL = previous.global
-        if (previous.state === undefined) delete process.env.XDG_STATE_HOME
-        else process.env.XDG_STATE_HOME = previous.state
-      }
-      expect(await service, run.stderr()).toBe(0)
-      expect(rounds).toBe(1)
-      expect(await w.git(["ls-remote", "--refs", "origin", indexRef])).toContain(indexRef)
-      expect((await readQueueHealth(w.workdir, SERVICE)).state).toBe("healthy")
-    } finally {
-      stop.abort()
-      await service.catch(() => undefined)
-    }
-  }, 20_000)
+    },
+    20_000,
+  )
 
   /**
    * @failure A pre-cutover writer recreates the legacy override ref; the new runner exits instead of holding the line visibly.
@@ -2586,11 +2632,12 @@ describe("yrd queue up, the service", () => {
             error: { code: "legacy-override-present", cause: expect.stringContaining(legacyRef) },
           })
           expect(health.error?.cause).toContain(target)
-          expect(health.error?.resolution.join(" ")).toContain("@chief")
+          expect(health.error?.resolution.join(" ")).not.toContain("@chief")
         },
         { timeout: 5_000 },
       )
       expect(settled, run.stderr()).toBe(false)
+      expect(run.stderr()).not.toContain("@chief")
       expect(rounds).toBe(0)
       await w.git(["push", "--quiet", "origin", `:${legacyRef}`])
       expect(await service, run.stderr()).toBe(0)
