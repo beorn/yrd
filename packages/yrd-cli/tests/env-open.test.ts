@@ -177,7 +177,7 @@ describe("yrd env open prepares the retained environment", () => {
    * @failure `yrd env open` read the target's declaration through the strict parser, so a top-level key a
    *          newer queue declares refused every environment on a week-old checkout (27796; 27187 fixed
    *          only `submit`), and the refusal named neither the cause nor the cure. 26121: the warning must
-   *          name the reader version and the cure `Run with main's yrd to apply it`.
+   *          name the reader version and portable guidance to use a current build.
    * @level   l2 (real bare remote, declaration at the target, real retained worktree)
    * @consumer every seat opening an environment from a checkout older than the target's declaration
    * @testonly none
@@ -196,7 +196,7 @@ describe("yrd env open prepares the retained environment", () => {
     expect(run.stderr()).toContain("futurekey:")
     expect(run.stderr()).toMatch(/this environment's Yrd does not know/iu)
     expect(run.stderr()).toContain(formatYrdRuntimeVersion())
-    expect(run.stderr()).toContain("Run with main's yrd to apply it")
+    expect(run.stderr()).toContain("Run with a current build of Yrd to apply it")
     expect(run.stderr().match(/futurekey:/gu)).toHaveLength(1)
     expect(existsSync(join(w.work, ".bays", "newer-key"))).toBe(true)
   })
@@ -227,7 +227,7 @@ describe("yrd env open prepares the retained environment", () => {
     expect(run.stderr()).toContain("submitter: future-ending")
     expect(run.stderr()).toMatch(/this environment's Yrd does not know/iu)
     expect(run.stderr()).toContain(formatYrdRuntimeVersion())
-    expect(run.stderr()).toContain("Run with main's yrd to apply it")
+    expect(run.stderr()).toContain("Run with a current build of Yrd to apply it")
     expect(run.stderr().match(/future-ending/gu)).toHaveLength(1)
     expect(existsSync(join(w.work, ".bays", "newer-notify"))).toBe(true)
   })
