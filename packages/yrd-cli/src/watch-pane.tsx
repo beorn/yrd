@@ -283,6 +283,8 @@ const HELD_DETAILS = 2
 export type WatchSource = Readonly<{
   id: string
   label: string
+  /** Viewer-local executable/cwd and this source's selected queue; never part of a snapshot. */
+  formatCommand?: (argv: readonly string[]) => string
   snapshot?: WatchSnapshot
   error?: string
   load?: (request?: Readonly<{ draftWindow: DraftWindow }>) => Promise<WatchSnapshot>
@@ -296,6 +298,7 @@ export type ReadFailure = Readonly<{ at: Date; message: string }>
 
 type WatchPaneProps = {
   snapshot: WatchSnapshot
+  formatCommand?: (argv: readonly string[]) => string
   initialKey?: string
   queueShortcuts?: boolean
   initialFailure?: ReadFailure
@@ -330,6 +333,7 @@ export function WatchPane(props: WatchPaneProps) {
         <SingleWatchPane
           {...props}
           snapshot={source.snapshot ?? props.snapshot}
+          formatCommand={source.formatCommand ?? props.formatCommand}
           initialFailure={
             props.initialFailure ?? (source.error === undefined ? undefined : { at: new Date(), message: source.error })
           }
@@ -541,7 +545,7 @@ function QueuesWatchPane({
         snapshot: reading,
         digit: source.digit,
         kind: "runner",
-        line: runnerOf(reading, at),
+        line: runnerOf(reading, at, source.formatCommand),
         key: `${source.id}:runner`,
       } as WatchPaneItem,
     ]
@@ -655,6 +659,7 @@ function QueuesWatchPane({
           key={selectedSource.id}
           {...props}
           snapshot={focusedSnapshot}
+          formatCommand={selectedSource.formatCommand}
           readFailure={selectedError === undefined ? undefined : { at: new Date(), message: selectedError }}
           initialKey={focus?.rowKey}
           navigationSerial={focus?.serial}
@@ -683,7 +688,7 @@ function QueuesWatchPane({
                   queueDigit={multiple ? source.digit : undefined}
                   queueFirst
                   status={{
-                    ...queueLineStatus(source.snapshot, at),
+                    ...queueLineStatus(source.snapshot, at, source.formatCommand),
                     timer: (
                       <LiveStatusTimer
                         snapshot={source.snapshot}
@@ -732,6 +737,7 @@ function QueuesWatchPane({
                 rows={rows}
                 columns={columns - 2}
                 snapshot={snapshot}
+                formatCommand={sources.find((source) => source.snapshot?.queue === snapshot.queue)?.formatCommand}
                 multipleQueues={multiple}
                 empty={visible.length === 0 ? "no queues visible — press a to show all" : "nothing in line"}
                 cursor={cursor}
@@ -767,6 +773,7 @@ function QueuesWatchPane({
 
 function SingleWatchPane({
   snapshot,
+  formatCommand,
   initialKey,
   navigationSerial,
   queueShortcuts = true,
@@ -893,7 +900,7 @@ function SingleWatchPane({
   // filters over the one table (items 9, 32); `all` is every one of both. The
   // bands are applied HERE, before the cursor and the detail read an index, so
   // every one of them addresses the sequence the reader is looking at.
-  const runner = runnerOf(shown, shown.at)
+  const runner = runnerOf(shown, shown.at, formatCommand)
   const visible = bandedRows(
     shown.rows.filter(
       (item) =>
@@ -1301,6 +1308,7 @@ function SingleWatchPane({
         rows={visible}
         columns={listColumns}
         snapshot={shown}
+        formatCommand={formatCommand}
         empty={shown.rows.length === 0 ? "nothing in line" : "no change matches the filters"}
         cursor={at}
         listRef={listRef}
@@ -1322,10 +1330,10 @@ function SingleWatchPane({
         status={
           statusTimer(shown, now) !== undefined || Math.max(0, now.getTime() - shown.at.getTime()) > 120_000
             ? {
-                ...queueLineStatus(shown, now),
+                ...queueLineStatus(shown, now, formatCommand),
                 timer: <LiveStatusTimer snapshot={shown} fallback={queueLineStatus(shown, now).timer} />,
               }
-            : queueLineStatus(shown, now)
+            : queueLineStatus(shown, now, formatCommand)
         }
         columns={isWideSplit ? listColumns : columns}
         live={live}
@@ -1549,8 +1557,12 @@ function LiveStatusTimer({ snapshot, fallback }: { snapshot: WatchSnapshot; fall
   return <Text color="$fg-on-inverse-muted">{ageText}</Text>
 }
 
-export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus {
-  const runner = runnerOf(snapshot, now)
+export function queueLineStatus(
+  snapshot: WatchSnapshot,
+  now: Date,
+  formatCommand?: (argv: readonly string[]) => string,
+): LineStatus {
+  const runner = runnerOf(snapshot, now, formatCommand)
   const held = snapshot.pause !== undefined || (snapshot.stopped !== undefined && snapshot.stopped !== null)
   const isRunning = snapshot.runner?.service.kind === "beating" || snapshot.runner?.latest?.alive === true
   const word =
@@ -1649,6 +1661,7 @@ function Table({
   rows,
   columns,
   snapshot,
+  formatCommand,
   empty,
   cursor,
   listRef,
@@ -1662,6 +1675,7 @@ function Table({
   columns: number
   /** The whole reading: the runner's row is the queue's, never the selector's. */
   snapshot: WatchSnapshot
+  formatCommand?: (argv: readonly string[]) => string
   /** What an empty table says: an empty queue and a filter that hides everything are different facts. */
   empty: string
   cursor: number
@@ -1674,7 +1688,7 @@ function Table({
   // Column widths depend on how long a duration prints, which changes on the
   // minute at most; the seconds belong to the cells, not to the table.
   const minute = useMinute()
-  const runner = runnerOf(snapshot, minute)
+  const runner = runnerOf(snapshot, minute, formatCommand)
   const queue = { digit: 1, label: snapshot.queues[0]?.label ?? formatStoredQueueAddress(snapshot.queue) }
   const isSingleQueue = multipleQueues === undefined ? snapshot.queues.length <= 1 : !multipleQueues
   const baseLayout = listLayout(rows, columns, minute, runner, queue, {
@@ -1694,6 +1708,7 @@ function Table({
             snapshot={snapshot}
             layout={layout}
             includeRunner={true}
+            formatCommand={formatCommand}
           />
           <Text color="$fg-muted">{empty}</Text>
         </>

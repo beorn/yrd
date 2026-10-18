@@ -92,6 +92,7 @@ import { readRunnerFacts } from "../src/watch-runner.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { transientPushRetry } from "../../yrd-queue-core/src/transient-push.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
+import type { WatchSource } from "../src/watch-pane.tsx"
 import { installSelectedGit } from "./support/selected-git.ts"
 
 // A mutable facade, so a test can catch each health document at the rename
@@ -2751,6 +2752,13 @@ describe("yrd queue up, the service", () => {
     })
 
     const duplicatePause = capture(w.work)
+    const refusalCwd = dirname(w.work)
+    duplicatePause.io.cwd = refusalCwd
+    const refusalCommands: { argv: readonly string[]; cwd: string }[] = []
+    duplicatePause.io.formatYrdCommand = (argv, cwd) => {
+      refusalCommands.push({ argv, cwd })
+      return "host-paused-refusal"
+    }
     expect(
       await coreQueueCommand(
         w.work,
@@ -2761,9 +2769,28 @@ describe("yrd queue up, the service", () => {
     ).toBe(1)
     expect(duplicatePause.stderr()).toContain("paused by @chief")
     expect(duplicatePause.stderr()).toContain("49 new failures on main")
+    expect(duplicatePause.stderr()).toContain("host-paused-refusal")
+    expect(refusalCommands).toContainEqual({
+      argv: [
+        "queue",
+        "resume",
+        "--reason",
+        "<why>",
+        "--queue",
+        `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`,
+      ],
+      cwd: refusalCwd,
+    })
 
     for (const dryRun of [true, false]) {
       const accepted = capture(w.work)
+      // A stopped submit must render its current action in the viewer's host
+      // context; the old bare-command assertion could not detect its loss.
+      const commands: { argv: readonly string[]; cwd: string }[] = []
+      accepted.io.formatYrdCommand = (argv, cwd) => {
+        commands.push({ argv, cwd })
+        return "host-selected-resume"
+      }
       expect(
         await coreQueueCommand(
           w.work,
@@ -2775,13 +2802,32 @@ describe("yrd queue up, the service", () => {
       ).toBe(0)
       expect(accepted.stderr()).toContain("paused by @chief")
       expect(accepted.stderr()).toContain("49 new failures on main")
-      expect(accepted.stderr()).toContain("yrd queue resume")
+      expect(accepted.stderr()).toContain("host-selected-resume")
+      expect(commands).toContainEqual({
+        argv: [
+          "queue",
+          "resume",
+          "--reason",
+          "<why>",
+          "--queue",
+          `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`,
+        ],
+        cwd: w.work,
+      })
     }
     const ref = changesRef("main", "task/one")
     expect(await w.git(["ls-remote", "--refs", "origin", ref])).toContain(ref)
 
     const listed = capture(w.work)
-    expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    const displayedCommands: { argv: readonly string[]; cwd: string }[] = []
+    const listedIO = {
+      ...listed.io,
+      formatYrdCommand(argv: readonly string[], cwd: string) {
+        displayedCommands.push({ argv, cwd })
+        return `viewer ${cwd} yrd ${argv.join(" ")}`
+      },
+    }
+    expect(await coreQueueCommand(w.work, listedIO, { command: "list" }, { workdir: w.workdir })).toBe(0)
     // The pause is the loudest state on the page and it LEADS it, once; the
     // runner's row says the WORD paused and what lifts the stop, never the
     // record's own sentence a second time (watch-frame.tsx).
@@ -2801,7 +2847,32 @@ describe("yrd queue up, the service", () => {
     const runnerBoxEnd = page.findIndex((line, i) => i > runnerBoxStart && (line.includes("╰") || line.trim() === ""))
     const runnerBox = page.slice(runnerBoxStart, runnerBoxEnd === -1 ? undefined : runnerBoxEnd + 1).join("\n")
     expect(runnerBox, listed.stdout()).toContain("paused")
-    expect(runnerBox, listed.stdout()).toContain("resume: yrd queue resume")
+    const selectedQueue = `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`
+    const liveSources: WatchSource[] = []
+    expect(
+      await coreQueueCommand(
+        w.work,
+        listedIO,
+        { command: "list", watch: true },
+        {
+          workdir: w.workdir,
+          watchSource: (source) => liveSources.push(source),
+        },
+      ),
+    ).toBe(0)
+    // The production source must carry the viewer formatter into the live
+    // pane; component-only callback fixtures cannot prove this boundary.
+    expect(liveSources).toHaveLength(1)
+    expect(liveSources[0]?.formatCommand?.(["queue", "resume"])).toBe(
+      `viewer ${w.work} yrd queue resume --queue ${selectedQueue}`,
+    )
+    expect(displayedCommands).toContainEqual({
+      argv: ["queue", "resume", "--queue", selectedQueue],
+      cwd: w.work,
+    })
+    expect(runnerBox.replace(/[│┃\s]/gu, ""), listed.stdout()).toContain(
+      `to resume: viewer ${w.work} yrd queue resume --queue ${selectedQueue}`.replace(/\s/gu, ""),
+    )
     expect(runnerBox, listed.stdout()).not.toContain("refs/yrd/main/runner")
     const listedJson = capture(w.work)
     expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
@@ -4903,9 +4974,10 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       expect(document.error?.code).toBe("queue-round-stuck")
       expect(document.error?.cause).toContain(`task/stuck@${head}`)
       const body = document.error?.resolution.join("\n") ?? ""
-      expect(body).toContain("yrd queue withdraw task/stuck")
+      expect(body).toContain("withdraw task/stuck")
       expect(body).toContain("clears this reason")
-      expect(body).toContain("yrd queue resume")
+      expect(body).toContain("resume the queue")
+      expect(body).not.toContain(w.work)
       expect(body).not.toMatch(/clears on its own|next round|resets the spacing/u)
       expect(document.facts).toMatchObject({ stopped: { by: "yrd", cause: "stuck", change: `task/stuck@${head}` } })
       expect(document.facts?.stuckRounds).toBeUndefined()
@@ -5088,7 +5160,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       ),
       service.stderr(),
     ).toBe(0)
-    expect(seen[0]?.error?.resolution.join(" ")).toContain("yrd queue resume")
+    expect(seen[0]?.error?.resolution.join(" ")).toContain("resume the queue")
 
     const resumed = capture(w.work)
     expect(
@@ -5270,11 +5342,34 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
     })
-    expect(await coreQueueCommand(w.work, capture(w.work).io, { command: "run" }, { workdir: w.workdir })).toBe(2)
+    const stuckRound = capture(w.work)
+    const roundCommands: { argv: readonly string[]; cwd: string }[] = []
+    stuckRound.io.cwd = dirname(w.work)
+    stuckRound.io.formatYrdCommand = (argv, cwd) => {
+      roundCommands.push({ argv, cwd })
+      return "host-stuck-round-action"
+    }
+    expect(await coreQueueCommand(w.work, stuckRound.io, { command: "run" }, { workdir: w.workdir })).toBe(2)
+    expect(stuckRound.stderr()).toContain("recorded guidance:")
+    expect(stuckRound.stderr()).toContain("host-stuck-round-action")
+    const roundQueue = `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`
+    for (const argv of [
+      ["queue", "show", "task/stuck"],
+      ["queue", "withdraw", "task/stuck"],
+      ["merge", "task/stuck"],
+      ["queue", "resume", "--reason", "<why>"],
+    ]) {
+      expect(roundCommands).toContainEqual({ argv: [...argv, "--queue", roundQueue], cwd: dirname(w.work) })
+    }
     const judgedBefore = fault.runs()
 
     for (const dryRun of [true, false]) {
       const accepted = capture(w.work)
+      const commands: { argv: readonly string[]; cwd: string }[] = []
+      accepted.io.formatYrdCommand = (argv, cwd) => {
+        commands.push({ argv, cwd })
+        return "host-stuck-remedy"
+      }
       expect(
         await coreQueueCommand(
           w.work,
@@ -5289,8 +5384,14 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
         stopped: { by: "yrd", cause: "stuck", change: `task/stuck@${stuckHead}` },
       })
       expect(accepted.stderr()).toContain(`task/stuck@${stuckHead}`)
-      expect(accepted.stderr()).toContain("yrd queue withdraw task/stuck")
-      expect(accepted.stderr()).toContain("yrd queue resume")
+      expect(accepted.stderr()).toContain("recorded guidance:")
+      expect(accepted.stderr()).toContain("host-stuck-remedy")
+      const queue = `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`
+      expect(commands).toContainEqual({ argv: ["queue", "withdraw", "task/stuck", "--queue", queue], cwd: w.work })
+      expect(commands).toContainEqual({
+        argv: ["queue", "resume", "--reason", "<why>", "--queue", queue],
+        cwd: w.work,
+      })
     }
     // Opened, and nothing more: no check ran at submit.
     expect(
@@ -6244,11 +6345,18 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
   // pages it — never overdue, which would say the writer died.
   it("a stopped line reads stopped, never overdue, across a long hold, heartbeat writes included", async () => {
     const w = await world()
+    // Publication is a separate boundary from the pure health builder: a
+    // producer-local formatter must not bind the shared document to this clone.
+    const viewer = join(dirname(w.work), "health-viewer")
+    await gitIn(dirname(w.work))(["clone", "--quiet", w.work, viewer])
+    const viewerHealth = join(viewer, "health")
+    mkdirSync(viewerHealth)
     const fault = brokenSetup(w.workdir)
     await redeclare(w, `setup: ${fault.command}\n`)
     const head = await oneChange(w, "task/stuck")
     using published = await publishedHealth(w.workdir)
     const run = capture(w.work)
+    run.io.formatYrdCommand = (argv, cwd) => `producer-host ${cwd} yrd ${argv.join(" ")}`
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
     const roundEnds: number[] = []
@@ -6276,6 +6384,14 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     )
     try {
       await vi.waitFor(() => expect(seen.length, run.stderr()).toBeGreaterThan(0), { timeout: 20_000 })
+      const bytes = readFileSync(join(w.workdir, QUEUE_HEALTH_DOCUMENT), "utf8")
+      expect(bytes, "published health must not contain the producing clone's command context").not.toContain(w.work)
+      expect(bytes).not.toContain("producer-host")
+      writeFileSync(join(viewerHealth, QUEUE_HEALTH_DOCUMENT), bytes)
+      const remoteReading = await readQueueHealth(viewerHealth, SERVICE, new Date(String(seen[0]?.facts?.writtenAt)))
+      expect(remoteReading.error?.code).toBe("queue-round-stuck")
+      expect(remoteReading.error?.resolution).toEqual(seen[0]?.error?.resolution)
+      expect(remoteReading.facts?.stopped).toEqual(seen[0]?.facts?.stopped)
       const heldSince = Date.now()
       const readings: QueueHealthDocument[] = []
       while (seen.length < 3) {
@@ -7018,7 +7134,8 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     { file: "fails.txt", ending: "failed", exit: 1, verdict: "fails its check" },
     { file: "cannot-judge.txt", ending: "stuck", exit: 2, verdict: "has a check that cannot judge it" },
     { file: "passes.txt", ending: "merged", exit: 0, verdict: "passes" },
-  ])("a change that $verdict ends $ending, and yrd merge exits $exit", async ({ file, ending, exit }) => {
+    { file: "deferred.txt", ending: "queued", exit: 2, verdict: "defers its check" },
+  ])("a change that $verdict reads $ending, and yrd merge exits $exit", async ({ file, ending, exit }) => {
     const w = await verbWorld()
     const script = join(dirname(w.workdir), "verdict.sh")
     writeFileSync(
@@ -7027,12 +7144,16 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
         "#!/bin/sh",
         "if [ -f fails.txt ]; then echo 'this change fails the verdict' >&2; exit 1; fi",
         "if [ -f cannot-judge.txt ]; then echo 'the verdict cannot judge this change' >&2; exit 2; fi",
+        'if [ -f deferred.txt ]; then echo \'YRD-CHECK-RESULT {"result":"deferred","reason":"too wide","projectedMs":3600000,"boundMs":1800000}\'; exit 3; fi',
         "exit 0",
         "",
       ].join("\n"),
     )
     chmodSync(script, 0o755)
-    await redeclare(w, `checks:\n  - verdict:\n      on: [submit]\n      run: ${script}\n`)
+    await redeclare(
+      w,
+      `checks:\n  - verdict:\n      on: [submit]\n      run: ${script}\n      long: {timeoutMs: 5400000}\n`,
+    )
     const head = await branchWith(w, "task/judged", file)
 
     // Never submitted: merge opens the change itself, then judges it.
@@ -7041,6 +7162,41 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     const judged = await readStatus(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", "task/judged")
     expect(judged, merged.report).toMatchObject({ commit: head, status: ending })
     expect(merged.exitCode, merged.report).toBe(exit)
+    if (ending === "queued") {
+      // A deferred merge is the live retry boundary; prior ending rows never
+      // reach it, so they cannot catch a bare command losing host/cwd/queue.
+      const retry = capture(w.work)
+      retry.io.cwd = dirname(w.work)
+      const commands: { argv: readonly string[]; cwd: string }[] = []
+      retry.io.formatYrdCommand = (argv, cwd) => {
+        commands.push({ argv, cwd })
+        return "host-selected-merge-retry"
+      }
+      expect(
+        await coreQueueCommand(
+          w.work,
+          retry.io,
+          { command: "merge", branch: "task/judged", submitter: "test-submitter" },
+          { workdir: w.workdir },
+        ),
+      ).toBe(2)
+      expect.soft(retry.stderr()).toContain("host-selected-merge-retry")
+      expect.soft(commands).toContainEqual({
+        argv: ["merge", "task/judged", "--queue", `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`],
+        cwd: dirname(w.work),
+      })
+      const unavailable = capture(w.work)
+      expect(
+        await coreQueueCommand(
+          w.work,
+          unavailable.io,
+          { command: "merge", branch: "task/not-submitted", submitter: "test-submitter" },
+          { workdir: w.workdir },
+        ),
+      ).toBe(2)
+      expect.soft(unavailable.stderr()).toContain("a clone that contains task/not-submitted")
+      expect.soft(unavailable.stderr()).not.toContain("run yrd merge")
+    }
   })
 
   // ACCEPTANCE: on a line a stuck change stopped, the fix that sits BEHIND it

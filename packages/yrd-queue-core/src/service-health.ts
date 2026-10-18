@@ -232,8 +232,8 @@ export function roundHealthDocument(
         code: "queue-round-stuck",
         cause: `${STUCK_RECORD_CODE}: the line stopped at stuck change ${branch}${paused}`,
         resolution: [
-          `Repair ${branch}, then run yrd queue resume to retry it; or withdraw or merge the change.`,
-          `The stuck event and its evidence: yrd queue show ${branch}.`,
+          `Repair ${branch}, then resume the queue to retry it; or withdraw or merge the change.`,
+          `Inspect the stuck event for ${branch} and its evidence.`,
           "The service remains alive and holds the line; this page does not clear by itself.",
         ],
       },
@@ -258,7 +258,7 @@ export function roundHealthDocument(
           // re-worded here: a refusal names its cure (G1), and a page is read by
           // someone who has not got the journal open.
           stop.next ?? stuckCures(stop.change.branch),
-          `The stuck record, its evidence and its log: yrd queue show ${stop.change.branch}.`,
+          `Inspect the stuck record for ${stop.change.branch}, its evidence and its log.`,
           "No restart is needed or wanted: the service is alive, holds the line stopped, and checks and merges nothing.",
           `This page clears when the line resumes — ${change} withdrawn or merged, or the queue resumed — and never by itself.`,
         ],

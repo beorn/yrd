@@ -27,7 +27,7 @@ export type Notice = Readonly<{
   word: string
   /** Why it is that, when the row carries a why. */
   cause?: string
-  /** Incident advice, or whose move an ordinary change is and why. */
+  /** Whose move the change is and why; incident guidance is part of the cause. */
   next?: string
 }>
 
@@ -49,12 +49,7 @@ export function watchNotice(row: Row, joinedRun = false): Notice {
       ? `went around the queue${skewMarker(row)}`
       : stateWord({ state: row.state, format: row.format, unknownKinds: row.unknownKinds })
   const state = joinedRun ? `change ${word}` : word
-  const next =
-    row.incident?.next !== undefined
-      ? row.incident.next
-      : row.next === undefined
-        ? undefined
-        : `${row.next.owner} — ${row.next.because}`
+  const next = row.next === undefined ? undefined : `${row.next.owner} — ${row.next.because}`
   return {
     glyph: stateGlyph(row),
     // The overlay says what is happening RIGHT NOW; the state still says what

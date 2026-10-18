@@ -79,6 +79,8 @@ function writeCaptureIfConfigured(name: string, content: string | Uint8Array): v
 const BEATING = { kind: "beating", state: "healthy" } as const
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
+// Layout fixtures supply their host callback; command-context proofs use the real formatter separately.
+const layoutFormatCommand = (argv: readonly string[]): string => ["yrd", ...argv].join(" ")
 const RUN_ID = "q-20260903T113000000Z-0badf00d"
 
 function row(over: Partial<Row> = {}): Row {
@@ -1889,7 +1891,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
 
   /** Paint the pane and hand back its lines, pressing the keys given first. */
   async function lines(snap: WatchSnapshot, cols: number, rows: number, keys: readonly string[] = []) {
-    const app = render(<WatchPane snapshot={snap} live={false} />, { cols, rows })
+    const app = render(<WatchPane snapshot={snap} live={false} formatCommand={layoutFormatCommand} />, { cols, rows })
     await settle(app)
     for (const key of keys) {
       app.press(key)
@@ -2002,6 +2004,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const at = async (cols: number, runner = RUNNER) => {
       const page = (
         await printListing(snapshot({ rows, runner, stopped } as Partial<WatchSnapshot>), {
+          formatCommand: layoutFormatCommand,
           color: false,
           columns: cols,
         })
@@ -2051,7 +2054,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       stopped: STOP,
     } as Partial<WatchSnapshot>)
 
-    const page = (await printListing(snap, { color: false, columns: 100 })).split("\n")
+    const page = (await printListing(snap, { formatCommand: layoutFormatCommand, color: false, columns: 100 })).split(
+      "\n",
+    )
     const line = (page.find((l) => l.includes(W.waiting.word)) ?? "").trim()
     expect(line).toBe(
       `3 ${W.waiting.word} · ${W.checking.word} task/x for 3:21 · line stopped at task/s since ${clock(new Date(STOP.since))}` +
@@ -2093,6 +2098,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const at = async (cols: number) => {
       const page = (
         await printListing(snapshot({ rows, runner: RUNNER, stopped } as Partial<WatchSnapshot>), {
+          formatCommand: layoutFormatCommand,
           color: false,
           columns: cols,
         })
@@ -2510,7 +2516,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       [160, 40],
       [80, 31],
     ] as const) {
-      const app = render(<WatchPane snapshot={snap} live={false} />, { cols, rows })
+      const app = render(<WatchPane formatCommand={layoutFormatCommand} snapshot={snap} live={false} />, { cols, rows })
       await settle(app)
       app.press("s")
       await settle(app)
@@ -2774,7 +2780,11 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   async function onePulse(cols: number, height: number, steps: number) {
     // `autoRender`: a live pane repaints on its own timers (the clock, the pulse), not only on a key.
     const app = render(
-      <WatchPane snapshot={snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER })} live />,
+      <WatchPane
+        formatCommand={layoutFormatCommand}
+        snapshot={snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER })}
+        live
+      />,
       {
         autoRender: true,
         cols,
@@ -3007,6 +3017,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // 1. Stopped runner: title shows status color
     const stoppedApp = render(
       <WatchPane
+        formatCommand={layoutFormatCommand}
         snapshot={snapshot({
           runner: {
             journalDir: "/w/logs",
@@ -3031,6 +3042,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // 2. Stuck runner: title shows status color (stuck warning color, distinct from stopped error color)
     const stuckApp = render(
       <WatchPane
+        formatCommand={layoutFormatCommand}
         snapshot={snapshot({
           runner: RUNNER,
           stopped: STOP,
@@ -3054,6 +3066,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // 3. Idle runner: title uses idle color, distinct from stopped/stuck colors
     const idleApp = render(
       <WatchPane
+        formatCommand={layoutFormatCommand}
         snapshot={snapshot({
           runner: RUNNER,
         })}
@@ -3079,6 +3092,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // 1. Stopped runner in empty pane (rows: [])
     const stoppedApp = render(
       <WatchPane
+        formatCommand={layoutFormatCommand}
         snapshot={snapshot({
           rows: [],
           runner: {
@@ -3104,6 +3118,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // 2. Stuck runner in empty pane (rows: [])
     const stuckApp = render(
       <WatchPane
+        formatCommand={layoutFormatCommand}
         snapshot={snapshot({
           rows: [],
           runner: RUNNER,
@@ -3128,6 +3143,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // 3. Idle runner in empty pane (rows: [])
     const idleApp = render(
       <WatchPane
+        formatCommand={layoutFormatCommand}
         snapshot={snapshot({
           rows: [],
           runner: RUNNER,
@@ -3182,6 +3198,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   it("25556: section disclosure, STATS, what is in hand now and the last 24 hours directly under the top line", async () => {
     const app = render(
       <WatchPane
+        formatCommand={layoutFormatCommand}
         snapshot={snapshot({
           decisions: DECISIONS,
           rows: [
@@ -3417,6 +3434,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // 1. Idle runner
     const idleApp = render(
       <WatchPane
+        formatCommand={layoutFormatCommand}
         snapshot={snapshot({ runner: RUNNER, queues: [{ branch: "main", label: "main", path: "/repo" }] })}
         live={false}
       />,
@@ -3430,6 +3448,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // 2. Stopped runner
     const stoppedApp = render(
       <WatchPane
+        formatCommand={layoutFormatCommand}
         snapshot={snapshot({
           runner: {
             journalDir: "/w/logs",
@@ -3449,6 +3468,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // 3. Stuck runner
     const stuckApp = render(
       <WatchPane
+        formatCommand={layoutFormatCommand}
         snapshot={snapshot({
           runner: RUNNER,
           stopped: STOP,
@@ -3468,6 +3488,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const paintStop = async (stopReason?: string, cols = 120) => {
       const app = render(
         <WatchPane
+          formatCommand={layoutFormatCommand}
           snapshot={snapshot({
             runner: {
               journalDir: "/w/logs",
@@ -3756,15 +3777,29 @@ describe("the top line (25416)", () => {
   })
 
   it("25556: state is shown by foreground colour on white, with the pause reason truncated before the tabs", async () => {
-    const wide = render(<WatchPane snapshot={snapshot({ ...PAUSED, runner: RUNNER_READ })} live={false} />, {
-      cols: 160,
-      rows: 30,
-    })
+    const wide = render(
+      <WatchPane
+        formatCommand={layoutFormatCommand}
+        snapshot={snapshot({ ...PAUSED, runner: RUNNER_READ })}
+        live={false}
+      />,
+      {
+        cols: 160,
+        rows: 30,
+      },
+    )
     await settle(wide)
-    const narrow = render(<WatchPane snapshot={snapshot({ ...PAUSED, runner: RUNNER_READ })} live={false} />, {
-      cols: 100,
-      rows: 30,
-    })
+    const narrow = render(
+      <WatchPane
+        formatCommand={layoutFormatCommand}
+        snapshot={snapshot({ ...PAUSED, runner: RUNNER_READ })}
+        live={false}
+      />,
+      {
+        cols: 100,
+        rows: 30,
+      },
+    )
     await settle(narrow)
     const seen = {
       wide: wide.lines[0]?.includes(RUNNER_GLYPH),
@@ -3781,11 +3816,14 @@ describe("the top line (25416)", () => {
   })
 
   it("row 2: the marker pulses while the line is paused with a reason", async () => {
-    const app = render(<WatchPane snapshot={snapshot({ ...PAUSED, runner: RUNNER_READ })} live />, {
-      autoRender: true,
-      cols: 120,
-      rows: 30,
-    })
+    const app = render(
+      <WatchPane formatCommand={layoutFormatCommand} snapshot={snapshot({ ...PAUSED, runner: RUNNER_READ })} live />,
+      {
+        autoRender: true,
+        cols: 120,
+        rows: 30,
+      },
+    )
     await settle(app)
     const markerX = (app.lines[0] ?? "").indexOf(RUNNER_GLYPH)
     const marker = (): string => `${app.cell(markerX, 0).char}:${JSON.stringify(app.cell(markerX, 0).fg)}`
@@ -3858,6 +3896,7 @@ describe("the top line (25416)", () => {
   it("every pair on the top line reads at 3:1 or better against the ground it is painted on", async () => {
     const running = render(
       <WatchPane
+        formatCommand={layoutFormatCommand}
         snapshot={snapshot({ queues: [QUEUES[0]!], rows: [{ row: failedRow() }], runner: RUNNER_READ })}
         live={false}
       />,
@@ -3866,13 +3905,21 @@ describe("the top line (25416)", () => {
     await settle(running)
     running.press("f")
     await settle(running)
-    const paused = render(<WatchPane snapshot={snapshot({ ...PAUSED, runner: RUNNER_READ })} live={false} />, {
-      cols: 160,
-      rows: 30,
-    })
+    const paused = render(
+      <WatchPane
+        formatCommand={layoutFormatCommand}
+        snapshot={snapshot({ ...PAUSED, runner: RUNNER_READ })}
+        live={false}
+      />,
+      {
+        cols: 160,
+        rows: 30,
+      },
+    )
     await settle(paused)
     const stopped = render(
       <WatchPane
+        formatCommand={layoutFormatCommand}
         snapshot={snapshot({
           runner: {
             journalDir: "/w/logs",
@@ -5399,6 +5446,7 @@ describe("bead 25779: watch tabs background and truecolor capture", () => {
     it("renders ▸ YRD STOPPED at top left with status colour for a stopped queue", async () => {
       const app = render(
         <WatchPane
+          formatCommand={layoutFormatCommand}
           snapshot={snapshot({
             runner: {
               journalDir: "/w/logs",
@@ -5452,6 +5500,7 @@ describe("independent queue watch (22949)", () => {
       queues: [{ branch: "main", label: "one", path: "/one" }],
       rows: [{ row: row({ subject: "first repository", position: 1, run: RUN_ID }) }],
       decisions: [],
+      stopped: { by: "operator", cause: "operator", change: null, since: NOW.toISOString() },
     })
     const second = snapshot({
       queue: "example.test/two#main",
@@ -5462,13 +5511,14 @@ describe("independent queue watch (22949)", () => {
       ],
       decisions: [],
       pause: "second queue is held",
+      stopped: { by: "yrd", cause: "stuck", change: `task/repair@${"1".repeat(40)}`, since: NOW.toISOString() },
     })
     const app = render(
       <WatchPane
         snapshot={first}
         sources={[
-          { id: "one#main", label: "one", snapshot: first },
-          { id: "two#main", label: "two", snapshot: second },
+          { id: "one#main", label: "one", snapshot: first, formatCommand: (argv) => `one-host ${argv.join(" ")}` },
+          { id: "two#main", label: "two", snapshot: second, formatCommand: (argv) => `two-host ${argv.join(" ")}` },
         ]}
         live={false}
       />,
@@ -5486,6 +5536,10 @@ describe("independent queue watch (22949)", () => {
     expect(app.text).toContain("2 waiting")
     expect(app.text).toContain("second repository")
     expect(app.text).toContain("second queue is held")
+    // Each visible queue owns its viewer-local command context. The ordinary
+    // listing render cannot catch losing it in multi-queue or focused panes.
+    expect(app.text).toContain("one-host queue resume")
+    expect(app.text).toContain("two-host queue withdraw task/repair")
     if (process.env.YRD_CAPTURE_DIR) {
       const ansi = bufferToStyledText(app.term.buffer)
       writeCaptureIfConfigured("22949-multi-queue-352x117.ansi", ansi)
@@ -5508,6 +5562,7 @@ describe("independent queue watch (22949)", () => {
     await settle(app)
     expect(app.text).toContain("example.test/one#main")
     expect(app.text).not.toContain("example.test/two#main")
+    expect(app.text).toContain("one-host queue resume")
     app.press("Escape")
     await settle(app)
     expect(app.text).toContain("example.test/two#main")
