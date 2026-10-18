@@ -462,7 +462,7 @@ describe("runner ref publication", () => {
     const replacement = await f.replace({ ...prior, pid: 9 })
     expect((await execute()).exit).not.toBe(0)
     expect(await f.remoteTip()).toBe(replacement)
-    await f.replace(prior)
+    await f.git(["push", "--quiet", `--force-with-lease=${f.ref}:${replacement}`, "origin", `${oldTip}:${f.ref}`])
     const removed = await execute()
     expect(removed, removed.stderr).toMatchObject({ exit: 0 })
     expect(await f.remoteTip()).toBeUndefined()
