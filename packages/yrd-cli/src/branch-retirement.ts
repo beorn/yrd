@@ -458,6 +458,7 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
   log.write({
     kind: "run",
     command: destination === "local" ? "drop --local" : "drop --retire",
+    pid: process.pid,
     target: `origin/${queue}`,
     config: config.blob,
   })

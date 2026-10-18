@@ -85,6 +85,7 @@ export type RunnerRun = Readonly<{
   /** The instant the journal was last appended to: the file's mtime. */
   lastWriteAt: Date
   /** What the run's own header record said, after any initial Git evidence. */
+  command?: string
   target?: string
   gitlink?: string
   queue?: string
@@ -95,7 +96,8 @@ export type RunnerRun = Readonly<{
   /**
    * The round's own closing row (25570): either the counted `remote-calls` row or
    * the warning that replaces it when git's trace is unreadable. This run's
-   * journal says its round ended. Absent while it executes, and absent on one
+   * journal says its round ended. A local drop ends at its non-preview retirement outcome.
+   * Absent while it executes, and absent on one
    * that died — neither wrote the row.
    */
   ended?: true
@@ -236,6 +238,8 @@ export function projectionFallbackReport(
   //     when the trace is unreadable), while the run's own pid is still live.
   // A completed run never qualifies — it has that row — so a newer round's lock
   // cannot hide an older run's genuinely missing projection (@yrd/29994 review).
+  // Covered run kinds: queue rounds and ordinary `drop --local`. Local drops
+  // have no round lock; their header pid and final retirement outcome own this proof.
   const latest = runner.latest
   const lock = runner.roundLockLastHolder
   const ownStep = latest?.activeStep !== undefined && activeStepStage(latest.activeStep) === "provisioning"
@@ -250,7 +254,8 @@ export function projectionFallbackReport(
     latest.ended !== true &&
     Number.isFinite(since) &&
     latest.startedAt.getTime() >= since
-  return ownStep || ownRound
+  const ownLocalDrop = latest?.command === "drop --local" && latest.alive && latest.ended !== true
+  return ownStep || ownRound || ownLocalDrop
     ? { ...fallback, reason: "not-yet-written", runnerState: state }
     : { ...fallback, runnerState: state }
 }
@@ -566,7 +571,7 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
 /** What one journal's opening says, before anything is known about liveness. */
 export type JournalHead = Readonly<{
   /** The header's own fields, empty when there is no header to read. */
-  fields: Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks" | "effectiveChecks">
+  fields: Pick<RunnerRun, "command" | "target" | "gitlink" | "queue" | "checks" | "effectiveChecks">
   /** Was a `run` record found at all. */
   headed: boolean
   /** Did the round write its own closing row (25570): `remote-calls`, or its unreadable-trace warning. */
@@ -761,7 +766,12 @@ export function readRunHeader(path: string, projected?: readonly LogRecord[]): J
   // (queue-core/src/run.ts). Both prove the round finished, so neither may be
   // read as a run still executing.
   const ended = records.some(
-    (record) => record.kind === "remote-calls" || (record.kind === "warning" && record.subject === "remote-calls"),
+    (record) =>
+      record.kind === "remote-calls" ||
+      (record.kind === "warning" && record.subject === "remote-calls") ||
+      (header?.command === "drop --local" &&
+        record.kind === "local-branch-retirement" &&
+        (record.outcome === "removed" || record.outcome === "kept" || record.outcome === "failed")),
   )
   if (header === undefined) return { died, ended, fields: {}, headed: false }
   const resolved = records.find((record) => record.kind === "queue")?.queue ?? header.queue
@@ -778,6 +788,7 @@ export function readRunHeader(path: string, projected?: readonly LogRecord[]): J
     headed: true,
     ...(typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? { pid } : {}),
     fields: {
+      ...(typeof header.command === "string" ? { command: header.command } : {}),
       ...(typeof header.target === "string" ? { target: header.target } : {}),
       ...(typeof header.gitlink === "string" ? { gitlink: header.gitlink } : {}),
       ...(typeof resolved === "string" ? { queue: resolved } : {}),
@@ -807,6 +818,7 @@ function journalVerdict(
   alive: boolean,
 ): Pick<
   RunnerRun,
+  | "command"
   | "target"
   | "gitlink"
   | "queue"

@@ -4816,6 +4816,8 @@ describe("component-local retirement without a component queue", () => {
     expect(records).toContainEqual(
       expect.objectContaining({ kind: "local-branch-retirement", repo: child, branch, head: tip }),
     )
+    // The list reader needs the writer's identity before any retirement outcome exists.
+    expect(records).toContainEqual(expect.objectContaining({ kind: "run", command: "drop --local", pid: process.pid }))
     if (failure) {
       const failedRecord = records.find(
         (record) =>
