@@ -57,11 +57,25 @@ function capture(): Readonly<{ io: YrdCliIO; stdout: () => string }> {
 describe("the declared health probe", () => {
   it("prints what the last round wrote, and exits on its state", async () => {
     const dir = workdir()
-    const written = roundHealthDocument(SERVICE, undefined, 120_000, NOW)
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), `${JSON.stringify(written, undefined, 2)}\n`)
-    const run = capture()
-    expect(await queueHealthCommand(dir, SERVICE, run.io, NOW)).toBe(0)
-    expect(JSON.parse(run.stdout())).toEqual(written)
+    const healthy = roundHealthDocument(SERVICE, undefined, 120_000, NOW)
+    const stalled = roundHealthDocument(SERVICE, undefined, 120_000, NOW, {
+      flow: {
+        lastJudgedAt: "2026-09-11T10:00:00.000Z",
+        oldestWaiting: { branch: "task/oldest", openedAt: "2026-09-11T11:00:00.000Z" },
+        waiting: 3,
+      },
+      threshold: { ms: 45 * 60_000, declared: false },
+    })
+    expect(stalled.state).toBe("unhealthy")
+    for (const [written, exit] of [
+      [healthy, 0],
+      [stalled, 2],
+    ] as const) {
+      writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), `${JSON.stringify(written, undefined, 2)}\n`)
+      const run = capture()
+      expect(await queueHealthCommand(dir, SERVICE, run.io, NOW)).toBe(exit)
+      expect(JSON.parse(run.stdout())).toEqual(written)
+    }
   })
 
   it("reports a line a stuck change stopped as unhealthy-and-running, exit 2", async () => {
