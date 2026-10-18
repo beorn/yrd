@@ -74,6 +74,7 @@ export {
   appendNumberedChangeEvent,
   archiveQueue,
   appendNumberedPublishedMerge,
+  acceptsMergedLocalRetirement,
   changeInput,
   createEventQueue,
   createLocalEventStore,

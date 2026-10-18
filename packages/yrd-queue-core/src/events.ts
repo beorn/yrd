@@ -2580,6 +2580,23 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   }
 }
 
+/** Explicit local abandonment may retain a merged descendant without changing its ended history.
+ * Requested-tip checks belong to the retirement callers; this checks only the merged-local exception.
+ */
+export async function acceptsMergedLocalRetirement(
+  git: Git,
+  input: Readonly<{
+    local: boolean
+    head: string
+    change: Pick<EventChange, "status" | "commit"> | undefined
+  }>,
+): Promise<boolean> {
+  if (!input.local || input.change?.status !== "merged" || input.change.commit === undefined) {
+    return false
+  }
+  return isAncestor(git, input.change.commit, input.head)
+}
+
 async function dropBranch(store: QueueLocation, request: DropRequest): Promise<Dropped> {
   const { queue, branch } = request
   const format = await queueFormat(store, queue)
@@ -2681,7 +2698,14 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
   }
   if (state.ending !== undefined && head !== undefined) {
     const kept = history.flatMap((event) => event.links)
-    if (!kept.includes(head)) {
+    if (
+      !kept.includes(head) &&
+      !(await acceptsMergedLocalRetirement(gitIn(store.repo, undefined, store.selection), {
+        local: archive !== undefined,
+        head,
+        change: state,
+      }))
+    ) {
       const lastKept = kept.at(-1)
       throw new Error(
         `${branchRef} at ${head} has already ended ${state.ending.kind}; its last kept link is ${lastKept ?? "none"}. ` +

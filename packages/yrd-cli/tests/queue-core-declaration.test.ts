@@ -19,6 +19,8 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
+import { spawnSync } from "node:child_process"
+import { fileURLToPath } from "node:url"
 import * as fs from "node:fs"
 import * as removely from "removely"
 import { dirname, join } from "node:path"
@@ -27,6 +29,7 @@ import {
   CHANGE_STATUSES,
   archivedChangesPrefix,
   readChangeEvents,
+  readBranchHistory,
   MIRROR_REFRESHED_AT,
   assertPlainEventQueueConfig,
   changeInput,
@@ -64,6 +67,7 @@ import {
 import { runYrdProcess } from "../src/cli.ts"
 import { releaseRetainedCheckouts } from "../src/branch-retirement.ts"
 import { archiveRefFor } from "git-super/archive-ref"
+import { shellQuote } from "git-super/shell-command"
 import { readEnvOpenRecord } from "../src/env-open-record.ts"
 import { SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
@@ -2171,6 +2175,248 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect((await childGit(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tips.get(branch))
     }
   }, 60_000)
+
+  /** @failure A refused local preview asks for an already supplied issue or prints a command that loses host/authority arguments.
+   * @level l3 @consumer A caller copying the refusal's exact direct-apply command
+   * Other custody fixtures call valid argv; none copies a refused preview through a host renderer and executes the cure.
+   */
+  it("a local preview refusal supplies the exact host-rendered archive and local-delete command", async () => {
+    const repo = await world("checks: []\n")
+    const git = gitIn(repo)
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    const branch = "task/local-retirement"
+    const issue = "@example/local-retirement"
+    const reason = "finish unsubmitted local work"
+    await git(["checkout", "--quiet", "-b", branch])
+    writeFileSync(join(repo, "local.txt"), "retain through origin custody\n")
+    await git(["add", "local.txt"])
+    await git(["commit", "--quiet", "-m", "local work"])
+    const tip = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    const out = capture(repo)
+    let recipe: string | undefined
+    const entry = fileURLToPath(new URL("../../../bin/yrd", import.meta.url))
+    out.io.formatYrdCommand = (argv, cwd) => {
+      recipe = "cd " + shellQuote(cwd) + " && " + [process.execPath, entry, ...argv].map(shellQuote).join(" ")
+      return recipe
+    }
+    expect(
+      await runYrdProcess(
+        [
+          "bun",
+          "yrd",
+          "drop",
+          branch,
+          "--local",
+          "--tip",
+          tip,
+          "--issue",
+          issue,
+          "--queue",
+          "main",
+          "--submitter",
+          "fixture",
+          "--reason",
+          reason,
+          "--dry-run",
+          "--json",
+        ],
+        out.io,
+      ),
+    ).toBe(2)
+    expect(out.stderr()).toContain("--local has no preview")
+    expect(out.stderr()).toContain("archives at origin")
+    expect(out.stderr()).toContain("deletes the local branch")
+    expect(out.stderr()).not.toContain("require drop --issue")
+    if (recipe === undefined) throw new Error("refusal did not use the host renderer")
+    expect(out.stderr()).toContain(recipe)
+    expect(recipe).not.toContain("--dry-run")
+    expect(recipe).toContain(["--reason", reason].map(shellQuote).join(" "))
+    expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(tip)
+    const applied = spawnSync("/bin/sh", ["-c", recipe], {
+      cwd: repo,
+      encoding: "utf8",
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024,
+    })
+    expect(applied.status, applied.stderr).toBe(0)
+    const report = JSON.parse(applied.stdout) as { removed: { branch: string; archiveRef: string }[] }
+    expect(report.removed).toEqual([expect.objectContaining({ branch })])
+    const row = report.removed[0]
+    if (row === undefined) throw new Error("copied command removed no branch")
+    expect((await git(["ls-remote", "origin", row.archiveRef])).split(/\s/u)[0]).toBe(tip)
+    expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/" + branch])).trim()).toBe("")
+    const history = (await readBranchHistory(createEventStore(repo, "origin", git.selection), "main", branch)).history
+    expect(history?.state.issue).toBe(issue)
+    expect(history?.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ content: reason, props: expect.arrayContaining([["By", "fixture"]]) }),
+      ]),
+    )
+  }, 60_000)
+
+  /** @failure Public drop help leaves the caller in the superproject when the local branch belongs to a component author store.
+   * @level l1 @consumer A caller choosing the local branch command from drop help
+   */
+  it("drop help names the component author checkout and its local command", async () => {
+    const out = capture(outsideRepositoryRoot())
+    expect(await runYrdProcess(["bun", "yrd", "drop", "--help"], out.io), out.stderr()).toBe(0)
+    expect(out.stdout()).toContain("component author checkout")
+    expect(out.stdout()).toContain("drop <branch> --local --tip <full-oid>")
+  })
+
+  /**
+   * @failure Exact local abandonment rejects a merged descendant, or relaxes requested-tip, ancestry, state or automatic-cleanup protection.
+   * @level l3 @consumer The existing local drop caller and core archive-only publication
+   * The older advanced case below is still queued; it cannot exercise an already-merged chain with a later local tip.
+   */
+  it.each([
+    "duplicate",
+    "gitlink-delta",
+    "wrong-tip",
+    "non-descendant",
+    "unknown-ancestry",
+    "unmerged",
+    "automatic",
+  ] as const)(
+    "archives a merged local descendant only with its authority: %s",
+    async (mode) => {
+      const repo = await world("checks: []\n")
+      const git = gitIn(repo)
+      const branch = "task/retirement-advanced"
+      const issue = "@example/retirement"
+      let component: string | undefined
+      if (mode === "gitlink-delta") {
+        const seed = await world()
+        component = join(repo, "component")
+        await git([
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          "--quiet",
+          join(dirname(seed), "remote.git"),
+          "component",
+        ])
+        await git(["commit", "--quiet", "-am", "register component"])
+        await git(["push", "--quiet", "origin", "main"])
+      }
+      const recorded = (await git(["rev-parse", "HEAD"])).trim()
+      const queueTip = await createQueue(repo, "main", recorded, new Date())
+      const store = createEventStore(repo, "origin", git.selection)
+      const chain = await openEvents({ ...store, ref: changesRef("main", branch), writer: "fixture" })
+      await chain.append(
+        [
+          changeInput("opened", { queueTip, at: new Date(), commit: recorded, by: "fixture", issue }),
+          ...(mode === "unmerged" ? [] : [changeInput("merged", { queueTip, at: new Date(), commit: recorded })]),
+        ],
+        { expect: null },
+      )
+      let head: string
+      if (mode === "non-descendant") {
+        const tree = (await git(["rev-parse", "HEAD^{tree}"])).trim()
+        head = (await git(["commit-tree", tree, "-m", "unrelated local tip"])).trim()
+        await git(["branch", branch, head])
+      } else {
+        await git(["checkout", "--quiet", "-b", branch])
+        if (component !== undefined) {
+          const childGit = gitIn(component)
+          await childGit(["commit", "--quiet", "--allow-empty", "-m", "component advancement"])
+          await childGit(["push", "--quiet", "origin", "main"])
+          await git(["add", "component"])
+          await git(["commit", "--quiet", "-m", "advance only the gitlink"])
+        } else await git(["commit", "--quiet", "--allow-empty", "-m", "local advancement"])
+        head = (await git(["rev-parse", "HEAD"])).trim()
+        await git(["checkout", "--quiet", "main"])
+      }
+      const history = (await readBranchHistory(store, "main", branch)).history
+      if (history === undefined) throw new Error("fixture has no change history")
+      const endingRef = await git(["ls-remote", "origin", changesRef("main", branch)])
+      const localArchives = await git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/archive/"])
+      const originArchives = await git(["ls-remote", "origin", "refs/archive/*"])
+      const status = await git(["status", "--porcelain=v2", "-z"])
+      const componentRefs =
+        component === undefined
+          ? undefined
+          : await gitIn(component)(["for-each-ref", "--format=%(refname) %(objectname)"])
+      if (mode === "unknown-ancestry") {
+        // Public Git selection supplies one real failing read; no production-only seam or mocked retirement result.
+        const hook = join(dirname(repo), "unreadable-ancestry")
+        writeFileSync(
+          hook,
+          "#!/bin/sh\n" +
+            'if [ "$1" = merge-base ] && [ "$2" = --is-ancestor ] && [ "$3" = "' +
+            recorded +
+            '" ] && [ "$4" = "' +
+            head +
+            '" ]; then\n' +
+            '  echo "ancestry evidence intentionally unreadable" >&2\n  exit 128\nfi\n' +
+            'exec git "$@"\n',
+        )
+        chmodSync(hook, 0o755)
+        await git(["config", "yrd.git", JSON.stringify({ executable: hook, contract: "native" })])
+      }
+      const out = capture(repo)
+      const argv =
+        mode === "automatic"
+          ? ["bun", "yrd", "drop", "--issue", issue, "--dry-run", "--json"]
+          : [
+              "bun",
+              "yrd",
+              "drop",
+              branch,
+              "--local",
+              "--tip",
+              mode === "wrong-tip" ? recorded : head,
+              "--issue",
+              issue,
+              "--submitter",
+              "fixture",
+              "--json",
+            ]
+      const exit = await runYrdProcess(argv, out.io)
+      // Unreadable authority is a CLI execution error (2), rather than an ordinary kept result.
+      expect(exit, out.stderr()).toBe(mode === "unknown-ancestry" ? 2 : 0)
+      if (mode === "unknown-ancestry") {
+        expect(out.stderr()).toContain("ancestry evidence intentionally unreadable")
+        expect(out.stdout()).toBe("")
+      } else {
+        const report = JSON.parse(out.stdout()) as {
+          removed: { branch: string; head: string; archiveRef?: string }[]
+          kept: { branch: string; reason: string }[]
+          failed: unknown[]
+        }
+        if (mode === "duplicate" || mode === "gitlink-delta") {
+          expect(report.kept).toEqual([])
+          expect(report.failed).toEqual([])
+          expect(report.removed).toEqual([expect.objectContaining({ branch, head })])
+          const removed = report.removed[0]
+          if (removed?.archiveRef === undefined) throw new Error("retirement did not name its origin archive")
+          expect((await git(["ls-remote", "origin", removed.archiveRef])).split(/\s/u)[0]).toBe(head)
+          expect((await git(["rev-parse", removed.archiveRef])).trim()).toBe(head)
+          expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/" + branch])).trim()).toBe("")
+        } else {
+          expect(report.removed).toEqual([])
+          expect(report.failed).toEqual([])
+          expect(report.kept).toEqual([expect.objectContaining({ branch, reason: "advanced" })])
+        }
+      }
+      if (mode !== "duplicate" && mode !== "gitlink-delta") {
+        expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(head)
+        expect(await git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/archive/"])).toBe(localArchives)
+        expect(await git(["ls-remote", "origin", "refs/archive/*"])).toBe(originArchives)
+      }
+      expect(await git(["ls-remote", "origin", changesRef("main", branch)])).toBe(endingRef)
+      const after = (await readBranchHistory(store, "main", branch)).history
+      expect(after?.state).toEqual(history.state)
+      expect(after?.events.map((event) => event.links)).toEqual(history.events.map((event) => event.links))
+      expect(await git(["status", "--porcelain=v2", "-z"])).toBe(status)
+      if (component !== undefined) {
+        expect(await gitIn(component)(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(componentRefs)
+      }
+    },
+    60_000,
+  )
 
   /**
    * @failure Issue cleanup deletes unpublished work without origin custody, or removes an advanced submitted branch.

@@ -61,6 +61,7 @@ import {
   claimWorktrees,
   directMergeLine,
   drop,
+  acceptsMergedLocalRetirement,
   retireLocalBranch,
   pauseLine,
   eventDirectMergeCommits,
@@ -1854,18 +1855,27 @@ export async function coreQueueCommand(
               kept.push({
                 ...row,
                 reason: "mismatch",
-                detail: `recorded issue ${bound} differs from reviewed ${request.issue}`,
+                detail: `recorded issue ${bound} differs from requested ${request.issue}`,
               })
             } else if (bound === undefined) unnumbered.push({ branch, head })
             else excludedUnrelated++
             continue
           }
           if (local && issue !== undefined && bound !== undefined && issueIdentity(bound) !== issueIdentity(issue)) {
-            kept.push({ ...row, reason: "mismatch", detail: `recorded issue ${bound} differs from reviewed ${issue}` })
+            kept.push({ ...row, reason: "mismatch", detail: `recorded issue ${bound} differs from requested ${issue}` })
             continue
           }
           matched++
-          if ((local && head !== request.tip) || (change?.commit !== undefined && change.commit !== head)) {
+          if (
+            (local && head !== request.tip) ||
+            (change?.commit !== undefined &&
+              change.commit !== head &&
+              !(await acceptsMergedLocalRetirement(authorGit, {
+                local,
+                head,
+                change,
+              })))
+          ) {
             kept.push({
               ...row,
               reason: "advanced",
