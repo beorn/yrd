@@ -173,13 +173,6 @@ export async function readEventChain(chain: Chain, acquiredTip?: Oid): Promise<E
   return events
 }
 
-/** Decode one already-retained immutable parent without walking its branch chain. */
-export async function readRetainedEvent(chain: Chain, id: Oid): Promise<Event> {
-  const [event] = await chain.events({ at: id, limit: 1 })
-  if (event?.id !== id) throw new Error(`retained event ${id}: exact event was not readable`)
-  return event
-}
-
 /**
  * Refs an exact remote read of named chains fetches in the same round trip, outside its chain selection: each one's
  * advertised id, or null when absent, lands in `seen` (28867 B3).
