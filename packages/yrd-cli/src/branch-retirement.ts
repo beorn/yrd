@@ -451,10 +451,13 @@ export async function retireIssueBranches(
                 (await readBranchProtections(io, { repo, branch, tip: head, issue })).protections,
               disposition,
             })
+            const detail = origin
+              ? `origin ${candidate.remote}#${branch}@${candidate.originHead} remains; this custody path selects only the local name${result.detail === undefined ? "" : `; ${result.detail}`}`
+              : result.detail
             const output = {
               ...row,
               reason: result.outcome === "removed" || result.outcome === "eligible" ? disposition.kind : result.reason,
-              ...(result.detail === undefined ? {} : { detail: result.detail }),
+              ...(detail === undefined ? {} : { detail }),
               ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
             }
             if (result.outcome === "eligible") eligible.push(output)
