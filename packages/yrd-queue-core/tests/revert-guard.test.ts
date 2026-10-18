@@ -803,8 +803,9 @@ async function ambiguousWorld(kind: "restore" | "shared" | "swallowed" | "no-bas
     incomingPin === targetPin
       ? (await pg(["rev-parse", "HEAD"])).trim()
       : await pin(product, "vendor/dep", dep, incomingPin, "head carries incoming change")
-  if (kind === "no-base")
+  if (kind === "no-base") {
     head = (await pg([...author, "commit-tree", `${head}^{tree}`, "-m", "unrelated incoming root"])).trim()
+  }
   await pg(["checkout", "--quiet", "-b", "stale", root0])
   const candidate =
     candidatePin === targetPin
