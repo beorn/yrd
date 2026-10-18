@@ -275,6 +275,15 @@ export type OutsideRound = Readonly<{
   process?: Process
 }>
 
+/** How one entry answered one notice: the notice it was handed, and how that handing went. */
+export type NotifyDelivery = Readonly<{
+  notice: NotifyRecord
+  name: string
+  delivery: Delivery
+  failure?: string
+  refused?: string
+}>
+
 /**
  * Hand one override notice to every `notify:` entry that wants `override`,
  * outside any round, in a worktree at the target exactly as a round runs its
@@ -285,8 +294,8 @@ export type OutsideRound = Readonly<{
 export async function notifyOutsideRound(
   context: OutsideRound,
   notice: OverrideNotice,
-): Promise<readonly Readonly<{ name: string; delivery: Delivery; failure?: string; refused?: string }>[]> {
-  return dispatchNotifications(context, "override", notice)
+): Promise<readonly NotifyDelivery[]> {
+  return dispatchNotifications(context, "override", [notice])
 }
 
 /**
@@ -297,30 +306,40 @@ export async function notifyOutsideRound(
 export async function notifyRetiredRoot(
   context: OutsideRound,
   notice: RetiredRootNotice,
-): Promise<readonly Readonly<{ name: string; delivery: Delivery; failure?: string; refused?: string }>[]> {
-  return dispatchNotifications(context, "retired-root-written", notice)
+): Promise<readonly NotifyDelivery[]> {
+  return dispatchNotifications(context, "retired-root-written", [notice])
 }
 
 /**
- * Hand an env-retired notice to every `notify:` entry that wants it, outside
- * any round — post-merge environment cleanup watches no round either. The
- * retirement already happened; this only ever tells, never gates.
+ * Hand env-retired notices to every `notify:` entry that wants them, outside
+ * any round — post-merge environment cleanup watches no round either. One
+ * cleanup pass retires several environments; they travel in one dispatch so
+ * the worktree is prepared once, not once per folder. The retirements
+ * already happened; this only ever tells, never gates.
  */
 export async function notifyEnvRetired(
   context: OutsideRound,
-  notice: EnvRetiredNotice,
-): Promise<readonly Readonly<{ name: string; delivery: Delivery; failure?: string; refused?: string }>[]> {
-  return dispatchNotifications(context, "env-retired", notice)
+  notices: readonly EnvRetiredNotice[],
+): Promise<readonly NotifyDelivery[]> {
+  return dispatchNotifications(context, "env-retired", notices)
 }
 
-/** Run the declaration's existing notify transport for an event-chain ending. */
+/**
+ * Run the declaration's existing notify transport for an event-chain ending:
+ * every notice to every entry that wants the ending, notices in the order
+ * given, entries in declaration order, all over the one worktree this
+ * dispatch prepares. Each notice keeps its own deliveries (each result names
+ * its notice), and one failed delivery never stops the rest. No notices is
+ * no dispatch: nothing is prepared and nobody is owed a `none`.
+ */
 export async function dispatchNotifications(
   context: OutsideRound,
   ending: Ending,
-  notice: NotifyRecord,
-): Promise<readonly Readonly<{ name: string; delivery: Delivery; failure?: string; refused?: string }>[]> {
+  notices: readonly NotifyRecord[],
+): Promise<readonly NotifyDelivery[]> {
+  if (notices.length === 0) return []
   const wanted = context.notify.filter((entry) => entry.on.includes(ending))
-  if (wanted.length === 0) return [{ delivery: "none", name: NOBODY }]
+  if (wanted.length === 0) return notices.map((notice) => ({ notice, delivery: "none" as const, name: NOBODY }))
   await using resources = new AsyncDisposableStack()
   const runner = context.process ?? resources.use(createProcess({ cwd: context.repo }))
   const stamp = `notify-${String(Date.now())}-${String(process.pid)}-${randomUUID().slice(0, 8)}`
@@ -351,12 +370,15 @@ export async function dispatchNotifications(
     })()
     return prepared
   }
-  const handed: Readonly<{ name: string; delivery: Delivery; failure?: string; refused?: string }>[] = []
-  for (const entry of wanted) {
-    handed.push({
-      ...(await deliverWith(environment, context.targetSha, context.env, entry, notice)),
-      name: entry.name,
-    })
+  const handed: NotifyDelivery[] = []
+  for (const notice of notices) {
+    for (const entry of wanted) {
+      handed.push({
+        ...(await deliverWith(environment, context.targetSha, context.env, entry, notice)),
+        notice,
+        name: entry.name,
+      })
+    }
   }
   return handed
 }

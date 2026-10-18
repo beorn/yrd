@@ -272,7 +272,14 @@ export {
   notifyRetiredRoot,
   overrideNotice,
 } from "./with-notify.ts"
-export type { EnvRetiredNotice, OutsideRound, OverrideNotice, RetiredRootNotice } from "./with-notify.ts"
+export type {
+  EnvRetiredNotice,
+  NotifyDelivery,
+  NotifyRecord,
+  OutsideRound,
+  OverrideNotice,
+  RetiredRootNotice,
+} from "./with-notify.ts"
 
 export { remoteHead, remoteUrl } from "./remote.ts"
 

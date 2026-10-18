@@ -351,7 +351,7 @@ async function settleEventNotice(
   }>,
   entry: NonNullable<QueueRunOptions["notify"]>[number],
   kind: Parameters<typeof dispatchNotifications>[1],
-  record: Parameters<typeof dispatchNotifications>[2],
+  record: Parameters<typeof dispatchNotifications>[2][number],
   message: Readonly<{ about: string; branch: string; head: string; id: string; text: string }>,
 ): Promise<SettledNotice> {
   const { options, git, target, log, url, queue } = context
@@ -371,7 +371,7 @@ async function settleEventNotice(
           process: options.process,
         },
         kind,
-        record,
+        [record],
       )
     )[0]
     if (delivered === undefined || delivered.delivery === "none") {
@@ -1077,7 +1077,12 @@ export async function eventQueueRun(
         )
       } catch (error) {
         deliveries = [
-          { name: "notify", delivery: "failed", failure: error instanceof Error ? error.message : String(error) },
+          {
+            notice,
+            name: "notify",
+            delivery: "failed",
+            failure: error instanceof Error ? error.message : String(error),
+          },
         ]
       }
       for (const told of deliveries) {

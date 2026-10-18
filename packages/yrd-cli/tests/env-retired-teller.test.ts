@@ -42,6 +42,7 @@ function change(status: EventChange["status"]): EventChange {
 function harness(read: EventChange | undefined, wants = true) {
   const reads: string[] = []
   const told: { branch: string; status: EventChange["status"] }[] = []
+  const batches: number[] = []
   const said: string[] = []
   const teller = envRetiredTeller({
     notify: wants
@@ -52,8 +53,9 @@ function harness(read: EventChange | undefined, wants = true) {
       reads.push(branch)
       return read
     },
-    tell: async (closed, readChange) => {
-      told.push({ branch: closed.branch, status: readChange.status })
+    tell: async (retired) => {
+      batches.push(retired.length)
+      for (const each of retired) told.push({ branch: each.closed.branch, status: each.change.status })
     },
     io: {
       cwd: "/repo",
@@ -62,14 +64,36 @@ function harness(read: EventChange | undefined, wants = true) {
       localBranchProtections: null,
     },
   })
-  return { reads, told, said, teller }
+  return { reads, told, batches, said, teller }
 }
 
-it("tells a merged change exactly once", async () => {
+it("tells a merged change exactly once, at flush rather than at close", async () => {
   const h = harness(change("merged"))
   await h.teller(CLOSED)
   expect(h.reads).toEqual(["task/env-fresh"])
+  expect(h.told, "the close callback only collects").toEqual([])
+  await h.teller.flush()
   expect(h.told).toEqual([{ branch: "task/env-fresh", status: "merged" }])
+  expect(h.batches).toEqual([1])
+})
+
+it("collects several closes into one tell at flush, in close order", async () => {
+  const h = harness(change("merged"))
+  await h.teller(CLOSED)
+  await h.teller({ ...CLOSED, branch: "task/env-second", path: "/repo/.bays/env-second" })
+  await h.teller.flush()
+  expect(h.batches).toEqual([2])
+  expect(h.told.map((each) => each.branch)).toEqual(["task/env-fresh", "task/env-second"])
+  await h.teller.flush()
+  expect(h.batches, "a second flush has nothing left to tell").toEqual([2])
+})
+
+it("flush with nothing eligible collected never calls tell", async () => {
+  const h = harness(change("cancelled"))
+  await h.teller(CLOSED)
+  await h.teller.flush()
+  expect(h.batches).toEqual([])
+  expect(h.told).toEqual([])
 })
 
 it("never tells a cancelled change; the merged-only skip is named", async () => {
