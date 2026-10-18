@@ -94,20 +94,6 @@ export async function retireIssueBranches(
   const issue = request.issue
 
   const eventStore = createEventStore(authorRepo, input.remote, selection)
-  const reading = await readEventQueueWithChanges(eventStore, config.target.branch)
-  const landings = [...reading.histories.values()].flatMap(({ events }) => {
-    let state = initial
-    const pins: { event: string; path: string; tip: string }[] = []
-    for (const event of events) {
-      state = evolve(state, event)
-      if (event.type === "merged") {
-        for (const pin of state.landedGitlinks ?? []) {
-          pins.push({ event: event.id, path: pin.path, tip: pin.target })
-        }
-      }
-    }
-    return pins
-  })
   type Row = {
     repo: string
     path: string
@@ -153,6 +139,7 @@ export async function retireIssueBranches(
     commonDirectory: string
   }
   const candidates: Candidate[] = []
+  const stores: { repository: string; path: string; git: Git; commonDirectory: string; commit: string }[] = []
   const seenStores = new Set<string>()
   const seenCheckouts = new Set<string>()
   const notMaterialized: { repo: string; path: string; reason: "not-materialized" }[] = []
@@ -167,9 +154,13 @@ export async function retireIssueBranches(
     }
     return reading
   }
-  const collect = async (repository: string, path: string, childGit: Git, commonDirectory: string): Promise<void> => {
-    if (seenStores.has(commonDirectory)) return
-    seenStores.add(commonDirectory)
+  const collect = async (
+    repository: string,
+    path: string,
+    childGit: Git,
+    commonDirectory: string,
+    reading: Awaited<ReturnType<typeof readEventQueueWithChanges>>,
+  ): Promise<void> => {
     const heads = await listRefs("refs/heads/", createLocalEventStore(repository, selection))
     // Resolve a local transport relative to its checkout before sharing its advertisement.
     const remote = resolveSubmoduleOrigin(
@@ -249,8 +240,10 @@ export async function retireIssueBranches(
       }
       const metadata = await inspectCheckoutGitMetadata(repository)
       seenCheckouts.add(canonical)
-      inspected.push(repository)
-      await collect(repository, path, childGit, metadata.commonDirectory)
+      if (!seenStores.has(metadata.commonDirectory)) {
+        seenStores.add(metadata.commonDirectory)
+        stores.push({ repository, path, git: childGit, commonDirectory: metadata.commonDirectory, commit })
+      }
       for (const child of await readCommitSubmodules(seamProcess(childGit, repository), repository, commit)) {
         await visit(
           join(repository, child.path),
@@ -299,6 +292,36 @@ export async function retireIssueBranches(
         })
       } else await visit(root.path, "", root.head)
     }
+    io.stderr(
+      `yrd: issue cleanup will inspect ${stores.length} repository stores; ${notMaterialized.length} not materialized. Reading every registered worktree's component stores can take minutes.\n`,
+    )
+    const reading = await readEventQueueWithChanges(eventStore, config.target.branch)
+    const landings = [...reading.histories.values()].flatMap(({ events }) => {
+      let state = initial
+      const pins: { event: string; path: string; tip: string }[] = []
+      for (const event of events) {
+        state = evolve(state, event)
+        if (event.type === "merged") {
+          for (const pin of state.landedGitlinks ?? []) pins.push({ event: event.id, path: pin.path, tip: pin.target })
+        }
+      }
+      return pins
+    })
+    for (const store of stores) {
+      inspected.push(store.repository)
+      try {
+        await collect(store.repository, store.path, store.git, store.commonDirectory, reading)
+      } catch (cause) {
+        failed.push({
+          repo: store.repository,
+          path: store.path,
+          branch: "",
+          head: store.commit,
+          reason: "unreadable",
+          detail: String(cause),
+        })
+      }
+    }
     // Prefer a native local author store for a shared origin arm; inspect every store before removal.
     const originOwners = new Map<string, Candidate>()
     const key = (row: Candidate) => `${row.remote}\0${row.branch}`
@@ -315,6 +338,15 @@ export async function retireIssueBranches(
       if (!candidate.local && !origin) continue
       const { repo, path, branch, head } = candidate
       const row = { repo, path, branch, head }
+      const failure = failed[0]
+      if (failure !== undefined) {
+        kept.push({
+          ...row,
+          reason: "held",
+          detail: `retirement stopped after ${failure.repo}: ${failure.detail ?? failure.reason}`,
+        })
+        continue
+      }
       try {
         const custody = await targetFor(candidate)
         if (custody.ownQueue || (path === "" && isOpen(reading.histories.get(branch)?.state.status ?? "draft"))) {
@@ -392,6 +424,7 @@ export async function retireIssueBranches(
         : mode,
     inspected,
     notMaterialized,
+    counts: { inspected: inspected.length, notMaterialized: notMaterialized.length },
     excluded,
     unnumbered,
     eligible,
