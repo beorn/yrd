@@ -1359,8 +1359,9 @@ async function eventQueueFromHistory(
       effectPosition !== undefined &&
       effectPosition <= knownPosition &&
       knownQueue?.issueEffects[effect.providerId]?.id === id
-    )
+    ) {
       continue
+    }
     const anchor = readAnchors.get(effect.mergedEvent) ?? (await readRetainedEvent(chain, effect.mergedEvent))
     assertIssueEffectAnchor(ref, id, effect, anchor, positions, effectPosition)
     readAnchors.set(anchor.id, anchor)
@@ -2401,7 +2402,7 @@ type ChangeWrite = Readonly<{
   retry?: Readonly<{ retried: 1; reason?: string }>
   deferred?: DeferredWrite
   notice?: NoticeWrite
-  issueEffect?: AppliedIssueEffect
+  issueEffect?: never
   run?: string
   writer?: string
   landedGitlinks?: readonly CommitGitlink[]
@@ -2421,18 +2422,18 @@ export async function appendChangeEvent(
   write: ChangeWrite,
   onPrepared?: (oid: Oid, runNumber?: number) => void,
 ): Promise<string> {
-  assertChangeWriter(write)
+  assertChangeWriter(queue, write)
   return (await appendDecision(store, queue, branch, selectedTip, write, onPrepared)).event
 }
 
-function assertChangeWriter(write: ChangeWrite): void {
-  const isIssueEffect = write.type === "notified" && write.issueEffect !== undefined
-  if (write.writer === QUEUE_RUN_WRITER && !isIssueEffect) {
-    throw new TypeError(`${QUEUE_RUN_WRITER} writer is reserved for an atomic published merge`)
+function assertChangeWriter(queue: string, write: ChangeWrite): void {
+  if (write.issueEffect !== undefined) {
+    throw new TypeError(
+      `branch issue-effect authoring is retired; use writeQueueEvent on ${queueRef(queue)} with writer yrd-run`,
+    )
   }
-  if (write.issueEffect !== undefined && !isIssueEffect) throw new TypeError("issue effect belongs on notified")
-  if (isIssueEffect && write.writer !== QUEUE_RUN_WRITER) {
-    throw new TypeError(`issue effect requires ${QUEUE_RUN_WRITER} writer`)
+  if (write.writer === QUEUE_RUN_WRITER) {
+    throw new TypeError(`${QUEUE_RUN_WRITER} writer is reserved for an atomic published merge`)
   }
 }
 
@@ -2446,7 +2447,7 @@ export async function appendNumberedChangeEvent(
   identity: RunIndexIdentity,
   onPrepared?: (oid: Oid, runNumber?: number) => void,
 ): Promise<Readonly<{ event: string; number: number }>> {
-  assertChangeWriter(write)
+  assertChangeWriter(queue, write)
   const result = await appendDecision(store, queue, branch, selectedTip, write, onPrepared, identity)
   if (result.number === undefined) throw new Error(`${runIndexRef(queue)}: numbered publication returned no run number`)
   return { event: result.event, number: result.number }
@@ -2592,7 +2593,6 @@ async function appendDecision(
     ...(write.warningKind === undefined ? {} : { warningKind: write.warningKind }),
     ...(write.deferred === undefined ? {} : { deferred: write.deferred }),
     ...(write.notice === undefined ? {} : { notice: write.notice }),
-    ...(write.issueEffect === undefined ? {} : { issueEffect: write.issueEffect }),
     ...(write.run === undefined ? {} : { run: write.run }),
   })
   const planned = decide(history, input)
@@ -2606,9 +2606,6 @@ async function appendDecision(
       ? [{ ref: queueRef(queue), expect: queueTip, oid: queueTip }, ...(write.also ?? [])]
       : write.also
   const chain = await openEvents({ ...store, ref, writer: write.writer ?? "yrd" })
-  const validateIssueEffect = async (tip: Oid): Promise<void> => {
-    if (write.issueEffect !== undefined) project(await readEventChain(chain, tip), ref, store.repo)
-  }
   if (numbered !== undefined) {
     const indexRef = runIndexRef(queue)
     if (
@@ -2621,7 +2618,6 @@ async function appendDecision(
     }
     if (indexRead === undefined) throw new Error(`${indexRef}: numbered queue read was absent`)
     const staged = await chain.stage(planned, { expect: selectedTip })
-    await validateIssueEffect(staged.head)
     const updates = [...(also ?? []), ...((await write.prepareAlso?.(staged.head)) ?? [])]
     const index = await stageRunIndexEntry(store, queue, indexRead.tip(), numbered, queueTip, write.at)
     // The staged head AND the run number it consumed are one atomic push; a
@@ -2652,11 +2648,10 @@ async function appendDecision(
   // publisher needs the exact event OID before that call so its remote read can
   // distinguish this attempt from another writer with identical trailers.
   const result =
-    onPrepared === undefined && write.prepareAlso === undefined && write.issueEffect === undefined
+    onPrepared === undefined && write.prepareAlso === undefined
       ? await chain.append(planned, { expect: selectedTip, ...(also === undefined ? {} : { also }) })
       : await (async () => {
           const staged = await chain.stage(planned, { expect: selectedTip })
-          await validateIssueEffect(staged.head)
           onPrepared?.(staged.head)
           const prepared = await write.prepareAlso?.(staged.head)
           const updates = [...(also ?? []), ...(prepared ?? [])]

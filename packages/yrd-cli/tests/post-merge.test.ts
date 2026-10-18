@@ -1062,26 +1062,32 @@ it.each([
       )!.effect
       const wrongBlob = (await git(["rev-parse", `${applied.mergeSha}:.yrd.yml`])).trim()
       expect(wrongBlob).not.toBe(applied.declaration.blob)
-      await appendChangeEvent(store, "main", "task/first", reading.history!.state.tip!, {
-        type: "notified",
-        at: new Date(),
-        commit: applied.mergeSha,
-        writer: "yrd-run",
-        issueEffect: {
-          kind: "issue-effect-v1",
-          mergedEvent: applied.mergedEvent,
-          mergeSha: applied.mergeSha,
-          mergeCommitterTime: applied.mergeCommitterTime,
-          verb: "comment",
-          issueKey: applied.issueKey,
-          providerId:
-            "yrd1-" +
-            createHash("sha256")
-              .update(JSON.stringify([applied.mergeSha, "comment", null, applied.issueKey]))
-              .digest("hex"),
-          declaration: { path: "issues.yml", blob: wrongBlob },
-        },
-      })
+      // Preserve a historical branch fact as raw fixture data after retiring the public branch writer.
+      const historical = await openEvents({ ...store, ref: reading.ref, writer: "yrd-run" })
+      await historical.append(
+        [
+          changeInput("notified", {
+            queueTip: (await readEventQueue(store, "main")).tip,
+            at: new Date(),
+            commit: applied.mergeSha,
+            issueEffect: {
+              kind: "issue-effect-v1",
+              mergedEvent: applied.mergedEvent,
+              mergeSha: applied.mergeSha,
+              mergeCommitterTime: applied.mergeCommitterTime,
+              verb: "comment",
+              issueKey: applied.issueKey,
+              providerId:
+                "yrd1-" +
+                createHash("sha256")
+                  .update(JSON.stringify([applied.mergeSha, "comment", null, applied.issueKey]))
+                  .digest("hex"),
+              declaration: { path: "issues.yml", blob: wrongBlob },
+            },
+          }),
+        ],
+        { expect: reading.history!.state.tip! },
+      )
       const resolutionsBefore = readFileSync(resolveCalls, "utf8")
       const closesBefore = readFileSync(closeCalls, "utf8")
       await using runner = createPostMerge({

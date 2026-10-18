@@ -25,6 +25,7 @@ import {
   adoptedChange,
   archiveQueue,
   appendChangeEvent,
+  appendNumberedChangeEvent,
   changeInput,
   changesRef,
   decide,
@@ -2288,7 +2289,7 @@ describe("the queue-format boundary", () => {
     expect(await target.head()).toBe(composed)
   })
 
-  it("appends only validated runner issue effects without changing the branch verdict", async () => {
+  it("refuses branch effect authoring and reads historical facts across branch reuse", async () => {
     const { store, location } = remoteMemStore("yrd-event-run-issue-effect")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const mergeSha = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
@@ -2335,12 +2336,45 @@ describe("the queue-format boundary", () => {
       providerId: `yrd1-${createHash("sha256").update(providerIdentity).digest("hex")}`,
       declaration: { path: "issues.yml" as const, blob: B },
     }
-    const written = await appendChangeEvent(location, "lab", "task/issue-effect", selectedTip, {
-      type: "notified",
-      at: new Date("2026-09-22T14:07:00.000Z"),
-      issueEffect: effect,
-      writer: QUEUE_RUN_WRITER,
-    })
+    // A stale runner must be directed to the common authority before it writes an invisible branch-only fact.
+    await expect(
+      appendChangeEvent(location, "lab", "task/issue-effect", selectedTip, {
+        type: "notified",
+        at: new Date("2026-09-22T14:07:00.000Z"),
+        issueEffect: effect as never,
+        writer: QUEUE_RUN_WRITER,
+      }),
+    ).rejects.toThrow(/writeQueueEvent/u)
+    await expect(
+      appendNumberedChangeEvent(
+        location,
+        "lab",
+        "task/issue-effect",
+        selectedTip,
+        {
+          type: "notified",
+          at: new Date("2026-09-22T14:07:00.000Z"),
+          issueEffect: effect as never,
+          writer: QUEUE_RUN_WRITER,
+        },
+        { id: "retired-writer", startedAt: "2026-09-22T14:07:00.000Z", host: "fixture", actor: "yrd" },
+      ),
+    ).rejects.toThrow(/writeQueueEvent/u)
+    expect(await readStatus(location, "lab", "task/issue-effect")).toEqual(before)
+    // Historical facts are fixture data, written through the existing raw event primitive, never the retired API.
+    const historical = await openEvents({ ...store, ref, writer: QUEUE_RUN_WRITER })
+    const written = (
+      await historical.append(
+        [
+          changeInput("notified", {
+            queueTip,
+            at: new Date("2026-09-22T14:07:00.000Z"),
+            issueEffect: effect,
+          }),
+        ],
+        { expect: selectedTip },
+      )
+    ).head
     const after = await readStatus(location, "lab", "task/issue-effect")
     expect(after).toEqual({ ...before, tip: written })
     const stored = (await chain.events()).at(-1)
@@ -2348,23 +2382,14 @@ describe("the queue-format boundary", () => {
 
     const remoteTip = await chain.head()
     if (remoteTip === null) throw new Error("fixture effect chain lost its tip")
-    await expect(
-      appendChangeEvent(location, "lab", "task/issue-effect", remoteTip, {
-        type: "notified",
-        at: new Date("2026-09-22T14:08:00.000Z"),
-        issueEffect: { ...effect, mergedEvent: B },
-        writer: QUEUE_RUN_WRITER,
-      }),
-    ).rejects.toThrow(/does not name an earlier merged event/u)
-    expect(await chain.head()).toBe(remoteTip)
-    await expect(
-      appendChangeEvent(location, "lab", "task/issue-effect", remoteTip, {
-        type: "notified",
-        at: new Date("2026-09-22T14:09:00.000Z"),
-        issueEffect: effect,
-        writer: QUEUE_RUN_WRITER,
-      }),
-    ).rejects.toThrow(/duplicate issue effect/u)
+    const historicalEvents = await chain.events()
+    expect(() =>
+      project(
+        changeChain(...historicalEvents, issueEffectEvent({ ...effect, mergedEvent: B }, "d".repeat(40))),
+        ref,
+        store.repo,
+      ),
+    ).toThrow(/earlier merged event/u)
     expect(await chain.head()).toBe(remoteTip)
     await expect(
       appendChangeEvent(location, "lab", "task/issue-effect", remoteTip, {
@@ -2378,9 +2403,9 @@ describe("the queue-format boundary", () => {
       appendChangeEvent(location, "lab", "task/issue-effect", remoteTip, {
         type: "notified",
         at: new Date("2026-09-22T14:11:00.000Z"),
-        issueEffect: effect,
+        issueEffect: effect as never,
       }),
-    ).rejects.toThrow(/issue effect requires yrd-run writer/u)
+    ).rejects.toThrow(/writeQueueEvent/u)
     expect(await chain.head()).toBe(remoteTip)
   })
 
