@@ -4059,7 +4059,8 @@ describe("yrd queue up, the service", () => {
       symlinkSync(resolve(import.meta.dirname, "../node_modules"), join(bCli, "node_modules"), "dir")
       const { coreQueueCommand: fromLandingB } = await import(join(bCli, "src/queue-core-commands.ts"))
       const successor = capture(w.work)
-      successor.io.liveEnvironmentUse = async () => []
+      // Keep one prior catch-up row so the later startup-capture case still has a row to observe.
+      successor.io.liveEnvironmentUse = async () => [{ path: authors[0]!.path, reason: "prior startup catch-up row" }]
       let environmentStarted = false
       const environmentHeld = new Promise<void>((resolve) => {
         releaseEnvironment = resolve
@@ -4101,8 +4102,15 @@ describe("yrd queue up, the service", () => {
         successor.stderr(),
       ).toBe(0)
       const closed = authors.filter(({ path }) => !existsSync(path))
-      expect(closed, "a started attempt finishes its existing one-close budget").toHaveLength(1)
+      expect(
+        closed.map(({ branch }) => branch),
+        "a started attempt finishes the eligible close sequence",
+      ).toEqual(authors.slice(1).map(({ branch }) => branch))
       const remaining = authors.filter(({ path }) => existsSync(path))
+      expect(
+        remaining.map(({ branch }) => branch),
+        "the prior catch-up row remains available for startup",
+      ).toEqual(authors.slice(0, 1).map(({ branch }) => branch))
       const successorInventory = await environmentInventory(w.work, gitIn(w.work), w.workdir)
       for (const author of closed) {
         expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${author.branch}`])).trim()).toBe("")
