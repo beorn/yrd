@@ -1,5 +1,6 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
 import { createHash } from "node:crypto"
+
 import { shellQuote } from "git-super/shell-command"
 import { Conflict, RetriesExhausted } from "./git.ts"
 import { ARCHIVE_REF_PREFIX, archiveRefFor } from "git-super/archive-ref"
@@ -2691,6 +2692,15 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   }
 }
 
+/** A retire tip is kept when it equals a link, or `isAncestor` says it is an ancestor of one. */
+async function keptLinkAdmits(git: Git, head: string, kept: readonly string[]): Promise<boolean> {
+  if (kept.includes(head)) return true
+  for (const link of kept) {
+    if (await isAncestor(git, head, link)) return true
+  }
+  return false
+}
+
 /** Explicit local abandonment may retain a merged descendant without changing its ended history.
  * Requested-tip checks belong to the retirement callers; this checks only the merged-local exception.
  */
@@ -2809,8 +2819,9 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
   }
   if (state.ending !== undefined && head !== undefined) {
     const kept = history.flatMap((event) => event.links)
+    const keptByLink = await keptLinkAdmits(gitIn(store.repo, undefined, store.selection), head, kept)
     if (
-      !kept.includes(head) &&
+      !keptByLink &&
       !(await acceptsMergedLocalRetirement(gitIn(store.repo, undefined, store.selection), {
         local: archive !== undefined,
         head,
@@ -2820,7 +2831,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
       const lastKept = kept.at(-1)
       throw new Error(
         `${branchRef} at ${head} has already ended ${state.ending.kind}; its last kept link is ${lastKept ?? "none"}. ` +
-          `The branch is deletable when its head equals a kept link. ` +
+          `The branch is deletable when its head equals, or is an ancestor of, a kept link. ` +
           `See 25658 P3: drop an ended branch head reachable from origin/main through the one ancestry implementation.`,
       )
     }

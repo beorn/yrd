@@ -4,6 +4,9 @@
 // @consumer yrd list, submit and the queue runner on ADR-0016 event queues
 
 import { createHash } from "node:crypto"
+import { mkdtempSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import type { Event, EventInput } from "gitomic/events"
 import { listRefs, openEvents } from "gitomic/events"
@@ -2200,13 +2203,35 @@ describe("the queue-format boundary", () => {
 
   // @failure delete-only drop loses a branch's newer, unkept commit (ADR-0018 / 25658).
   it("refuses an ended branch whose current head is not already kept by its chain", async () => {
-    const { store, location } = remoteMemStore("yrd-event-drop-ended-advanced")
-    const target = await open({ ...store, ref: "refs/heads/lab" })
-    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
-    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
-    const branch = await open({ ...store, ref: "refs/heads/task/advanced" })
-    const kept = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
-    const chain = await openEvents({ ...store, ref: changesRef("lab", "task/advanced") })
+    const root = mkdtempSync(join(tmpdir(), "yrd-event-drop-ended-advanced-"))
+    const origin = mkdtempSync(join(tmpdir(), "yrd-event-drop-ended-advanced-origin-"))
+    const git = gitIn(root)
+    await git(["init", "--quiet"])
+    await git(["init", "--bare", "--quiet", origin])
+    await git(["remote", "add", "origin", origin])
+    await git(["config", "user.name", "fixture"])
+    await git(["config", "user.email", "fixture@yrd.test"])
+    writeFileSync(join(root, "work"), "one\n")
+    await git(["add", "work"])
+    await git(["commit", "-m", "kept", "--quiet"])
+    const kept = (await git(["rev-parse", "HEAD"])).trim()
+    writeFileSync(join(root, "work"), "two\n")
+    await git(["add", "work"])
+    await git(["commit", "-m", "advanced", "--quiet"])
+    const advanced = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["update-ref", "refs/heads/lab", kept])
+    await git(["update-ref", "refs/heads/task/advanced", advanced])
+    await git([
+      "push",
+      "--quiet",
+      "origin",
+      "refs/heads/lab:refs/heads/lab",
+      "refs/heads/task/advanced:refs/heads/task/advanced",
+    ])
+    const store = { repo: root, backend: git.backend }
+    const location = { ...store, remote: "origin", selection: git.selection }
+    const queueTip = await seedEventQueue(location, "lab", kept, new Date("2026-09-22T14:00:00.000Z"))
+    const chain = await openEvents({ ...location, ref: changesRef("lab", "task/advanced") })
     const opened = await chain.append(
       [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: kept, by: "@dev/2" })],
       { expect: null },
@@ -2215,12 +2240,72 @@ describe("the queue-format boundary", () => {
       [changeInput("failed", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), reason: "check failed" })],
       { expect: opened.head },
     )
-    const advanced = (await branch.transact(async (map) => map.set("work", "two"), "push after ending")).oid
     await expect(
       drop(location, { queue: "lab", branch: "task/advanced", by: "@dev/2", note: "retire" }),
     ).rejects.toThrow(new RegExp(`task/advanced.*${advanced}.*${kept}`))
-    expect(await branch.head()).toBe(advanced)
+    expect((await git(["rev-parse", "refs/heads/task/advanced"])).trim()).toBe(advanced)
     expect(await chain.head()).toBe(failed.head)
+  })
+
+  // @failure an ended retire tip behind its own kept link is refused, so a shipped head cannot be deleted (25671).
+  it("drops an ended branch whose head is behind its kept link and refuses one beyond it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-25671-"))
+    const origin = mkdtempSync(join(tmpdir(), "yrd-25671-origin-"))
+    const git = gitIn(root)
+    await git(["init", "--quiet"])
+    await git(["init", "--bare", "--quiet", origin])
+    await git(["remote", "add", "origin", origin])
+    await git(["config", "user.name", "fixture"])
+    await git(["config", "user.email", "fixture@yrd.test"])
+    const commit = async (name: string, body: string): Promise<string> => {
+      writeFileSync(join(root, name), body)
+      await git(["add", name])
+      await git(["commit", "-m", name, "--quiet"])
+      return (await git(["rev-parse", "HEAD"])).trim()
+    }
+    const sixBehind = await commit("behind", "0\n")
+    let oneBehind = sixBehind
+    let kept = sixBehind
+    for (let step = 1; step <= 6; step++) {
+      const sha = await commit(`step-${step}`, `${step}\n`)
+      if (step === 5) oneBehind = sha
+      kept = sha
+    }
+    const beyond = await commit("beyond", "beyond\n")
+    const keptTree = (await git(["rev-parse", `${kept}^{tree}`])).trim()
+    const sameTree = (await git(["commit-tree", keptTree, "-p", sixBehind, "-m", "same tree"])).trim()
+    expect((await git(["rev-parse", `${sameTree}^{tree}`])).trim()).toBe(keptTree)
+    await git(["update-ref", "refs/heads/lab", sixBehind])
+    await git(["push", "--quiet", "origin", "refs/heads/lab:refs/heads/lab"])
+    const store = { repo: root, backend: git.backend }
+    const location = { ...store, remote: "origin", selection: git.selection }
+    const queueTip = await seedEventQueue(location, "lab", sixBehind, new Date("2026-09-22T14:00:00.000Z"))
+    const ended = async (branchName: string, tip: string) => {
+      const branchRef = `refs/heads/${branchName}`
+      await git(["update-ref", branchRef, tip])
+      await git(["push", "--quiet", "origin", `${branchRef}:${branchRef}`])
+      const chain = await openEvents({ ...location, ref: changesRef("lab", branchName) })
+      const opened = await chain.append(
+        [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: kept, by: "@dev/2" })],
+        { expect: null },
+      )
+      await chain.append(
+        [changeInput("failed", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), reason: "check failed" })],
+        { expect: opened.head },
+      )
+    }
+    const retire = (branchName: string, tip: string) =>
+      drop(location, { queue: "lab", branch: branchName, by: "@dev/2", note: "25671", retire: { tip } })
+    await ended("task/six", sixBehind)
+    await expect(retire("task/six", sixBehind)).resolves.toMatchObject({ head: sixBehind })
+    await ended("task/one", oneBehind)
+    await expect(retire("task/one", oneBehind)).resolves.toMatchObject({ head: oneBehind })
+    await ended("task/beyond", beyond)
+    await expect(retire("task/beyond", beyond)).rejects.toThrow(new RegExp(`${beyond}.*${kept}.*ancestor of`))
+    await ended("task/same", sameTree)
+    await expect(retire("task/same", sameTree)).rejects.toThrow(/ancestor of/u)
+    expect((await git(["rev-parse", "refs/heads/task/beyond"])).trim()).toBe(beyond)
+    expect((await git(["rev-parse", "refs/heads/task/same"])).trim()).toBe(sameTree)
   })
 
   it("writes a runner phase at the selected tip and keeps its candidate, then refuses a stale rival", async () => {
