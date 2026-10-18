@@ -1019,14 +1019,54 @@ describe("event submit", () => {
   })
 
   /**
+   * @failure Yrd issue binding read only Refs and Resolves, so commits with Closes: or Fixes:
+   *          trailers submitted with "has no issue link; no explicit issue binding was found"
+   *          (29962, specimen 29957-dark-work-duplicate-ref at 05c927cb).
+   * @level   l2 (real git history through issueOf and issueBindingsOf)
+   * @consumer Yrd submit and its opened change record
+   */
+  it.each(["Closes", "Fixes", "Resolves", "Refs"])(
+    "binds %s trailer in both colon and colonless body forms while ignoring subject and prose (29962)",
+    async (key) => {
+      const w = await world()
+      const slug = key.toLowerCase()
+      await branchWithCommit(w, `task/colon-${slug}`, `colon-${slug}.txt`)
+      await w.git(["checkout", "--quiet", `task/colon-${slug}`])
+      await w.git([
+        "commit",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        `${key} the race in submit\n\n${slug} without a single token is prose.\n\n${key}: @yrd/29962-${slug}`,
+      ])
+      const headColon = (await w.git(["rev-parse", "HEAD"])).trim()
+      expect(await issueOf(w.git, `task/colon-${slug}`, headColon, w.target)).toEqual({
+        issue: `@yrd/29962-${slug}`,
+        source: "binding",
+        commit: headColon,
+      })
+
+      await branchWithCommit(w, `task/colonless-${slug}`, `colonless-${slug}.txt`)
+      await w.git(["checkout", "--quiet", `task/colonless-${slug}`])
+      await w.git(["commit", "--quiet", "--allow-empty", "-m", `work\n\n${key} #29962-${slug}`])
+      const headColonless = (await w.git(["rev-parse", "HEAD"])).trim()
+      expect(await issueOf(w.git, `task/colonless-${slug}`, headColonless, w.target)).toEqual({
+        issue: `#29962-${slug}`,
+        source: "binding",
+        commit: headColonless,
+      })
+    },
+  )
+
+  /**
    * @failure A Refs trailer linking a follow-up issue refuses the whole branch as
    *          conflicting bindings, and the refusal named neither the trailer that
    *          binds nor the line that keeps the link without binding it (27300).
    * @level   l2 (real git history through issueOf)
    * @consumer a submitter who links a follow-up issue beside the issue being submitted
    */
-  it.each(["Refs", "Resolves"])(
-    "conflicting issue bindings names the %s trailer and the Follow-up: form that does not bind (27300)",
+  it.each(["Closes", "Fixes", "Resolves", "Refs"])(
+    "conflicting issue bindings names the %s trailer and the Follow-up: form that does not bind (27300, 29962)",
     async (key) => {
       const w = await world()
       await branchWithCommit(w, "task/conflict", "change.txt")

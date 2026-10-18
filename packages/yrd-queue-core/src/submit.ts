@@ -1474,7 +1474,7 @@ async function submitEvent(
 }
 
 /**
- * The first explicit Refs/Resolves binding in branch history wins. The
+ * The first explicit Closes/Fixes/Resolves/Refs binding in branch history wins. The
  * merge-base and all target ancestry are excluded; neither later work nor a
  * branch rename loses the binding. Conflicting explicit/declared issues refuse.
  * An unbound branch may use an explicit declaration; branch names never decode issue keys.
@@ -1566,6 +1566,13 @@ export async function issueOf(
   return undefined
 }
 
+const CANONICAL_BINDING_TRAILERS: Readonly<Record<string, string>> = {
+  closes: "Closes",
+  fixes: "Fixes",
+  resolves: "Resolves",
+  refs: "Refs",
+}
+
 /** Read all explicit bindings through the submit decoder, preserving Git's commit order. */
 export async function* issueBindingsOf(
   git: Git,
@@ -1573,7 +1580,7 @@ export async function* issueBindingsOf(
   branch: string,
 ): AsyncGenerator<Readonly<{ issue: string; commit: string; trailer?: string }>, void> {
   // NUL separates each commit, Git trailer values, body and keyed trailers.
-  // The body fallback accepts colonless Refs/Resolves while excluding subjects.
+  // The body fallback accepts colonless Closes/Fixes/Resolves/Refs while excluding subjects.
   let history: string
   try {
     history = await git([
@@ -1581,7 +1588,7 @@ export async function* issueBindingsOf(
       "--reverse",
       "--topo-order",
       "-z",
-      "--format=%H%x00%(trailers:key=Resolves,key=Refs,valueonly,separator=%x1e)%x00%B%x00%(trailers:key=Resolves,key=Refs,separator=%x1e)",
+      "--format=%H%x00%(trailers:key=Closes,key=Fixes,key=Resolves,key=Refs,valueonly,separator=%x1e)%x00%B%x00%(trailers:key=Closes,key=Fixes,key=Resolves,key=Refs,separator=%x1e)",
       ...revisions,
       "--",
     ])
@@ -1619,16 +1626,16 @@ export async function* issueBindingsOf(
       const issue = value.trim()
       consider(issue, trailerNames.get(issue))
     }
-    // Also parse trailer-shaped lines like "Refs <issue>" or "Refs: <issue>" or "Resolves <issue>"
-    // from commit body to accept trailers without colon (27041).
+    // Also parse trailer-shaped lines like "Refs <issue>" or "Closes: <issue>" or "Fixes <issue>"
+    // from commit body to accept trailers without colon (27041, 29962).
     // Never inspect the subject line, and require a single-token issue value to avoid binding prose lines.
     const nonSubjectLines = body.split(/\r?\n/).slice(1)
-    const trailerRegex = /^[ \t]*(refs|resolves)[ \t]*:?[ \t]+(\S+)[ \t]*$/i
+    const trailerRegex = /^[ \t]*(closes|fixes|resolves|refs)[ \t]*:?[ \t]+(\S+)[ \t]*$/i
     for (const line of nonSubjectLines) {
       const match = trailerRegex.exec(line)
       if (match !== null) {
         const keyword = match[1]?.toLowerCase() ?? ""
-        consider(match[2]?.trim() ?? "", keyword === "refs" ? "Refs" : "Resolves")
+        consider(match[2]?.trim() ?? "", CANONICAL_BINDING_TRAILERS[keyword] ?? "Resolves")
       }
     }
     for (const candidate of candidates) {
