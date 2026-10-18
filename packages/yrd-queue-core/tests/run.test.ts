@@ -89,7 +89,6 @@ const RIVAL_STUCK_TRAILERS = [
     via: "a rival writer in this test",
     evidence: "/dev/null",
     next: "nothing: a test fixture",
-    owner: "the test",
   }),
   ["Reason", "crash"],
 ] as const
@@ -3353,6 +3352,9 @@ it("ends a queue-owned configured event check stuck and holds the next change", 
   const outcome = await queueRun({ ...(await w.options({ exit: 2 })), notify: undefined })
 
   expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/a"] })
+  const diagnostic = logRecords(outcome).find((record) => record.kind === "change" && record.decision === "stuck")
+  expect(diagnostic).toMatchObject({ code: expect.any(String), subject: expect.any(String) })
+  expect(diagnostic).not.toHaveProperty("owner")
   expect(await remoteTarget(w)).toBe(w.target)
   expect((await readStatus(store, "main", "task/a")).status).toBe("stuck")
   expect((await readStatus(store, "main", "task/b")).status).toBe("queued")

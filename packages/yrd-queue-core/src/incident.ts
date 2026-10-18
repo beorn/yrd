@@ -1,23 +1,18 @@
 /**
- * The complete, stored explanation of a queue-owned failure or queued wait.
- *
- * These six fields are ADR-0007's obvious-error shape. They live on the
- * change record, not in a host-local journal, so every clone reads the same
- * cause and next move. A partial incident is unreadable rather than rendered
- * with blanks: the record ref is the authority or it is not an answer.
+ * A named failure, with the context that failure needs. Actor routing belongs
+ * to the change's Next value, not to diagnostic content.
  */
 
 import { isAbsolute } from "node:path"
 
-export const INCIDENT_TRAILERS = ["Code", "Subject", "Via", "Evidence", "Next", "Owner"] as const
+export const INCIDENT_TRAILERS = ["Code", "Subject", "Via", "Evidence", "Next"] as const
 
 export type Incident = Readonly<{
   code: string
   subject: string
-  via: string
-  evidence: string
-  next: string
-  owner: string
+  via?: string
+  evidence?: string
+  next?: string
 }>
 
 const PROPERTY: Readonly<Record<(typeof INCIDENT_TRAILERS)[number], keyof Incident>> = {
@@ -26,36 +21,72 @@ const PROPERTY: Readonly<Record<(typeof INCIDENT_TRAILERS)[number], keyof Incide
   Via: "via",
   Evidence: "evidence",
   Next: "next",
-  Owner: "owner",
 }
 
-/** The six trailers one incident writes, in the order a full reader renders them. */
+/** Required facts and only the supplied context; old actor fields are not diagnostic content. */
 export function incidentTrailers(incident: Incident): readonly (readonly [string, string])[] {
-  if (!isAbsolute(incident.evidence)) {
-    throw new Error(`incident Evidence: is not an absolute path: ${incident.evidence}`)
-  }
-  return INCIDENT_TRAILERS.map((name) => {
+  const trailers: (readonly [string, string])[] = []
+  for (const name of INCIDENT_TRAILERS) {
     const value = incident[PROPERTY[name]]
-    if (value.trim() === "" || value.includes("\n")) {
+    if (value === undefined && name !== "Code" && name !== "Subject") continue
+    if (typeof value !== "string" || value.trim() === "" || value.includes("\n")) {
       throw new Error(`incident ${name}: must be one non-empty line`)
     }
-    return [name, value] as const
-  })
+    if (name === "Evidence" && !isAbsolute(value)) {
+      throw new Error(`incident Evidence: is not an absolute path: ${value}`)
+    }
+    trailers.push([name, value])
+  }
+  return trailers
 }
 
-/** ADR-0007's compact form, used in the existing result slot of list rows. */
+/** The subject first, followed by its code and available compact context. */
 export function incidentLine(incident: Incident): string {
-  return `${incident.code}: ${incident.subject}; evidence: ${incident.evidence}; next: ${incident.next}; owner: ${incident.owner}`
+  return [`${incident.subject} [${incident.code}]`, ...incidentLines(incident).slice(2)].join("; ")
 }
 
-/** ADR-0007's full form: one field per line, subject first. */
+/** One supplied field per line, subject first. */
 export function incidentLines(incident: Incident): readonly string[] {
   return [
     `subject: ${incident.subject}`,
     `code: ${incident.code}`,
-    `via: ${incident.via}`,
-    `evidence: ${incident.evidence}`,
-    `next: ${incident.next}`,
-    `owner: ${incident.owner}`,
+    ...(incident.via === undefined ? [] : [`via: ${incident.via}`]),
+    ...(incident.evidence === undefined ? [] : [`evidence: ${incident.evidence}`]),
+    ...(incident.next === undefined ? [] : [`next: ${incident.next}`]),
   ]
+}
+
+/** Decode both historical owner-bearing rows and current diagnostics without rewriting either. */
+export function incidentIn(
+  record: Readonly<Record<string, unknown>>,
+):
+  | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "incident"; incident: Incident }>
+  | Readonly<{ kind: "malformed"; reason: string }> {
+  const fields = ["code", "subject", "via", "evidence", "next"] as const
+  if (fields.every((name) => record[name] === undefined)) return { kind: "none" }
+  const absent = ["code", "subject"].filter((name) => record[name] === undefined)
+  const unreadable = fields.filter((name) => record[name] !== undefined && typeof record[name] !== "string")
+  if (absent.length > 0 || unreadable.length > 0) {
+    return {
+      kind: "malformed",
+      reason: [
+        ...(absent.length === 0 ? [] : [`missing ${absent.join(", ")}`]),
+        ...(unreadable.length === 0 ? [] : [`not a string: ${unreadable.join(", ")}`]),
+      ].join("; "),
+    }
+  }
+  const incident: Incident = {
+    code: record.code as string,
+    subject: record.subject as string,
+    ...(record.via === undefined ? {} : { via: record.via as string }),
+    ...(record.evidence === undefined ? {} : { evidence: record.evidence as string }),
+    ...(record.next === undefined ? {} : { next: record.next as string }),
+  }
+  try {
+    incidentTrailers(incident)
+    return { kind: "incident", incident }
+  } catch (error) {
+    return { kind: "malformed", reason: error instanceof Error ? error.message : String(error) }
+  }
 }
