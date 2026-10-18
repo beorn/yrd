@@ -3709,7 +3709,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       .filter((name) => name.endsWith(".jsonl"))
       .flatMap((name) => {
         const rows = readRunLog(cleanupLogs, name.slice(0, -".jsonl".length))
-        return rows.some((row) => row.kind === "run" && row.queueRun === outcome.run) ? rows : []
+        return rows.some((row) => row.kind === "observation" && row.queueRun === outcome.run) ? rows : []
       })
     const retirement = records.find((row) => row.kind === "local-branch-retirement" && row.branch === branch)
     if (kind === "bay") {
