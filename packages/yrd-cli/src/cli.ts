@@ -320,7 +320,12 @@ function buildProgram(
       (options.submodules || options.dryRun || options.apply) &&
       (command !== "drop" || options.issue === undefined || (options.local && !options.releaseCheckout))
     ) {
-      throw new Error("--submodules, --dry-run and --apply require drop --issue <id>")
+      throw new Error(
+        options.local && !options.releaseCheckout
+          ? "--submodules, --dry-run and --apply belong to drop --issue <id>, not the branch form; " +
+              "drop <branch> --local --tip needs no issue binding (30106)"
+          : "--submodules, --dry-run and --apply require drop --issue <id>",
+      )
     }
     if (options.local && options.dryRun && options.apply) throw new Error("choose --dry-run or --apply")
     if (

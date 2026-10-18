@@ -2530,6 +2530,24 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(out.stdout()).toContain("custody proof")
   })
 
+  /** @failure The submodule-flag refusal on the BRANCH form still says "--issue <id>" is missing when the caller passed it,
+   *          so a seat whose --local --tip drop refused is sent to add a binding that form does not need (30106).
+   * @level l1 @consumer A seat cleaning up a local branch after its Yrd merge
+   */
+  it("a submodule flag on the branch form names the form, not a missing issue (30106)", async () => {
+    const repo = await world("checks: []\n")
+    const tip = (await gitIn(repo)(["rev-parse", "HEAD"])).trim()
+    const out = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "drop", "task/30106-branch", "--local", "--tip", tip, "--issue", "30106", "--submodules"],
+        out.io,
+      ),
+    ).toBe(2)
+    expect(out.stderr()).toContain("belong to drop --issue <id>, not the branch form")
+    expect(out.stderr()).toContain("needs no issue binding")
+  })
+
   /**
    * @failure Exact local abandonment rejects a merged descendant, or relaxes requested-tip, ancestry, state or automatic-cleanup protection.
    * @level l3 @consumer The existing local drop caller and core archive-only publication
