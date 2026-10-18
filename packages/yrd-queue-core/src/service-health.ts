@@ -540,13 +540,11 @@ function stalledFailure(stall: LineStall, flow: LineFlow): QueueHealthFailure {
       stall.shape === "cas-refused"
         ? `Read the refused publication rows in the last round journals for ${flow.casRefused?.ref ?? "the change"}; repair persistent ref contention, then let the queue retry.`
         : stall.shape === "slow-round"
-          ? "A round is running: read its journal (yrd queue list shows the RUNNER line and the round's log) to see which check or step it is in and whether that phase is making progress."
+          ? "A round is running: read its journal and the queue listing's RUNNER line to see which check or step it is in and whether that phase is making progress."
           : stall.shape === "total-round"
             ? "The whole round exceeded its published plan: read its journal and the RUNNER line to find which candidate or phase is consuming the bound."
             : "No round is judging anything: read the last round's journal and the service's own log for why rounds complete without taking a change.",
-      ...(oldest === undefined
-        ? []
-        : [`The oldest waiting change, its records and its log: yrd queue show ${oldest}.`]),
+      ...(oldest === undefined ? [] : [`Read the oldest waiting change ${oldest}, its retained records and its log.`]),
       "The service is alive and heartbeating: no restart is needed to read this, and a restart alone does not cure a line that judges nothing.",
       stall.shape === "cas-refused"
         ? "This page clears when this change publishes successfully."

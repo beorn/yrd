@@ -351,6 +351,10 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
     )
     const unread = { ...flow, roundOpen: { phaseUnread: "no journal", startedAt: "2026-09-24T19:35:00.000Z" } }
     expect(lineStall(unread, threshold, at("20:30:00"))?.cause).toContain("for 55m (phase unread: no journal); ")
+    const page = roundHealthDocument("yrd", undefined, INTERVAL, at("20:30:00"), { flow, threshold })
+    expect(page.error?.resolution[0]).toContain("A round is running")
+    expect(page.error?.resolution[0]).toContain("journal")
+    expect(page.error?.resolution.join("\n")).not.toContain("yrd queue")
   })
 
   test("an open round pages only after its current declared deadline plus three beats", () => {
@@ -563,7 +567,9 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
     expect(stalled.verdict).toEqual({ kind: "running" })
     expect(stalled.error?.code).toBe(STALLED_LINE_CODE)
     expect(stalled.error?.cause).toContain("judged nothing while 16 waited")
-    expect((stalled.error?.resolution ?? []).join("\n")).toContain("yrd queue show task/oldest")
+    expect(stalled.error?.resolution[0]).toContain("No round is judging anything")
+    expect((stalled.error?.resolution ?? []).join("\n")).toContain("task/oldest")
+    expect((stalled.error?.resolution ?? []).join("\n")).not.toContain("yrd queue")
     expect(stalled.facts?.flow).toMatchObject({
       stallAfterMs: DEFAULT_STALL_AFTER_MS,
       stalledForMs: minutes(47),

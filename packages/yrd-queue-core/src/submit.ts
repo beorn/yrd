@@ -1407,13 +1407,13 @@ async function submitEvent(
     } catch (error) {
       // Exhaustion is this caller's decision (28805): a persistent 5xx on the submit
       // event publish is not a judgement. Fail loud, naming the ambiguity, so the
-      // submitter runs `yrd status` before re-submitting — and the re-submit is safe
+      // submitter inspects the queue before re-submitting — and the re-submit is safe
       // because decideSubmit sees an already-queued head and writes no second submit.
       const exhausted = transientPush5xxOf(error)
       if (exhausted !== undefined) {
         throw new Error(
           `GitHub returned ${exhausted.line} on the submit of ${request.branch}; it may or may not have been recorded. ` +
-            `Run \`yrd status ${request.branch}\` before submitting again.`,
+            `Inspect the change's current queue state before submitting again.`,
           { cause: error },
         )
       }
