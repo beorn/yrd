@@ -3011,6 +3011,7 @@ export async function coreQueueCommand(
           log?.warn?.(line)
           io.stderr(`yrd: ${line}\n`)
         },
+        repo,
       )
       const setRunnerState = (
         state: RunnerClaim["state"],

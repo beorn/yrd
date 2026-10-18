@@ -20,7 +20,7 @@ afterAll(() => {
 })
 
 async function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "yrd-runner-ref-"))
+  const root = mkdtempSync(join(tmpdir(), "yrd-runner-ref 'quoted-"))
   roots.push(root)
   const boot = gitIn(root)
   const remote = join(root, "remote.git")
@@ -48,6 +48,7 @@ async function fixture() {
     "main",
     (status) => statuses.push(status.kind),
     (notice) => notices.push(notice),
+    work,
   )
   const ref = runnerRef("main")
   const remoteTip = () => readRemoteCommit(git, "origin", ref)
@@ -59,7 +60,7 @@ async function fixture() {
     await git(["push", "--quiet", `--force-with-lease=${ref}:${prior ?? "0".repeat(40)}`, "origin", `${oid}:${ref}`])
     return oid
   }
-  return { git, own, publisher, ref, remoteTip, replace, statuses, notices }
+  return { root, work, git, own, publisher, ref, remoteTip, replace, statuses, notices }
 }
 
 describe("runner ref publication", () => {
@@ -137,6 +138,7 @@ describe("runner ref publication", () => {
           "main",
           () => {},
           () => {},
+          f.work,
         )
         const publishers = [f.publisher, second]
         await Promise.all(publishers.map((publisher, index) => publisher.publish(claims[index]!)))
@@ -425,14 +427,46 @@ describe("runner ref publication", () => {
     expect(live.statuses.at(-1)).toBe("failed")
   })
 
-  it("names the safe removal command when a foreign claim is unreadable", async () => {
+  /** @failure Copied claim removal can target the caller's repo or delete a replacement claim without a lease. @level l2 */
+  it("removes only the observed unreadable claim from another directory", async () => {
     const f = await fixture()
     const future = new Date(Date.now() + 60_000).toISOString()
-    await f.replace({ ...f.own, host: "rival", pid: 8, at: future })
-    await f.publisher.publish(f.own)
+    const prior = { ...f.own, host: "rival", pid: 8, at: future }
+    const oldTip = await f.replace(prior)
+    const remote = "remote's;literal"
+    await f.git(["remote", "add", remote, (await f.git(["remote", "get-url", "origin"])).trim()])
+    const publisher = new RunnerPublisher(
+      f.git,
+      remote,
+      "main",
+      (status) => f.statuses.push(status.kind),
+      (notice) => f.notices.push(notice),
+      f.work,
+    )
+    await publisher.publish(f.own)
     expect(f.statuses).toEqual(["failed"])
     expect(f.notices.join(" ")).toContain("verifying no live runner")
-    expect(f.notices.join(" ")).toContain(`git push origin :${f.ref}`)
+    const command = /run `([^`]+)` to remove the claim/u.exec(f.notices.join(" "))?.[1]
+    if (command === undefined) throw new Error("unreadable claim notice supplied no removal command")
+    const unrelated = "refs/heads/keep-unrelated"
+    await f.git(["push", "--quiet", "origin", `${oldTip}:${unrelated}`])
+    const execute = async () => {
+      const child = Bun.spawn(["/bin/sh", "-c", command], { cwd: f.root, stdout: "pipe", stderr: "pipe" })
+      const [exit, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ])
+      return { exit, stdout, stderr }
+    }
+    const replacement = await f.replace({ ...prior, pid: 9 })
+    expect((await execute()).exit).not.toBe(0)
+    expect(await f.remoteTip()).toBe(replacement)
+    await f.replace(prior)
+    const removed = await execute()
+    expect(removed, removed.stderr).toMatchObject({ exit: 0 })
+    expect(await f.remoteTip()).toBeUndefined()
+    expect(await readRemoteCommit(f.git, "origin", unrelated)).toBe(oldTip)
   })
   describe("a runner ref whose tip object was never fetched", () => {
     /** A reader clone that never fetched the runner ref, plus the live remote tip. */
@@ -463,6 +497,7 @@ describe("runner ref publication", () => {
         "main",
         () => {},
         () => {},
+        work,
       )
       await publisher.publish(claim)
       const ref = runnerRef("main")

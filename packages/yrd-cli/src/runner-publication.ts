@@ -1,5 +1,6 @@
 /** The runner's one remote health claim. Change facts never read this ref. */
 import { hostname } from "node:os"
+import { shellQuote } from "git-super/shell-command"
 import {
   formatRunnerClaim,
   judgeRunnerClaim,
@@ -285,6 +286,7 @@ export class RunnerPublisher {
       status: { kind: "ok"; at: string } | { kind: "failed" | "waiting"; cause: string; at: string },
     ) => void,
     private readonly onNotice: (line: string) => void,
+    private readonly repo: string,
   ) {
     this.ref = runnerRef(queue)
   }
@@ -349,7 +351,7 @@ export class RunnerPublisher {
     const unreadable = (cause: string): Error =>
       new Error(
         `${this.ref} at ${current}: cannot take over an unreadable runner claim: ${cause}. ` +
-          `After verifying no live runner, run \`git push ${this.remote} :${this.ref}\` to remove the claim.`,
+          `After verifying no live runner, run \`git -C ${shellQuote(this.repo)} push ${shellQuote(`--force-with-lease=${this.ref}:${current}`)} ${shellQuote(this.remote)} ${shellQuote(`:${this.ref}`)}\` to remove the claim.`,
       )
     let prior: RunnerClaim
     try {
