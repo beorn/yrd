@@ -312,12 +312,16 @@ describe("revert guard (27363)", () => {
       base: { base: "a".repeat(40), state: "single" },
       count: 0,
       coverage: "incomplete",
-      gaps: [{ kind: "bounded", depth: 0, path: "a.txt", reason: "target history window W=50 exhausted" }],
+      gaps: [
+        { kind: "bounded", depth: 0, path: "a.txt", reason: "target history window W=50 exhausted" },
+        { kind: "unjudged", depth: 1, path: "vendor/dep/b.txt", reason: "path cap P_max=500" },
+      ],
       paths: [],
       swallowed: [],
     }
     const reason = revertedPathsReason(capped)
     expect(reason).toContain("a.txt@d0")
+    expect(reason).toContain("vendor/dep/b.txt@d1")
     expect(reason).toContain('"gaps"')
     expect(revertedPathsFinding(capped)?.reason).toContain("a.txt@d0")
   })
@@ -427,7 +431,7 @@ describe("revert guard (27363)", () => {
 })
 
 describe("revert guard review regressions (27363)", () => {
-  it("bounds (#28000): a reached history window is recorded, warns nobody, and refusal still sticks", async () => {
+  it("bounds (#28000, #29963): a reached history window reports coverage incomplete with what the bound proves, warns nobody, and refusal still sticks", async () => {
     const w = await cappedWorld()
     const root = await w.checkoutAt(w.candidate)
     const capped = await detectReverted({
@@ -438,10 +442,19 @@ describe("revert guard review regressions (27363)", () => {
       root,
       targetHead: w.target,
     })
-    // The declared bound was reached: it is RECORDED and typed as a bound, never as a failure to judge, because
-    // the guard RAN its proof and this is the proof it declares (#28000).
-    expect(capped.coverage).toBe("complete")
-    expect(capped.gaps.some((gap) => gap.kind === "bounded" && gap.reason.includes("window"))).toBe(true)
+    // #29963: an audit that names gaps is incomplete, never complete; the gap states what the bounded reading proves.
+    expect(capped.coverage).toBe("incomplete")
+    expect(
+      capped.gaps.some(
+        (gap) =>
+          gap.kind === "bounded" &&
+          gap.reason.includes("window W=1 exhausted") &&
+          gap.reason.includes(
+            "proves no revert within the latest 1 first-parent target commit(s) touching this path",
+          ) &&
+          gap.reason.includes("older target history was not read"),
+      ),
+    ).toBe(true)
     // `observe` must mean "nobody could judge this change": a bounded search warns nobody (0 reverted paths plus a
     // warning on every change touching an established path is a warning with no signal).
     expect(revertedPathsFinding(capped)).toBeUndefined()
@@ -451,6 +464,73 @@ describe("revert guard review regressions (27363)", () => {
     // The full window finds the restore the cap hid: the cap, not the change, was the finding.
     const full = await detect(w, w.candidate, w.head)
     expect(full.paths.map((row) => row.path)).toContain("vendor/dep/a.txt")
+  })
+
+  it("merge candidate (29963): a composed merge candidate at root and component level bounds the walk at the divergence base instead of exhausting W on pre-base history", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-revert-29963-"))
+    roots.push(root)
+    const dep = join(root, "dep")
+    mkdirSync(dep)
+    const depGit = gitIn(dep, undefined, undefined, { env })
+    await depGit(["init", "--quiet", "--initial-branch=main"])
+    await commit(dep, { "code.ts": "v1\n" }, "dep c1")
+    await commit(dep, { "code.ts": "v2\n" }, "dep c2")
+    const depBase = await commit(dep, { "code.ts": "v3\n" }, "dep c3 (base)")
+    const depTarget = await commit(dep, { "other.ts": "target\n" }, "dep target advances other.ts")
+    await depGit(["checkout", "--quiet", "-b", "author", depBase])
+    await commit(dep, { "code.ts": "v4-author\n" }, "author edits code.ts")
+    // Author merges target into the component branch (exact #29456 ag shape: ea5cc44c = merge(target, author)).
+    await depGit(["checkout", "--quiet", "-B", "composed-dep", depTarget])
+    await depGit([...author, "merge", "--no-ff", "--quiet", "-m", "merge author into dep target", "author"])
+    const depCandidate = (await depGit(["rev-parse", "HEAD"])).trim()
+
+    const product = join(root, "product")
+    mkdirSync(product)
+    const productGit = gitIn(product, undefined, undefined, { env })
+    await productGit(["init", "--quiet", "--initial-branch=main"])
+    await commit(product, { "staffing.ts": "s1\n" }, "root c1")
+    await commit(product, { "staffing.ts": "s2\n" }, "root c2")
+    await commit(product, { "staffing.ts": "s3\n" }, "root c3")
+    const rootBase = await pin(product, "vendor/dep", dep, depBase, "root base pins depBase")
+    await commit(product, { "unrelated.ts": "u\n" }, "root target advances unrelated")
+    const targetHead = await pin(product, "vendor/dep", dep, depTarget, "root target pins depTarget")
+    await productGit(["checkout", "--quiet", "-b", "branch", rootBase])
+    await commit(product, { "staffing.ts": "s4-author\n" }, "branch edits staffing.ts")
+    const head = await pin(product, "vendor/dep", dep, depCandidate, "branch pins depCandidate")
+    // Compose candidate is merge(targetHead, head) at root (exact verifyCandidate / #29456 shape).
+    await productGit(["checkout", "--quiet", "-B", "composed-root", head])
+    writeFileSync(join(product, "unrelated.ts"), "u\n")
+    await productGit(["add", "unrelated.ts"])
+    const composedTree = (await productGit(["write-tree"])).trim()
+    const candidate = (
+      await productGit([
+        ...author,
+        "commit-tree",
+        composedTree,
+        "-p",
+        targetHead,
+        "-p",
+        head,
+        "-m",
+        "compose branch into target",
+      ])
+    ).trim()
+    await productGit(["update-ref", "refs/heads/composed-root", candidate])
+
+    const checkoutDir = await regressionCheckout(root, product, candidate)
+    const report = await detectReverted({
+      bounds: { depth: 3, pathCap: 500, window: 1 },
+      candidate,
+      git: gitIn(checkoutDir, undefined, undefined, { env }),
+      head,
+      root: checkoutDir,
+      targetHead,
+    })
+    expect(report.base).toEqual({ base: rootBase, state: "single" })
+    expect(report.gaps).toEqual([])
+    expect(report.coverage).toBe("complete")
+    expect(report.paths).toEqual([])
+    expect(report.swallowed).toEqual([])
   })
 
   it("mode: a mode-only restore of a target advance is a hit, not clean", async () => {
