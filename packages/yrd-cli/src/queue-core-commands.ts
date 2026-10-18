@@ -69,6 +69,7 @@ import {
   eventRows,
   enumerateChangeSegments,
   EventRefsAcquireExhausted,
+  EventRefsMoved,
   isOpen,
   createEventStore,
   createLocalEventStore,
@@ -4496,7 +4497,7 @@ export async function coreQueueCommand(
         try {
           return await round(declared, undefined, "omit")
         } catch (error) {
-          if (!(error instanceof EventRefsAcquireExhausted)) throw error
+          if (!(error instanceof EventRefsAcquireExhausted || error instanceof EventRefsMoved)) throw error
           io.stderr(`yrd: ${error.message}\n`)
           return undefined
         }
@@ -7080,7 +7081,8 @@ export async function readEventListing(
   const observation = await observe(queueRefs, branchRefs)
   const operational = await readEventOps(store, git, config.target.branch, targetOid, { knownQueue: queue })
   if (operational.queue.tip !== queue.tip) {
-    throw new Error(
+    throw new EventRefsMoved(
+      [queueRef(config.target.branch)],
       `${queueRef(config.target.branch)} moved from ${queue.tip} to ${operational.queue.tip} during listing; retry the read`,
     )
   }
