@@ -2767,9 +2767,12 @@ describe("yrd queue up, the service", () => {
         { workdir: w.workdir },
       ),
     ).toBe(1)
-    expect(duplicatePause.stderr()).toContain("paused by @chief")
-    expect(duplicatePause.stderr()).toContain("49 new failures on main")
-    expect(duplicatePause.stderr()).toContain("host-paused-refusal")
+    // Pin the whole refusal: substring checks missed a repeated lift sentence.
+    expect(
+      duplicatePause.stderr().replace(/since .+?: 49 new failures on main/u, "since <time>: 49 new failures on main"),
+    ).toBe(
+      "yrd: paused by @chief since <time>: 49 new failures on main; resume queue main with a reason to check and merge work again; resume: host-paused-refusal\n",
+    )
     expect(refusalCommands).toContainEqual({
       argv: [
         "queue",

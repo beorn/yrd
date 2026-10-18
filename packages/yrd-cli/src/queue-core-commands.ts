@@ -2132,7 +2132,7 @@ export async function coreQueueCommand(
       } catch (error) {
         if (error instanceof QueuePaused || error instanceof QueueNotPaused) {
           io.stderr(
-            `yrd: ${error.message}${error instanceof QueuePaused ? `; ${await stopGuidance(error.pause)}` : ""}\n`,
+            `yrd: ${error instanceof QueuePaused ? `${pauseLine(error.pause)}; ${await stopGuidance(error.pause)}` : error.message}\n`,
           )
           return 1
         }
