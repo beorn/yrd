@@ -444,7 +444,6 @@ export async function eventQueueRun(
       via: `${cause.via} in yrd queue ${queue} [${log.id}]`,
       evidence: log.path,
       next: `${cause.next}; ${stuckCures(branch)}`,
-      owner: "the queue operator",
     }
     incidentTrailers(incident)
     log.write({

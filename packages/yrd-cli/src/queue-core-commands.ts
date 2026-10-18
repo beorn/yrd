@@ -95,6 +95,7 @@ import {
   programRootCheck,
   openLog,
   gitIn,
+  incidentIn,
   incidentLine,
   isAncestor,
   journalKey,
@@ -183,7 +184,6 @@ import {
   type GitObservation,
   type GitSelection,
   type HealthWriter,
-  type Incident,
   type LogRecord,
   type QueueConfig,
   type QueueHealthDocument,
@@ -5734,34 +5734,14 @@ function stuckCureLines(outcome: QueueRunOutcome): readonly string[] {
     .split("\n")
     .filter((line) => line !== "")
     .map((line) => JSON.parse(line) as Record<string, unknown>)
-  const filled = (value: unknown): value is string => typeof value === "string" && value.trim() !== ""
   return outcome.stuck.map((branch) => {
     const row = rows.find(
       (record) => record.kind === "change" && record.decision === "stuck" && record.branch === branch,
     )
-    const complete =
-      row !== undefined &&
-      filled(row.code) &&
-      filled(row.subject) &&
-      filled(row.via) &&
-      filled(row.evidence) &&
-      filled(row.next) &&
-      filled(row.owner)
-    if (!complete) {
-      // Every stuck ending writes a complete incident (event-run.ts `writeStuck`);
-      // this is the guard against a future ending that stops doing so, not an
-      // expected path — it still names the branch rather than saying nothing.
-      return `stuck ${branch}: no complete incident in this run's log (${outcome.log}); see \`yrd queue show ${branch}\``
-    }
-    const incident: Incident = {
-      code: row.code as string,
-      subject: row.subject as string,
-      via: row.via as string,
-      evidence: row.evidence as string,
-      next: row.next as string,
-      owner: row.owner as string,
-    }
-    return `stuck ${branch}: ${incidentLine(incident)}`
+    const reading = incidentIn(row ?? {})
+    if (reading.kind === "incident") return `stuck ${branch}: ${incidentLine(reading.incident)}`
+    const reason = reading.kind === "malformed" ? reading.reason : "no incident"
+    return `stuck ${branch}: ${reason} in this runs log (${outcome.log}); see yrd queue show ${branch}`
   })
 }
 

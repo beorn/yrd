@@ -43,6 +43,20 @@ function journals(entries: Readonly<Record<string, readonly string[]>>): Journal
 }
 
 describe("the rows a watch shows", () => {
+  it("keeps routing advice when a diagnostic has no next context", () => {
+    expect(
+      watchNotice(
+        row({
+          incident: { code: "blocked", subject: "the queue stopped" },
+          next: { owner: "submitter", because: "repair the change" },
+        }),
+      ),
+    ).toMatchObject({
+      cause: "the queue stopped [blocked]",
+      next: "submitter — repair the change",
+    })
+  })
+
   it("prints deferred detail and settled notices from one folded event reading", () => {
     const queue = "a".repeat(40)
     const head = "b".repeat(40)
@@ -164,7 +178,6 @@ describe("the rows a watch shows", () => {
         via: "later",
         evidence: "/later",
         next: "repair",
-        owner: "operator",
       },
       live: { run: "later", check: "later", phase: "merge", since: now },
       next: { owner: "submitter", because: "fix the change" },

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `Incident` keeps required `code` and `subject`, makes `via`, `evidence` and `next`
+  optional, and removes diagnostic `owner`. Existing renderers put the subject first.
+  New `incidentIn` decodes stored rows as `none`, `incident` or `malformed`; both
+  journal and run-summary readers use it. Historical owner fields remain readable
+  without rewriting records; actor routing and health documents are unchanged.
+
 - `YrdCliIO.localBranchProtections` is now required and accepts a reader or explicit `null` for a standalone repository. Omitted wiring fails with a named error; ordinary standalone cleanup retains its previous behavior, while retained-checkout release requires the reader. `runYrdExecutable` also requires an explicit host argument; shipped standalone bins pass `localBranchProtections: null` (29648).
 
 - `QueueRunOutcome` loses its `checkedWaiting` field and the two readers that consulted it

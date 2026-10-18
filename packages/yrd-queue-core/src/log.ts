@@ -49,7 +49,7 @@ import {
   writeSync,
 } from "node:fs"
 import { join } from "node:path"
-import { incidentTrailers, type Incident } from "./incident.ts"
+import { incidentIn, type Incident } from "./incident.ts"
 import type { GitInvocation, GitInvocationOptions, GitOutputSink } from "./git.ts"
 
 /**
@@ -1512,62 +1512,6 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
   }
 }
 
-/**
- * What one change record claims about an incident: the incident itself, the
- * SENTENCE naming its defect, or nothing when it claims none.
- *
- * Reading a defect instead of throwing one is 24408. `waiting()` wrote four of
- * the six authority fields onto a journal row, and every read verb — `yrd
- * list`, `yrd queue list`, `yrd queue show`, the watch — refused for that
- * journal's whole seven-day window while the queue itself was healthy and
- * merging. One short row now costs the row it is on, and the change it was
- * about carries the sentence. The WRITER's validator is deliberately
- * unchanged: a malformed incident must still never be written.
- */
-function incidentIn(record: LogRecord, id: string, branch: string, head: string): Incident | string | undefined {
-  const { code, subject, via, evidence, next, owner } = record
-  if ([code, subject, via, evidence, next, owner].every((value) => value === undefined)) return undefined
-  if (
-    typeof code !== "string" ||
-    typeof subject !== "string" ||
-    typeof via !== "string" ||
-    typeof evidence !== "string" ||
-    typeof next !== "string" ||
-    typeof owner !== "string"
-  ) {
-    // Name WHICH of the six are gone. "Incomplete" alone sends the reader back
-    // to the JSONL with jq — the very cost 24408 was opened to remove — and a
-    // field that is present but not a string is a different bug from one that
-    // was never written, so the two are never reported as one.
-    const claimed = [
-      ["code", code],
-      ["subject", subject],
-      ["via", via],
-      ["evidence", evidence],
-      ["next", next],
-      ["owner", owner],
-    ] as const
-    const absent = claimed.filter(([, value]) => value === undefined).map(([name]) => name)
-    const unreadable = claimed
-      .filter(([, value]) => value !== undefined && typeof value !== "string")
-      .map(([name]) => name)
-    const said = [
-      ...(absent.length === 0 ? [] : [`missing ${absent.join(", ")}`]),
-      ...(unreadable.length === 0 ? [] : [`not a string: ${unreadable.join(", ")}`]),
-    ].join("; ")
-    return `run journal ${id} has an incomplete incident for ${journalKey(branch, head)}: ${said}`
-  }
-  const incident = { code, subject, via, evidence, next, owner }
-  try {
-    // The writer's own validator, run on the read path: a malformed value is a
-    // defect of this ROW, and the reader reports it rather than dying on it.
-    incidentTrailers(incident)
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error)
-  }
-  return incident
-}
-
 /** What one run's records say about each change it touched. */
 /**
  * The steps of one run's journal and the git commands each ran, in journal
@@ -1747,11 +1691,11 @@ function runsIn(
     const reason = typeof record.reason === "string" ? record.reason : undefined
     // `next` is deliberately not read here: it is legacy diagnostic text as
     // often as it is incident authority, so only `incidentIn` weighs it.
-    const { code, subject, via, evidence, owner } = record
+    const { code, subject, via, evidence } = record
     const diagnostic =
       record.kind === "change" &&
       Object.values(CHANGE_REF_DIAGNOSTICS).some((value) => value === reason) &&
-      [code, subject, via, evidence, owner].every((value) => value === undefined)
+      [code, subject, via, evidence].every((value) => value === undefined)
     // Legacy `next` and current `inspect` are both diagnostic fields here.
     // Any incident authority field above instead takes normal validation.
     // A warning must not advance an existing run's completion clock; a run
@@ -1767,9 +1711,11 @@ function runsIn(
       // row that cannot be read is skipped whole, so nothing half of it
       // claimed reaches the change. Whatever state the run's OTHER records
       // give still stands, and no decision is invented for the gap.
-      const claimed = incidentIn(record, id, branch, head)
-      if (typeof claimed === "string") {
-        ;(change.malformed ??= []).push(claimed)
+      const claimed = incidentIn(record)
+      if (claimed.kind === "malformed") {
+        ;(change.malformed ??= []).push(
+          `run journal ${id} has an incomplete incident for ${journalKey(branch, head)}: ${claimed.reason}`,
+        )
         continue
       }
       if (typeof record.decision === "string") {
@@ -1789,7 +1735,7 @@ function runsIn(
           )
         }
       }
-      if (claimed !== undefined) change.incident = claimed
+      if (claimed.kind === "incident") change.incident = claimed.incident
     }
     if (record.kind === "merge" && typeof record.commit === "string") change.merge = record.commit
     // Legacy reader (28899): validates the 528 retained merged settle rows;
