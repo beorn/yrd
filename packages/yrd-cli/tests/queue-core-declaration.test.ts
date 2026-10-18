@@ -177,11 +177,11 @@ function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout
   }
 }
 
-async function world(config?: string): Promise<string> {
+async function world(config?: string, name = "repo"): Promise<string> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-declaration-"))
   roots.push(root)
   const remote = join(root, "remote.git")
-  const repo = join(root, "repo")
+  const repo = join(root, name)
   const seed = gitIn(root)
   await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
   await seed(["clone", "--quiet", remote, repo])
@@ -3002,7 +3002,9 @@ describe("a queue is the selected origin branch carrying config", () => {
    * @consumer The closer running yrd drop --issue after durable issue closure
    */
   it("drop by issue keeps unpublished work and advanced submitted tips; explicit abandonment retains custody", async () => {
-    const repo = await world("{}\n")
+    const repo = await world("{}\n", "repo 'quoted")
+    const outside = outsideRepositoryRoot()
+    roots.push(outside)
     const git = gitIn(repo)
     await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
     const issue = "@example/28791-retirement"
@@ -3105,9 +3107,14 @@ describe("a queue is the selected origin branch carrying config", () => {
     }
     expect(manualReport.removed).toEqual([expect.objectContaining({ branch: "task/manual-only" })])
     expect((await git(["ls-remote", "origin", manualReport.removed[0]!.archiveRef])).split("\t")[0]).toBe(manualHead)
-    expect(manualReport.removed[0]!.recovery).toBe(
-      `git -C ${repo} fetch ${(await git(["config", "--get", "remote.origin.url"])).trim()} ${manualReport.removed[0]!.archiveRef}:refs/heads/task/manual-only`,
-    )
+    const remoteRefs = await git(["ls-remote", "origin"])
+    const originRecovery = manualReport.removed[0]!.recovery
+    if (originRecovery === undefined) throw new Error("origin archive supplied no recovery command")
+    const restored = spawnSync("/bin/sh", ["-c", originRecovery], { cwd: outside, encoding: "utf8" })
+    expect(restored.status, restored.stderr).toBe(0)
+    expect((await git(["rev-parse", "refs/heads/task/manual-only"])).trim()).toBe(manualHead)
+    expect(await git(["ls-remote", "origin"])).toBe(remoteRefs)
+    await git(["update-ref", "-d", "refs/heads/task/manual-only", manualHead])
     expect((await git(["rev-parse", "refs/heads/task/28791-advanced"])).trim()).toBe(advanced)
     // Accepted29301: local expected=head, but the recorded change has an older head.
     // Existing assertions only check the reason token, so they miss identical SHAs in the detail.
@@ -3218,10 +3225,10 @@ describe("a queue is the selected origin branch carrying config", () => {
     // the printed recovery command must name the local archive ref and resolve when executed.
     const curedArchive = curedReport.removed[0]!.archiveRef
     expect((await git(["ls-remote", "origin", curedArchive])).trim()).toBe("")
-    expect(curedReport.removed[0]!.recovery).toBe(`git -C ${repo} branch task/28791-advanced ${curedArchive}`)
-    const recoveryArgs = curedReport.removed[0]!.recovery!.split(" ")
-    expect(recoveryArgs.slice(0, 3)).toEqual(["git", "-C", repo])
-    await git(recoveryArgs.slice(3))
+    const localRecovery = curedReport.removed[0]!.recovery
+    if (localRecovery === undefined) throw new Error("local archive supplied no recovery command")
+    const localRestored = spawnSync("/bin/sh", ["-c", localRecovery], { cwd: outside, encoding: "utf8" })
+    expect(localRestored.status, localRestored.stderr).toBe(0)
     expect((await git(["rev-parse", "refs/heads/task/28791-advanced"])).trim()).toBe(saved.get("task/28791-advanced"))
     await git(["update-ref", "-d", "refs/heads/task/28791-advanced", saved.get("task/28791-advanced")!])
     // AC5: the command's journal must remain readable by the existing projection reader.
