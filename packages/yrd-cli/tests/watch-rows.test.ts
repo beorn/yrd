@@ -311,6 +311,17 @@ describe("the notice", () => {
     expect(line).toContain("failed")
     expect(line).toContain("test")
     expect(line).toContain("next: @dev/2")
+
+    const historical = noticeLine(
+      row({
+        incident: { code: "stopped", subject: "old record", next: "cd /old-producer && yrd queue resume" },
+        next: { owner: "submitter", because: "repair the change" },
+        state: "stuck",
+      }),
+    )
+    expect(historical).toContain("recorded guidance: cd /old-producer && yrd queue resume")
+    expect(historical.match(/cd \/old-producer && yrd queue resume/g)).toHaveLength(1)
+    expect(historical).toContain("next: submitter — repair the change")
   })
 
   // @dev/4 R3: watch-notice forwarded only state/format to stateWord, so the
