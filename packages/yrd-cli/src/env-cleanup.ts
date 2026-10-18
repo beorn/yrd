@@ -143,8 +143,8 @@ function reportedFromState(parsed: unknown): Map<string, string> {
  * Retirement is loud and bounded. Existence is checked FIRST, so a path already
  * gone is an `already-removed` row and never a close attempt (23162: freshness at
  * destruction). The registry row is re-read, and a gone registration, a hold or a
- * moved HEAD retires the request as `stale` without charging the attempt or time
- * budget. Only an incomplete census is
+ * moved HEAD retires the request as `stale`; stale and gone rows do not count as
+ * an attempt. Only an incomplete census is
  * retryable — at most MAX_COVERAGE_ATTEMPTS rounds — after which the file is
  * DELETED with the whole request and the last refusal in its final journal row
  * (no archive directory). Every other refusal retires at once with its reason.
@@ -251,7 +251,8 @@ async function consumeCloseRequests(
     const age = a.request.at === b.request.at ? 0 : a.request.at < b.request.at ? -1 : 1
     return age || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
   })
-  const inventory = await environmentInventory(registry, worktrees, workdir)
+  let inventory = await environmentInventory(registry, worktrees, workdir)
+  let inventoryStale = false
   const startedAt = Date.now()
   let attempted = 0
   let closed = 0
@@ -265,6 +266,10 @@ async function consumeCloseRequests(
       journal(file, request, request.path, "already-removed", `${request.path} is gone; the request is satisfied`)
       dropCloseRequest(file)
       continue
+    }
+    if (inventoryStale) {
+      inventory = await environmentInventory(registry, worktrees, workdir)
+      inventoryStale = false
     }
     const current = inventory.rows.find((row) => row.path === request.path)
     if (current === undefined) {
@@ -302,6 +307,7 @@ async function consumeCloseRequests(
     // Stage before the close so two consumers cannot both act on one request and
     // a crash mid-close leaves the row in a named place.
     attempted++
+    inventoryStale = true
     const staged = stageCloseRequest(file)
     const ending = request.ending
     let exit: YrdCliExitCode

@@ -286,3 +286,64 @@ it("drops already-removed and stale requests in front without reducing the eight
   expect(rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual(valid.slice(0, 8))
   expect(listCloseRequests(w.workdir)).toEqual([closeRequestFile(w.workdir, valid[8]!)])
 })
+
+it("re-reads the inventory after an attempt so a second environment whose HEAD moved during the first close retires as stale uncharged", async () => {
+  const w = await world()
+  const uid = process.getuid?.()
+  if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
+  const request = (path: string, at: string) =>
+    writeCloseRequest(w.workdir, {
+      name: path.split("/").at(-1)!,
+      path,
+      requester: "@dev/12",
+      uid,
+      at,
+      predicate: "direct-admission",
+      options: { noRehome: true },
+      head: w.head,
+    }).file
+
+  const second = join(w.repo, ".bays", "env-second-moved")
+  await w.git(["worktree", "add", "--quiet", "--detach", second, "HEAD"])
+  const rest: string[] = []
+  for (let index = 0; index < 7; index++) {
+    const path = join(w.repo, ".bays", `env-rest-${index}`)
+    await w.git(["worktree", "add", "--quiet", "--detach", path, "HEAD"])
+    rest.push(path)
+  }
+
+  request(w.env, "2026-10-15T00:00:00.000Z")
+  const secondFile = request(second, "2026-10-15T00:00:01.000Z")
+  for (const [index, path] of rest.entries()) {
+    request(path, `2026-10-15T00:00:0${index + 2}.000Z`)
+  }
+
+  const attemptedPaths: string[] = []
+  vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
+    attemptedPaths.push(path)
+    if (path === w.env) {
+      const secondGit = testGitIn(second)
+      writeFileSync(join(second, "moved.txt"), "moved\n")
+      await secondGit(["add", "moved.txt"])
+      await secondGit(["commit", "--quiet", "-m", "moved during first close"])
+    }
+    callIo.stdout(JSON.stringify({ closed: path }))
+    return 0
+  })
+  try {
+    await runRound(w, "cleanup-refresh-inventory-per-attempt")
+  } finally {
+    vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
+      callIo.stdout(JSON.stringify({ closed: path }))
+      return 0
+    })
+  }
+
+  const rows = cleanupRows(w.workdir)
+  const staleRows = rows.filter((row) => row.result === "stale")
+  expect(staleRows.map((row) => row.path)).toEqual([second])
+  expect(String(staleRows[0]?.why)).toContain(`registered HEAD moved from ${w.head} to `)
+  expect(existsSync(secondFile)).toBe(false)
+  expect(attemptedPaths).not.toContain(second)
+  expect(rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([w.env, ...rest])
+})
