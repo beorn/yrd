@@ -2254,11 +2254,16 @@ describe("the queue-format boundary", () => {
     const publish = git.backend.publish
     if (publish === undefined) throw new Error("native fixture lacks publication")
     const outside = outsideRepositoryRoot()
-    for (const kind of ["event", "published-main"] as const) {
-      const branch = `task/race'${kind}`
+    for (const [kind, localBranch] of [
+      ["event", true],
+      ["published-main", true],
+      ["published-main", false],
+    ] as const) {
+      const branch = `task/race'${kind}${localBranch ? "" : "-absent"}`
       const branchRef = `refs/heads/${branch}`
       await git(["branch", branch, kept])
       await git(["push", "--quiet", "origin", branchRef])
+      if (!localBranch) await git(["update-ref", "-d", branchRef, kept])
       const eventRef = changesRef("lab", branch)
       const raceChain = await openEvents({ ...location, ref: eventRef })
       const start = await raceChain.append(
@@ -2308,9 +2313,12 @@ describe("the queue-format boundary", () => {
       const before = await git(["ls-remote", "origin"])
       const restored = spawnSync("/bin/sh", ["-c", recovery], { cwd: outside, encoding: "utf8" })
       expect.soft(restored.status, `${kind}: ${restored.stderr}`).toBe(0)
-      expect(restored.stdout.trim()).toBe(`${kept} ${branchRef}`)
+      expect(restored.stdout.trim()).toBe(localBranch ? `${kept} ${branchRef}` : "")
       expect((await git(["rev-parse", branchRef])).trim()).toBe(kept)
       expect(await git(["ls-remote", "origin"])).toBe(before)
+      if (kind === "published-main") {
+        await publish(root, [{ ref: authority.ref, expect: movedTip, oid: authority.tip }], "origin")
+      }
     }
 
     // Neither surviving-branch row proves recovery when only origin keeps the
