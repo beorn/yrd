@@ -1251,11 +1251,10 @@ export async function coreQueueCommand(
       : undefined
   // Declared BEFORE postMerge so it disposes AFTER it: the post-merge worker drains first and the housekeeping
   // journal is finished only then, never while a cleanup can still append (post-merge.ts:642-651, log.ts:283).
-  await using housekeepingJournal = {
-    [Symbol.asyncDispose]: (): Promise<void> => {
+  using housekeepingJournal = {
+    [Symbol.dispose]: (): void => {
       housekeepingLog?.finish()
       housekeepingLog = undefined
-      return Promise.resolve()
     },
   }
   // The binding IS the disposal slot; the object holds no state of its own.
