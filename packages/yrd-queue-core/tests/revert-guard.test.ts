@@ -296,7 +296,7 @@ describe("revert guard (27363)", () => {
     expect(hit?.reason).toContain("vendor/dep/a.txt")
     expect(hit?.reason).toContain('"count":1')
     const gap = revertedPathsFinding({
-      base: { count: 2, state: "ambiguous" },
+      base: { state: "none" },
       count: 0,
       coverage: "incomplete",
       gaps: [],
@@ -304,7 +304,7 @@ describe("revert guard (27363)", () => {
       swallowed: [],
     })
     expect(gap?.coverage).toBe("incomplete")
-    expect(gap?.reason).toContain("ambiguous")
+    expect(gap?.reason).toContain("revert audit undecidable")
   })
 
   it("durable: a capped gap keeps its component path and depth, not only the reason", () => {
@@ -399,7 +399,7 @@ describe("revert guard (27363)", () => {
     expect(revertGuardAction(hit, "observe")).toBe("warn")
     expect(revertGuardAction(hit, "refuse")).toBe("stick")
     const gap: RevertGuardReport = {
-      base: { count: 2, state: "ambiguous" },
+      base: { state: "none" },
       count: 0,
       coverage: "incomplete",
       gaps: [],
@@ -556,6 +556,7 @@ describe("revert guard review regressions (27363)", () => {
       expect(allBases).toBe(await targetOnly([w.head]))
       expect(allBases).toBe(await targetOnly([...bases].reverse()))
       const report = await detectReverted({ candidate: w.candidate, git, head: w.head, root, targetHead: w.target })
+      expect(await git(["ls-tree", w.target, "vendor/dep"])).toContain("160000 commit")
       // CTO4aeb221b amends the old blanket ambiguity veto: this real put-back remains a named S2.
       expect(report.base).toEqual({ state: "multiple", bases: expect.arrayContaining(bases) })
       expect(report.coverage).toBe("complete")
@@ -713,6 +714,8 @@ async function ambiguousWorld(kind: "restore" | "shared" | "swallowed"): Promise
   await pg(["init", "--quiet", "--initial-branch=main"])
   await commit(product, { "readme.txt": "product\n" }, "product base")
   const root0 = await pin(product, "vendor/dep", dep, targetPin, "target pins the advance")
+  // Later commit() calls stage the worktree: materialize the pin so add -A cannot delete it.
+  await pg(["submodule", "update", "--init", "--quiet"])
   await pg(["checkout", "--quiet", "-b", "left"])
   await commit(product, { "left.txt": "l\n" }, "left")
   const left0 = (await pg(["rev-parse", "HEAD"])).trim()
