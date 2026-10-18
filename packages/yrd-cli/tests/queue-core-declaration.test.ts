@@ -14,6 +14,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -2710,12 +2711,15 @@ describe("a queue is the selected origin branch carrying config", () => {
    * @consumer The closer running yrd drop --issue after durable issue closure
    */
   it("drop by issue keeps unpublished work and advanced submitted tips; explicit abandonment retains custody", async () => {
-    const repo = await world("{}\n")
+    const originalRepo = await world("{}\n")
+    const repo = join(dirname(originalRepo), "work tree's")
+    renameSync(originalRepo, repo)
     const git = gitIn(repo)
     await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
     const issue = "@example/28791-retirement"
+    const advancedBranch = "task/28791-advanced'quoted"
     const saved = new Map<string, string>()
-    for (const branch of ["task/28791-local-only", "task/manual-only", "task/28791-advanced"]) {
+    for (const branch of ["task/28791-local-only", "task/manual-only", advancedBranch]) {
       await git(["checkout", "--quiet", "-b", branch, "main"])
       writeFileSync(join(repo, "work.txt"), branch)
       await git(["add", "work.txt"])
@@ -2726,7 +2730,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         `work\n\nRefs: ${branch === "task/manual-only" ? "@example/other-issue" : issue}`,
       ])
       saved.set(branch, (await git(["rev-parse", "HEAD"])).trim())
-      if (branch === "task/28791-advanced") {
+      if (branch === advancedBranch) {
         const submitted = capture(repo)
         expect(await runYrdProcess(["bun", "yrd", "submit", "--json"], submitted.io), submitted.stderr()).toBe(0)
         await git(["commit", "--quiet", "--allow-empty", "-m", "new work after submission"])
@@ -2751,13 +2755,13 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect.objectContaining({ branch: "task/28791-local-only", reason: "unreached" }),
         // 29579: a branch with work the target lacks names that cure, never a ref move.
         expect.objectContaining({
-          branch: "task/28791-advanced",
+          branch: advancedBranch,
           reason: "advanced",
           detail:
             "current tip " +
             advanced +
             " differs from recorded change tip " +
-            saved.get("task/28791-advanced") +
+            saved.get(advancedBranch) +
             "; it holds commits origin/main lacks: submit them, and drop the branch after they land",
         }),
       ]),
@@ -2765,7 +2769,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect((await git(["rev-parse", "refs/heads/task/28791-local-only"])).trim()).toBe(
       saved.get("task/28791-local-only"),
     )
-    expect((await git(["rev-parse", "refs/heads/task/28791-advanced"])).trim()).toBe(advanced)
+    expect((await git(["rev-parse", `refs/heads/${advancedBranch}`])).trim()).toBe(advanced)
     expect(
       (await listChanges(createEventStore(repo, "origin", git.selection), "main")).has("task/28791-local-only"),
     ).toBe(false)
@@ -2816,7 +2820,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(manualReport.removed[0]!.recovery).toBe(
       `git -C ${repo} fetch ${(await git(["config", "--get", "remote.origin.url"])).trim()} ${manualReport.removed[0]!.archiveRef}:refs/heads/task/manual-only`,
     )
-    expect((await git(["rev-parse", "refs/heads/task/28791-advanced"])).trim()).toBe(advanced)
+    expect((await git(["rev-parse", `refs/heads/${advancedBranch}`])).trim()).toBe(advanced)
     // Accepted29301: local expected=head, but the recorded change has an older head.
     // Existing assertions only check the reason token, so they miss identical SHAs in the detail.
     await git(["push", "--quiet", "origin", advanced + ":refs/heads/main"])
@@ -2825,7 +2829,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const local = capture(repo)
     expect(
       await runYrdProcess(
-        ["bun", "yrd", "drop", "task/28791-advanced", "--local", "--tip", advanced, "--submitter", "fixture", "--json"],
+        ["bun", "yrd", "drop", advancedBranch, "--local", "--tip", advanced, "--submitter", "fixture", "--json"],
         local.io,
       ),
       local.stderr(),
@@ -2834,27 +2838,14 @@ describe("a queue is the selected origin branch carrying config", () => {
       removed: [],
       kept: [
         {
-          branch: "task/28791-advanced",
+          branch: advancedBranch,
           head: advanced,
           reason: "advanced",
-          // 29579: the target already holds the tip, so the detail names the move back and the rerun.
-          detail:
-            "current tip " +
-            advanced +
-            " differs from recorded change tip " +
-            saved.get("task/28791-advanced") +
-            "; origin/main already holds " +
-            advanced +
-            ", so nothing is lost: move the branch back with git update-ref refs/heads/task/28791-advanced " +
-            saved.get("task/28791-advanced") +
-            " " +
-            advanced +
-            ", then rerun with --tip " +
-            saved.get("task/28791-advanced"),
+          detail: expect.stringContaining("nothing is lost: move the branch back with "),
         },
       ],
     })
-    expect((await git(["rev-parse", "refs/heads/task/28791-advanced"])).trim()).toBe(advanced)
+    expect((await git(["rev-parse", `refs/heads/${advancedBranch}`])).trim()).toBe(advanced)
     const requested = capture(repo)
     expect(
       await runYrdProcess(
@@ -2862,10 +2853,10 @@ describe("a queue is the selected origin branch carrying config", () => {
           "bun",
           "yrd",
           "drop",
-          "task/28791-advanced",
+          advancedBranch,
           "--local",
           "--tip",
-          saved.get("task/28791-advanced")!,
+          saved.get(advancedBranch)!,
           "--submitter",
           "fixture",
           "--json",
@@ -2878,13 +2869,13 @@ describe("a queue is the selected origin branch carrying config", () => {
       removed: [],
       kept: [
         {
-          branch: "task/28791-advanced",
+          branch: advancedBranch,
           reason: "advanced",
           detail:
             "current tip " +
             advanced +
             " differs from requested tip " +
-            saved.get("task/28791-advanced") +
+            saved.get(advancedBranch) +
             "; if " +
             advanced +
             " is the tip to retire, rerun with --tip " +
@@ -2894,7 +2885,22 @@ describe("a queue is the selected origin branch carrying config", () => {
       ],
     })
     // 29579: the named cure works. Moved back to its recorded tip, the branch the target already holds retires.
-    await git(["update-ref", "refs/heads/task/28791-advanced", saved.get("task/28791-advanced")!, advanced])
+    const nativeDetail = (JSON.parse(local.stdout()) as { kept: { branch: string; detail: string }[] }).kept.find(
+      (row) => row.branch === advancedBranch,
+    )?.detail
+    const recipe = nativeDetail?.split("move the branch back with ")[1]?.split(", then ")[0]
+    expect(recipe, nativeDetail).toBeDefined()
+    const outside = outsideRepositoryRoot("yrd-native-advanced-cure-")
+    roots.push(outside)
+    const originBefore = await git(["ls-remote", "origin"])
+    const applied = spawnSync("/bin/sh", ["-c", recipe!], { cwd: outside, encoding: "utf8", timeout: 30_000 })
+    expect(applied.status, applied.stderr).toBe(0)
+    expect((await git(["rev-parse", `refs/heads/${advancedBranch}`])).trim()).toBe(saved.get(advancedBranch))
+    // The copied command's old-tip lease is stale after its first successful use.
+    const stale = spawnSync("/bin/sh", ["-c", recipe!], { cwd: outside, encoding: "utf8", timeout: 30_000 })
+    expect(stale.status, stale.stderr).toBe(128)
+    expect((await git(["rev-parse", `refs/heads/${advancedBranch}`])).trim()).toBe(saved.get(advancedBranch))
+    expect(await git(["ls-remote", "origin"])).toBe(originBefore)
     const cured = capture(repo)
     expect(
       await runYrdProcess(
@@ -2902,10 +2908,10 @@ describe("a queue is the selected origin branch carrying config", () => {
           "bun",
           "yrd",
           "drop",
-          "task/28791-advanced",
+          advancedBranch,
           "--local",
           "--tip",
-          saved.get("task/28791-advanced")!,
+          saved.get(advancedBranch)!,
           "--submitter",
           "fixture",
           "--json",
@@ -2920,7 +2926,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     }
     expect(curedReport).toMatchObject({
       kept: [],
-      removed: [{ branch: "task/28791-advanced", head: saved.get("task/28791-advanced") }],
+      removed: [{ branch: advancedBranch, head: saved.get(advancedBranch) }],
     })
     // 29949: A landed branch dropped with --local writes its archive ref only locally, never to origin;
     // the printed recovery command must name the local archive ref and resolve when executed.
@@ -2930,8 +2936,8 @@ describe("a queue is the selected origin branch carrying config", () => {
     const recoveryArgs = curedReport.removed[0]!.recovery!.split(" ")
     expect(recoveryArgs.slice(0, 3)).toEqual(["git", "-C", repo])
     await git(recoveryArgs.slice(3))
-    expect((await git(["rev-parse", "refs/heads/task/28791-advanced"])).trim()).toBe(saved.get("task/28791-advanced"))
-    await git(["update-ref", "-d", "refs/heads/task/28791-advanced", saved.get("task/28791-advanced")!])
+    expect((await git(["rev-parse", `refs/heads/${advancedBranch}`])).trim()).toBe(saved.get(advancedBranch))
+    await git(["update-ref", "-d", `refs/heads/${advancedBranch}`, saved.get(advancedBranch)!])
     // AC5: the command's journal must remain readable by the existing projection reader.
     // Custody assertions alone miss a writer that omits the required run header.
     const logs = join(await workdirOf(git, { cwd: repo }), "logs")
@@ -3482,11 +3488,9 @@ describe("a queue is the selected origin branch carrying config", () => {
   it("prints the policy cure and submits through the event queue on admission exit 3", async () => {
     const repo = await world('admission:\n  run: "sh tools/policy.sh"\n  timeoutMs: 5000\n')
     const git = gitIn(repo)
+    const reason = "\n  target policy: keep 'literal' bytes\t\n\n"
     mkdirSync(join(repo, "tools"))
-    writeFileSync(
-      join(repo, "tools", "policy.sh"),
-      "#!/bin/sh\necho 'Start 3 is not ticked; complete and tick it'\nexit 3\n",
-    )
+    writeFileSync(join(repo, "tools", "policy.sh"), "#!/bin/sh\nprintf %s " + shellQuote(reason) + "\nexit 3\n")
     await git(["add", "tools/policy.sh"])
     await git(["commit", "--quiet", "-m", "policy"])
     await git(["push", "--quiet", "origin", "main"])
@@ -3495,15 +3499,23 @@ describe("a queue is the selected origin branch carrying config", () => {
     writeFileSync(join(repo, "work.txt"), "warning submit\n")
     await git(["add", "work.txt"])
     await git(["commit", "--quiet", "-m", "warning submit"])
+    const prepared = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "submit", "--prepare", "--queue", "main", "--json"], prepared.io),
+      prepared.stderr(),
+    ).toBe(0)
+    expect(prepared.stderr()).toContain("target policy warning (recorded guidance)")
+    expect(prepared.stderr()).toContain(reason)
+    expect(JSON.parse(prepared.stdout()).admission).toEqual({ kind: "warn", reason })
     const submitted = capture(repo)
     expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], submitted.io)).toBe(0)
-    expect(submitted.stderr()).toContain("POLICY WARNING")
-    expect(submitted.stderr()).toContain("Start 3 is not ticked; complete and tick it")
+    expect(submitted.stderr()).toContain("TARGET POLICY WARNING (recorded guidance)")
+    expect(submitted.stderr()).toContain(reason)
     const receipt = JSON.parse(submitted.stdout()) as { admission: { kind: string } }
-    expect(receipt.admission.kind).toBe("warn")
+    expect(receipt.admission).toEqual({ kind: "warn", reason })
     const store = createEventStore(repo, "origin", git.selection)
     const change = (await listChanges(store, "main")).get("task/warn-only")
-    expect(change).toMatchObject({ status: "queued", diagnostic: expect.stringContaining("policy warning") })
+    expect(change).toMatchObject({ status: "queued", diagnostic: expect.stringContaining("target policy warning") })
   })
 
   /** @failure 25708: a same-head submit reopened a merged chain while the service published against its old tip. */
