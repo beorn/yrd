@@ -4142,7 +4142,7 @@ export async function coreQueueCommand(
         const localRunner = await readRunnerFacts(workdir)
         const runner: RunnerFacts = { ...localRunner, published }
         const service = localRunner.service
-        const runnerState = runnerOf({ unfiltered, runner: localRunner, stopped }, new Date()).state
+        const runnerState = runnerOf({ unfiltered, runner, stopped }, new Date()).state
         // The runner's own word decides whether an absent projection is a fault
         // or simply a run that has not written it yet (@yrd/29994).
         const projectionFallback = projectionFallbackReport(localRunner.projectionFallback, localRunner, runnerState)

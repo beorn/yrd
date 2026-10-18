@@ -119,8 +119,14 @@ export type RunnerRun = Readonly<{
   unstarted?: true
 }>
 
-export type RoundLockHolder = Readonly<{
-  command: string
+/**
+ * The round lock BODY's named last holder, exactly as the body claims it.
+ * A body is a claim, not a measurement: only a waiter whose own take failed
+ * knows the flock is held, and a reader never takes the lock. This carries
+ * what the body says (its pid, its since) so a row can name it as context;
+ * no state word is ever derived from it.
+ */
+export type RoundLockLastHolder = Readonly<{
   pid: number
   since: string
 }>
@@ -187,16 +193,16 @@ export type RunnerFacts = Readonly<{
   service: RunnerService
   /** The remote runner ref, read with the queue refs; available on every machine. */
   published?: PublishedRunner
-  /** Round lock holder if currently held by an active process. */
-  roundLockHolder?: RoundLockHolder
+  /** The lock body's named last holder: the body's own claim, not measured ownership. */
+  roundLockLastHolder?: RoundLockLastHolder
 }>
 
 /**
  * What a machine reader is told about a run whose projection artifact is
  * absent. The journal-level reasons are the reader's own; `not-yet-written` is
- * the runner's, and it is only said when the runner's state proves the run is
+ * the runner's, and it is only said when run-owned facts prove the run is
  * still provisioning — its writer has journal facts to fold and has not
- * written them yet (@yrd/29994).
+ * written them yet.
  */
 export type ProjectionFallbackReport = Readonly<{
   run: string
@@ -207,35 +213,43 @@ export type ProjectionFallbackReport = Readonly<{
 }>
 
 /**
- * An absent projection is two different facts. While the runner is still
- * provisioning, the run has not written the artifact yet: calling that
- * `missing` reads as a broken instrument, and a seat correctly stops the line
- * to report it (@yrd/29994, twice in 25 minutes). Past provisioning the
- * absence IS the fault, and stays `missing` and loud.
+ * An absent projection is two different facts. While a run is still
+ * provisioning, it has not written the artifact yet: calling that `missing`
+ * reads as a broken instrument, and a seat correctly stops the line to
+ * report it. Once the run's own facts show it ended, the absence IS the
+ * fault, and stays `missing` and loud.
  */
 export function projectionFallbackReport(
   fallback: JournalProjectionFallback | undefined,
-  runner: Pick<RunnerFacts, "latest" | "roundLockHolder">,
+  runner: Pick<RunnerFacts, "latest" | "roundLockLastHolder">,
   state: RunnerState,
 ): ProjectionFallbackReport | undefined {
   if (fallback === undefined) return undefined
-  if (fallback.reason !== "missing" || state !== "provisioning") return fallback
-  // `provisioning` alone proves nothing about THIS run: readRunnerFacts judges a
-  // round lock's BODY and its pid, never the flock, so a released round leaves a
-  // body naming a live service and the word survives between rounds (measured on
-  // hh-dev, 2026-10-18). Two run-owned facts can prove it instead:
+  if (fallback.reason !== "missing") return fallback
+  // The runner's word alone proves nothing about THIS run, and no word is
+  // ever read from the lock body: the body is a claim, never the flock, so a
+  // released round leaves a body naming a live service and any word read
+  // from it would survive between rounds. Two run-owned facts can prove it instead:
   //   - the journal's own unterminated provisioning step, or
   //   - a lock taken at or before this run's start, over a journal that has not
   //     written its closing row (`remote-calls`, or the warning that replaces it
-  //     when the trace is unreadable).
+  //     when the trace is unreadable), while the run's own pid is still live.
   // A completed run never qualifies — it has that row — so a newer round's lock
   // cannot hide an older run's genuinely missing projection (@yrd/29994 review).
   const latest = runner.latest
-  const lock = runner.roundLockHolder
+  const lock = runner.roundLockLastHolder
   const ownStep = latest?.activeStep !== undefined && activeStepStage(latest.activeStep) === "provisioning"
   const since = lock === undefined ? Number.NaN : Date.parse(lock.since)
+  // The round proof needs a live writer, not merely an unclosed journal: a
+  // run that crashed before its closing row has the same unclosed journal
+  // and a stale body can predate its start, so without a live pid the
+  // absence stays `missing` and loud.
   const ownRound =
-    latest !== undefined && latest.ended !== true && Number.isFinite(since) && latest.startedAt.getTime() >= since
+    latest !== undefined &&
+    latest.alive &&
+    latest.ended !== true &&
+    Number.isFinite(since) &&
+    latest.startedAt.getTime() >= since
   return ownStep || ownRound
     ? { ...fallback, reason: "not-yet-written", runnerState: state }
     : { ...fallback, runnerState: state }
@@ -514,29 +528,30 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
   const alive = pid !== undefined && running(pid)
   const header = journalVerdict(path, read, alive)
   const lockPath = join(workdir, "round.lock")
-  let roundLockHolder: RoundLockHolder | undefined
+  // The body is carried as its own claim, never judged: whether its pid is
+  // alive says nothing about the flock, which only a failed take can know.
+  let roundLockLastHolder: RoundLockLastHolder | undefined
   if (existsSync(lockPath)) {
     try {
       const body = readFileSync(lockPath, "utf8").trim()
       if (body !== "") {
         const parsed = JSON.parse(body) as Record<string, unknown>
-        if (typeof parsed === "object" && parsed !== null && typeof parsed.pid === "number" && running(parsed.pid)) {
-          roundLockHolder = {
-            command: typeof parsed.command === "string" ? parsed.command : "yrd",
+        if (typeof parsed === "object" && parsed !== null && typeof parsed.pid === "number") {
+          roundLockLastHolder = {
             pid: parsed.pid,
             since: typeof parsed.since === "string" ? parsed.since : "",
           }
         }
       }
     } catch {
-      // silent-fallback-allow: unreadable lock body means no usable holder
+      // silent-fallback-allow: unreadable lock body means no body claim to carry
     }
   }
   return {
     journalDir,
     service,
     ...(projection.kind === "raw" ? { projectionFallback: projection.fallback } : {}),
-    ...(roundLockHolder === undefined ? {} : { roundLockHolder }),
+    ...(roundLockLastHolder === undefined ? {} : { roundLockLastHolder }),
     latest: {
       alive,
       id,
@@ -868,6 +883,13 @@ function running(pid: number): boolean {
  * liveness. Journal age never supplies `silent`: a healthy long check writes
  * no new journal boundary until it finishes.
  *
+ * A round-lock BODY never supplies a word either: the body is a claim,
+ * never the flock, so a released round leaves a body naming a live service
+ * and any word read from it would survive between rounds. Without a claim,
+ * `provisioning` is not read from the body; the body stays named context on
+ * the row (its named last holder, in the holds text), and the word comes
+ * from the document, the journal's active step, or the run's own pid.
+ *
  * The incident this ladder answers is @i/10-yrd/24486 — measured 2026-09-11
  * during an outage, three rows sat queued with no live check on any of them
  * while the service was down, and a fourth seat submitted into it, because
@@ -932,7 +954,6 @@ export function runnerWord(
         return activeStepStage(facts.latest.activeStep)
       }
       if (underCheck) return "checking"
-      if (facts.roundLockHolder !== undefined) return "provisioning"
       return "idle"
     }
     default:
@@ -942,13 +963,11 @@ export function runnerWord(
       break
   }
   if (facts?.latest === undefined) {
-    if (facts?.roundLockHolder !== undefined) return "provisioning"
     return "unpublished"
   }
   if (facts.latest.alive && facts.latest.activeStep !== undefined) {
     return activeStepStage(facts.latest.activeStep)
   }
-  if (facts.roundLockHolder !== undefined) return "provisioning"
   // No document, so the run's own pid is the liveness fact. Nothing is claimed
   // about a SERVICE here, because on this edge there is not one to claim it of.
   if (!underCheck) return "idle"
@@ -1170,13 +1189,16 @@ function runnerLineOf(
         } else {
           holdsText = `${stepName} ${activeStep.branch ?? ""}`.trim()
         }
-      } else if (facts?.roundLockHolder !== undefined) {
+      } else if (facts?.roundLockLastHolder !== undefined) {
         const runnerStart = (service && "since" in service ? service.since : undefined) ?? latest?.startedAt
-        const holder = facts.roundLockHolder
+        const holder = facts.roundLockLastHolder
         const holderDate = holder.since ? new Date(holder.since) : undefined
-        durationText =
-          holderDate && !Number.isNaN(holderDate.getTime()) ? `${word} ${since(holderDate)}` : `${word} 0:00`
-        holdsText = runnerStart !== undefined ? `runner since ${clock(runnerStart)} · ${durationText}` : durationText
+        const holderText =
+          holderDate && !Number.isNaN(holderDate.getTime())
+            ? `lock body names pid ${String(holder.pid)} since ${clock(holderDate)} (the body's claim, not measured ownership)`
+            : `lock body names pid ${String(holder.pid)} (the body's claim, not measured ownership)`
+        durationText = `${word} 0:00`
+        holdsText = runnerStart !== undefined ? `runner since ${clock(runnerStart)} · ${holderText}` : holderText
       } else if (holding !== undefined) {
         durationText = `${word} ${since(holding.since)}`
         holdsText = `${holding.branch}${holding.subject === undefined ? "" : ` ${holding.subject}`}`
@@ -1275,10 +1297,16 @@ function runnerLineOf(
     }
     default: {
       let holdsText: string
-      if (facts?.roundLockHolder !== undefined) {
+      if (facts?.roundLockLastHolder !== undefined) {
         const runnerStart = (service && "since" in service ? service.since : undefined) ?? latest?.startedAt
         const startText = runnerStart !== undefined ? `runner since ${clock(runnerStart)}` : "runner"
-        holdsText = `${startText} · ${word} ${beat ?? "0:00"}`
+        const holder = facts.roundLockLastHolder
+        const holderDate = holder.since ? new Date(holder.since) : undefined
+        const holderText =
+          holderDate && !Number.isNaN(holderDate.getTime())
+            ? `lock body names pid ${String(holder.pid)} since ${clock(holderDate)} (the body's claim, not measured ownership)`
+            : `lock body names pid ${String(holder.pid)} (the body's claim, not measured ownership)`
+        holdsText = `${startText} · ${word} ${beat ?? "0:00"} · ${holderText}`
       } else if (waiting === 0) {
         holdsText = "nothing in line"
       } else {
