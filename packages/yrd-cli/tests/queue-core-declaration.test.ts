@@ -2513,11 +2513,14 @@ describe("a queue is the selected origin branch carrying config", () => {
   /** @failure Public drop help leaves the caller in the superproject when the local branch belongs to a component author store.
    * @level l1 @consumer A caller choosing the local branch command from drop help
    */
-  it("drop help names the component author checkout and its local command", async () => {
+  it("drop help names the component author checkout, its local command, and the archive-only --release-checkout composition", async () => {
     const out = capture(outsideRepositoryRoot())
     expect(await runYrdProcess(["bun", "yrd", "drop", "--help"], out.io), out.stderr()).toBe(0)
     expect(out.stdout()).toContain("component author checkout")
     expect(out.stdout()).toContain("drop <branch> --local --tip <full-oid>")
+    expect(out.stdout()).toContain(
+      "To archive at origin and detach the branch while keeping checkout bytes: yrd drop <branch> --local --release-checkout --tip <full-oid> --issue <id> --reason <why> [--apply]",
+    )
   })
 
   /** @failure drop help leaves a seat reading a correct --retire refusal as a failure when the merge already removed the branch.
@@ -5817,6 +5820,44 @@ describe("drop --local --release-checkout", () => {
         for (const files of fixture.checkoutFiles.values()) {
           expect([readFileSync(files.lease), readFileSync(files.lock), readFileSync(files.index)]).toEqual(files.bytes)
         }
+      } finally {
+        spy.mockRestore()
+      }
+    },
+    30_000,
+  )
+  /**
+   * @failure An excluded component with an attached branch reports 'no current attached branch mapping to the requested issue' instead of naming the attached branch and head it saw.
+   * @level l2 @consumer A caller inspecting excluded component rows in a drop --local --release-checkout --submodules receipt
+   */
+  it.each(["attached", "detached"] as const)(
+    "reports the %s component checkout reason when a submodule does not map to the requested issue",
+    async (kind) => {
+      const fixture = await releaseWorld(true)
+      const { spy } = await permitCensus()
+      try {
+        const childGit = gitIn(fixture.child!)
+        const childTip = (await childGit(["rev-parse", "HEAD"])).trim()
+        await childGit(["checkout", "--quiet", "task/29600-unselected"])
+        await childGit(["branch", "-m", "task/29600-unselected", "task/29601-other"])
+        await childGit(["branch", "-D", fixture.branch])
+        if (kind === "detached") {
+          await childGit(["update-ref", "--no-deref", "HEAD", childTip, childTip])
+        }
+        const preview = releaseCapture(fixture.repo)
+        expect(await runYrdProcess(fixture.argv, preview.io), preview.stderr()).toBe(0)
+        const report = JSON.parse(preview.stdout()) as ReleaseReport
+        expect(report.eligible).toHaveLength(1)
+        expect(report.excluded).toEqual([
+          {
+            repo: fixture.child,
+            path: "modules/child",
+            reason:
+              kind === "attached"
+                ? `attached branch task/29601-other at ${childTip} does not map to 29600; not selected`
+                : "no current attached branch mapping to the requested issue",
+          },
+        ])
       } finally {
         spy.mockRestore()
       }

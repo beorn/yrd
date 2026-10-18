@@ -1079,7 +1079,14 @@ export async function releaseRetainedCheckouts(
           })
         }
       } else {
-        excluded.push({ repo: repository, path, reason: "no current attached branch mapping to the requested issue" })
+        excluded.push({
+          repo: repository,
+          path,
+          reason:
+            attached?.branch !== undefined
+              ? `attached branch ${attached.branch} at ${attached.head ?? "unreadable"} does not map to ${request.issue}; not selected`
+              : "no current attached branch mapping to the requested issue",
+        })
       }
       if (request.submodules) {
         for (const child of await readCommitSubmodules(seamProcess(git, repository), repository, commit)) {
