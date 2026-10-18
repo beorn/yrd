@@ -2995,112 +2995,147 @@ describe("yrd queue up, the service", () => {
    * on the original 5xx at once.
    * @level l2 @consumer the operator running `yrd queue pause`/`resume`
    */
-  it("fails loud, naming the ambiguity, when the pause publish exhausts a 5xx", async () => {
-    const sleep = transientPushRetry.sleep
-    transientPushRetry.sleep = async () => {}
-    const write = process.stderr.write.bind(process.stderr)
-    process.stderr.write = ((chunk: unknown, encoding?: unknown, callback?: unknown) => {
-      if (typeof encoding === "function") encoding()
-      if (typeof callback === "function") callback()
-      return true
-    }) as typeof process.stderr.write
-    try {
-      const w = await world()
-      const queue = "release"
-      const target = (await w.git(["rev-parse", "HEAD"])).trim()
-      const config = await readConfig(w.git, target, { branch: queue, remote: "origin" })
-      if (config === undefined) throw new Error("pause fixture declaration is absent")
-      await w.git(["push", "--quiet", "origin", `${target}:refs/heads/${queue}`])
-      await createEventQueue(
-        createEventStore(w.work, "origin", gitIn(w.work).selection),
-        queue,
-        target,
-        config,
-        new Date(),
-      )
-      const ref = queueRef(queue)
-      const mainBefore = (await w.git(["ls-remote", "--refs", "origin", queueRef("main")])).trim()
-      const github5xx = [
-        "remote: Internal Server Error",
-        "fatal: unable to access 'https://github.com/beorn/hh.git/': The requested URL returned error: 500",
-      ].join("\n")
-      const originalBackend = gitomic.createShellBackend
-      let uploads = 0
-      let outage = false
-      using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
-        const backend = originalBackend(options)
-        const publish = backend.publish
-        const fetchRefs = backend.fetchRefs
-        if (publish === undefined || fetchRefs === undefined) {
-          throw new Error("fixture needs Gitomic publish and ref reads")
+  it.each(["pause", "submit"] as const)(
+    "fails loud with selected inspection when the %s publish exhausts a 5xx",
+    async (operation) => {
+      const sleep = transientPushRetry.sleep
+      transientPushRetry.sleep = async () => {}
+      const write = process.stderr.write.bind(process.stderr)
+      process.stderr.write = ((chunk: unknown, encoding?: unknown, callback?: unknown) => {
+        if (typeof encoding === "function") encoding()
+        if (typeof callback === "function") callback()
+        return true
+      }) as typeof process.stderr.write
+      try {
+        const w = await world()
+        const queue = "release"
+        const target = (await w.git(["rev-parse", "HEAD"])).trim()
+        const config = await readConfig(w.git, target, { branch: queue, remote: "origin" })
+        if (config === undefined) throw new Error("pause fixture declaration is absent")
+        await w.git(["push", "--quiet", "origin", `${target}:refs/heads/${queue}`])
+        await createEventQueue(
+          createEventStore(w.work, "origin", gitIn(w.work).selection),
+          queue,
+          target,
+          config,
+          new Date(),
+        )
+        const branch = "task/submit's-proof"
+        if (operation === "submit") {
+          await w.git(["checkout", "--quiet", "-b", branch, "main"])
+          writeFileSync(join(w.work, "submit-change.txt"), "candidate\n")
+          await w.git(["add", "submit-change.txt"])
+          await w.git(["commit", "--quiet", "-m", "submit candidate"])
         }
-        return {
-          ...backend,
-          publish: async (repo, updates, remote) => {
-            const landed = await publish(repo, updates, remote)
-            if (updates.some((update) => update.ref === ref)) {
-              uploads++
-              outage = true
-              // The push APPLIED; the 500 rides every response.
-              throw new gitomic.PublicationRejected(updates, [github5xx], github5xx)
-            }
-            return landed
-          },
-          fetchRefs: async (repo, refs, remote, fetchOptions) => {
-            const asked = Array.isArray(refs) ? refs : [refs]
-            if (outage && asked.includes(ref)) throw new Error("fatal: Connection reset by peer")
-            return fetchRefs(repo, refs, remote, fetchOptions)
-          },
+        const ref = operation === "pause" ? queueRef(queue) : changesRef(queue, branch)
+        const mainBefore = (await w.git(["ls-remote", "--refs", "origin", queueRef("main")])).trim()
+        const github5xx = [
+          "remote: Internal Server Error",
+          "fatal: unable to access 'https://github.com/beorn/hh.git/': The requested URL returned error: 500",
+        ].join("\n")
+        const originalBackend = gitomic.createShellBackend
+        let uploads = 0
+        let outage = false
+        using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
+          const backend = originalBackend(options)
+          const publish = backend.publish
+          const fetchRefs = backend.fetchRefs
+          if (publish === undefined || fetchRefs === undefined) {
+            throw new Error("fixture needs Gitomic publish and ref reads")
+          }
+          return {
+            ...backend,
+            publish: async (repo, updates, remote) => {
+              const landed = await publish(repo, updates, remote)
+              if (updates.some((update) => update.ref === ref)) {
+                uploads++
+                outage = true
+                // The push APPLIED; the 500 rides every response.
+                throw new gitomic.PublicationRejected(updates, [github5xx], github5xx)
+              }
+              return landed
+            },
+            fetchRefs: async (repo, refs, remote, fetchOptions) => {
+              const asked = Array.isArray(refs) ? refs : [refs]
+              if (outage && asked.includes(ref)) throw new Error("fatal: Connection reset by peer")
+              return fetchRefs(repo, refs, remote, fetchOptions)
+            },
+          }
+        })
+        const run = capture(w.work)
+        const viewer = join(w.work, "inspection's cwd")
+        mkdirSync(viewer)
+        run.io.cwd = viewer
+        const commands: { argv: readonly string[]; cwd: string; recipe: string }[] = []
+        run.io.formatYrdCommand = (argv, cwd) => {
+          const recipe = `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`
+          commands.push({ argv, cwd, recipe })
+          return recipe
         }
-      })
-      const run = capture(w.work)
-      const viewer = join(w.work, "inspection's cwd")
-      mkdirSync(viewer)
-      run.io.cwd = viewer
-      const commands: { argv: readonly string[]; cwd: string; recipe: string }[] = []
-      run.io.formatYrdCommand = (argv, cwd) => {
-        const recipe = `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`
-        commands.push({ argv, cwd, recipe })
-        return recipe
+        const request =
+          operation === "pause"
+            ? { by: "fixture", command: "pause" as const, reason: "repair" }
+            : { branch, command: "submit" as const, submitter: "fixture" }
+        const attempt = coreQueueCommand(w.work, run.io, request, {
+          queue,
+          workdir: w.workdir,
+        })
+        if (operation === "pause") {
+          expect(await attempt).toBe(1)
+          expect(run.stderr()).toContain("GitHub returned Internal Server Error on the pause of")
+          expect(run.stderr()).toContain("it may or may not have been recorded")
+        } else {
+          await expect(attempt).rejects.toThrow("it may or may not have been recorded")
+        }
+        // The probe failed, so the push was never re-run: exactly one attempt.
+        expect(uploads).toBe(1)
+        expect((await w.git(["ls-remote", "--refs", "origin", queueRef("main")])).trim()).toBe(mainBefore)
+        const remote = (await w.git(["remote", "get-url", "origin"])).trim()
+        const inspections =
+          operation === "pause"
+            ? commands
+            : commands.filter(
+                ({ argv }) =>
+                  argv[0] === "queue" && argv[1] === "show" && argv[2] === branch && argv.includes("--json"),
+              )
+        expect(inspections).toHaveLength(1)
+        expect(inspections[0]).toMatchObject({
+          argv: [
+            ...(operation === "pause" ? ["queue", "list", "--json"] : ["queue", "show", branch, "--json"]),
+            "--queue",
+            `${remote}#${queue}`,
+          ],
+          cwd: viewer,
+        })
+        const recipe = inspections[0]?.recipe
+        if (recipe === undefined) throw new Error("pause inspection recipe is absent")
+        expect(run.stderr()).toContain(
+          operation === "pause"
+            ? `Read the standing pause state (${recipe}) before retrying`
+            : `Inspect the submission before retrying: ${recipe}`,
+        )
+        outage = false
+        const inspected = execFileSync("bash", ["-c", recipe], {
+          cwd: dirname(w.work),
+          encoding: "utf8",
+          env: { ...process.env, XDG_STATE_HOME: join(viewer, "inspection-state") },
+        })
+        if (operation === "pause") {
+          expect(JSON.parse(inspected)).toMatchObject({ pause: { kind: "paused", reason: "repair" } })
+        } else {
+          expect(JSON.stringify(JSON.parse(inspected))).toContain(JSON.stringify(branch))
+          const retried = capture(w.work)
+          expect(await coreQueueCommand(w.work, retried.io, request, { queue, json: true, workdir: w.workdir })).toBe(0)
+          expect(records(retried)[0]).toMatchObject({ retry: true })
+        }
+        expect(uploads).toBe(1)
+      } finally {
+        process.stderr.write = write
+        transientPushRetry.sleep = sleep
       }
-      expect(
-        await coreQueueCommand(
-          w.work,
-          run.io,
-          { by: "@chief", command: "pause", reason: "repair" },
-          {
-            queue,
-            workdir: w.workdir,
-          },
-        ),
-      ).toBe(1)
-      expect(run.stderr()).toContain("GitHub returned Internal Server Error on the pause of")
-      expect(run.stderr()).toContain("it may or may not have been recorded")
-      // The probe failed, so the push was never re-run: exactly one attempt.
-      expect(uploads).toBe(1)
-      expect((await w.git(["ls-remote", "--refs", "origin", queueRef("main")])).trim()).toBe(mainBefore)
-      const remote = (await w.git(["remote", "get-url", "origin"])).trim()
-      expect(commands).toHaveLength(1)
-      expect(commands[0]).toMatchObject({
-        argv: ["queue", "list", "--json", "--queue", `${remote}#${queue}`],
-        cwd: viewer,
-      })
-      const recipe = commands[0]?.recipe
-      if (recipe === undefined) throw new Error("pause inspection recipe is absent")
-      expect(run.stderr()).toContain(`Read the standing pause state (${recipe}) before retrying`)
-      _backend.mockRestore()
-      const inspected = execFileSync("bash", ["-c", recipe], {
-        cwd: dirname(w.work),
-        encoding: "utf8",
-        env: { ...process.env, XDG_STATE_HOME: join(viewer, "inspection-state") },
-      })
-      expect(JSON.parse(inspected)).toMatchObject({ pause: { kind: "paused", reason: "repair" } })
-      expect(uploads).toBe(1)
-    } finally {
-      process.stderr.write = write
-      transientPushRetry.sleep = sleep
-    }
-  }, 15_000)
+    },
+    15_000,
+  )
 
   // 27187: the target's declaration is read by the SUBMITTER's Yrd. A key the
   // queue's newer parser reads and this one does not must not refuse the submit —
@@ -6288,6 +6323,8 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     )
     expect(exit).toBe(2)
     expect(run.stdout()).toContain("hooks-disabled")
+    expect(run.stdout()).toContain("review the named entries before another queue round")
+    expect(run.stdout()).not.toContain("then run yrd queue run")
   })
 
   /** @failure 25946: a second change-ref write between the rival status and its selected history read

@@ -1376,6 +1376,23 @@ export async function coreQueueCommand(
         `the change waits in line and is judged once the stop lifts; ${await stopGuidance(stop)}\n`,
     )
   }
+  const submitWithInspection = async (
+    author: Parameters<typeof submit>[0],
+    remote: string,
+    submission: Parameters<typeof submit>[2],
+  ): Promise<Submitted> => {
+    try {
+      return await submit(author, remote, submission)
+    } catch (error) {
+      if (transientPush5xxOf(error) !== undefined) {
+        const queue = formatStoredQueueAddress(queueName(submission.target, await remoteUrl(author, remote)))
+        io.stderr(
+          `Inspect the submission before retrying: ${formatQueueCommand(io, queue, ["queue", "show", submission.branch, "--json"])}\n`,
+        )
+      }
+      throw error
+    }
+  }
   const echoAdmission = (outcome: AdmissionOutcome, dryRun = false): void => {
     if (outcome.kind === "warn") {
       io.stderr(
@@ -2500,7 +2517,7 @@ export async function coreQueueCommand(
         }
         let submitted
         try {
-          submitted = await submit(git, config.target.remote, submission)
+          submitted = await submitWithInspection(git, config.target.remote, submission)
         } catch (cause) {
           try {
             await removeCarrierRef()
@@ -2604,7 +2621,7 @@ export async function coreQueueCommand(
         echoAdmission(inspected.admission, true)
         return 0
       }
-      const submitted = await submit(git, config.target.remote, submission)
+      const submitted = await submitWithInspection(git, config.target.remote, submission)
       await notifyAdmissionWarning(submitted, request.submitter)
       const { stop: acceptedUnder, ...accepted } = submitted
       emit(
@@ -2709,7 +2726,7 @@ export async function coreQueueCommand(
           return 2
         }
         const remote = request.author.remote ?? "origin"
-        const submitted = await submit(author, remote, {
+        const submitted = await submitWithInspection(author, remote, {
           branch,
           submitter: request.submitter,
           target: { branch: config.target.branch, remote },

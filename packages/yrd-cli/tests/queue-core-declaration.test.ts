@@ -5179,7 +5179,8 @@ describe("exact-tip origin retirement of a draft", () => {
       if (mode === "held" || mode === "held-later") expect(output.stderr()).toContain("fixture draft hold")
       if (mode === "unmerged") {
         expect(output.stderr()).toContain(`merging into fresh refs/heads/main@${main} changes main`)
-        expect(output.stderr()).toContain(`explicit unmerged abandonment with yrd drop ${branch} --reason <why>`)
+        expect(output.stderr()).toContain("keep this draft or explicitly abandon its unmerged work with a reason")
+        expect(output.stderr()).not.toContain(`yrd drop ${branch} --reason <why>`)
       }
       if (mode === "advanced") expect(output.stderr()).toContain(`expected ${base} at origin, found ${head}`)
       return
