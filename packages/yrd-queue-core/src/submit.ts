@@ -337,8 +337,12 @@ export type PublishedGitlink = Readonly<{
    * `published`: this submit wrote the ref. `retained`: it already named the pin (a retry, or a prior submit).
    */
   state: "published" | "retained"
-  /** Submit-time attached author; unavailable metadata never makes a pin publication fail. */
-  author?: Pick<ComponentAuthor, "branch" | "tip">
+  /**
+   * Submit-time author. A local branch carries `branch` and `tip`. A detached
+   * checkout carries the published commit's own author name and that commit.
+   * Unavailable metadata never makes a pin publication fail.
+   */
+  author?: Pick<ComponentAuthor, "branch" | "tip"> | Readonly<{ name: string; tip: string }>
   /** Named observation failure; the CLI renders it on its diagnostic stream. */
   authorUnavailable?: string
 }>
@@ -378,7 +382,15 @@ async function componentAuthor(
       !symbolic.timedOut &&
       symbolic.failure === undefined
     ) {
-      return unavailable("detached HEAD")
+      const shown = await process.run({ repo: pin.checkout, args: ["log", "-1", "--format=%an", pin.sha] })
+      if (shown.code !== 0 || shown.timedOut || shown.failure !== undefined) {
+        return unavailable(
+          `cannot read the published commit's author: exit ${shown.code}; ${shown.failure ?? shown.stderr}`,
+        )
+      }
+      const name = shown.stdout.trim()
+      if (name.length === 0) return unavailable("commit has no author")
+      return { author: { name, tip: pin.sha } }
     }
     if (symbolic.code !== 0 || symbolic.timedOut || symbolic.failure !== undefined) {
       return unavailable(`cannot read HEAD symref: exit ${symbolic.code}; ${symbolic.failure ?? symbolic.stderr}`)
@@ -1231,19 +1243,16 @@ async function submitEvent(
       throw new Error(`${request.branch}: its history read carried no remote tip for ${branchRef}`)
     }
     const branchAt = selected.branchTip
+    const componentAuthors = published.flatMap(({ path, author }) =>
+      author !== undefined && "branch" in author ? [{ path, branch: author.branch, tip: author.tip }] : [],
+    )
     const input = changeInput("opened", {
       queueTip: ops.queue.tip,
       base: inspected.targetHead,
       at: new Date(),
       commit: head,
       by: request.submitter,
-      ...(published.some(({ author }) => author !== undefined)
-        ? {
-            componentAuthors: published.flatMap(({ path, author }) =>
-              author === undefined ? [] : [{ path, ...author }],
-            ),
-          }
-        : {}),
+      ...(componentAuthors.length === 0 ? {} : { componentAuthors }),
       ...(inspected.issue === undefined ? {} : { issue: inspected.issue.issue }),
       title: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
     })
