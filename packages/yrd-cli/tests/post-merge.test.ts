@@ -250,6 +250,7 @@ it.each([
   { mode: "observed-legacy" },
   { mode: "provider-lost-reply" },
   { mode: "resolve-retry" },
+  { mode: "walk-retry" },
 ] as const)(
   "preserves the real merge queue while exercising post-merge $mode behavior",
   async ({ mode }) => {
@@ -261,6 +262,7 @@ it.each([
       mode === "concurrent" ||
       mode === "provider-lost-reply" ||
       mode === "resolve-retry" ||
+      mode === "walk-retry" ||
       mode === "observed-legacy"
     const expectedCloses = mode === "observed-stacked-merge" ? 4 : mode.startsWith("observed-") ? 3 : 2
     const root = world(),
@@ -624,6 +626,76 @@ it.each([
       expect(attempts[0]).toMatchObject({ status: "failed", timedOut: false })
       expect(attempts[0]!.signal).not.toBeNull()
       expect(existsSync(finished)).toBe(false)
+      return
+    }
+    if (mode === "walk-retry") {
+      // History and segment failures have no provider identity. A clean retry
+      // must clear both without hiding failures while their walks are incomplete.
+      const second = (await readBranchHistory(store, "main", "task/second")).history!
+      const fetchRefs = store.backend.fetchRefs
+      if (fetchRefs === undefined) throw new Error("fixture lacks existing fetch seam")
+      const faultStore = {
+        ...store,
+        backend: {
+          ...store.backend,
+          fetchRefs: async (...args: Parameters<typeof fetchRefs>) => {
+            if (args[1].includes(changesRef("main", "task/first"))) {
+              throw new Error("fixture transient history read failure")
+            }
+            return fetchRefs(...args)
+          },
+        },
+      }
+      const faultGit = new Proxy(git, {
+        apply: (target, _this, args: Parameters<typeof git>) => {
+          if (args[0][0] === "ls-tree" && args[0].includes(second.state.merge!)) {
+            throw new Error("fixture transient segment read failure")
+          }
+          return target(...args)
+        },
+      })
+      for (let retry = 0; retry < 2; retry++) {
+        await using runner = createPostMerge({
+          workdir,
+          cwd: repo,
+          git: retry === 0 ? faultGit : git,
+          store: retry === 0 ? faultStore : store,
+          cleanup: async () => {},
+          report: (message) => diagnostics.push(message),
+        })
+        runner.nudge({
+          ...context,
+          target: second.state.merge!,
+          merged: ["task/first", "task/second"],
+          projectRoot: repo,
+          queueBranch: "main",
+        })
+        await runner[Symbol.asyncDispose]()
+        if (retry === 0) {
+          expect(readPostMergeIssueDiagnostics(workdir)).toEqual([
+            expect.objectContaining({
+              branch: "task/first",
+              mergedEvent: "",
+              providerId: "",
+              diagnostic: expect.stringContaining("transient history read failure"),
+            }),
+            expect.objectContaining({
+              branch: "task/second",
+              mergedEvent: second.state.ending!.id,
+              providerId: "",
+              diagnostic: expect.stringContaining("transient segment read failure"),
+            }),
+          ])
+          expect(existsSync(closeCalls)).toBe(false)
+        }
+      }
+      expect(readPostMergeIssueDiagnostics(workdir)).toEqual([])
+      expect(
+        readFileSync(closeCalls, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => line.split("\t")[0]),
+      ).toEqual(["issue-first", "issue-second"])
       return
     }
     if (mode === "resolve-retry") {

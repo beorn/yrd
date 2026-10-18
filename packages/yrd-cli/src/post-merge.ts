@@ -131,7 +131,7 @@ export function readPostMergeIssueDiagnostics(
     for (const item of attempt.actions) {
       const identity = JSON.stringify([item.branch, item.mergedEvent, item.mergeSha, item.providerId])
       if (item.status === "skipped" || item.status === "fulfilled") {
-        if (item.status === "fulfilled") found.delete(identity)
+        found.delete(identity)
         continue
       }
       found.set(identity, {
@@ -389,12 +389,16 @@ async function closeMergedIssues(
               }
             }
           }
+          if (input.stop?.aborted) return { outcomes, queue: completed }
+          outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId: "", status: "fulfilled" })
         } catch (error) {
           const diagnostic = String(error)
           outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId: "", status: "failed", diagnostic })
           input.report(`${branch}@${mergeSha}: issue close failed: ${diagnostic}`)
         }
       }
+      if (input.stop?.aborted) return { outcomes, queue: completed }
+      outcomes.push({ branch, mergedEvent: "", mergeSha: "", providerId: "", status: "fulfilled" })
     } catch (error) {
       const diagnostic = String(error)
       outcomes.push({ branch, mergedEvent: "", mergeSha: "", providerId: "", status: "unavailable", diagnostic })
