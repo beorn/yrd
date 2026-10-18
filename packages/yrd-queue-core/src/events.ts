@@ -7,7 +7,7 @@ import { prepareRetirementArchive, retireOriginBranch } from "./origin-branch-re
 import { readCommitSubmodules, type CommitGitlink } from "git-super/commit-graph"
 import { listRefs, openEvents } from "./git.ts"
 import { publishWithTransientRetry } from "./transient-push.ts"
-import { readEventChain, readEventChains, type RecentEventReadOptions } from "./event-read.ts"
+import { readEventChain, readEventChains, readRetainedEvent, type RecentEventReadOptions } from "./event-read.ts"
 import type { AlsoRef, Appended, Decide, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
 import {
@@ -242,7 +242,8 @@ export type NoticeWrite = Readonly<{
 }>
 
 /**
- * A completed provider write, retained as neutral history on the branch's existing event chain.
+ * A completed provider write, retained as neutral history on an existing event chain.
+ * Queue facts share completion across branches; branch facts remain readable history.
  * mergeCommitterTime is syntax-checked here; the writer must bind it to the named merge commit.
  */
 export type AppliedIssueEffect = Readonly<{
@@ -1210,6 +1211,8 @@ type EventQueueProjection = Readonly<{
   ops?: OpsState
   pause?: Readonly<{ id: string; at: Date; reason: string; by: string; cause: "operator" | "maintenance" }>
   observed: Readonly<Record<string, Readonly<{ id: string; branch?: string }>>>
+  /** Completed provider actions shared by every branch replay in this queue. */
+  issueEffects: Readonly<Record<string, Readonly<{ id: string; effect: AppliedIssueEffect }>>>
   notices: Readonly<
     Record<string, Readonly<{ id: string; for: string; to: string; result: NoticeWrite["result"]; reason?: string }>>
   >
@@ -1320,13 +1323,38 @@ export async function readEventQueueWithChain(
 ): Promise<Readonly<{ queue: EventQueue; events: readonly Event[] }>> {
   const ref = queueRef(queue)
   const events = await readEventChain(await openEvents({ ...store, ref }))
-  return { queue: eventQueueFromHistory(store, queue, events), events }
+  return { queue: await eventQueueFromHistory(store, queue, events), events }
 }
 
 /** One projection and validation policy, independent of how its exact tip was acquired. */
-function eventQueueFromHistory(store: QueueReadStore, queue: string, events: readonly Event[]): EventQueue {
+async function eventQueueFromHistory(
+  store: QueueReadStore,
+  queue: string,
+  events: readonly Event[],
+): Promise<EventQueue> {
   const ref = queueRef(queue)
   const projected = projectEventQueue(events, ref, store.repo)
+  const positions = new Map(events.map((event, index) => [event.id, index]))
+  // The acquired queue ref retains these exact objects through extra parents.
+  // Decode only each immutable anchor; never discover or fetch other branch refs.
+  const anchors = await openEvents({ ...store, ref, remote: undefined })
+  const readAnchors = new Map<string, Event>()
+  for (const { id, effect } of Object.values(projected.issueEffects)) {
+    const anchor = readAnchors.get(effect.mergedEvent) ?? (await readRetainedEvent(anchors, effect.mergedEvent))
+    if (anchor.type !== "merged") {
+      throw new Error(`${ref}: issue effect ${id} does not retain an actual merged event ${effect.mergedEvent}`)
+    }
+    if (keptCommit(anchor) !== effect.mergeSha) {
+      throw new Error(`${ref}: issue effect ${id} mergeSha does not match merged event ${effect.mergedEvent}`)
+    }
+    const cause = prop(anchor, EVENT_TRAILERS.queue)
+    const causePosition = cause === undefined ? undefined : positions.get(cause)
+    const effectPosition = positions.get(id)
+    if (causePosition === undefined || effectPosition === undefined || causePosition >= effectPosition) {
+      throw new Error(`${ref}: issue effect ${id} merged event ${effect.mergedEvent} has no earlier queue cause`)
+    }
+    readAnchors.set(anchor.id, anchor)
+  }
   const result: EventQueue = {
     ...projected,
     [validatedQueue]: true,
@@ -1386,7 +1414,7 @@ export async function readEventOpsWithRefs(
     projected =
       knownQueue?.tip === tip
         ? knownQueue
-        : eventQueueFromHistory(store, queue, await readEventChain(await openEvents({ ...store, ref }), tip))
+        : await eventQueueFromHistory(store, queue, await readEventChain(await openEvents({ ...store, ref }), tip))
   } else if (knownQueue !== undefined && store.remote === undefined) {
     const chain = await openEvents({ ...store, ref: queueRef(queue) })
     projected = (await chain.head()) === knownQueue.tip ? knownQueue : await readEventQueue(store, queue)
@@ -1794,6 +1822,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   let ops: OpsState | undefined
   let notifyFloors: EventQueueProjection["notifyFloors"]
   const observed: Record<string, { id: string; branch?: string }> = {}
+  const issueEffects: Record<string, { id: string; effect: AppliedIssueEffect }> = {}
   const notices: Record<
     string,
     { id: string; for: string; to: string; result: NoticeWrite["result"]; reason?: string }
@@ -1815,6 +1844,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
       throw new Error(`${ref}: event ${event.id} (${event.type}) needs Time: as an ISO instant`)
     }
     if (event.props.some(([key]) => key === "Status")) throw new Error(`${ref}: event ${event.id} stores Status:`)
+    const issueEffect = readIssueEffect(event)
     switch (event.type) {
       case "created":
         if (index !== 0) throw new Error(`${ref}: event ${event.id} declares a second queue`)
@@ -1987,6 +2017,16 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
         if (event.writer !== QUEUE_RUN_WRITER) {
           throw new Error(`${ref}: notified event ${event.id} needs writer ${QUEUE_RUN_WRITER}`)
         }
+        if (issueEffect !== undefined) {
+          if (event.links.length !== 1 || event.links[0] !== issueEffect.mergedEvent) {
+            throw new Error(`${ref}: issue effect ${event.id} must keep its merged event ${issueEffect.mergedEvent}`)
+          }
+          if (issueEffects[issueEffect.providerId] !== undefined) {
+            throw new Error(`${ref}: duplicate issue effect ${issueEffect.providerId}`)
+          }
+          issueEffects[issueEffect.providerId] = { id: event.id, effect: issueEffect }
+          break
+        }
         const forEvent = requiredProp(event, EVENT_TRAILERS.for)
         const to = requiredProp(event, EVENT_TRAILERS.to)
         const key = requiredProp(event, EVENT_TRAILERS.key)
@@ -2022,6 +2062,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
     declaration,
     tip: previous,
     observed,
+    issueEffects,
     notices,
     ...(pause === undefined ? {} : { pause }),
     ...(opsCutover === undefined ? {} : { opsCutover }),

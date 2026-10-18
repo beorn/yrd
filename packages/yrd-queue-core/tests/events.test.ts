@@ -3197,6 +3197,80 @@ describe("the queue-format boundary", () => {
     expect(events[1]?.links).toEqual([commit])
   })
 
+  // A queue completion must be readable from any branch replay without walking other
+  // branches. These cases exercise the retained immutable anchor, not a new writer.
+  it.each(["valid", "unkept", "wrong merge", "not merged", "foreign queue", "wrong writer", "duplicate"])(
+    "reads retained issue effects on the queue chain: %s",
+    async (variant) => {
+      const { store, location } = remoteMemStore(`yrd-queue-issue-effect-${variant}`)
+      const target = await open({ ...store, ref: "refs/heads/lab" })
+      const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+      const at = new Date("2026-09-22T14:00:00.000Z")
+      const queueTip = await seedEventQueue(location, "lab", commit, at)
+      const branch = await openEvents({ ...store, ref: changesRef("lab", "task/retained"), writer: QUEUE_RUN_WRITER })
+      const opened = await branch.append([changeInput("opened", { queueTip, at, commit, by: "author" })], {
+        expect: null,
+      })
+      const merged = await branch.append(
+        [changeInput("merged", { queueTip: variant === "foreign queue" ? B : queueTip, at, commit })],
+        { expect: opened.head },
+      )
+      const anchor = variant === "not merged" ? opened.head : merged.head
+      if (anchor === null) throw new Error("fixture lacks its retained event")
+      const mergeSha = variant === "wrong merge" ? A : commit
+      const effect = {
+        ...ISSUE_EFFECT,
+        mergedEvent: anchor,
+        mergeSha,
+        providerId: `yrd1-${createHash("sha256")
+          .update(JSON.stringify([mergeSha, "close", "completed", ISSUE_EFFECT.issueKey]))
+          .digest("hex")}`,
+      }
+      const queue = await openEvents({
+        ...store,
+        ref: queueRef("lab"),
+        writer: variant === "wrong writer" ? "intruder" : QUEUE_RUN_WRITER,
+      })
+      const input: EventInput = {
+        type: "notified",
+        props: [
+          ["Queue", queueTip],
+          ["Time", at.toISOString()],
+          ["Issue-Effect", JSON.stringify(effect)],
+        ],
+        keeps: variant === "unkept" ? [] : [anchor],
+      }
+      const written = await queue.append([input], { expect: queueTip })
+      if (variant === "duplicate") {
+        await queue.append(
+          [
+            {
+              ...input,
+              props: input.props?.map(([key, value]) => [key, key === "Queue" ? (written.head as string) : value]),
+            },
+          ],
+          { expect: written.head },
+        )
+      }
+      if (variant !== "valid") {
+        const failures: Record<string, RegExp> = {
+          unkept: /keep.*merged event/u,
+          "wrong merge": /mergeSha.*merged event/u,
+          "not merged": /actual merged event/u,
+          "foreign queue": /queue cause/u,
+          "wrong writer": /writer yrd-run/u,
+          duplicate: /duplicate issue effect/u,
+        }
+        await expect(readEventQueue(location, "lab")).rejects.toThrow(failures[variant])
+        return
+      }
+      const reading = await readEventQueue(location, "lab")
+      expect(reading.issueEffects[effect.providerId]).toEqual({ id: written.head, effect })
+      expect(reading.notices).toEqual({})
+      expect((await queue.events()).map((event) => event.type)).toEqual(["created", "notified"])
+    },
+  )
+
   const GITHUB_5XX = [
     "remote: Internal Server Error",
     "fatal: unable to access 'https://github.com/beorn/hh.git/': The requested URL returned error: 500",
