@@ -83,19 +83,21 @@ describe("expiredRoundOutput (selection, by name only)", () => {
     const newRound = place(join(logs, round(ago(1))))
     const oldCheck = place(join(logs, "check", round(ago(9))))
     const oldEnv = place(join(logs, "environments", "fixer-28499", round(ago(10))))
-    // An environment NAMED with a round stamp (`<commit12>-q-…`) is itself the round; its child is not a second one.
+    // An old `<commit12>-q-…` parent that still holds a round inside the window is named, not removed.
     const namedParent = join(logs, "environments", `abc123def456-${round(ago(20))}`)
     const namedEnv = place(join(namedParent, round(ago(1))))
     const oldChecksFlat = place(join(checks, "fixer", round(ago(8))))
     const oldChecksDeep = place(join(checks, "dev", "8", "26673-thing@20eb", round(ago(8))))
 
-    const found = expiredRoundOutput({ roots: [logs, checks], now: NOW }).entries
-    const paths = found.map((entry) => entry.path).sort()
-    expect(paths).toEqual([oldRound, oldCheck, oldEnv, namedParent, oldChecksFlat, oldChecksDeep].sort())
+    const scan = expiredRoundOutput({ roots: [logs, checks], now: NOW })
+    const paths = scan.entries.map((entry) => entry.path).sort()
+    expect(paths).toEqual([oldRound, oldCheck, oldEnv, oldChecksFlat, oldChecksDeep].sort())
     expect(paths).not.toContain(newRound)
+    expect(paths).not.toContain(namedParent)
     expect(paths).not.toContain(namedEnv)
+    expect(scan.withheld).toEqual([namedParent])
     // Containment is per-root: every selection names the root removely must be given.
-    for (const entry of found) expect(entry.within === logs || entry.within === checks).toBe(true)
+    for (const entry of scan.entries) expect(entry.within === logs || entry.within === checks).toBe(true)
   })
 
   /**
@@ -111,13 +113,26 @@ describe("expiredRoundOutput (selection, by name only)", () => {
     expect(found[0]?.started.toISOString()).toBe(ago(12).toISOString())
   })
 
+  it("selects an old stamped environment once every round inside it is past the window", () => {
+    const { logs } = tree("env-old-children")
+    const parent = join(logs, "environments", `0010d72a646a-${round(ago(20))}`)
+    const child = place(join(parent, round(ago(12))))
+    const scan = expiredRoundOutput({ roots: [logs], now: NOW })
+    expect(scan.entries.map((entry) => entry.path)).toEqual([parent])
+    expect(scan.entries.map((entry) => entry.path)).not.toContain(child)
+    expect(scan.withheld).toEqual([])
+  })
+
   it("names a directory whose q- stamp cannot be read and does not select it", () => {
     const { logs } = tree("unreadable")
-    const broken = join(logs, "environments", "broken-q-2026not-a-stamp")
+    const broken = join(logs, "environments", "0010d72a646a-q-2026not-a-stamp")
     place(broken, "setup.log")
+    const bay = join(logs, "environments", "topic-q-1-not-a-stamp")
+    const oldChild = place(join(bay, round(ago(12))))
     const scan = expiredRoundOutput({ roots: [logs], now: NOW })
-    expect(scan.entries).toEqual([])
+    expect(scan.entries.map((entry) => entry.path)).toEqual([oldChild])
     expect(scan.unreadable).toEqual([broken])
+    expect(scan.withheld).toEqual([])
   })
 
   it("never selects the journals it sits beside, nor a plain file named like a round", () => {

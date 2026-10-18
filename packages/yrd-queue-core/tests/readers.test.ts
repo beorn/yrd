@@ -1512,9 +1512,7 @@ describe("a run's journal, read back", () => {
 
   it("reads a run's start instant out of its own id, so a month of journals costs one readdir", () => {
     expect(runStartedAt("q-20260903T200000000Z-deadbeef")?.toISOString()).toBe("2026-09-03T20:00:00.000Z")
-    expect(runStartedAt("0010d72a646a-q-20260903T200000000Z-deadbeef")?.toISOString()).toBe("2026-09-03T20:00:00.000Z")
     expect(runStartedAt("not-one-of-ours.jsonl")).toBeUndefined()
-    expect(runStartedAt("broken-q-not-a-stamp")).toBeUndefined()
   })
 })
 

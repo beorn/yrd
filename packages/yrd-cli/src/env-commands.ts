@@ -35,6 +35,7 @@ import {
   resolveGitSelection,
   retirePreviewSubject,
   runId,
+  runStartedAt,
   runSetup,
   SetupFailed,
   worktreeWithoutSubmodules,
@@ -409,6 +410,29 @@ async function recordOpenedLifetime(
 }
 
 /**
+ * A detached environment's log directory, minted below as `<commit12>-<runId>`.
+ * The parser is the same shape: 12 hex, a hyphen, then a run id. `runStartedAt`
+ * stays the run-id parser; this only peels the commit prefix off.
+ */
+export function detachedEnvironmentDirectoryName(commit: string, run: string): string {
+  return `${commit.slice(0, 12)}-${run}`
+}
+
+const DETACHED_ENVIRONMENT_DIRECTORY = /^[0-9a-f]{12}-(q-.*)$/u
+
+/** When a detached environment directory was minted, or undefined when `name` is not that shape. */
+export function environmentDirectoryStartedAt(name: string): Date | undefined {
+  const run = DETACHED_ENVIRONMENT_DIRECTORY.exec(name)?.[1]
+  if (run === undefined) return undefined
+  return runStartedAt(run)
+}
+
+/** `<12 hex>-q-…` whose run id does not parse. A bay that merely contains `q-` does not claim this shape. */
+export function environmentStampUnreadable(name: string): boolean {
+  return /^[0-9a-f]{12}-q-/u.test(name) && environmentDirectoryStartedAt(name) === undefined
+}
+
+/**
  * `yrd env open` — open an environment for one branch and keep it. Prints its
  * path on stdout, which is what a caller `cd`s into.
  */
@@ -449,7 +473,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     (options.issue === undefined
       ? undefined
       : await implicitIssueName(gitIn(root, undefined, selection), options.issue)) ??
-    (commit === undefined ? `env-${Date.now().toString(36)}` : `${commit.slice(0, 12)}-${runId()}`)
+    (commit === undefined ? `env-${Date.now().toString(36)}` : detachedEnvironmentDirectoryName(commit, runId()))
   ).trim()
   if (name === "") throw new Error("yrd: --bay needs a name")
   const branch = commit === undefined ? `task/${name}` : undefined

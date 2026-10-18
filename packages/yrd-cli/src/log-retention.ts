@@ -1,6 +1,7 @@
 import { appendFileSync, readdirSync, renameSync, statSync } from "node:fs"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import { runStartedAt } from "@yrd/queue-core"
+import { environmentDirectoryStartedAt, environmentStampUnreadable } from "./env-commands.ts"
 import { safeRemove } from "removely"
 
 /**
@@ -69,6 +70,11 @@ export type RetentionScan = Readonly<{
   missing: readonly string[]
   /** Directories whose names did not yield a start instant, so they were not selected and not descended into. */
   unreadable: readonly string[]
+  /**
+   * Stamped environment directories past the window that still hold a round inside it.
+   * Named and not removed; the younger round stays.
+   */
+  withheld: readonly string[]
 }>
 
 /** One round-output directory a sweep could not remove, with the error it raised. */
@@ -104,6 +110,7 @@ export type RetentionDrain = RetentionResult &
     selected: readonly ExpiredRoundOutput[]
     planned: readonly ExpiredRoundOutput[]
     unreadable: readonly string[]
+    withheld: readonly string[]
   }>
 
 function rootOf(root: RetentionRoot): Readonly<{ path: string; optional: boolean }> {
@@ -124,6 +131,7 @@ export function expiredRoundOutput(
   const found: ExpiredRoundOutput[] = []
   const missing: string[] = []
   const unreadable: string[] = []
+  const withheld: string[] = []
   for (const root of input.roots) {
     const { path: within, optional } = rootOf(root)
     const stack: { directory: string; depth: number }[] = [{ directory: within, depth: 0 }]
@@ -152,15 +160,26 @@ export function expiredRoundOutput(
         // A symlink is neither followed nor removed: only a real directory may be a target.
         if (!entry.isDirectory()) continue
         const path = join(current.directory, entry.name)
+        if (basename(current.directory) === "environments") {
+          const envStarted = environmentDirectoryStartedAt(entry.name)
+          if (envStarted !== undefined) {
+            const holdsYoungRound = roundInstants(path).some((started) => started.getTime() > cutoff)
+            if (holdsYoungRound) {
+              if (envStarted.getTime() <= cutoff) withheld.push(path)
+              if (current.depth < MAX_WALK_DEPTH) stack.push({ directory: path, depth: current.depth + 1 })
+              continue
+            }
+            if (envStarted.getTime() <= cutoff) found.push({ path, name: entry.name, within, started: envStarted })
+            continue
+          }
+          if (environmentStampUnreadable(entry.name)) {
+            unreadable.push(path)
+            continue
+          }
+        }
         const started = runStartedAt(entry.name)
         if (started !== undefined) {
           if (started.getTime() <= cutoff) found.push({ path, name: entry.name, within, started })
-          continue
-        }
-        // A name that claims a run stamp (`q-` then a digit) but does not parse is named and not descended into.
-        // A plain container (`environments`, a bay, a check topic) has no stamp and is descended.
-        if (/(?:^|-)q-\d/u.test(entry.name)) {
-          unreadable.push(path)
           continue
         }
         if (current.depth < MAX_WALK_DEPTH) stack.push({ directory: path, depth: current.depth + 1 })
@@ -169,7 +188,26 @@ export function expiredRoundOutput(
   }
   found.sort((left, right) => left.started.getTime() - right.started.getTime() || left.name.localeCompare(right.name))
   unreadable.sort((left, right) => left.localeCompare(right))
-  return { entries: found, missing, unreadable }
+  withheld.sort((left, right) => left.localeCompare(right))
+  return { entries: found, missing, unreadable, withheld }
+}
+
+/** Start instants of round directories directly inside `directory`. Names only; a vanished directory has none. */
+function roundInstants(directory: string): Date[] {
+  let entries
+  try {
+    entries = readdirSync(directory, { withFileTypes: true })
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw new Error(`log retention cannot read ${directory}: ${String(cause)}`, { cause })
+  }
+  const instants: Date[] = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const started = runStartedAt(entry.name)
+    if (started !== undefined) instants.push(started)
+  }
+  return instants
 }
 
 /** Remove a chosen list of round-output directories, oldest first, at most `limit` of them, through removely. */
@@ -275,6 +313,7 @@ export async function pruneRoundOutput(
     remaining: selected.filter((entry) => !removedPaths.has(entry.path)),
     missing: scan.missing,
     unreadable: scan.unreadable,
+    withheld: scan.withheld,
   }
 }
 
@@ -319,6 +358,7 @@ export function retentionHumanLines(
     dryRun: boolean
     listed: readonly ExpiredRoundOutput[]
     unreadable?: readonly string[]
+    withheld?: readonly string[]
   }>,
 ): string[] {
   const days = Math.round(result.windowMs / (24 * 60 * 60 * 1000))
@@ -335,6 +375,9 @@ export function retentionHumanLines(
     ...((input.unreadable?.length ?? 0) === 0
       ? []
       : [`yrd: log retention: start time unreadable, named and not removed: ${input.unreadable?.join(", ")}`]),
+    ...((input.withheld?.length ?? 0) === 0
+      ? []
+      : [`yrd: log retention: holds a round inside the window, named and not removed: ${input.withheld?.join(", ")}`]),
     ...input.listed.map((entry) => entry.path),
   ]
 }
