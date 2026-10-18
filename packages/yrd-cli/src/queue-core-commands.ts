@@ -1955,8 +1955,8 @@ export async function coreQueueCommand(
               !local && (result.outcome === "removed" || result.outcome === "eligible")
                 ? disposition.kind
                 : result.reason,
-            detail: result.detail,
-            archiveRef: result.archiveRef,
+            ...(result.detail === undefined ? {} : { detail: result.detail }),
+            ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
             ...(result.outcome === "removed" && disposition.kind === "closed"
               ? {
                   recovery: `git -C ${authorRepo} fetch ${eventStore.remote} ${result.archiveRef}:refs/heads/${branch}`,

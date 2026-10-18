@@ -2484,8 +2484,37 @@ describe("a queue is the selected origin branch carrying config", () => {
       (await listChanges(createEventStore(repo, "origin", git.selection), "main")).has("task/28791-local-only"),
     ).toBe(false)
     // Manual cleanup is exact-branch/exact-tip, and does not expand to the issue's other refs.
-    const manual = capture(repo)
     const manualHead = saved.get("task/manual-only")!
+    // 29948: A held row that never wrote an archive ref must omit archiveRef and state that it did not archive.
+    const heldManual = capture(repo)
+    heldManual.io.localBranchProtections = async () => ({
+      protections: [`declared cwd for @dev/5 in /hh/hh.hab.tsx: ${repo}`],
+      evidence: [],
+    })
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "drop", "task/manual-only", "--local", "--tip", manualHead, "--submitter", "fixture", "--json"],
+        heldManual.io,
+      ),
+      heldManual.stderr(),
+    ).toBe(0)
+    const heldManualReport = JSON.parse(heldManual.stdout()) as {
+      removed: unknown[]
+      kept: { branch: string; head: string; reason: string; detail?: string; archiveRef?: string }[]
+    }
+    expect(heldManualReport.removed).toEqual([])
+    expect(heldManualReport.kept).toEqual([
+      expect.objectContaining({
+        branch: "task/manual-only",
+        head: manualHead,
+        reason: "held",
+        detail: `declared cwd for @dev/5 in /hh/hh.hab.tsx: ${repo}; not archived`,
+      }),
+    ])
+    expect(heldManualReport.kept[0]).not.toHaveProperty("archiveRef")
+    expect((await git(["for-each-ref", "refs/archive/*/*/task/manual-only"])).trim()).toBe("")
+
+    const manual = capture(repo)
     expect(
       await runYrdProcess(
         ["bun", "yrd", "drop", "task/manual-only", "--local", "--tip", manualHead, "--submitter", "fixture", "--json"],
@@ -4252,6 +4281,7 @@ describe("component-local retirement without a component queue", () => {
     "origin-publication-refused",
     "merged",
     "unmerged",
+    "unmerged-held",
     "held",
     "checked-out",
     "publication-refused",
@@ -4265,6 +4295,7 @@ describe("component-local retirement without a component queue", () => {
     "standalone",
     "missing-protections-reader",
     "archive-collision",
+    "local-archive-collision",
     "malformed-declaration",
     "unreadable-declaration",
   ] as const)("retires exact %s component work through the declared root's existing log", async (mode) => {
@@ -4300,8 +4331,10 @@ describe("component-local retirement without a component queue", () => {
     const baseTip = (await git(["rev-parse", "HEAD"])).trim()
     if (
       mode === "unmerged" ||
+      mode === "unmerged-held" ||
       mode === "advanced" ||
       mode === "archive-collision" ||
+      mode === "local-archive-collision" ||
       mode === "publication-refused" ||
       mode === "archive-readback-lost" ||
       mode === "prior-day-archive" ||
@@ -4347,6 +4380,7 @@ describe("component-local retirement without a component queue", () => {
       await git(["push", "--quiet", "origin", tip + ":" + priorRef])
     }
     if (mode === "archive-collision") await git(["push", "--quiet", "origin", baseTip + ":" + collisionRef])
+    if (mode === "local-archive-collision") await git(["update-ref", collisionRef, baseTip])
     if (mode === "checked-out") await git(["checkout", "--quiet", branch])
     if (mode === "publication-refused" || mode === "origin-publication-refused" || mode === "archive-readback-lost") {
       const hook = join(
@@ -4401,7 +4435,11 @@ describe("component-local retirement without a component queue", () => {
         await git(["push", "--quiet", "origin", `${next}:refs/heads/main`])
       }
       if (mode === "protection-error") throw new Error("host protection authority unavailable")
-      return { protections: mode === "held" || mode === "origin-held" ? ["fixture owner hold"] : [], evidence: [] }
+      return {
+        protections:
+          mode === "held" || mode === "unmerged-held" || mode === "origin-held" ? ["fixture owner hold"] : [],
+        evidence: [],
+      }
     }
     if (mode === "standalone") run.io.localBranchProtections = null
     let io = run.io
@@ -4443,6 +4481,7 @@ describe("component-local retirement without a component queue", () => {
       mode === "protection-error" ||
       mode === "missing-protections-reader" ||
       mode === "archive-collision" ||
+      mode === "local-archive-collision" ||
       mode === "publication-refused" ||
       mode === "archive-readback-lost" ||
       mode === "malformed-declaration" ||
@@ -4473,6 +4512,10 @@ describe("component-local retirement without a component queue", () => {
       }
       if (mode === "archive-collision") {
         expect((await git(["ls-remote", "origin", collisionRef])).split("\t")[0]).toBe(baseTip)
+      }
+      if (mode === "local-archive-collision") {
+        const failedReport = JSON.parse(run.stdout()) as { failed: { branch: string; archiveRef?: string }[] }
+        expect(failedReport.failed[0]).not.toHaveProperty("archiveRef")
       }
       if (mode === "publication-refused" || mode === "origin-publication-refused") {
         expect(run.stdout() + run.stderr()).toContain("fixture refuses archive publication")
@@ -4569,13 +4612,16 @@ describe("component-local retirement without a component queue", () => {
     if (!failure) {
       const report = JSON.parse(run.stdout()) as {
         removed: { branch: string; head: string; archiveRef: string }[]
-        kept: { branch: string }[]
+        kept: { branch: string; detail?: string; archiveRef?: string }[]
         failed: unknown[]
       }
       expect(report.failed).toEqual([])
-      if (mode === "held" || mode === "advanced" || mode === "checked-out") {
+      if (mode === "held" || mode === "unmerged-held" || mode === "advanced" || mode === "checked-out") {
         expect(report.removed).toEqual([])
-        expect(report.kept).toEqual([expect.objectContaining({ branch, head: actualTip })])
+        expect(report.kept).toEqual([
+          expect.objectContaining({ branch, head: actualTip, detail: expect.stringContaining("; not archived") }),
+        ])
+        expect(report.kept[0]).not.toHaveProperty("archiveRef")
         expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(actualTip)
       } else {
         expect(report.removed).toEqual([expect.objectContaining({ branch, head: tip })])
@@ -4601,15 +4647,33 @@ describe("component-local retirement without a component queue", () => {
           .trim()
           .split("\n")
           .filter(Boolean)
-          .map((line) => JSON.parse(line) as { kind?: string; repo?: string; branch?: string; head?: string }),
+          .map(
+            (line) =>
+              JSON.parse(line) as {
+                kind?: string
+                repo?: string
+                branch?: string
+                head?: string
+                outcome?: string
+                archive?: string
+              },
+          ),
       )
     expect(records).toContainEqual(
       expect.objectContaining({ kind: "local-branch-retirement", repo: child, branch, head: tip }),
     )
     if (failure) {
-      expect(records).toContainEqual(
-        expect.objectContaining({ kind: "local-branch-retirement", repo: child, branch, outcome: "failed" }),
+      const failedRecord = records.find(
+        (record) =>
+          record.kind === "local-branch-retirement" &&
+          record.repo === child &&
+          record.branch === branch &&
+          record.outcome === "failed",
       )
+      expect(failedRecord).toBeDefined()
+      if (mode === "local-archive-collision" || mode === "protection-error" || mode === "missing-protections-reader") {
+        expect(failedRecord).not.toHaveProperty("archive")
+      }
     }
   })
 })
@@ -5274,7 +5338,14 @@ describe("drop --local --release-checkout", () => {
           }
         } else {
           expect(report.removed).toEqual([])
-          expect(report.kept).toContainEqual(expect.objectContaining({ repo: fixture.repo, reason: "held" }))
+          expect(report.kept).toContainEqual(
+            expect.objectContaining({
+              repo: fixture.repo,
+              reason: "held",
+              detail: expect.stringContaining("; not archived"),
+            }),
+          )
+          for (const row of report.kept) expect(row).not.toHaveProperty("archiveRef")
           for (const repo of [fixture.repo, fixture.child!]) {
             expect((await gitIn(repo)(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
             expect(await gitIn(repo)(["for-each-ref", "refs/archive/"])).toBe("")
@@ -5346,7 +5417,16 @@ describe("drop --local --release-checkout", () => {
         expect(report.removed).toEqual([])
         expect(failed ? report.failed : report.kept).toHaveLength(1)
         expect(failed ? report.kept : report.failed).toEqual([])
-        expect((failed ? report.failed : report.kept)[0]?.detail).toMatch(
+        const outcomeRow = (failed ? report.failed : report.kept)[0]
+        const beforeArchive =
+          kind === "moved" || kind === "cwd" || kind === "delegation" || kind === "host" || kind === "preview host"
+        if (beforeArchive) {
+          expect(outcomeRow).not.toHaveProperty("archiveRef")
+          if (!failed) expect(outcomeRow?.detail).toContain("; not archived")
+        } else {
+          expect(outcomeRow?.archiveRef).toMatch(/^refs\/archive\//u)
+        }
+        expect(outcomeRow?.detail).toMatch(
           kind === "moved"
             ? /tip|moved/
             : kind === "cwd"
