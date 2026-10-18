@@ -33,7 +33,7 @@ import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
 import { readIssueDisplay } from "./issue-resolver.ts"
 import { formatYrdCommand } from "./command-format.ts"
-import { createPostMerge } from "./post-merge.ts"
+import { createPostMerge, readPostMergeIssueDiagnostics } from "./post-merge.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup, type ClosedEnvironment } from "./env-cleanup.ts"
 import { environmentInventory } from "./env-commands.ts"
@@ -1219,6 +1219,8 @@ export async function coreQueueCommand(
           cwd: repo,
           env,
           stop: postMergeSignal,
+          git,
+          store: eventStore,
           report: (message) => io.stderr("yrd: " + message + "\n"),
           cleanup: async (context: {
             code: string
@@ -1230,6 +1232,8 @@ export async function coreQueueCommand(
             merged: readonly string[]
             update?: readonly string[]
             updateDue?: boolean
+            projectRoot?: string
+            queueBranch: string
             cleanup: (merged: readonly string[]) => Promise<void>
           }) => context.cleanup(context.merged),
         })
@@ -1567,6 +1571,8 @@ export async function coreQueueCommand(
             merged: outcome.merged,
             update: declared.config.issuesProvider?.update,
             updateDue: outcome.merged.length > 0 || startupCatchup,
+            ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
+            queueBranch: config.target.branch,
             cleanup,
           })
         }
@@ -3784,6 +3790,8 @@ export async function coreQueueCommand(
                 base: declared.oid,
                 merged,
                 update: declared.config.issuesProvider?.update,
+                ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
+                queueBranch: declared.config.target.branch,
                 cleanup: async (merged) => {
                   try {
                     await cleanupAfterRound(
@@ -6780,12 +6788,15 @@ export async function readEventListing(
     !undatedDraftsFetched &&
     !draftWindowChanged
   ) {
-    return {
-      ...cache.reading,
-      ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
-      observation: await observe(cache.queueRefs, cache.branchRefs),
-      journals: await journalsFor(cache.reading.history, cache.reading.all),
-    }
+    return withPostMergeIssueDiagnostics(
+      {
+        ...cache.reading,
+        ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
+        observation: await observe(cache.queueRefs, cache.branchRefs),
+        journals: await journalsFor(cache.reading.history, cache.reading.all),
+      },
+      workdir,
+    )
   }
 
   // 3. Head listing: runs at most once a minute, or when event-ref fetch reports a change
@@ -6816,12 +6827,15 @@ export async function readEventListing(
     !draftWindowChanged
   ) {
     cache.lastHeadListingAt = headListingAt
-    return {
-      ...cache.reading,
-      ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
-      observation: await observe(cache.queueRefs, branchRefs),
-      journals: await journalsFor(cache.reading.history, cache.reading.all),
-    }
+    return withPostMergeIssueDiagnostics(
+      {
+        ...cache.reading,
+        ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
+        observation: await observe(cache.queueRefs, branchRefs),
+        journals: await journalsFor(cache.reading.history, cache.reading.all),
+      },
+      workdir,
+    )
   }
 
   // 4. Full read
@@ -7106,7 +7120,54 @@ export async function readEventListing(
     draftWindow,
   })
 
-  return reading
+  return withPostMergeIssueDiagnostics(reading, workdir)
+}
+
+function withPostMergeIssueDiagnostics<Run extends JournalSummary>(
+  reading: EventListingResult<Run>,
+  workdir: string,
+): EventListingResult<Run> {
+  const failures = readPostMergeIssueDiagnostics(workdir)
+  if (failures.length === 0) return reading
+  const byBranch = new Map<string, typeof failures>()
+  for (const failure of failures) byBranch.set(failure.branch, [...(byBranch.get(failure.branch) ?? []), failure])
+  const history = new Map(
+    [...reading.history].map(([branch, entries]) => {
+      const branchFailures = byBranch.get(branch) ?? []
+      return [
+        branch,
+        entries.map(({ row, events }) => {
+          const matched = branchFailures.filter(
+            (failure) => row.merge === failure.mergeSha && events.some((event) => event.id === failure.mergedEvent),
+          )
+          if (matched.length === 0) return { row, events }
+          const added = matched.map(
+            (failure) =>
+              `issuesProvider close failed for merged event ${failure.mergedEvent} at ${failure.mergeSha} (${failure.providerId}): ${failure.diagnostic}`,
+          )
+          return { row: { ...row, diagnostic: [row.diagnostic, ...added].filter(Boolean).join("; ") }, events }
+        }),
+      ] as const
+    }),
+  )
+  const decorate = (rows: readonly Row[]): readonly Row[] =>
+    rows.map((row) => {
+      const matched = (byBranch.get(row.branch) ?? []).filter((failure) =>
+        history
+          .get(row.branch)
+          ?.some(
+            (entry) =>
+              entry.row.merge === failure.mergeSha && entry.events.some((event) => event.id === failure.mergedEvent),
+          ),
+      )
+      if (matched.length === 0) return row
+      const added = matched.map(
+        (failure) =>
+          `issuesProvider close failed for historical merged event ${failure.mergedEvent} at ${failure.mergeSha} (${failure.providerId}): ${failure.diagnostic}`,
+      )
+      return { ...row, diagnostic: [row.diagnostic, ...added].filter(Boolean).join("; ") }
+    })
+  return { ...reading, history, all: decorate(reading.all), document: decorate(reading.document) }
 }
 
 /** A history read and its final observation must name the same event tips. */
