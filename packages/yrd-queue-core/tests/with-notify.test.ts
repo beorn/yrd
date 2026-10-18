@@ -1,3 +1,8 @@
+/**
+ * @reach fs-walk <fixture-only: counts setup stamp directories under its own fixture workdir>
+ * Notify dispatch: several notices over one prepared worktree, per-notice
+ * results, and the ending messages a notifier is handed.
+ */
 import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
