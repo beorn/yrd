@@ -711,6 +711,88 @@ describe("yrd queue up, the service", () => {
   }, 120_000)
 
   /**
+   * @failure A service start mints one housekeeping journal per merged round, and cleanup appends rows to a round journal whose final row was already written.
+   * @level l2
+   * @consumer the queue service operator reading logs/post-merge
+   * @testonly none
+   */
+  it("keeps one housekeeping journal for the whole service start and never appends to a finished round journal (30105)", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await redeclare(w, "setup: ':'\n")
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const branches = ["task/30105-first", "task/30105-second"]
+    for (const [index, branch] of branches.entries()) {
+      await w.git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(w.work, `work-${index}.txt`), `${branch}\n`)
+      await w.git(["add", `work-${index}.txt`])
+      await w.git(["commit", "--quiet", "-m", `${branch} work`])
+      await w.git(["checkout", "--quiet", "main"])
+      await submit(w.git, "origin", { branch, submitter: "fixture", target: { remote: "origin", branch: "main" } })
+    }
+    const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue({
+      complete: true,
+      unreadable: [],
+      mechanism: "proc",
+      rows: [],
+    })
+    try {
+      const stop = new AbortController()
+      const roundRuns: string[] = []
+      const finished = new Map<string, readonly Record<string, unknown>[]>()
+      const io = capture(w.work)
+      io.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
+      io.io.liveEnvironmentUse = async () => []
+      expect(
+        await coreQueueCommand(
+          w.work,
+          io.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async (outcome) => {
+              // Every journal a previous round finished is still exactly what it
+              // was: cleanup may never append after a round's own final row.
+              for (const [run, rows] of finished) {
+                expect(
+                  readRunLog(join(workdir, "logs"), run),
+                  `round journal ${run} unchanged by later cleanup`,
+                ).toEqual(rows)
+              }
+              if (outcome.merged.length === 0) return
+              roundRuns.push(outcome.run)
+              finished.set(outcome.run, readRunLog(join(workdir, "logs"), outcome.run))
+              await waitForEnvironmentCleanup(workdir, outcome.run)
+              if (roundRuns.length === branches.length) stop.abort()
+            },
+          },
+          { json: true, workdir },
+        ),
+        io.stderr(),
+      ).toBe(0)
+      expect(roundRuns).toHaveLength(branches.length)
+      const housekeeping = readdirSync(join(workdir, "logs", "post-merge")).filter((name) => name.endsWith(".jsonl"))
+      expect(housekeeping, "one housekeeping journal for the whole service start").toHaveLength(1)
+      const rows = readRunLog(join(workdir, "logs", "post-merge"), housekeeping[0]!.slice(0, -".jsonl".length))
+      for (const run of roundRuns) {
+        expect(rows, `housekeeping journal carries the cleanup run row for ${run}`).toContainEqual(
+          expect.objectContaining({ kind: "run", command: "post-merge cleanup", queueRun: run }),
+        )
+        expect(
+          rows.some((row) => row.run === run && row.scope === "environment-cleanup"),
+          `cleanup rows keep the queue run ${run}`,
+        ).toBe(true)
+        expect(readRunLog(join(workdir, "logs"), run), `round journal ${run} ends as its own final row`).toEqual(
+          finished.get(run),
+        )
+      }
+    } finally {
+      census.mockRestore()
+    }
+  }, 120_000)
+
+  /**
    * @failure An external declared use has no process cwd holder between
    *          commands, so automatic cleanup destroys its environment.
    * @level l2
