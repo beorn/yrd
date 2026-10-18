@@ -2360,6 +2360,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
 
   it("draws draft rows and a draft's detail from the snapshot alone: redrawing, moving over drafts and opening one reads nothing (A2-set-v3)", async () => {
     const moved: WatchRow = {
+      localHead: "f".repeat(40),
       row: {
         at: ago(30 * MINUTE),
         author: "grace",
@@ -2406,8 +2407,12 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         (shown[0] ?? "").includes("run draft-host submit task/moved"),
       read: { load: load.mock.calls.length, loadDiff: loadDiff.mock.calls.length, open: open.mock.calls.length },
       unread:
-        (shown[2] ?? "").includes("not yet read") && (shown[2] ?? "").includes("run draft-host submit task/unread"),
-    }).toEqual({ moved: true, read: { load: 0, loadDiff: 0, open: 0 }, unread: true })
+        (shown[2] ?? "").includes("not yet read") &&
+        (shown[2] ?? "").includes("fetch") &&
+        !(shown[2] ?? "").includes("run draft-host submit task/unread"),
+      remoteOnlyDated:
+        (shown[1] ?? "").includes("fetch") && !(shown[1] ?? "").includes("run draft-host submit task/d1"),
+    }).toEqual({ moved: true, read: { load: 0, loadDiff: 0, open: 0 }, unread: true, remoteOnlyDated: true })
     // A host that supplied no formatter must not gain a standalone submit recipe.
     const unavailable = render(<WatchPane snapshot={snap} live={false} />, { cols: 220, rows: 50 })
     await settle(unavailable)

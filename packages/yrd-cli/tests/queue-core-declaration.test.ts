@@ -3740,6 +3740,36 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(shown).not.toContain("task/hidden")
     expect(shown).not.toContain("scratch/nested")
     expect(shown).toContain("task/hidden-submitted")
+    // The formatter's author clone differs from the queue reader: fetched commit
+    // metadata proves neither a local branch nor a runnable submit instruction.
+    const author = join(dirname(repo), "draft-author")
+    await git(["clone", "--quiet", (await git(["remote", "get-url", "origin"])).trim(), author])
+    const authorGit = gitIn(author)
+    await authorGit(["branch", "task/kept", "origin/task/kept"])
+    const watched = capture(author)
+    const sources: WatchSource[] = []
+    expect(await coreQueueCommand(repo, {
+      ...watched.io,
+      formatYrdCommand: (argv, cwd) =>
+        `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`,
+    }, { command: "list", drafts: true }, {
+      queue: "main", watchSource: (source) => sources.push(source),
+    }), watched.stderr()).toBe(0)
+    const source = sources[0]
+    if (source?.snapshot === undefined || source.formatCommand === undefined) throw new Error("watch source missing")
+    const ready = source.snapshot.rows.find((item) => item.row.branch === "task/kept")
+    const remoteOnly = source.snapshot.rows.find((item) => item.row.branch === "other/task/hidden")
+    if (ready === undefined || remoteOnly === undefined) throw new Error("draft rows missing from watch source")
+    expect(ready.localHead).toBe(ready.row.head)
+    expect(remoteOnly.row.at).toBeInstanceOf(Date)
+    expect(remoteOnly).not.toHaveProperty("localHead")
+    const beforeRefs = await git(["ls-remote", "origin", "refs/heads/*"])
+    const submitted = spawnSync("/bin/sh", ["-c", source.formatCommand(["submit", "task/kept"])], {
+      cwd: dirname(repo), encoding: "utf8", timeout: 30000,
+    })
+    expect(submitted.status, submitted.stderr).toBe(0)
+    expect((await readStatus(createEventStore(repo, "origin", git.selection), "main", "task/kept")).commit).toBe(ready.row.head)
+    expect(await git(["ls-remote", "origin", "refs/heads/*"])).toBe(beforeRefs)
   }, 30_000)
 
   it("requires reason and actor for ignore, then returns byte-clean JSON for both verbs", async () => {
