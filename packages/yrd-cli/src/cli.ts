@@ -1450,7 +1450,7 @@ function buildProgram(
       )
       .option(
         "--retire",
-        "retire an ended origin branch, or end a draft whose exact tip is already accepted by fresh origin main; requires --tip and --reason",
+        "retire an ended origin branch, or end a draft whose exact tip is already accepted by fresh origin main; requires --tip and --reason. A branch the merge already removed needs no retire: the merge commit names its tip as a parent and is the custody proof",
       )
       .option("--tip <commit>", "expected full commit for --local or --retire; an advanced branch is kept")
       .option("--issue <id>", "retire issue-bound local refs; with --local, carry the reviewed issue identity")

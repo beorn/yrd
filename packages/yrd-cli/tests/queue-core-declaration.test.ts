@@ -2383,6 +2383,16 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(out.stdout()).toContain("drop <branch> --local --tip <full-oid>")
   })
 
+  /** @failure drop help leaves a seat reading a correct --retire refusal as a failure when the merge already removed the branch.
+   * @level l1 @consumer A seat following a cleanup instruction after its merged branch is gone at origin
+   */
+  it("drop help says a merged branch needs no retire", async () => {
+    const out = capture(outsideRepositoryRoot())
+    expect(await runYrdProcess(["bun", "yrd", "drop", "--help"], out.io), out.stderr()).toBe(0)
+    expect(out.stdout()).toContain("needs no retire")
+    expect(out.stdout()).toContain("custody proof")
+  })
+
   /**
    * @failure Exact local abandonment rejects a merged descendant, or relaxes requested-tip, ancestry, state or automatic-cleanup protection.
    * @level l3 @consumer The existing local drop caller and core archive-only publication
