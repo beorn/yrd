@@ -208,12 +208,14 @@ async function waitForEnvironmentCleanup(workdir: string, run: string): Promise<
   await vi.waitFor(
     () => {
       const dir = join(workdir, "logs", "post-merge")
-      // 30105: one housekeeping journal per service start. The round's own run
-      // row names its queueRun, and the rows cleanup writes keep that run id.
+      // 30105: one housekeeping journal per service start, with ONE header and
+      // one `observation` marker per round carrying that round's queueRun.
       const roundRow = (existsSync(dir) ? readdirSync(dir) : [])
         .filter((name) => name.endsWith(".jsonl"))
         .some((name) =>
-          readRunLog(dir, name.slice(0, -".jsonl".length)).some((row) => row.kind === "run" && row.queueRun === run),
+          readRunLog(dir, name.slice(0, -".jsonl".length)).some(
+            (row) => row.kind === "observation" && row.queueRun === run,
+          ),
         )
       expect(
         roundRow &&
@@ -775,10 +777,28 @@ describe("yrd queue up, the service", () => {
       const housekeeping = readdirSync(join(workdir, "logs", "post-merge")).filter((name) => name.endsWith(".jsonl"))
       expect(housekeeping, "one housekeeping journal for the whole service start").toHaveLength(1)
       const rows = readRunLog(join(workdir, "logs", "post-merge"), housekeeping[0]!.slice(0, -".jsonl".length))
+      // Condition 1: exactly one header. A second `run` row would read as one
+      // run and silently ignore every later round's header fields.
+      expect(
+        rows.filter((row) => row.kind === "run"),
+        "one header for the whole journal",
+      ).toHaveLength(1)
+      // Condition 3: finish() ran after the worker drained, so it persisted a
+      // projection instead of refusing a source that changed while it read.
+      expect(rows, "no journal-projection warning").not.toContainEqual(
+        expect.objectContaining({ subject: "journal-projection" }),
+      )
       for (const run of roundRuns) {
-        expect(rows, `housekeeping journal carries the cleanup run row for ${run}`).toContainEqual(
-          expect.objectContaining({ kind: "run", command: "post-merge cleanup", queueRun: run }),
+        expect(rows, `housekeeping journal carries the cleanup marker for ${run}`).toContainEqual(
+          expect.objectContaining({ kind: "observation", command: "post-merge cleanup", queueRun: run }),
         )
+        // Condition 2: attribution is positional, so every row that belongs to
+        // this round must sit after this round's own marker.
+        const marker = rows.findIndex((row) => row.kind === "observation" && row.queueRun === run)
+        const own = rows.flatMap((row, index) => (row.run === run ? [index] : []))
+        expect(marker, `marker position for ${run}`).toBeGreaterThan(0)
+        expect(own.length, `rows attributed to ${run}`).toBeGreaterThan(0)
+        expect(Math.min(...own), `rows of ${run} after its own marker`).toBeGreaterThan(marker)
         expect(
           rows.some((row) => row.run === run && row.scope === "environment-cleanup"),
           `cleanup rows keep the queue run ${run}`,
@@ -4421,7 +4441,7 @@ describe("yrd queue up, the service", () => {
         .filter((name) => name.endsWith(".jsonl"))
         .flatMap((name) => readRunLog(startupRetirement, name.slice(0, -".jsonl".length)))
       expect(
-        roundCleanupHeaders.some((entry) => entry.kind === "run" && entry.queueRun === mixedRounds.at(-1)!.run),
+        roundCleanupHeaders.some((entry) => entry.kind === "observation" && entry.queueRun === mixedRounds.at(-1)!.run),
         "cleanup names the newest actual queue run",
       ).toBe(true)
       roundRead.mockRestore()
