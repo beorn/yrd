@@ -8,6 +8,7 @@
  *          the request.
  * @level   l1 (pure help rendering, no queue and no network)
  * @consumer anyone holding or closing an environment
+ * @testonly none
  */
 
 import { describe, expect, it } from "vitest"
