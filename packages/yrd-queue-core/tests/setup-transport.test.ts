@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest"
 
-import { transportFaultIn } from "../src/setup-transport.ts"
+import { setupStuckNext, transportFaultIn } from "../src/setup-transport.ts"
 
 // @i/10-yrd/24486 rows 2 and 3. A 504 from a code host and a lockfile that does
 // not match its manifest both stopped the whole queue as `yrd-setup-unusable`,
@@ -21,6 +21,8 @@ describe("what IS an unreachable remote", () => {
     const fault = transportFaultIn(log)
     expect(fault?.signature).toBe("http-5xx")
     expect(fault?.line).toContain("504")
+    // This becomes shared event guidance; only its viewer can render a command.
+    expect(setupStuckNext(fault)).not.toMatch(/\byrd\s+queue\b/u)
   })
 
   test.each([
@@ -72,6 +74,7 @@ describe("row 3, the negative control: what is NOT an unreachable remote", () =>
     ["a full disk", "ENOSPC: no space left on device"],
   ])("%s", (_why, line) => {
     expect(transportFaultIn(line)).toBeUndefined()
+    expect(setupStuckNext(undefined)).not.toMatch(/\byrd\s+queue\b/u)
   })
 
   // The one yrd already paid for, one layer up: a remote that ANSWERED and does

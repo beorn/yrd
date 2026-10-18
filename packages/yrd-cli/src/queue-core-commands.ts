@@ -1339,17 +1339,32 @@ export async function coreQueueCommand(
     // read at any round says what the line waits on and what lifts it.
     const held = outcome.stopped?.ring === "pause" ? (outcome.stopped.what as PauseRecord) : undefined
     if (outcome.stuck.length === 0 && held?.change !== undefined) {
-      io.stderr(`yrd: ${liftLine(held, config.target.remote, config.target.branch)}\n`)
+      io.stderr(`yrd: ${await stopGuidance(held)}\n`)
     }
     return outcome
   }
 
   /** The stop a submit is accepted under, said where the submitter reads it: who, why, and what lifts it. */
-  const echoStop = (stop: PauseRecord | undefined): void => {
+  const stopGuidance = async (stop: PauseRecord): Promise<string> => {
+    const queue = formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))
+    const command = (argv: readonly string[]): string =>
+      formatYrdCommand(io, [...argv, "--queue", queue], io.cwd ?? repo)
+    const actions = [
+      `resume: ${command(["queue", "resume", "--reason", "<why>"])}`,
+      ...(stop.change === undefined
+        ? []
+        : [
+            `withdraw: ${command(["queue", "withdraw", stop.change.branch])}`,
+            `retry after repair: ${command(["merge", stop.change.branch])}`,
+          ]),
+    ]
+    return `${liftLine(stop, config.target.remote, config.target.branch)}; ${actions.join("; ")}`
+  }
+  const echoStop = async (stop: PauseRecord | undefined): Promise<void> => {
     if (stop === undefined) return
     io.stderr(
       `yrd: accepted while the line is stopped — ${pauseLine(stop)}; ` +
-        `the change waits in line and is judged once the stop lifts; ${liftLine(stop, config.target.remote, config.target.branch)}\n`,
+        `the change waits in line and is judged once the stop lifts; ${await stopGuidance(stop)}\n`,
     )
   }
   const echoAdmission = (outcome: AdmissionOutcome, dryRun = false): void => {
@@ -2445,7 +2460,7 @@ export async function coreQueueCommand(
               ) +
               formatDryRunExcluded(inspected.verifying.state === "verified" ? inspected.verifying : undefined),
           )
-          echoStop(inspected.stop)
+          await echoStop(inspected.stop)
           echoAdmission(inspected.admission, true)
           return 0
         }
@@ -2492,7 +2507,7 @@ export async function coreQueueCommand(
               .map((row) => `\n${row.state} ${row.path}@${row.sha.slice(0, 12)} at ${row.remote} ${row.ref}`)
               .join(""),
         )
-        echoStop(acceptedUnder)
+        await echoStop(acceptedUnder)
         echoAdmission(submitted.admission)
         echoRevertWarning(submitted)
         echoComponentAuthors(submitted.published)
@@ -2529,7 +2544,7 @@ export async function coreQueueCommand(
           `prepared ${branch} at ${head}; inspected base ${base} against ${targetHead}; ${published.length} child retention receipts` +
             published.map((row) => `\n${row.state} ${row.path}@${row.sha} at ${row.remote} ${row.ref}`).join(""),
         )
-        echoStop(stop)
+        await echoStop(stop)
         echoComponentAuthors(published)
         if (admission.kind === "warn" || admission.kind === "cannot-judge") {
           io.stderr(`preparation admission ${admission.kind}: ${admission.reason}\n`)
@@ -2560,7 +2575,7 @@ export async function coreQueueCommand(
             formatDryRunGitlinks(verifying.state === "verified" ? verifying.gitlinks : undefined) +
             formatDryRunExcluded(verifying.state === "verified" ? verifying : undefined),
         )
-        echoStop(inspected.stop)
+        await echoStop(inspected.stop)
         echoAdmission(inspected.admission, true)
         return 0
       }
@@ -2577,7 +2592,7 @@ export async function coreQueueCommand(
             .map((row) => `\n${row.state} ${row.path}@${row.sha.slice(0, 12)} at ${row.remote} ${row.ref}`)
             .join(""),
       )
-      echoStop(acceptedUnder)
+      await echoStop(acceptedUnder)
       echoAdmission(submitted.admission)
       echoRevertWarning(submitted)
       echoComponentAuthors(submitted.published)
@@ -2704,12 +2719,7 @@ export async function coreQueueCommand(
       // A stop that still stands is said, with the command that merges what it
       // waits on: the named change's exit never hides a stopped line.
       if (after.stop !== undefined) {
-        const stuckOn = after.stop.cause === "stuck" ? after.stop.change : undefined
-        io.stderr(
-          `yrd: the line is still stopped — ${pauseLine(after.stop)}; ` +
-            (stuckOn === undefined ? "" : `once it is repaired, merge it with yrd merge ${stuckOn.branch}; `) +
-            `${liftLine(after.stop, config.target.remote, config.target.branch)}\n`,
-        )
+        io.stderr(`yrd: the line is still stopped — ${pauseLine(after.stop)}; ` + `${await stopGuidance(after.stop)}\n`)
       }
       const state = after.entry.reading.state
       const ending = endingCode([state])
@@ -4292,6 +4302,7 @@ export async function coreQueueCommand(
         const single = one.rows.length === 1 ? one.rows[0] : undefined
         const snapshot = snapshotOf(one)
         const listing = await printListing(snapshot, {
+          formatCommand: (argv) => formatYrdCommand(io, [...argv, "--queue", snapshot.queue], io.cwd ?? repo),
           color: io.color === true,
           columns: io.columns ?? 120,
           ...(one.scope === undefined ? {} : { scope: one.scope }),
