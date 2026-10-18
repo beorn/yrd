@@ -321,7 +321,7 @@ function buildProgram(
     ) {
       throw new Error("--submodules, --dry-run and --apply require drop --issue <id>")
     }
-    if (options.dryRun && options.apply) throw new Error("choose --dry-run or --apply")
+    if (options.local && options.dryRun && options.apply) throw new Error("choose --dry-run or --apply")
     if (
       options.releaseCheckout &&
       (command !== "drop" || !options.local || !options.issue?.trim() || !options.reason?.trim())
@@ -1440,7 +1440,7 @@ function buildProgram(
     program
       .command("drop [branch]")
       .description(
-        "end a change, or archive and retire local branches; root issue cleanup applies by default using exact origin custody; --submodules previews because it expands to component repositories",
+        "end a change, or archive and retire issue branches across all registered root/component stores by default; can take minutes; --dry-run previews",
       )
       .option(
         "--local",
@@ -1455,13 +1455,16 @@ function buildProgram(
         "retire an ended origin branch, or end a draft whose exact tip is already accepted by fresh origin main; requires --tip and --reason. A branch the merge already removed needs no retire: the merge commit names its tip as a parent and is the custody proof",
       )
       .option("--tip <commit>", "expected full commit for --local or --retire; an advanced branch is kept")
-      .option("--issue <id>", "retire issue-bound local refs; with --local, carry the reviewed issue identity")
+      .option(
+        "--issue <id>",
+        "retire issue-bound refs across every registered worktree's component stores; can take minutes; with --local, carry the reviewed issue identity",
+      )
       .option(
         "--submodules",
-        "include local and origin branches in registered component author stores using the issue's mapping; preview by default",
+        "compatibility flag for issue cleanup; every registered component store is included by default",
       )
       .option("--dry-run", "preview issue cleanup without archiving or deleting branches")
-      .option("--apply", "apply issue cleanup after rechecking exact tips and protections"),
+      .option("--apply", "compatibility flag for issue cleanup; it applies unless --dry-run previews"),
   )
     .addHelpText(
       "after",

@@ -140,6 +140,34 @@ describe("projectionFallbackReport, the not-yet-written proof", () => {
     const ended: RunnerFacts = { ...crashed, latest: run({ alive: true, ended: true }) }
     expect(projectionFallbackReport(missing, ended, "idle")?.reason).toBe("missing")
   })
+
+  // A local drop has neither a round lock nor a provisioning step. Its preview
+  // may write an eligible outcome before the final retirement is attempted.
+  it("reads a local drop 910 ms after its start, but keeps completed and unowned absences loud", async () => {
+    for (const sample of [
+      { command: "drop --local", pid: process.pid, outcome: undefined, reason: "not-yet-written" },
+      { command: "drop --local", pid: process.pid, outcome: "eligible", reason: "not-yet-written" },
+      { command: "drop --local", pid: process.pid, outcome: "removed", reason: "missing" },
+      { command: "drop --local", pid: process.pid, outcome: "failed", reason: "missing" },
+      { command: "drop --local", pid: process.pid, outcome: "kept", reason: "missing" },
+      { command: "drop --local", pid: undefined, outcome: undefined, reason: "missing" },
+      { command: "drop --retire", pid: process.pid, outcome: undefined, reason: "missing" },
+    ]) {
+      const start = new Date(NOW.getTime() - 910)
+      const workdir = workdirWith({
+        ageMs: 910,
+        header: `${JSON.stringify({ kind: "run", run: runId(start), at: start.toISOString(), target: "origin/main", command: sample.command, pid: sample.pid })}\n`,
+        after:
+          sample.outcome === undefined
+            ? ""
+            : `${JSON.stringify({ kind: "local-branch-retirement", outcome: sample.outcome })}\n`,
+      })
+      const facts = await readRunnerFacts(workdir, NOW)
+      expect(projectionFallbackReport(facts.projectionFallback, facts, "idle")?.reason, JSON.stringify(sample)).toBe(
+        sample.reason,
+      )
+    }
+  })
 })
 
 describe("readRunnerFacts", () => {

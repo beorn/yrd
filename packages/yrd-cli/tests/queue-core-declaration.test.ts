@@ -2007,184 +2007,207 @@ describe("a queue is the selected origin branch carrying config", () => {
    * @level l3
    * @consumer An author previewing and applying issue cleanup in their own submodule stores
    */
-  it("drop by issue previews registered submodules without issue lookup and applies exact landed tips", async () => {
-    // A configured resolver that always fails proves this mode never consults issue status.
-    const repo = await world('issuesProvider: {read: ["false"]}\n')
-    const seed = await world()
-    const git = gitIn(repo)
-    await git([
-      "-c",
-      "protocol.file.allow=always",
-      "submodule",
-      "add",
-      "--quiet",
-      join(dirname(seed), "remote.git"),
-      "modules/child",
-    ])
-    await git(["commit", "--quiet", "-am", "register child"])
-    await git(["push", "--quiet", "origin", "main"])
-    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
-    const child = join(repo, "modules/child")
-    const childGit = gitIn(child)
-    await childGit(["config", "user.name", "yrd test"])
-    await childGit(["config", "user.email", "yrd@test.invalid"])
-    const landed = (await childGit(["rev-parse", "HEAD"])).trim()
-    // Main's materialized child is not the private author worktree's module store.
-    // The previous fixture only checked local refs in the selected checkout, missing both destinations.
-    const privateRoot = join(dirname(repo), "private-author")
-    await git(["worktree", "add", "--quiet", "--detach", privateRoot, "HEAD"])
-    const privateGit = gitIn(privateRoot)
-    await privateGit(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--quiet"])
-    const privateChild = join(privateRoot, "modules/child")
-    const privateChildGit = gitIn(privateChild)
-    const privateBranch = "task/1234-private"
-    await privateChildGit(["branch", privateBranch, landed])
-    await privateChildGit(["push", "--quiet", "origin", `refs/heads/${privateBranch}`])
-    for (const branch of [
-      "task/28988-landed",
-      "exp/28988-landed",
-      "task/28988-held",
-      "task/28988-moved",
-      "task/99999-other",
-      "task/no-number",
-    ]) {
-      await childGit(["branch", branch, landed])
-    }
-    await childGit(["push", "--quiet", "origin", "refs/heads/task/28988-landed"])
-    await childGit(["checkout", "--quiet", "-b", "task/28988-unique"])
-    writeFileSync(join(child, "unique.txt"), "unpublished\n")
-    await childGit(["add", "unique.txt"])
-    await childGit(["commit", "--quiet", "-m", "unique work"])
-    const unique = (await childGit(["rev-parse", "HEAD"])).trim()
-    await childGit(["checkout", "--quiet", "task/28988-held"])
-    const refs = async (read: typeof git) =>
-      read(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/archive/", "refs/yrd/"])
-    const rootBranch = "task/1234-root"
-    await git(["branch", rootBranch])
-    await git(["push", "--quiet", "origin", `refs/heads/${rootBranch}`])
-    const rootBefore = await refs(git)
-    const childBefore = await refs(childGit)
-    const argv = [
-      "bun",
-      "yrd",
-      "drop",
-      "--issue",
-      "@example/28988-cleanup",
-      "--submodules",
-      "--submitter",
-      "fixture",
-      "--json",
-    ]
-    const fixtureIssue: NonNullable<YrdCliIO["branchIssue"]> = ({ branch, recordedIssue }) => {
-      const key = recordedIssue ?? /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
-      return key === "28988" || key === "1234" ? "@example/28988-cleanup" : key
-    }
-    type Report = {
-      excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[]
-      eligible: { repo: string; branch: string; head: string }[]
-      removed: { repo: string; branch: string; head: string; archiveRef: string }[]
-      kept: { repo: string; branch: string; reason: string }[]
-      failed: { repo: string; reason: string }[]
-    }
-    for (const flags of [[], ["--dry-run"]]) {
-      const preview = capture(repo)
-      preview.io.branchIssue = fixtureIssue
-      expect(await runYrdProcess([...argv, ...flags], preview.io), preview.stderr()).toBe(0)
-      const result = JSON.parse(preview.stdout()) as Report
-      expect(result.eligible.map((row) => row.branch).sort()).toEqual([
+  it.each([
+    { compatibilityFlags: [] },
+    { compatibilityFlags: ["--apply"] },
+    { compatibilityFlags: ["--submodules"] },
+    { compatibilityFlags: ["--submodules", "--apply"] },
+  ])(
+    "drop by issue covers registered stores with compatibility flags $compatibilityFlags",
+    async ({ compatibilityFlags }) => {
+      // A configured resolver that always fails proves this mode never consults issue status.
+      const repo = await world('issuesProvider: {read: ["false"]}\n')
+      const seed = await world()
+      const git = gitIn(repo)
+      await git([
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        join(dirname(seed), "remote.git"),
+        "modules/child",
+      ])
+      await git(["commit", "--quiet", "-am", "register child"])
+      await git(["push", "--quiet", "origin", "main"])
+      await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+      const child = join(repo, "modules/child")
+      const childGit = gitIn(child)
+      await childGit(["config", "user.name", "yrd test"])
+      await childGit(["config", "user.email", "yrd@test.invalid"])
+      const landed = (await childGit(["rev-parse", "HEAD"])).trim()
+      // Main's materialized child is not the private author worktree's module store.
+      // The previous fixture only checked local refs in the selected checkout, missing both destinations.
+      const privateRoot = join(dirname(repo), "private-author")
+      await git(["worktree", "add", "--quiet", "--detach", privateRoot, "HEAD"])
+      const privateGit = gitIn(privateRoot)
+      await privateGit(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--quiet"])
+      const privateChild = join(privateRoot, "modules/child")
+      const privateChildGit = gitIn(privateChild)
+      const privateBranch = "task/1234-private"
+      await privateChildGit(["branch", privateBranch, landed])
+      await privateChildGit(["push", "--quiet", "origin", `refs/heads/${privateBranch}`])
+      for (const branch of [
+        "task/28988-landed",
+        "exp/28988-landed",
+        "task/28988-held",
+        "task/28988-moved",
+        "task/99999-other",
+        "task/no-number",
+      ]) {
+        await childGit(["branch", branch, landed])
+      }
+      await childGit(["push", "--quiet", "origin", "refs/heads/task/28988-landed"])
+      await childGit(["checkout", "--quiet", "-b", "task/28988-unique"])
+      writeFileSync(join(child, "unique.txt"), "unpublished\n")
+      await childGit(["add", "unique.txt"])
+      await childGit(["commit", "--quiet", "-m", "unique work"])
+      const unique = (await childGit(["rev-parse", "HEAD"])).trim()
+      await childGit(["checkout", "--quiet", "task/28988-held"])
+      const refs = async (read: typeof git) =>
+        read(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/archive/", "refs/yrd/"])
+      const rootBranch = "task/1234-root"
+      await git(["branch", rootBranch])
+      await git(["push", "--quiet", "origin", `refs/heads/${rootBranch}`])
+      const rootBefore = await refs(git)
+      const childBefore = await refs(childGit)
+      const argv = [
+        "bun",
+        "yrd",
+        "drop",
+        "--issue",
+        "@example/28988-cleanup",
+        ...compatibilityFlags,
+        "--submitter",
+        "fixture",
+        "--json",
+      ]
+      const fixtureIssue: NonNullable<YrdCliIO["branchIssue"]> = ({ branch, recordedIssue }) => {
+        const key = recordedIssue ?? /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
+        return key === "28988" || key === "1234" ? "@example/28988-cleanup" : key
+      }
+      type Report = {
+        inspected: string[]
+        notMaterialized: unknown[]
+        counts: { inspected: number; notMaterialized: number }
+        excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[]
+        eligible: { repo: string; branch: string; head: string }[]
+        removed: { repo: string; branch: string; head: string; archiveRef: string }[]
+        kept: { repo: string; branch: string; reason: string }[]
+        failed: { repo: string; reason: string }[]
+      }
+      for (const flags of [["--dry-run"]]) {
+        const preview = capture(repo)
+        preview.io.branchIssue = fixtureIssue
+        expect(await runYrdProcess([...argv, ...flags], preview.io), preview.stderr()).toBe(0)
+        const result = JSON.parse(preview.stdout()) as Report
+        expect(result.counts).toEqual({
+          inspected: result.inspected.length,
+          notMaterialized: result.notMaterialized.length,
+        })
+        expect(preview.stderr()).toContain(`will inspect ${result.inspected.length} repository stores`)
+        expect(result.eligible.map((row) => row.branch).sort()).toEqual([
+          "exp/28988-landed",
+          privateBranch,
+          "task/28988-landed",
+          "task/28988-moved",
+        ])
+        expect(result.eligible.every((row) => [child, privateChild].includes(row.repo) && row.head === landed)).toBe(
+          true,
+        )
+        expect(result.removed).toEqual([])
+        expect(result.kept).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ repo: child, branch: "task/28988-held", reason: "held" }),
+            expect.objectContaining({ repo: child, branch: "task/28988-unique", reason: "unreached" }),
+          ]),
+        )
+        expect(result.excluded).toContainEqual({ repo: child, target: 1, unrelated: 1, unnumbered: 1 })
+        expect(result.kept.every((row) => /(?:28988|1234)/u.test(row.branch))).toBe(true)
+        expect(await refs(git)).toBe(rootBefore)
+        expect(await refs(childGit)).toBe(childBefore)
+      }
+      const apply = capture(repo)
+      apply.io.branchIssue = fixtureIssue
+      let moved = false
+      apply.io.localBranchProtections = async (input) => {
+        if (input.repo === child && input.branch === "task/28988-moved" && !moved) {
+          moved = true
+          await childGit(["update-ref", "refs/heads/task/28988-moved", unique, landed])
+        }
+        return { protections: [], evidence: [] }
+      }
+      expect(await runYrdProcess(argv, apply.io), apply.stderr()).toBe(0)
+      const result = JSON.parse(apply.stdout()) as Report
+      expect(result.removed.map((row) => row.branch).sort()).toEqual([
         "exp/28988-landed",
         privateBranch,
         "task/28988-landed",
-        "task/28988-moved",
       ])
-      expect(result.eligible.every((row) => [child, privateChild].includes(row.repo) && row.head === landed)).toBe(true)
-      expect(result.removed).toEqual([])
-      expect(result.kept).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ repo: child, branch: "task/28988-held", reason: "held" }),
-          expect.objectContaining({ repo: child, branch: "task/28988-unique", reason: "unreached" }),
-        ]),
-      )
-      expect(result.excluded).toContainEqual({ repo: child, target: 1, unrelated: 1, unnumbered: 1 })
-      expect(result.kept.every((row) => /(?:28988|1234)/u.test(row.branch))).toBe(true)
-      expect(await refs(git)).toBe(rootBefore)
-      expect(await refs(childGit)).toBe(childBefore)
-    }
-    const apply = capture(repo)
-    apply.io.branchIssue = fixtureIssue
-    let moved = false
-    apply.io.localBranchProtections = async (input) => {
-      if (input.repo === child && input.branch === "task/28988-moved" && !moved) {
-        moved = true
-        await childGit(["update-ref", "refs/heads/task/28988-moved", unique, landed])
+      for (const row of result.removed) {
+        const owningGit = row.repo === privateChild ? privateChildGit : childGit
+        expect((await owningGit(["rev-parse", row.archiveRef])).trim()).toBe(landed)
+        expect((await owningGit(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
       }
-      return { protections: [], evidence: [] }
-    }
-    expect(await runYrdProcess([...argv, "--apply"], apply.io), apply.stderr()).toBe(0)
-    const result = JSON.parse(apply.stdout()) as Report
-    expect(result.removed.map((row) => row.branch).sort()).toEqual([
-      "exp/28988-landed",
-      privateBranch,
-      "task/28988-landed",
-    ])
-    for (const row of result.removed) {
-      const owningGit = row.repo === privateChild ? privateChildGit : childGit
-      expect((await owningGit(["rev-parse", row.archiveRef])).trim()).toBe(landed)
-      expect((await owningGit(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
-    }
-    expect(
-      (await childGit(["ls-remote", "origin", "refs/heads/task/28988-landed", `refs/heads/${privateBranch}`])).trim(),
-    ).toBe("")
-    expect(result.kept).toContainEqual(
-      expect.objectContaining({ repo: child, branch: "task/28988-moved", reason: "moved" }),
-    )
-    expect(result.kept).toContainEqual(
-      expect.objectContaining({ repo, branch: rootBranch, reason: "held", detail: expect.stringContaining("child") }),
-    )
-    for (const row of result.removed) {
-      expect(row).toMatchObject({ custody: { kind: "published-main", ref: "refs/heads/main", tip: landed } })
-    }
-    const retry = capture(repo)
-    retry.io.branchIssue = fixtureIssue
-    expect(await runYrdProcess([...argv, "--apply"], retry.io), retry.stderr()).toBe(0)
-    expect(JSON.parse(retry.stdout())).toMatchObject({
-      removed: [],
-      kept: expect.arrayContaining([expect.objectContaining({ repo, branch: rootBranch, reason: "held" })]),
-    })
-    expect((await childGit(["rev-parse", "refs/heads/task/28988-unique"])).trim()).toBe(unique)
-    expect((await childGit(["rev-parse", "refs/heads/task/28988-held"])).trim()).toBe(landed)
-    expect(await refs(git)).toBe(rootBefore)
-    // No component cleanup is misrepresented as a dropped root-queue change.
-    expect((await listChanges(createEventStore(repo, "origin", git.selection), "main")).size).toBe(0)
-    // Missing materialization must name the child, never discover and mutate the root through Git's upward search.
-    fs.renameSync(join(child, ".git"), join(child, ".git-unavailable"))
-    try {
-      const missing = capture(repo)
-      expect(await runYrdProcess(argv, missing.io), missing.stderr()).toBe(1)
-      expect((JSON.parse(missing.stdout()) as Report).failed).toContainEqual(
-        expect.objectContaining({ repo: child, reason: "unreadable" }),
+      expect(
+        (await childGit(["ls-remote", "origin", "refs/heads/task/28988-landed", `refs/heads/${privateBranch}`])).trim(),
+      ).toBe("")
+      expect(result.kept).toContainEqual(
+        expect.objectContaining({ repo: child, branch: "task/28988-moved", reason: "moved" }),
       )
+      expect(result.kept).toContainEqual(
+        expect.objectContaining({ repo, branch: rootBranch, reason: "held", detail: expect.stringContaining("child") }),
+      )
+      for (const row of result.removed) {
+        expect(row).toMatchObject({ custody: { kind: "published-main", ref: "refs/heads/main", tip: landed } })
+      }
+      const retry = capture(repo)
+      retry.io.branchIssue = fixtureIssue
+      expect(await runYrdProcess(argv, retry.io), retry.stderr()).toBe(0)
+      expect(JSON.parse(retry.stdout())).toMatchObject({
+        removed: [],
+        kept: expect.arrayContaining([expect.objectContaining({ repo, branch: rootBranch, reason: "held" })]),
+      })
+      expect((await childGit(["rev-parse", "refs/heads/task/28988-unique"])).trim()).toBe(unique)
+      expect((await childGit(["rev-parse", "refs/heads/task/28988-held"])).trim()).toBe(landed)
       expect(await refs(git)).toBe(rootBefore)
-    } finally {
-      fs.renameSync(join(child, ".git-unavailable"), join(child, ".git"))
-    }
-    // AC5 (29060): like the --local path (28791), the --submodules path must leave a
-    // journal the projection reader can persist. A writer that omits the run header
-    // writes an unreadable journal and a journal-projection warning, and every
-    // reader — this one or an older build — then refuses the whole queue on that
-    // single record. Custody assertions above miss it.
-    const dropLogs = join(await workdirOf(git, { cwd: repo }), "logs")
-    const dropJournals = readdirSync(dropLogs).filter((name) => name.endsWith(".jsonl"))
-    expect(dropJournals.length).toBeGreaterThan(0)
-    const dropRecords = dropJournals.flatMap((name) => readRunLog(dropLogs, name.slice(0, -".jsonl".length)))
-    for (const name of dropJournals) {
-      expect(readRunLog(dropLogs, name.slice(0, -".jsonl".length))[0]?.kind).toBe("run")
-    }
-    expect(dropRecords.filter((row) => row.subject === "journal-projection")).toEqual([])
-    expect(dropRecords).toContainEqual(
-      expect.objectContaining({ kind: "local-branch-retirement", branch: "task/28988-landed", outcome: "removed" }),
-    )
-  }, 60_000)
+      // No component cleanup is misrepresented as a dropped root-queue change.
+      expect((await listChanges(createEventStore(repo, "origin", git.selection), "main")).size).toBe(0)
+      // Missing materialization must name the child, never discover and mutate the root through Git's upward search.
+      const laterBranch = "task/1234-after-discovery"
+      await privateChildGit(["branch", laterBranch, landed])
+      const privateBeforeFailure = await refs(privateChildGit)
+      fs.renameSync(join(child, ".git"), join(child, ".git-unavailable"))
+      try {
+        const missing = capture(repo)
+        expect(await runYrdProcess(argv, missing.io), missing.stderr()).toBe(1)
+        expect((JSON.parse(missing.stdout()) as Report).failed).toContainEqual(
+          expect.objectContaining({ repo: child, reason: "unreadable" }),
+        )
+        expect(await refs(git)).toBe(rootBefore)
+        expect(await refs(privateChildGit)).toBe(privateBeforeFailure)
+      } finally {
+        fs.renameSync(join(child, ".git-unavailable"), join(child, ".git"))
+      }
+      // AC5 (29060): like the --local path (28791), the --submodules path must leave a
+      // journal the projection reader can persist. A writer that omits the run header
+      // writes an unreadable journal and a journal-projection warning, and every
+      // reader — this one or an older build — then refuses the whole queue on that
+      // single record. Custody assertions above miss it.
+      const dropLogs = join(await workdirOf(git, { cwd: repo }), "logs")
+      const dropJournals = readdirSync(dropLogs).filter((name) => name.endsWith(".jsonl"))
+      expect(dropJournals.length).toBeGreaterThan(0)
+      const dropRecords = dropJournals.flatMap((name) => readRunLog(dropLogs, name.slice(0, -".jsonl".length)))
+      for (const name of dropJournals) {
+        expect(readRunLog(dropLogs, name.slice(0, -".jsonl".length))[0]?.kind).toBe("run")
+      }
+      expect(dropRecords.filter((row) => row.subject === "journal-projection")).toEqual([])
+      expect(dropRecords).toContainEqual(
+        expect.objectContaining({ kind: "local-branch-retirement", branch: "task/28988-landed", outcome: "removed" }),
+      )
+    },
+    60_000,
+  )
 
   /** @failure Store discovery repeats remote reads or never retires a root after its children finish.
    * @level l3 @consumer Issue retirement's root queue arm, including exact ending-event custody
@@ -2303,6 +2326,7 @@ describe("a queue is the selected origin branch carrying config", () => {
             kept: expect.arrayContaining([expect.objectContaining({ branch: rootBranch, reason: "held" })]),
           })
           expect((await git(["rev-parse", `refs/heads/${rootBranch}`])).trim()).toBe(rootTip)
+          expect((await childGit(["rev-parse", `refs/heads/${childBranch}`])).trim()).toBe(childTip)
         } finally {
           fs.renameSync(saved, missing)
         }
@@ -2332,9 +2356,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       }
       expect(result.failed).toEqual([])
       expect(result.kept).toEqual([])
-      expect(result.removed.map((row) => row.branch)).toEqual(
-        mode === "ended" ? [rootBranch] : [childBranch, rootBranch],
-      )
+      expect(result.removed.map((row) => row.branch)).toEqual([childBranch, rootBranch])
       const row = result.removed.find((entry) => entry.branch === rootBranch)
       expect(row).toMatchObject({ custody: { kind: "event", ref: changesRef("main", rootBranch) } })
       if (row?.custody === undefined || row.archiveRef === undefined) throw new Error("root receipt lacks custody")
@@ -2351,6 +2373,114 @@ describe("a queue is the selected origin branch carrying config", () => {
         if (row.custody.archive === undefined) throw new Error("ended-root receipt lacks origin archive")
         expect((await git(["ls-remote", "origin", row.custody.archive])).trim().split(/\s+/u)[0]).toBe(rootTip)
       }
+    },
+    60_000,
+  )
+
+  /** @failure Default issue cleanup omits a store-only population or continues after a retirement failure.
+   * @level l3 @consumer Authors retiring root-only, component-only or shared issue branches
+   * Existing journeys always have both populations and fail during discovery, before any retirement succeeds.
+   */
+  it.each(["root-only", "component-only", "both", "later-failure"] as const)(
+    "default issue cleanup handles %s with archive custody and failure-stop",
+    async (population) => {
+      const repo = await world("checks: []\n")
+      const seed = await world()
+      const git = gitIn(repo)
+      await git([
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        join(dirname(seed), "remote.git"),
+        "child",
+      ])
+      await git(["commit", "--quiet", "-am", "register child"])
+      await git(["push", "--quiet", "origin", "main"])
+      const rootTip = (await git(["rev-parse", "HEAD"])).trim()
+      await createQueue(repo, "main", rootTip, new Date())
+      const child = join(repo, "child")
+      const childGit = gitIn(child)
+      const childTip = (await childGit(["rev-parse", "HEAD"])).trim()
+      const rootBranch = "task/1234-root"
+      const childBranches =
+        population === "root-only"
+          ? []
+          : population === "later-failure"
+            ? ["task/1234-a", "task/1234-b", "task/1234-c"]
+            : ["task/1234-child"]
+      const rootBranches = population === "component-only" ? [] : [rootBranch]
+      for (const branch of rootBranches) {
+        await git(["branch", branch, rootTip])
+        await git(["push", "--quiet", "origin", branch])
+      }
+      for (const branch of childBranches) {
+        await childGit(["branch", branch, childTip])
+        await childGit(["push", "--quiet", "origin", branch])
+      }
+      const issue = "@example/1234-retirement"
+      const argv = ["bun", "yrd", "drop", "--issue", issue, "--submitter", "fixture", "--json"]
+      const run = async (preview: boolean) => {
+        const out = capture(repo)
+        out.io.branchIssue = ({ branch, recordedIssue }) =>
+          recordedIssue ?? (branch.startsWith("task/1234-") ? issue : undefined)
+        out.io.localBranchProtections = async ({ branch }) => {
+          if (!preview && population === "later-failure" && branch === "task/1234-b") {
+            throw new Error("fixture retirement read failed for task/1234-b")
+          }
+          return { protections: [], evidence: [] }
+        }
+        const exit = await runYrdProcess([...argv, ...(preview ? ["--dry-run"] : [])], out.io)
+        const report = JSON.parse(out.stdout()) as {
+          inspected: string[]
+          eligible: { repo: string; branch: string }[]
+          removed: { repo: string; branch: string; head: string; archiveRef: string }[]
+          kept: { branch: string; reason: string }[]
+          failed: { repo: string; branch: string; detail: string }[]
+        }
+        return { exit, out, report }
+      }
+      const preview = await run(true)
+      expect(preview.exit, preview.out.stderr()).toBe(0)
+      expect(preview.report.inspected).toEqual(expect.arrayContaining([repo, child]))
+      expect(preview.report.eligible.map(({ repo: store, branch }) => [store, branch])).toEqual([
+        ...childBranches.map((branch) => [child, branch]),
+        ...rootBranches.map((branch) => [repo, branch]),
+      ])
+      expect(preview.report.removed).toEqual([])
+      const applied = await run(false)
+      expect(applied.exit, applied.out.stderr()).toBe(population === "later-failure" ? 1 : 0)
+      const removed = population === "later-failure" ? ["task/1234-a"] : [...childBranches, ...rootBranches]
+      expect(applied.report.removed.map(({ branch }) => branch)).toEqual(removed)
+      for (const row of applied.report.removed) {
+        const owner = row.repo === repo ? git : childGit
+        expect((await owner(["rev-parse", row.archiveRef])).trim()).toBe(row.head)
+        expect((await owner(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
+        expect((await owner(["ls-remote", "origin", `refs/heads/${row.branch}`])).trim()).toBe("")
+      }
+      if (population === "later-failure") {
+        expect(applied.report.failed).toContainEqual(
+          expect.objectContaining({
+            repo: child,
+            branch: "task/1234-b",
+            detail: expect.stringContaining("fixture retirement read failed"),
+          }),
+        )
+        expect(applied.report.kept).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ branch: "task/1234-c", reason: "held" }),
+            expect.objectContaining({ branch: rootBranch, reason: "held" }),
+          ]),
+        )
+        for (const branch of ["task/1234-b", "task/1234-c"]) {
+          expect((await childGit(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(childTip)
+          expect((await childGit(["ls-remote", "origin", `refs/heads/${branch}`])).trim().split(/\s+/u)[0]).toBe(
+            childTip,
+          )
+        }
+        expect((await git(["rev-parse", `refs/heads/${rootBranch}`])).trim()).toBe(rootTip)
+      } else expect(applied.report.failed).toEqual([])
     },
     60_000,
   )
@@ -2454,9 +2584,16 @@ describe("a queue is the selected origin branch carrying config", () => {
         const rootOnly = JSON.parse(await run("1234", false)) as Report
         expect(rootOnly).toMatchObject({ eligible: [], removed: [], failed: [] })
         expect(rootOnly.mode).toContain('No branches matched issue key "1234"')
-        expect(rootOnly.kept).toEqual([
-          expect.objectContaining({ branch, reason: "mismatch", detail: expect.stringContaining(recordedIssue) }),
-        ])
+        expect(rootOnly.kept).toEqual(
+          [repo, ...children].map((store) =>
+            expect.objectContaining({
+              repo: store,
+              branch,
+              reason: "mismatch",
+              detail: expect.stringContaining(recordedIssue),
+            }),
+          ),
+        )
         // Receipt-only mismatches cannot become a child hold on another selected root.
         const unrelated = "task/1234-unrecorded"
         await git(["branch", unrelated, rootTip])
@@ -5142,6 +5279,8 @@ describe("component-local retirement without a component queue", () => {
     expect(records).toContainEqual(
       expect.objectContaining({ kind: "local-branch-retirement", repo: child, branch, head: tip }),
     )
+    // The list reader needs the writer's identity before any retirement outcome exists.
+    expect(records).toContainEqual(expect.objectContaining({ kind: "run", command: "drop --local", pid: process.pid }))
     if (failure) {
       const failedRecord = records.find(
         (record) =>

@@ -46,6 +46,7 @@ import {
   retireComponentBranch,
   retireIssueBranches,
   readBranchProtections,
+  advancedCure,
 } from "./branch-retirement.ts"
 import { sweepRoundOutputInRound } from "./log-retention.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
@@ -98,7 +99,6 @@ import {
   gitIn,
   incidentIn,
   incidentLine,
-  isAncestor,
   journalKey,
   queueName,
   resolveGitSelection,
@@ -1012,7 +1012,7 @@ export async function coreQueueCommand(
     request.command === "resume" ||
     request.command === "withdraw" ||
     request.command === "drop" ||
-    (request.command === "drop-issue" && (request.submodules ? request.apply : !request.dryRun)) ||
+    (request.command === "drop-issue" && request.dryRun !== true) ||
     (request.command === "drop-local" && (!request.releaseCheckout || request.apply)) ||
     request.command === "ignore" ||
     request.command === "unignore" ||
@@ -1730,7 +1730,6 @@ export async function coreQueueCommand(
     }
     case "drop-local":
     case "drop-issue": {
-      const local = request.command === "drop-local"
       const authorRepo = repositoryHere(io.cwd)
       if (authorRepo === undefined) {
         throw new Error(`${NAMED[request.command]} requires the authoring repository as cwd`)
@@ -1738,7 +1737,9 @@ export async function coreQueueCommand(
       const authorGit = gitIn(authorRepo, undefined, selection, { env })
       const issueIdentity = (value: string): string => value
       const mode =
-        "Root issue cleanup applies by default using exact origin custody; --submodules previews because it expands to component repositories."
+        request.command === "drop-issue"
+          ? "Issue cleanup applies by default across every registered worktree's component stores using exact origin custody; this can take minutes. --dry-run previews. --apply and --submodules are accepted compatibility flags."
+          : "Local branch cleanup archives the exact tip before deleting its local name."
       const branchIssue = (branch: string, recordedIssue?: string): string | undefined => {
         const mapped = io.branchIssue === undefined ? recordedIssue : io.branchIssue({ branch, recordedIssue })
         return mapped === undefined ? undefined : issueIdentity(mapped)
@@ -1789,7 +1790,7 @@ export async function coreQueueCommand(
           log.finish()
         }
       }
-      if (request.command === "drop-issue" && request.submodules) {
+      if (request.command === "drop-issue") {
         const report = await retireIssueBranches({
           authorRepo,
           git: authorGit,
@@ -1797,7 +1798,7 @@ export async function coreQueueCommand(
           selection,
           env,
           io,
-          request,
+          request: { ...request, apply: request.dryRun !== true },
           config,
           workdir,
           mode,
@@ -1809,7 +1810,7 @@ export async function coreQueueCommand(
           io,
           options.json,
           report,
-          `issue ${report.issue}: inspected ${report.inspected.length} repositories in ${authorRepo}; eligible ${report.eligible.length}, retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}\n${report.mode}` +
+          `issue ${report.issue}: inspected ${report.counts.inspected} repositories in ${authorRepo}, ${report.counts.notMaterialized} not materialized; eligible ${report.eligible.length}, retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}\n${report.mode}` +
             report.notMaterialized
               .map((row) => `\nSkipped ${row.repo}: not materialized (checkout Git pointer and private store absent)`)
               .join("") +
@@ -1831,23 +1832,21 @@ export async function coreQueueCommand(
         )
         return report.failed.length === 0 ? 0 : 1
       }
-      const issue = request.issue === undefined ? undefined : request.issue
-      if (local && (request.branch === config.target.branch || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(request.tip))) {
+      const issue = request.issue
+      if (request.branch === config.target.branch || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(request.tip)) {
         throw new Error("drop --local requires a non-target branch and a full expected commit oid")
       }
       const eventStore = createEventStore(authorRepo, await remoteUrl(git, config.target.remote), selection)
-      const reading = local
-        ? await Promise.all([
-            readEventQueue(eventStore, config.target.branch),
-            readBranchHistory(eventStore, config.target.branch, request.branch, { invalid: "return" }),
-          ]).then(([queue, selected]) => ({
-            queue,
-            histories: new Map(selected.history === undefined ? [] : [[request.branch, selected.history]]),
-            invalid: new Map(selected.invalid === undefined ? [] : [[request.branch, selected.invalid]]),
-          }))
-        : await readEventQueueWithChanges(eventStore, config.target.branch)
+      const reading = await Promise.all([
+        readEventQueue(eventStore, config.target.branch),
+        readBranchHistory(eventStore, config.target.branch, request.branch, { invalid: "return" }),
+      ]).then(([queue, selected]) => ({
+        queue,
+        histories: new Map(selected.history === undefined ? [] : [[request.branch, selected.history]]),
+        invalid: new Map(selected.invalid === undefined ? [] : [[request.branch, selected.invalid]]),
+      }))
       const heads = await listRefs("refs/heads/", createLocalEventStore(authorRepo, selection))
-      if (local && !heads.has(`refs/heads/${request.branch}`)) {
+      if (!heads.has(`refs/heads/${request.branch}`)) {
         throw new Error(`drop --local: refs/heads/${request.branch} is absent in ${authorRepo}; nothing was removed`)
       }
       const target = await readRemoteCommit(authorGit, eventStore.remote, `refs/heads/${config.target.branch}`)
@@ -1861,6 +1860,7 @@ export async function coreQueueCommand(
         target: targetLabel,
         base: target,
         config: config.blob,
+        pid: process.pid,
       })
       log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
       type Row = {
@@ -1875,22 +1875,15 @@ export async function coreQueueCommand(
       const removed: Row[] = []
       const kept: Row[] = []
       const failed: Row[] = []
-      let excludedTarget = 0
-      let excludedUnrelated = 0
-      let matched = 0
-      const unnumbered: { branch: string; head: string }[] = []
-      const dryRun = !local && request.dryRun === true
+      let excluded = 0
       try {
-        // Inventory once. The date and actor occupy exactly two segments; branch names may contain slashes.
-        const archives = local ? new Map<string, string>() : await listRefs("refs/archive/", eventStore)
         for (const [ref, head] of heads) {
           const branch = ref.slice("refs/heads/".length)
-          if (branch === config.target.branch || (local && branch !== request.branch)) {
-            excludedTarget++
+          if (branch === config.target.branch || branch !== request.branch) {
+            excluded++
             continue
           }
-          const history = reading.histories.get(branch)
-          const change = history?.state
+          const change = reading.histories.get(branch)?.state
           const row = { branch, head }
           const invalid = reading.invalid.get(branch)
           if (invalid !== undefined) {
@@ -1901,88 +1894,27 @@ export async function coreQueueCommand(
             failed.push({ ...row, reason: "unreadable", detail: change.diagnostic })
             continue
           }
-          const bound = local ? (change?.issue ?? issue) : branchIssue(branch, change?.issue)
-          if (!local && (bound === undefined || issueIdentity(bound) !== issueIdentity(request.issue))) {
-            if (bound !== undefined && change?.issue !== undefined && branchIssue(branch) === request.issue) {
-              kept.push({
-                ...row,
-                reason: "mismatch",
-                detail: `recorded issue ${bound} differs from requested ${request.issue}`,
-              })
-            } else if (bound === undefined) unnumbered.push({ branch, head })
-            else excludedUnrelated++
-            continue
-          }
-          if (local && issue !== undefined && bound !== undefined && issueIdentity(bound) !== issueIdentity(issue)) {
+          const bound = change?.issue ?? issue
+          if (issue !== undefined && bound !== undefined && issueIdentity(bound) !== issueIdentity(issue)) {
             kept.push({ ...row, reason: "mismatch", detail: `recorded issue ${bound} differs from requested ${issue}` })
             continue
           }
-          matched++
           if (
-            (local && head !== request.tip) ||
+            head !== request.tip ||
             (change?.commit !== undefined &&
               change.commit !== head &&
-              !(await acceptsMergedLocalRetirement(authorGit, {
-                local,
-                head,
-                change,
-              })))
+              !(await acceptsMergedLocalRetirement(authorGit, { local: true, head, change })))
           ) {
             kept.push({
               ...row,
               reason: "advanced",
               detail:
-                local && head !== request.tip
-                  ? `current tip ${head} differs from requested tip ${request.tip}; ` +
-                    `if ${head} is the tip to retire, rerun with --tip ${head}, otherwise the branch gained commits after you read it`
+                head !== request.tip
+                  ? `current tip ${head} differs from requested tip ${request.tip}; if ${head} is the tip to retire, rerun with --tip ${head}, otherwise the branch gained commits after you read it`
                   : `current tip ${head} differs from recorded change tip ${change?.commit}` +
-                    (await advancedCure(authorGit, branch, head, change?.commit, target, targetLabel, local)),
+                    (await advancedCure(authorGit, branch, head, change?.commit, target, targetLabel, true)),
             })
             continue
-          }
-          if (!local && change !== undefined && isOpen(change.status)) {
-            kept.push({ ...row, reason: "active", detail: `change is ${change.status}` })
-            continue
-          }
-          let disposition: Parameters<typeof retireLocalBranch>[0]["disposition"]
-          if (local) {
-            disposition = { kind: "closed", store: eventStore, queue: config.target.branch, target }
-          } else {
-            const landing =
-              history === undefined
-                ? undefined
-                : enumerateChangeSegments(history.events, changesRef(config.target.branch, branch), authorRepo).find(
-                    (segment) => segment.head === head && segment.state.status === "merged",
-                  )
-            const archive = [...archives].find(
-              ([archiveRef, tip]) =>
-                tip === head && /^refs\/archive\/[^/]+\/[^/]+\/(.+)$/u.exec(archiveRef)?.[1] === branch,
-            )
-            if (landing !== undefined) {
-              const ending = landing.state.ending
-              if (ending === undefined) {
-                failed.push({
-                  ...row,
-                  reason: "unreadable",
-                  detail: `merged segment ${landing.opened} has no ending event`,
-                })
-                continue
-              }
-              disposition = {
-                kind: "landed",
-                target: head,
-                proof: { kind: "landing", event: ending.id, path: "", tip: head },
-              }
-            } else if (archive !== undefined) {
-              disposition = { kind: "archived", target: head, ref: archive[0] }
-            } else {
-              kept.push({
-                ...row,
-                reason: "unreached",
-                detail: "no exact submitted root tip in merged history or same-branch origin archive",
-              })
-              continue
-            }
           }
           const result = await retireLocalBranch({
             repo: authorRepo,
@@ -1992,23 +1924,20 @@ export async function coreQueueCommand(
             actor: request.by,
             owner: change?.submitter,
             issue: bound,
-            reason: request.reason ?? (local ? "explicit local branch cleanup" : disposition.kind),
+            reason: request.reason ?? "explicit local branch cleanup",
             date: new Date().toISOString().slice(0, 10),
-            dryRun,
+            dryRun: false,
             log,
             protections: async () =>
               (await readBranchProtections(io, { repo: authorRepo, branch, tip: head, issue: bound })).protections,
-            disposition,
+            disposition: { kind: "closed", store: eventStore, queue: config.target.branch, target },
           })
           const output = {
             ...row,
-            reason:
-              !local && (result.outcome === "removed" || result.outcome === "eligible")
-                ? disposition.kind
-                : result.reason,
+            reason: result.reason,
             ...(result.detail === undefined ? {} : { detail: result.detail }),
             ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
-            ...(result.outcome === "removed" && disposition.kind === "closed" && result.archiveRef !== undefined
+            ...(result.outcome === "removed" && result.archiveRef !== undefined
               ? {
                   recovery:
                     result.archiveLocation === "origin"
@@ -2020,26 +1949,18 @@ export async function coreQueueCommand(
           if (result.outcome === "eligible") eligible.push(output)
           else if (result.outcome === "removed") removed.push(output)
           else if (result.outcome === "failed") failed.push({ ...output, reason: "failed", detail: result.reason })
-          else kept.push({ ...output, reason: local ? "held" : result.reason })
+          else kept.push({ ...output, reason: "held" })
         }
       } finally {
         log.finish()
       }
-      const scope = local ? `branch ${request.branch}` : `issue ${issue}`
-      const excluded = local
-        ? excludedTarget
-        : [{ repo: authorRepo, target: excludedTarget, unrelated: excludedUnrelated, unnumbered: unnumbered.length }]
       const report = {
-        ...(local ? { branch: request.branch } : { issue }),
+        branch: request.branch,
         repo: authorRepo,
-        apply: !dryRun,
-        mode:
-          !local && matched === 0 && failed.length === 0
-            ? `${mode} No branches matched issue key ${JSON.stringify(issue)} in the inspected stores.`
-            : mode,
+        apply: true,
+        mode,
         examined: heads.size,
         excluded,
-        ...(local ? {} : { unnumbered }),
         eligible,
         removed,
         kept,
@@ -2049,11 +1970,7 @@ export async function coreQueueCommand(
         io,
         options.json,
         report,
-        (local
-          ? `${scope}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excludedTarget} target or out-of-scope branches; `
-          : `${scope}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excludedTarget} target, ${excludedUnrelated} unrelated${unnumbered.length > 0 ? `, ${unnumbered.length} unnumbered (named below)` : ""}; `) +
-          `eligible ${eligible.length}, retired ${removed.length}, kept ${kept.length}, failed ${failed.length}\n${report.mode}` +
-          unnumbered.map((row) => `\n${row.branch}: unnumbered (${row.head.slice(0, 12)})`).join("") +
+        `branch ${request.branch}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excluded} target or out-of-scope branches; eligible ${eligible.length}, retired ${removed.length}, kept ${kept.length}, failed ${failed.length}\n${report.mode}` +
           [...eligible, ...removed, ...kept, ...failed]
             .map((row) => `\n${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`)
             .join(""),
@@ -7436,36 +7353,6 @@ async function instantOfCommit(git: Git, text: string): Promise<Date | undefined
     throw new Error(`commit ${commit}: git returned invalid committer timestamp ${JSON.stringify(seconds)}`)
   }
   return instant
-}
-
-/**
- * The next step for a branch drop keeps because it moved past its recorded change tip (29579). When the target already
- * holds the current tip, as after a fast-forward to it while verifying, nothing is lost by moving the branch back to
- * the recorded tip, after which the same drop retires it (a `--local` one with `--tip` at that recorded tip);
- * otherwise the branch holds work the target lacks, which lands by being submitted. An unanswerable ancestry read is
- * named, never guessed.
- */
-async function advancedCure(
-  git: Git,
-  branch: string,
-  head: string,
-  recorded: string | undefined,
-  target: string,
-  targetLabel: string,
-  local: boolean,
-): Promise<string> {
-  let held: boolean
-  try {
-    held = await isAncestor(git, head, target)
-  } catch (error) {
-    return `; whether ${targetLabel} holds ${head} is unknown (${error instanceof Error ? error.message : String(error)})`
-  }
-  if (!held) return `; it holds commits ${targetLabel} lacks: submit them, and drop the branch after they land`
-  return (
-    `; ${targetLabel} already holds ${head}, so nothing is lost: move the branch back with ` +
-    `git update-ref refs/heads/${branch} ${recorded} ${head}, then ` +
-    (local ? `rerun with --tip ${recorded}` : "rerun this drop")
-  )
 }
 
 function emit(io: YrdCliIO, json: boolean | undefined, data: unknown, human: string): void {
