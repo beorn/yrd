@@ -542,7 +542,7 @@ describe("revert guard review regressions (27363)", () => {
     expect(report.paths.map((row) => row.path)).toContain("vendor/dep/a.txt")
   })
 
-  it.each(["restore", "shared", "swallowed"] as const)(
+  it.each(["restore", "multi-restore", "shared", "swallowed"] as const)(
     "base: braided history judges %s against every base",
     async (kind) => {
       const w = await ambiguousWorld(kind)
@@ -562,19 +562,23 @@ describe("revert guard review regressions (27363)", () => {
       expect(report.base).toEqual({ state: "multiple", bases: expect.arrayContaining(bases) })
       expect(report.coverage).toBe("complete")
       expect(report.gaps).toEqual([])
-      expect(report.paths.map((row) => row.path)).toEqual(kind === "restore" ? ["vendor/dep/a.txt"] : [])
+      expect(report.paths.map((row) => row.path)).toEqual(
+        kind === "restore" || kind === "multi-restore" ? ["vendor/dep/a.txt"] : [],
+      )
       expect(report.swallowed.map((row) => row.path)).toEqual(kind === "swallowed" ? ["vendor/dep"] : [])
       expect(revertGuardAction(report, "observe")).toBe(kind === "shared" ? "clean" : "warn")
       expect(revertGuardAction(report, "refuse")).toBe(kind === "shared" ? "clean" : "stick")
-      const clean = await detect(w, w.head, w.head)
-      expect(clean.base).toEqual({ state: "multiple", bases: expect.arrayContaining(bases) })
-      expect(clean.coverage).toBe("complete")
-      expect(clean.gaps).toEqual([])
-      expect(clean.paths).toEqual([])
-      expect(clean.swallowed).toEqual([])
-      expect(revertedPathsFinding(clean)).toBeUndefined()
-      expect(revertGuardAction(clean, "observe")).toBe("clean")
-      expect(revertGuardAction(clean, "refuse")).toBe("clean")
+      if (kind !== "multi-restore") {
+        const clean = await detect(w, w.head, w.head)
+        expect(clean.base).toEqual({ state: "multiple", bases: expect.arrayContaining(bases) })
+        expect(clean.coverage).toBe("complete")
+        expect(clean.gaps).toEqual([])
+        expect(clean.paths).toEqual([])
+        expect(clean.swallowed).toEqual([])
+        expect(revertedPathsFinding(clean)).toBeUndefined()
+        expect(revertGuardAction(clean, "observe")).toBe("clean")
+        expect(revertGuardAction(clean, "refuse")).toBe("clean")
+      }
       await using native = createProcess({ cwd: root, env })
       const reorderedGit = gitIn(
         root,
@@ -749,7 +753,9 @@ async function modeWorld(): Promise<RegressionWorld> {
 }
 
 /** Real root criss-crosses, including a child criss-cross whose shared advance may be restored. */
-async function ambiguousWorld(kind: "restore" | "shared" | "swallowed" | "no-base"): Promise<RegressionWorld> {
+async function ambiguousWorld(
+  kind: "restore" | "multi-restore" | "shared" | "swallowed" | "no-base",
+): Promise<RegressionWorld> {
   const root = mkdtempSync(join(tmpdir(), "yrd-revert-ambiguous-"))
   roots.push(root)
   const dep = join(root, "dep")
@@ -762,7 +768,7 @@ async function ambiguousWorld(kind: "restore" | "shared" | "swallowed" | "no-bas
   let targetPin = c1
   let incomingPin = c1
   let candidatePin = c2
-  if (kind === "shared") {
+  if (kind === "shared" || kind === "multi-restore") {
     await dg(["checkout", "--quiet", "-b", "dep-left", c1])
     const left = await commit(dep, { "dep-left.txt": "left\n" }, "left from shared advance")
     await dg(["checkout", "--quiet", "-b", "dep-right", c1])
@@ -770,9 +776,16 @@ async function ambiguousWorld(kind: "restore" | "shared" | "swallowed" | "no-bas
     await dg(["checkout", "--quiet", "dep-left"])
     await dg([...author, "merge", "--no-ff", "--quiet", "-m", "left merges right", right])
     targetPin = (await dg(["rev-parse", "HEAD"])).trim()
+    if (kind === "multi-restore") {
+      targetPin = await commit(dep, { "a.txt": "target-only\n" }, "target-only advance beyond both bases")
+    }
     await dg(["checkout", "--quiet", "dep-right"])
     await dg([...author, "merge", "--no-ff", "--quiet", "-m", "right merges left", left])
-    incomingPin = await commit(dep, { "a.txt": "base\n" }, "deliberately restore shared history")
+    incomingPin = await commit(
+      dep,
+      { "a.txt": kind === "multi-restore" ? "target\n" : "base\n" },
+      "deliberately restore prior content",
+    )
     candidatePin = incomingPin
     expect((await dg(["merge-base", "--all", targetPin, incomingPin])).trim().split("\n")).toHaveLength(2)
   } else if (kind === "swallowed" || kind === "no-base") {
