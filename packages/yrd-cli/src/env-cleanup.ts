@@ -78,6 +78,7 @@ type CachedEnvironment = {
  * this path measured 4 per row).
  */
 const ENVIRONMENT_BATCH = 8
+const CLOSE_REQUEST_BUDGET_MS = 45_000
 // Covers opening through the first commit, including time waiting for review.
 const FRESH_ENVIRONMENT_GRACE_MS = 24 * 60 * 60 * 1000
 
@@ -137,12 +138,13 @@ function reportedFromState(parsed: unknown): Map<string, string> {
  * census could not certify the close (22894). This round IS the capable context:
  * it runs the SAME `closeEnvironment` lifecycle the direct verb runs, under the
  * direct admission predicate (clean, unlocked, no holder, ancestry not required),
- * one close per round like every other removal here.
+ * up to ENVIRONMENT_BATCH expensive attempts or CLOSE_REQUEST_BUDGET_MS per round.
  *
  * Retirement is loud and bounded. Existence is checked FIRST, so a path already
  * gone is an `already-removed` row and never a close attempt (23162: freshness at
  * destruction). The registry row is re-read, and a gone registration, a hold or a
- * moved HEAD retires the request as `stale`. Only an incomplete census is
+ * moved HEAD retires the request as `stale`; stale and gone rows do not count as
+ * an attempt. Only an incomplete census is
  * retryable — at most MAX_COVERAGE_ATTEMPTS rounds — after which the file is
  * DELETED with the whole request and the last refusal in its final journal row
  * (no archive directory). Every other refusal retires at once with its reason.
@@ -230,7 +232,7 @@ async function consumeCloseRequests(
     )
   }
   // Read cheap intent metadata before choosing the oldest batch; filenames do not encode request age.
-  // ENVIRONMENT_BATCH still bounds expensive handling. Unreadable files are named and left standing without a slot.
+  // ENVIRONMENT_BATCH and CLOSE_REQUEST_BUDGET_MS bound expensive handling. Unreadable files are named and left standing without a slot.
   const readable: Array<{ file: string; request: StoredCloseRequest }> = []
   for (const file of listCloseRequests(workdir)) {
     try {
@@ -249,15 +251,25 @@ async function consumeCloseRequests(
     const age = a.request.at === b.request.at ? 0 : a.request.at < b.request.at ? -1 : 1
     return age || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
   })
-  const inventory = await environmentInventory(registry, worktrees, workdir)
+  let inventory = await environmentInventory(registry, worktrees, workdir)
+  let inventoryStale = false
+  const startedAt = Date.now()
+  let attempted = 0
   let closed = 0
   const handled = new Set<string>()
-  for (const { file, request } of readable.slice(0, ENVIRONMENT_BATCH)) {
+  for (const { file, request } of readable) {
+    if (attempted >= ENVIRONMENT_BATCH || (attempted > 0 && Date.now() - startedAt >= CLOSE_REQUEST_BUDGET_MS)) {
+      break
+    }
     handled.add(request.path)
     if (!existsSync(request.path)) {
       journal(file, request, request.path, "already-removed", `${request.path} is gone; the request is satisfied`)
       dropCloseRequest(file)
       continue
+    }
+    if (inventoryStale) {
+      inventory = await environmentInventory(registry, worktrees, workdir)
+      inventoryStale = false
     }
     const current = inventory.rows.find((row) => row.path === request.path)
     if (current === undefined) {
@@ -294,6 +306,8 @@ async function consumeCloseRequests(
     }
     // Stage before the close so two consumers cannot both act on one request and
     // a crash mid-close leaves the row in a named place.
+    attempted++
+    inventoryStale = true
     const staged = stageCloseRequest(file)
     const ending = request.ending
     let exit: YrdCliExitCode
@@ -441,9 +455,7 @@ async function consumeCloseRequests(
           fingerprint,
         )
       }
-      // One close per round, like every other removal here: a waiting merge is
-      // judged before another removal (@i/10-yrd eligibility discipline).
-      break
+      continue
     }
     journal(
       file,
