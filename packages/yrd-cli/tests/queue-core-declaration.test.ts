@@ -3463,11 +3463,9 @@ describe("a queue is the selected origin branch carrying config", () => {
   it("prints the policy cure and submits through the event queue on admission exit 3", async () => {
     const repo = await world('admission:\n  run: "sh tools/policy.sh"\n  timeoutMs: 5000\n')
     const git = gitIn(repo)
+    const reason = "\n  target policy: keep 'literal' bytes\t\n\n"
     mkdirSync(join(repo, "tools"))
-    writeFileSync(
-      join(repo, "tools", "policy.sh"),
-      "#!/bin/sh\necho 'Start 3 is not ticked; complete and tick it'\nexit 3\n",
-    )
+    writeFileSync(join(repo, "tools", "policy.sh"), "#!/bin/sh\nprintf %s " + shellQuote(reason) + "\nexit 3\n")
     await git(["add", "tools/policy.sh"])
     await git(["commit", "--quiet", "-m", "policy"])
     await git(["push", "--quiet", "origin", "main"])
@@ -3476,15 +3474,23 @@ describe("a queue is the selected origin branch carrying config", () => {
     writeFileSync(join(repo, "work.txt"), "warning submit\n")
     await git(["add", "work.txt"])
     await git(["commit", "--quiet", "-m", "warning submit"])
+    const prepared = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "submit", "--prepare", "--queue", "main", "--json"], prepared.io),
+      prepared.stderr(),
+    ).toBe(0)
+    expect(prepared.stderr()).toContain("target policy warning (recorded guidance)")
+    expect(prepared.stderr()).toContain(reason)
+    expect(JSON.parse(prepared.stdout()).admission).toEqual({ kind: "warn", reason })
     const submitted = capture(repo)
     expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], submitted.io)).toBe(0)
-    expect(submitted.stderr()).toContain("POLICY WARNING")
-    expect(submitted.stderr()).toContain("Start 3 is not ticked; complete and tick it")
+    expect(submitted.stderr()).toContain("TARGET POLICY WARNING (recorded guidance)")
+    expect(submitted.stderr()).toContain(reason)
     const receipt = JSON.parse(submitted.stdout()) as { admission: { kind: string } }
-    expect(receipt.admission.kind).toBe("warn")
+    expect(receipt.admission).toEqual({ kind: "warn", reason })
     const store = createEventStore(repo, "origin", git.selection)
     const change = (await listChanges(store, "main")).get("task/warn-only")
-    expect(change).toMatchObject({ status: "queued", diagnostic: expect.stringContaining("policy warning") })
+    expect(change).toMatchObject({ status: "queued", diagnostic: expect.stringContaining("target policy warning") })
   })
 
   /** @failure 25708: a same-head submit reopened a merged chain while the service published against its old tip. */
