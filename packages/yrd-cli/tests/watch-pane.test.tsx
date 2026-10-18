@@ -1365,6 +1365,50 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
     app.unmount()
   })
 
+  // Slice A: the same source-first, pane-fallback rule must own every live queue reader.
+  // Existing recovery coverage supplies no pane fallback and exercises only one source.
+  it.each([
+    { count: 1, own: true },
+    { count: 1, own: false },
+    { count: 2, own: true },
+    { count: 2, own: false },
+  ])("uses source context or pane fallback for $count queue(s), source formatter $own", async ({ count, own }) => {
+    const paused = snapshot({
+      rows: [],
+      pause: "maintenance",
+      stopped: { by: "operator", cause: "operator", change: null, since: NOW.toISOString() },
+    })
+    const sources: WatchSource[] = Array.from({ length: count }, (_, index) => ({
+      id: `example.test/repo${String(index)}#main`,
+      label: `queue ${String(index)}`,
+      snapshot: { ...paused, queue: `example.test/repo${String(index)}#main` },
+      formatCommand: own ? (argv) => `source-host-${String(index)} ${argv.join(" ")}` : undefined,
+    }))
+    const app = render(
+      <WatchPane
+        snapshot={paused}
+        sources={sources}
+        formatCommand={(argv) => `pane-host ${argv.join(" ")}`}
+        live={false}
+      />,
+      { cols: 240, rows: 40 },
+    )
+    try {
+      await settle(app)
+      for (let index = 0; index < count; index++) {
+        expect(current(app)).toContain(`${own ? `source-host-${String(index)}` : "pane-host"} queue resume`)
+      }
+      if (own) expect(current(app)).not.toContain("pane-host queue resume")
+      if (count === 2) {
+        app.press("Enter")
+        await settle(app)
+        expect(current(app)).toContain(`${own ? "source-host-0" : "pane-host"} queue resume`)
+      }
+    } finally {
+      app.unmount()
+    }
+  })
+
   it("a single unreadable declared queue recovers its paused runner and viewer remedies", async () => {
     const { load, rounds } = gatedLoader()
     let readable = false
@@ -2320,10 +2364,17 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const load = vi.fn(async () => snap)
     const open = vi.fn(async (item: WatchRow) => detailOf(item, CHECKS))
     const loadDiff = vi.fn(async () => ({ text: "" }))
-    const app = render(<WatchPane snapshot={snap} load={load} open={open} loadDiff={loadDiff} live={false} />, {
-      cols: 220,
-      rows: 50,
-    })
+    const app = render(
+      <WatchPane
+        snapshot={snap}
+        load={load}
+        open={open}
+        loadDiff={loadDiff}
+        formatCommand={(argv) => `draft-host ${argv.join(" ")}`}
+        live={false}
+      />,
+      { cols: 220, rows: 50 },
+    )
     await settle(app)
     app.press("Home")
     await settle(app)
@@ -2336,9 +2387,12 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     app.unmount()
 
     expect({
-      moved: (shown[0] ?? "").includes("moved since its last submit") && (shown[0] ?? "").includes("run yrd submit"),
+      moved:
+        (shown[0] ?? "").includes("moved since its last submit") &&
+        (shown[0] ?? "").includes("run draft-host submit task/moved"),
       read: { load: load.mock.calls.length, loadDiff: loadDiff.mock.calls.length, open: open.mock.calls.length },
-      unread: (shown[2] ?? "").includes("not yet read") && (shown[2] ?? "").includes("run yrd submit"),
+      unread:
+        (shown[2] ?? "").includes("not yet read") && (shown[2] ?? "").includes("run draft-host submit task/unread"),
     }).toEqual({ moved: true, read: { load: 0, loadDiff: 0, open: 0 }, unread: true })
   })
 
