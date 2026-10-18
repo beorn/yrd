@@ -18,9 +18,11 @@ import { createEventStore, readStatus, submit, writeQueueEvent } from "@yrd/queu
 import * as removely from "removely"
 import { archiveRefFor } from "git-super/archive-ref"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
+import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
+import { resolveQueueLocation } from "../src/queue-location.ts"
 import { workdirOf } from "../src/workdir.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
@@ -318,7 +320,17 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
       withdrawn: readonly { archive?: string; recovery?: string; remoteRemoved: boolean }[]
     }
     expect(receipt.withdrawn[0]?.archive).toBe(archiveRef)
-    expect(receipt.withdrawn[0]?.recovery).toBe(`git branch 'task/one'\\''quoted' ${head}`)
+    const recovery = receipt.withdrawn[0]?.recovery
+    if (recovery === undefined) throw new Error("withdrawn work supplied no recovery command")
+    const outside = outsideRepositoryRoot()
+    roots.push(outside)
+    const remoteRefs = await git(["ls-remote", "origin"])
+    const recoveryRepo = (await resolveQueueLocation(work, undefined, process.env, "reader")).repo
+    const recoveredGit = gitIn(recoveryRepo)
+    const restored = spawnSync("/bin/sh", ["-c", recovery], { cwd: outside, encoding: "utf8" })
+    expect(restored.status, restored.stderr).toBe(0)
+    expect((await recoveredGit(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
+    expect(await git(["ls-remote", "origin"])).toBe(remoteRefs)
     expect(existsSync(environment.path), ran.report).toBe(true)
     await writeQueueEvent(createEventStore(work, "origin", git.selection, git.backend), "main", {
       type: "paused",

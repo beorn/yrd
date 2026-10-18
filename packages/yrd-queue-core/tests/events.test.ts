@@ -2162,7 +2162,7 @@ describe("the queue-format boundary", () => {
     if (fault === "ending-final") {
       expect(String(refusal)).toContain("change moved during retirement")
       expect(String(refusal)).toContain(archive)
-      expect(String(refusal)).toContain(`git branch '${branchName}' ${head}`)
+      expect(String(refusal)).toContain(`git -C 'retire-ending-final' branch '${branchName}' '${head}'`)
     }
     if (fault === "absent" || fault === "other-archive") {
       expect(String(refusal)).toContain(archive)

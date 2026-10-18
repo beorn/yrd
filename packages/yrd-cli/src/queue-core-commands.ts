@@ -13,6 +13,7 @@
  * add a line it does not need. The incumbent went at M6; the switch goes here.
  */
 
+import { shellQuote } from "git-super/shell-command"
 import {
   existsSync,
   appendFileSync,
@@ -1993,8 +1994,8 @@ export async function coreQueueCommand(
               ? {
                   recovery:
                     result.archiveLocation === "origin"
-                      ? `git -C ${authorRepo} fetch ${eventStore.remote} ${result.archiveRef}:refs/heads/${branch}`
-                      : `git -C ${authorRepo} branch ${branch} ${result.archiveRef}`,
+                      ? `git -C ${shellQuote(authorRepo)} fetch ${shellQuote(eventStore.remote)} ${shellQuote(`${result.archiveRef}:refs/heads/${branch}`)}`
+                      : `git -C ${shellQuote(authorRepo)} branch ${shellQuote(branch)} ${shellQuote(result.archiveRef)}`,
                 }
               : {}),
           }
@@ -4140,7 +4141,13 @@ export async function coreQueueCommand(
         // change has left the line is over, and a reader must not see it.
         const pause = reading.pause
         const stopped = stopFact(pause)
-        const published = await readPublishedRunner(git, config.target.branch, config.target.remote, reading.runnerTip)
+        const published = await readPublishedRunner(
+          git,
+          repo,
+          config.target.branch,
+          config.target.remote,
+          reading.runnerTip,
+        )
         const localRunner = await readRunnerFacts(workdir)
         const runner: RunnerFacts = { ...localRunner, published }
         const service = localRunner.service
@@ -6764,7 +6771,7 @@ export async function readEventListing(
     })
     if (asked.size === 0 || [...asked].every((id) => terminalJournalRuns.has(id))) return journals
     const left: string[] = []
-    const liveness = await readRunnerLiveness(git, config.target.branch, config.target.remote, runnerTip)
+    const liveness = await readRunnerLiveness(git, repo, config.target.branch, config.target.remote, runnerTip)
     const judged = read(runTerminalProbe(liveness, dir, (message) => left.push(message)))
     return left.length === 0
       ? judged

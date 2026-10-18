@@ -128,7 +128,7 @@ export async function retireOriginBranch(
     throw new Error(
       `${subject}: ${authority.kind === "event" ? "change" : "published main"} moved during retirement; ${authority.ref} expected ${authority.tip}, found ${authorities.get(authority.ref) ?? "absent"}; ` +
         (archive === undefined ? "caller established published-main custody; " : `archive ${archive} holds ${head}; `) +
-        `restore branch ${branch} from that custody: git branch ${shellQuote(branch)} ${head}`,
+        `restore branch ${branch} from that custody: git -C ${shellQuote(store.repo)} branch ${shellQuote(branch)} ${shellQuote(head)}`,
     )
   }
 }

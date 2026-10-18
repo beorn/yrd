@@ -123,6 +123,7 @@ async function objectPresence(git: Git, oid: string): Promise<ObjectPresence> {
  */
 export async function readPublishedRunner(
   git: Git,
+  repo: string,
   queue: string,
   remote: string,
   tip: string | undefined,
@@ -130,7 +131,7 @@ export async function readPublishedRunner(
 ): Promise<PublishedRunner> {
   const ref = runnerRef(queue)
   if (tip === undefined) return { signal: "absent", why: `${remote} ${ref} is absent` }
-  const fetchCommand = `git fetch ${remote} ${ref}`
+  const fetchCommand = `git -C ${shellQuote(repo)} fetch ${shellQuote(remote)} ${shellQuote(ref)}`
   let readTip = tip
   const initial = await objectPresence(git, tip)
   if (initial.kind === "indeterminate") {
@@ -213,12 +214,13 @@ export type RunnerLiveness =
  */
 export async function readRunnerLiveness(
   git: Git,
+  repo: string,
   queue: string,
   remote: string,
   tip: string | undefined,
 ): Promise<RunnerLiveness> {
   const ref = runnerRef(queue)
-  const published = await readPublishedRunner(git, queue, remote, tip)
+  const published = await readPublishedRunner(git, repo, queue, remote, tip)
   const claim = published.claim
   if (claim === undefined) {
     return { kind: "unknown", why: published.why ?? `${remote} ${ref} carries no claim to judge the runner by` }
