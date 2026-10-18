@@ -92,6 +92,12 @@ export type RunnerRun = Readonly<{
   effectiveChecks?: readonly string[]
   activeStep?: ActiveRunnerStep
   steps?: readonly RunnerJournalStep[]
+  /**
+   * The round's own closing `remote-calls` row (25570): this run's journal says
+   * its round ended. Absent while it executes, and absent on one that died —
+   * neither wrote the row.
+   */
+  ended?: true
   /** The line as this run read it, from its own `observation`/`line` record (25669), once it has. */
   line?: RoundLine
   /** The process the run's `.pid` file names, when the file is still there. */
@@ -208,11 +214,29 @@ export type ProjectionFallbackReport = Readonly<{
  */
 export function projectionFallbackReport(
   fallback: JournalProjectionFallback | undefined,
+  runner: Pick<RunnerFacts, "latest" | "roundLockHolder">,
   state: RunnerState,
 ): ProjectionFallbackReport | undefined {
   if (fallback === undefined) return undefined
   if (fallback.reason !== "missing" || state !== "provisioning") return fallback
-  return { ...fallback, reason: "not-yet-written", runnerState: state }
+  // `provisioning` alone proves nothing about THIS run: readRunnerFacts judges a
+  // round lock's BODY and its pid, never the flock, so a released round leaves a
+  // body naming a live service and the word survives between rounds (measured on
+  // hh-dev, 2026-10-18). Two run-owned facts can prove it instead:
+  //   - the journal's own unterminated provisioning step, or
+  //   - a lock taken at or before this run's start, over a journal that has not
+  //     written its closing `remote-calls` row.
+  // A completed run never qualifies — it has that row — so a newer round's lock
+  // cannot hide an older run's genuinely missing projection (@yrd/29994 review).
+  const latest = runner.latest
+  const lock = runner.roundLockHolder
+  const ownStep = latest?.activeStep !== undefined && activeStepStage(latest.activeStep) === "provisioning"
+  const since = lock === undefined ? Number.NaN : Date.parse(lock.since)
+  const ownRound =
+    latest !== undefined && latest.ended !== true && Number.isFinite(since) && latest.startedAt.getTime() >= since
+  return ownStep || ownRound
+    ? { ...fallback, reason: "not-yet-written", runnerState: state }
+    : { ...fallback, runnerState: state }
 }
 
 /** The document's flow fact, when it states one with waiting changes; an older writer states none. */
@@ -528,6 +552,8 @@ export type JournalHead = Readonly<{
   fields: Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks" | "effectiveChecks">
   /** Was a `run` record found at all. */
   headed: boolean
+  /** Did the round write its own closing `remote-calls` row (25570). */
+  ended: boolean
   /** The process the HEADER names, which is the only pid a run in its preamble has. */
   pid?: number
   /** The run never reached its queue — true of one still in its preamble as much as one that died there. */
@@ -713,7 +739,8 @@ export function readRunHeader(path: string, projected?: readonly LogRecord[]): J
   // still IN its preamble as well as one that died there, and only a pid tells
   // those apart.
   const died = runDiedInPreamble(records)
-  if (header === undefined) return { died, fields: {}, headed: false }
+  const ended = records.some((record) => record.kind === "remote-calls")
+  if (header === undefined) return { died, ended, fields: {}, headed: false }
   const resolved = records.find((record) => record.kind === "queue")?.queue ?? header.queue
   const pid = header.pid
   const activeStep = openSteps.at(-1)
@@ -724,6 +751,7 @@ export function readRunHeader(path: string, projected?: readonly LogRecord[]): J
     ...(line === undefined ? {} : { line }),
     ...(unknownKinds.size === 0 ? {} : { unknownKinds: [...unknownKinds].sort() }),
     died,
+    ended,
     headed: true,
     ...(typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? { pid } : {}),
     fields: {
@@ -763,6 +791,7 @@ function journalVerdict(
   | "effectiveChecks"
   | "activeStep"
   | "steps"
+  | "ended"
   | "line"
   | "unknownKinds"
   | "unstarted"
@@ -780,6 +809,7 @@ function journalVerdict(
     ...read.fields,
     ...(alive && read.activeStep !== undefined ? { activeStep: read.activeStep } : {}),
     ...(read.steps === undefined ? {} : { steps: read.steps }),
+    ...(read.ended ? { ended: true as const } : {}),
     ...(read.line === undefined ? {} : { line: read.line }),
     ...(read.unknownKinds === undefined ? {} : { unknownKinds: read.unknownKinds }),
     ...(unstarted ? { unstarted: true as const } : {}),

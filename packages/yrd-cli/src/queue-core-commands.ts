@@ -4130,7 +4130,7 @@ export async function coreQueueCommand(
         const runnerState = runnerOf({ unfiltered, runner: localRunner, stopped }, new Date()).state
         // The runner's own word decides whether an absent projection is a fault
         // or simply a run that has not written it yet (@yrd/29994).
-        const projectionFallback = projectionFallbackReport(localRunner.projectionFallback, runnerState)
+        const projectionFallback = projectionFallbackReport(localRunner.projectionFallback, localRunner, runnerState)
         const runnerStatus =
           options.json === true
             ? {
