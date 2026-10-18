@@ -1314,11 +1314,7 @@ export async function coreQueueCommand(
           queueRun: outcome.run,
         })
         try {
-          await cleanupAfterRound(
-            { ...outcome, log: cleanupLog.path, merged },
-            declared,
-            baseOptions.render,
-          )
+          await cleanupAfterRound({ ...outcome, log: cleanupLog.path, merged }, declared, baseOptions.render)
         } finally {
           // A service keeps its journal for its whole life; a one-shot command
           // owns it for one round.
