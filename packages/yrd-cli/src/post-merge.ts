@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { createHash, randomUUID } from "node:crypto"
+import { randomUUID } from "node:crypto"
 import { createProcess } from "@yrd/process"
 import {
   closingReferencesOf,
@@ -8,6 +8,7 @@ import {
   readBranchHistory,
   readEventQueue,
   readIssueEffect,
+  issueProviderId,
   writeQueueEvent,
   isAncestor,
   trailer,
@@ -187,11 +188,7 @@ async function closeMergedIssues(
           noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
         })
         if (!resolved.ok) {
-          const providerId =
-            "yrd1-" +
-            createHash("sha256")
-              .update(JSON.stringify([mergeSha, "resolve", null, reference.value]))
-              .digest("hex")
+          const providerId = issueProviderId(mergeSha, "resolve", undefined, reference.value)
           const diagnostic = resolved.message
           outcomes.push({
             branch,
@@ -207,11 +204,7 @@ async function closeMergedIssues(
         }
         const keys = (resolved.envelope.result as { keys: string[] }).keys
         for (const key of keys) {
-          const providerId =
-            "yrd1-" +
-            createHash("sha256")
-              .update(JSON.stringify([mergeSha, "close", "completed", key]))
-              .digest("hex")
+          const providerId = issueProviderId(mergeSha, "close", "completed", key)
           if (seen.has(providerId)) continue
           seen.add(providerId)
           completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
@@ -461,10 +454,23 @@ export function createPostMerge<C extends Context>(
         issueActions = closed.outcomes
         if (closed.queue !== undefined) completedQueue = { branch: context.queueBranch, value: closed.queue }
       } else if (context.merged.length > 0 && context.projectRoot === undefined) {
-        options.report("automatic issue close skipped: this queue invocation has no explicit projectRoot")
+        options.report(
+          "automatic issue close skipped: pass --project-root <CODE root> to opt in; issues.yml must be committed at the delivered merge in that repository",
+        )
+      } else if (context.merged.length > 0) {
+        const missing = [
+          ...(options.git === undefined ? ["git"] : []),
+          ...(options.store === undefined ? ["store"] : []),
+          ...(context.queueBranch === undefined ? ["queueBranch"] : []),
+        ]
+        const reason = `automatic issue close unavailable: explicit projectRoot ${context.projectRoot} has missing input(s): ${missing.join(", ")}`
+        settled = { status: "unavailable", reason }
+        options.report(reason)
       }
     } catch (error) {
-      options.report("post-merge issue close attempt unavailable: " + String(error))
+      const reason = "post-merge issue close attempt unavailable: " + String(error)
+      settled = { status: "unavailable", reason }
+      options.report(reason)
     } finally {
       evidence(path, () => {
         writeFileSync(

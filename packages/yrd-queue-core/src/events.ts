@@ -258,6 +258,18 @@ export type AppliedIssueEffect = Readonly<{
   declaration: Readonly<{ path: "issues.yml"; blob: Oid }>
 }>
 
+/** Stable provider replay identity, shared by the effect writer and stored-effect reader. */
+export function issueProviderId(
+  mergeSha: string,
+  verb: AppliedIssueEffect["verb"] | "resolve",
+  semanticEnding: AppliedIssueEffect["semanticEnding"],
+  issueKey: string,
+): string {
+  return `yrd1-${createHash("sha256")
+    .update(JSON.stringify([mergeSha, verb, semanticEnding ?? null, issueKey]))
+    .digest("hex")}`
+}
+
 type ChangeInputDetails = Readonly<{
   queueTip: string
   at: Date
@@ -575,8 +587,12 @@ function checkedIssueEffect(value: unknown, where: string): AppliedIssueEffect {
   if (declaration.path !== "issues.yml" || typeof declaration.blob !== "string" || !COMMIT_OID.test(declaration.blob)) {
     refuse("declaration needs issues.yml and a blob id")
   }
-  const identity = JSON.stringify([raw.mergeSha, raw.verb, raw.semanticEnding ?? null, raw.issueKey])
-  const expectedId = `yrd1-${createHash("sha256").update(identity).digest("hex")}`
+  const expectedId = issueProviderId(
+    raw.mergeSha as string,
+    raw.verb as AppliedIssueEffect["verb"],
+    raw.semanticEnding as AppliedIssueEffect["semanticEnding"],
+    raw.issueKey as string,
+  )
   if (raw.providerId !== expectedId) refuse(`providerId must be ${expectedId}`)
   const expectedKeys = [
     "kind",

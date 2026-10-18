@@ -93,6 +93,7 @@ export {
   queueResumedAfter,
   readChangeEvents,
   readIssueEffect,
+  issueProviderId,
   readEventQueue,
   readEventOps,
   readEventQueueWithChanges,

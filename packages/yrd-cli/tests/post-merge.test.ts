@@ -177,6 +177,32 @@ it("labels interrupted evidence and starts a fresh catch-up without consulting o
   expect(attemptAt(path).status).toBe("interrupted")
   expect(cleaned).toEqual(["merge-oid", "startup"])
 })
+/** @failure An enabled writer silently skips closes when its queue dependencies are missing. @level l2 @consumer post-merge attempts */
+it("records every missing input for explicitly enabled automatic issue closing", async () => {
+  const root = world()
+  const errors: string[] = []
+  const cleaned: string[] = []
+  await using runner = createPostMerge({
+    workdir: root,
+    cwd: root,
+    cleanup: async (c) => {
+      cleaned.push(c.target)
+    },
+    report: (message) => errors.push(message),
+  })
+  runner.nudge({ ...context, projectRoot: root })
+  await runner[Symbol.asyncDispose]()
+  expect(cleaned).toEqual([context.target])
+  const [attempt] = readdirSync(join(root, "post-merge"))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(readFileSync(join(root, "post-merge", name), "utf8")))
+  expect(attempt).toMatchObject({ status: "unavailable" })
+  for (const name of ["git", "store", "queueBranch"]) {
+    expect(attempt).toMatchObject({ reason: expect.stringContaining(name) })
+    expect(errors.join(" ")).toContain(name)
+  }
+})
+
 it("attempts the provider and cleanup even when its derived artifact directory is unwritable", async () => {
   const root = world(),
     marker = join(root, "provider-ran")

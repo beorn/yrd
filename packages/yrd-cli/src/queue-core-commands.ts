@@ -5956,11 +5956,13 @@ export async function openEventDetail(
   const values = (key: string): readonly string[] =>
     segment.flatMap((event) => event.props.filter(([name]) => name === key).map(([, value]) => value))
   const packed = values("Check")
+  const judgment = segment.findLast((event) => event.props.some(([name]) => name === "Check"))
+  const judgmentBase = judgment?.props.find(([name]) => name === "Base")?.[1]
   const source = values("Migrated-From").at(-1)
   const noMigratedChecks = source !== undefined && packed.length === 0
   const declared = noMigratedChecks
     ? undefined
-    : await declarationFor(git, config, values("Base").at(-1) ?? selected.adoptedBase ?? row.base)
+    : await declarationFor(git, config, judgmentBase ?? (packed.length > 0 ? selected.adoptedBase : undefined))
   const decided = row.state === "merged" || row.state === "failed" || row.state === "stuck" || row.state === "cancelled"
   const views =
     declared === undefined
