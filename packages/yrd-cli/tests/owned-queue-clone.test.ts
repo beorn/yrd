@@ -12,6 +12,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { ownedQueueClone, resolveQueueLocation } from "../src/queue-location.ts"
+import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 
 function git(cwd: string, ...args: string[]): string {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" })
@@ -35,7 +36,7 @@ afterEach(() => {
 
 /** A clone whose origin names a GitHub repository, with the real upstream gone: any remote read now fails. */
 function offlineClone(): { root: string; clone: string; state: string } {
-  const root = mkdtempSync(join(tmpdir(), "yrd-owned-queue-clone-"))
+  const root = mkdtempSync(join(tmpdir(), "yrd-owned-queue-clone 'quoted-"))
   roots.push(root)
   const upstream = join(root, "upstream")
   git(root, "init", "-q", "-b", "main", upstream)
@@ -71,11 +72,25 @@ describe("ownedQueueClone (hh 25626)", () => {
   })
 
   it("fails loud, naming the fix, when the clone records no origin/HEAD, rather than asking GitHub", async () => {
-    const { clone, state } = offlineClone()
+    const { root, clone, state } = offlineClone()
     git(clone, "remote", "set-head", "origin", "-d")
-
-    await expect(ownedQueueClone(clone, offlineEnv({ XDG_STATE_HOME: state }))).rejects.toThrow(
-      /records no refs\/remotes\/origin\/HEAD; run `git remote set-head origin --auto`/u,
+    const refusal = await ownedQueueClone(clone, offlineEnv({ XDG_STATE_HOME: state })).catch((error: unknown) => error)
+    expect(refusal).toBeInstanceOf(Error)
+    expect(String(refusal)).toContain("records no refs/remotes/origin/HEAD")
+    const command = /run `([^`]+)`/u.exec(String(refusal))?.[1]
+    if (command === undefined) throw new Error("origin/HEAD refusal supplied no repair command")
+    git(clone, "config", `url.${join(root, "gone")}.insteadOf`, "git@github.com:beorn/hh-dev.git")
+    const outside = outsideRepositoryRoot()
+    roots.push(outside)
+    const repaired = spawnSync("/bin/sh", ["-c", command], {
+      cwd: outside,
+      encoding: "utf8",
+      env: offlineEnv({ GIT_ALLOW_PROTOCOL: "file" }),
+    })
+    expect(repaired.status, repaired.stderr).toBe(0)
+    expect(git(clone, "symbolic-ref", "refs/remotes/origin/HEAD")).toBe("refs/remotes/origin/main")
+    await expect(ownedQueueClone(clone, offlineEnv({ XDG_STATE_HOME: state }))).resolves.toBe(
+      join(state, "yrd", "github.com", "beorn", "hh-dev~main", "repo"),
     )
   })
 })

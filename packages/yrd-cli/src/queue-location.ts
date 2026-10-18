@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
+import { shellQuote } from "git-super/shell-command"
 import { dirname, join, resolve } from "node:path"
 import {
   configValue,
@@ -227,7 +228,7 @@ export async function ownedQueueClone(cwd: string, env: NodeJS.ProcessEnv): Prom
   const prefix = "refs/remotes/origin/"
   if (!recorded.startsWith(prefix) || recorded.length === prefix.length) {
     throw new Error(
-      `${inside} records no refs/remotes/origin/HEAD; run \`git remote set-head origin --auto\` to name its queue`,
+      `${inside} records no refs/remotes/origin/HEAD; run \`git -C ${shellQuote(inside)} remote set-head ${shellQuote("origin")} --auto\` to name its queue`,
     )
   }
   return queueDirectory(await hostWorkdir(cwd, env, git), await originQueueAddress(git, recorded.slice(prefix.length)))
