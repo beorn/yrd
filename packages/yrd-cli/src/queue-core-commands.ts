@@ -142,6 +142,8 @@ import {
   parseUntil,
   type OverrideFact,
   type OverrideEntry,
+  type EnvRetiredNotice,
+  type NotifyRecord,
   type OutsideRound,
   type RetiredRootNotice,
   type QueueReadStore,
@@ -1098,6 +1100,24 @@ export async function coreQueueCommand(
     // Once environment cleanup begins, finish it and its component retirement.
     // A handoff before it begins leaves the native rows for startup catch-up.
     if (!postMergeSignal?.aborted) {
+      // The teller only collects while cleanup closes; the flush after it
+      // returns sends every collected tell in one dispatch — still inside
+      // cleanupAfterRound (round durable, flock released), outside the
+      // close budget. The finally keeps the tells for closes that already
+      // happened even when cleanup itself fails partway.
+      const teller = envRetiredTeller({
+        notify: config.notify,
+        where: `${config.target.remote}#${config.target.branch}`,
+        readChange: (branch) => readClosedChange(eventStore, config.target.branch, branch),
+        tell: (retired) =>
+          tellEnvRetired(
+            { config, git, repo, targetSha: outcome.target, workdir, tempRoot, env },
+            retired,
+            outcome.run,
+            io,
+          ),
+        io,
+      })
       const proofs = await cleanupEnvironments({
         repo,
         git,
@@ -1107,21 +1127,8 @@ export async function coreQueueCommand(
         io,
         env,
         selection,
-        onEnvironmentClosed: envRetiredTeller({
-          notify: config.notify,
-          where: `${config.target.remote}#${config.target.branch}`,
-          readChange: (branch) => readClosedChange(eventStore, config.target.branch, branch),
-          tell: (closed, change) =>
-            tellEnvRetired(
-              { config, git, repo, targetSha: outcome.target, workdir, tempRoot, env },
-              closed,
-              change,
-              outcome.run,
-              io,
-            ),
-          io,
-        }),
-      })
+        onEnvironmentClosed: teller,
+      }).finally(() => teller.flush())
       await retireMergedComponentAuthors({
         authors: componentAuthors,
         proofs,
@@ -1400,15 +1407,17 @@ export async function coreQueueCommand(
           populateReference: options.populateReference,
         },
         "admission-warning",
-        {
-          record: "admission-warning",
-          change: `${submitted.branch}@${submitted.head}`,
-          endingId: warning.event,
-          endedAt: warning.at,
-          submitter,
-          ...(submitted.issue === undefined ? {} : { issue: submitted.issue.issue }),
-          reason: warning.reason,
-        },
+        [
+          {
+            record: "admission-warning",
+            change: `${submitted.branch}@${submitted.head}`,
+            endingId: warning.event,
+            endedAt: warning.at,
+            submitter,
+            ...(submitted.issue === undefined ? {} : { issue: submitted.issue.issue }),
+            reason: warning.reason,
+          },
+        ],
       )
       for (const delivery of deliveries) {
         if (delivery.delivery !== "sent") {
@@ -5227,7 +5236,7 @@ type OutsideRoundTellContext = Readonly<{
   populateReference?: boolean
 }>
 
-type TellDelivery = Readonly<{ name: string; delivery: string; failure?: string }>
+type TellDelivery = Readonly<{ name: string; delivery: string; failure?: string; notice?: NotifyRecord }>
 
 /** The `OutsideRound` every outside-round tell dispatches through, built once here. */
 function outsideRoundOf(context: OutsideRoundTellContext): OutsideRound {
@@ -5253,7 +5262,7 @@ function outsideRoundOf(context: OutsideRoundTellContext): OutsideRound {
 async function handToEntries(
   context: OutsideRoundTellContext,
   run: (outside: OutsideRound) => Promise<readonly TellDelivery[]>,
-  wording: Readonly<{ none: string; failed: (each: TellDelivery) => string }>,
+  wording: Readonly<{ none: (each: TellDelivery) => string; failed: (each: TellDelivery) => string }>,
   io: YrdCliIO,
 ): Promise<readonly TellDelivery[]> {
   let handed: readonly TellDelivery[]
@@ -5263,7 +5272,7 @@ async function handToEntries(
     handed = [{ delivery: "failed", failure: error instanceof Error ? error.message : String(error), name: "notify" }]
   }
   for (const each of handed) {
-    if (each.delivery === "none") io.stderr(wording.none)
+    if (each.delivery === "none") io.stderr(wording.none(each))
     else if (each.delivery === "failed") io.stderr(wording.failed(each))
   }
   return handed
@@ -5291,7 +5300,8 @@ async function tellOverride(
     context,
     (outside) => notifyOutsideRound(outside, notice),
     {
-      none: `yrd: no notify entry in .yrd.yml wants override events, so nobody was told; the override's own record ${entry.record.slice(0, 12)} is the notice\n`,
+      none: () =>
+        `yrd: no notify entry in .yrd.yml wants override events, so nobody was told; the override's own record ${entry.record.slice(0, 12)} is the notice\n`,
       failed: (told) =>
         `yrd: could not tell ${told.name} about the override (it stands): ${told.failure ?? "no reason given"}\n`,
     },
@@ -5430,7 +5440,7 @@ async function tellRetiredRoot(
     context,
     (outside) => notifyRetiredRoot(outside, reading.notice),
     {
-      none:
+      none: () =>
         "yrd: no notify entry in .yrd.yml wants retired-root-written, so nobody was told;" +
         ` the ${reading.active ? "live" : "cleared"} retired root ${reading.notice.address} is on the record\n`,
       failed: (each) =>
@@ -5462,25 +5472,35 @@ export function readClosedChange(
   })
 }
 
+/** One retirement the teller has established may be told: the close, and the merged change it retired for. */
+type ToldRetirement = Readonly<{
+  closed: Readonly<{ branch: string; head?: string; path: string; proof: NonNullable<ClosedEnvironment["proof"]> }>
+  change: EventChange
+}>
+
 /**
  * The round's env-retired teller (29720, @cto REVISE 0773295f): subscribers
  * are checked before ANY chain read, the no-chain case comes from the
  * reader's own result (an undefined change), and only a merged change is
  * told — a withdrawn close is the author's own act and "now that it has
  * landed" would be false for it. Every skip names the path and the reason.
+ *
+ * The callback itself only collects: one cleanup pass retires several
+ * environments, and telling is one worktree preparation per dispatch, so
+ * the caller flushes once after cleanup returns and every collected tell
+ * travels in that one dispatch — outside the close budget, never gating a
+ * close. A flush with nothing collected tells nobody and prepares nothing.
  */
 export function envRetiredTeller(deps: {
   notify: QueueConfig["notify"]
   /** Where the change record is read, named in the no-record skip (e.g. `origin#main`). */
   where: string
   readChange: (branch: string) => Promise<EventChange | undefined>
-  tell: (
-    closed: Readonly<{ branch: string; head?: string; path: string; proof: NonNullable<ClosedEnvironment["proof"]> }>,
-    change: EventChange,
-  ) => Promise<void>
+  tell: (retired: readonly ToldRetirement[]) => Promise<void>
   io: YrdCliIO
-}): (closed: ClosedEnvironment) => Promise<void> {
-  return async (closed) => {
+}): ((closed: ClosedEnvironment) => Promise<void>) & Readonly<{ flush: () => Promise<void> }> {
+  const pending: ToldRetirement[] = []
+  const collect = async (closed: ClosedEnvironment): Promise<void> => {
     if (!deps.notify.some((entry) => entry.on.includes("env-retired"))) {
       deps.io.stderr(noEnvRetiredEntryLine(closed.path))
       return
@@ -5506,44 +5526,56 @@ export function envRetiredTeller(deps: {
       )
       return
     }
-    await deps.tell({ ...closed, branch: closed.branch, proof: closed.proof }, change)
+    pending.push({ closed: { ...closed, branch: closed.branch, proof: closed.proof }, change })
   }
+  return Object.assign(collect, {
+    flush: async (): Promise<void> => {
+      if (pending.length === 0) return
+      await deps.tell(pending.splice(0))
+    },
+  })
 }
 
 /**
- * Tell the declaration's notify entries that post-merge cleanup retired one
- * merged change's author environment (29720), so its author hears where the
- * folder went instead of finding it gone. Never throws and never gates: the
- * close already happened. The caller has already established the change
- * MERGED and that branch and proof can be named — every other close is
- * skipped there, by name.
+ * Tell the declaration's notify entries that post-merge cleanup retired these
+ * merged changes' author environments (29720), so each author hears where
+ * the folder went instead of finding it gone — one dispatch for the whole
+ * cleanup pass, so its worktree is prepared once. Never throws and never
+ * gates: the closes already happened. The caller has already established
+ * each change MERGED and that branch and proof can be named — every other
+ * close is skipped there, by name. Each delivery names its own notice, so a
+ * failure is said against its own environment; a dispatch that threw whole
+ * is said against every environment it carried.
  */
 async function tellEnvRetired(
   context: OutsideRoundTellContext,
-  closed: Readonly<{ branch: string; head?: string; path: string; proof: NonNullable<ClosedEnvironment["proof"]> }>,
-  change: EventChange,
+  retired: readonly ToldRetirement[],
   run: string,
   io: YrdCliIO,
 ): Promise<void> {
+  const notices: EnvRetiredNotice[] = retired.map(({ closed, change }) => ({
+    record: "env-retired",
+    change: `${closed.branch}@${closed.head ?? change.commit ?? ""}`,
+    endingId: `${run}:${closed.path}`,
+    endedAt: new Date().toISOString(),
+    ...(change.submitter === undefined ? {} : { submitter: change.submitter }),
+    ...(change.issue === undefined ? {} : { issue: change.issue }),
+    ...(change.merge === undefined ? {} : { merge: change.merge }),
+    environment: closed.path,
+    proof: closed.proof.manifest,
+    retainUntil: closed.proof.retainUntil,
+  }))
+  const environmentOf = (each: TellDelivery): string =>
+    each.notice?.record === "env-retired"
+      ? each.notice.environment
+      : retired.map(({ closed }) => closed.path).join(", ")
   await handToEntries(
     context,
-    (outside) =>
-      notifyEnvRetired(outside, {
-        record: "env-retired",
-        change: `${closed.branch}@${closed.head ?? change.commit ?? ""}`,
-        endingId: `${run}:${closed.path}`,
-        endedAt: new Date().toISOString(),
-        ...(change.submitter === undefined ? {} : { submitter: change.submitter }),
-        ...(change.issue === undefined ? {} : { issue: change.issue }),
-        ...(change.merge === undefined ? {} : { merge: change.merge }),
-        environment: closed.path,
-        proof: closed.proof.manifest,
-        retainUntil: closed.proof.retainUntil,
-      }),
+    (outside) => notifyEnvRetired(outside, notices),
     {
-      none: noEnvRetiredEntryLine(closed.path),
+      none: (each) => noEnvRetiredEntryLine(environmentOf(each)),
       failed: (each) =>
-        `yrd: could not tell ${each.name} about the retired environment ${closed.path}: ${each.failure ?? "no reason given"}\n`,
+        `yrd: could not tell ${each.name} about the retired environment ${environmentOf(each)}: ${each.failure ?? "no reason given"}\n`,
     },
     io,
   )
