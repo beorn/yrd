@@ -4940,6 +4940,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     const head = await oneChange(w, "task/stuck")
 
     const run = capture(w.work)
+    run.io.formatYrdCommand = (argv) => `host-selected ${argv.join(" ")}`
     const stdout = run.io.stdout
     run.io.stdout = (text) => {
       stdout(text)
@@ -4982,10 +4983,17 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     expect(exit, run.stderr()).toBe(0)
     // ONE judgement: the candidate's setup and its settled base's, and nothing after.
     expect(fault.runs()).toBe(2)
-    expect(run.stderr()).toContain("stuck task/stuck: not a string: code in this run's log (")
-    expect(run.stderr()).toContain("inspect:")
-    expect(run.stderr()).toContain("retry after repair:")
     const rounds = records(run)
+    const selectedQueue = `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`
+    const stuckLines = run
+      .stderr()
+      .split("\n")
+      .filter((line) => line.startsWith("yrd: stuck task/stuck:"))
+      .map((line) => line.replace(String(rounds[0]?.log), "<log>").replaceAll(selectedQueue, "<queue>"))
+    // A whole line catches duplicated lift text and missing host-selected cures.
+    expect(stuckLines).toEqual([
+      "yrd: stuck task/stuck: not a string: code in this run's log (<log>); inspect: host-selected queue show task/stuck --queue <queue>; resume: host-selected queue resume --reason <why> --queue <queue>; withdraw: host-selected queue withdraw task/stuck --queue <queue>; retry after repair: host-selected merge task/stuck --queue <queue>",
+    ])
     expect(rounds).toHaveLength(3)
     expect(rounds[0]).toMatchObject({ exitCode: 2, merged: [], stuck: ["task/stuck"] })
     for (const later of rounds.slice(1)) {

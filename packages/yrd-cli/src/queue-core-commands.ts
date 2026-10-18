@@ -5748,17 +5748,6 @@ export function describeRun(
   return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")} (log ${outcome.log})`
 }
 
-/**
- * One line per change this round ended stuck, naming the cure the way
- * `queue list`/`queue show` already render a stuck row's incident
- * (the shared `incidentLine` formatter) — `queue run`'s own summary line
- * names only the branch (@i/10-yrd/24141 AC2).
- *
- * Read from this round's own log rather than the remote: the `end()` step
- * that pushed a change to `stuck` wrote the complete incident to `outcome.log`
- * in the same call (event-run.ts), so this is that run's own record of why, never a
- * second, possibly-later reading of the change ref.
- */
 function formatQueueCommand(io: YrdCliIO, queue: string, argv: readonly string[]): string {
   return formatYrdCommand(io, [...argv, "--queue", queue], io.cwd)
 }
@@ -5781,6 +5770,17 @@ function stopActions(
   ].join("; ")
 }
 
+/**
+ * One line per change this round ended stuck, naming the cure the way
+ * `queue list`/`queue show` already render a stuck row's incident
+ * (the shared `incidentLine` formatter) — `queue run`'s own summary line
+ * names only the branch (@i/10-yrd/24141 AC2).
+ *
+ * Read from this round's own log rather than the remote: the `end()` step
+ * that pushed a change to `stuck` wrote the complete incident to `outcome.log`
+ * in the same call (event-run.ts), so this is that run's own record of why, never a
+ * second, possibly-later reading of the change ref.
+ */
 function stuckCureLines(outcome: QueueRunOutcome, command: (argv: readonly string[]) => string): readonly string[] {
   if (outcome.stuck.length === 0) return []
   const rows = readFileSync(outcome.log, "utf8")
