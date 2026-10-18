@@ -1780,7 +1780,7 @@ describe("what a watch says it looked at", () => {
     expect(selected.changes.map((change) => change.branch)).toEqual(["task/other"])
     expect.soft(selected.journal.malformed ?? []).toEqual([])
     expect.soft(selected.journal.absent).toMatch(/global.*\b1\b.*malformed/i)
-    expect.soft(selected.journal.absent).toContain("yrd list --all --json")
+    expect.soft(selected.journal.absent).toContain(`yrd 'list' '--all' '--json' '--queue' '${w.remote}#main'`)
     expect.soft(JSON.stringify(selected.journal)).not.toContain(`task/good@${head}`)
 
     const selectedHuman = capture(w.work)
@@ -1793,7 +1793,7 @@ describe("what a watch says it looked at", () => {
     expect(selectedHuman.stdout()).toContain("task/other")
     expect.soft(selectedHuman.stderr()).not.toContain(`task/good@${head}`)
     expect.soft(selectedHuman.stderr()).toMatch(/global.*\b1\b.*malformed/i)
-    expect.soft(selectedHuman.stderr()).toContain("yrd list --all --json")
+    expect.soft(selectedHuman.stderr()).toContain(`yrd 'list' '--all' '--json' '--queue' '${w.remote}#main'`)
   })
 
   it("puts submit- and merge-round checks into a merged change's interactive detail", async () => {
