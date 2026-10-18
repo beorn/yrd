@@ -3210,103 +3210,149 @@ describe("the queue-format boundary", () => {
   })
 
   // A queue completion must be readable from any branch replay without walking other
-  // branches. These cases exercise the retained immutable anchor, not a new writer.
-  it.each(["valid", "unkept", "wrong merge", "not merged", "foreign queue", "wrong writer", "duplicate"])(
-    "reads retained issue effects on the queue chain: %s",
-    async (variant) => {
-      const { store, location: remoteLocation } = remoteMemStore(`yrd-queue-issue-effect-${variant}`)
-      const target = await open({ ...store, ref: "refs/heads/lab" })
-      const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
-      const at = new Date("2026-09-22T14:00:00.000Z")
-      const queueTip = await seedEventQueue(remoteLocation, "lab", commit, at)
-      await activateRunIndex(remoteLocation, "lab", at)
-      const location = queueReadWithRunIndex(remoteLocation, "lab").store
-      const branch = await openEvents({ ...store, ref: changesRef("lab", "task/retained"), writer: QUEUE_RUN_WRITER })
-      const opened = await branch.append([changeInput("opened", { queueTip, at, commit, by: "author" })], {
-        expect: null,
-      })
-      const merged = await branch.append(
-        [changeInput("merged", { queueTip: variant === "foreign queue" ? B : queueTip, at, commit })],
-        { expect: opened.head },
-      )
-      const anchor = variant === "not merged" ? opened.head : merged.head
-      if (anchor === null) throw new Error("fixture lacks its retained event")
-      const mergeSha = variant === "wrong merge" ? A : commit
-      const effect = {
-        ...ISSUE_EFFECT,
-        mergedEvent: anchor,
-        mergeSha,
-        providerId: `yrd1-${createHash("sha256")
-          .update(JSON.stringify([mergeSha, "close", "completed", ISSUE_EFFECT.issueKey]))
-          .digest("hex")}`,
-      }
-      const queue = await openEvents({
-        ...store,
-        ref: queueRef("lab"),
-        writer: variant === "wrong writer" ? "intruder" : QUEUE_RUN_WRITER,
-      })
-      const input: EventInput = {
-        type: "notified",
-        props: [
-          ["Queue", queueTip],
-          ["Time", at.toISOString()],
-          ["Issue-Effect", JSON.stringify(effect)],
+  // branches. These cases exercise the retained immutable anchor and its queue authority.
+  it.each([
+    "valid",
+    "unkept",
+    "wrong merge",
+    "not merged",
+    "foreign queue",
+    "wrong writer",
+    "duplicate",
+    "reuse same",
+    "reuse descendant",
+    "reuse rewrite",
+  ])("reads retained issue effects on the queue chain: %s", async (variant) => {
+    const { store, location: remoteLocation } = remoteMemStore(`yrd-queue-issue-effect-${variant}`)
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const queueTip = await seedEventQueue(remoteLocation, "lab", commit, at)
+    await activateRunIndex(remoteLocation, "lab", at)
+    const location = queueReadWithRunIndex(remoteLocation, "lab").store
+    const branch = await openEvents({ ...store, ref: changesRef("lab", "task/retained"), writer: QUEUE_RUN_WRITER })
+    const opened = await branch.append([changeInput("opened", { queueTip, at, commit, by: "author" })], {
+      expect: null,
+    })
+    const merged = await branch.append(
+      [changeInput("merged", { queueTip: variant === "foreign queue" ? B : queueTip, at, commit })],
+      { expect: opened.head },
+    )
+    const anchor = variant === "not merged" ? opened.head : merged.head
+    if (anchor === null) throw new Error("fixture lacks its retained event")
+    const mergeSha = variant === "wrong merge" ? A : commit
+    const effect = {
+      ...ISSUE_EFFECT,
+      mergedEvent: anchor,
+      mergeSha,
+      providerId: `yrd1-${createHash("sha256")
+        .update(JSON.stringify([mergeSha, "close", "completed", ISSUE_EFFECT.issueKey]))
+        .digest("hex")}`,
+    }
+    const queue = await openEvents({
+      ...store,
+      ref: queueRef("lab"),
+      writer: variant === "wrong writer" ? "intruder" : QUEUE_RUN_WRITER,
+    })
+    const input: EventInput = {
+      type: "notified",
+      props: [
+        ["Queue", queueTip],
+        ["Time", at.toISOString()],
+        ["Issue-Effect", JSON.stringify(effect)],
+      ],
+      keeps: variant === "unkept" ? [] : [anchor],
+    }
+    const written = await queue.append([input], { expect: queueTip })
+    if (variant === "duplicate") {
+      await queue.append(
+        [
+          {
+            ...input,
+            props: input.props?.map(([key, value]) => [key, key === "Queue" ? (written.head as string) : value]),
+          },
         ],
-        keeps: variant === "unkept" ? [] : [anchor],
+        { expect: written.head },
+      )
+    }
+    if (variant !== "valid" && !variant.startsWith("reuse ")) {
+      const failures: Record<string, RegExp> = {
+        unkept: /keep.*merged event/u,
+        "wrong merge": /mergeSha.*merged event/u,
+        "not merged": /actual merged event/u,
+        "foreign queue": /queue cause/u,
+        "wrong writer": /writer yrd-run/u,
+        duplicate: /duplicate issue effect/u,
       }
-      const written = await queue.append([input], { expect: queueTip })
-      if (variant === "duplicate") {
-        await queue.append(
-          [
-            {
-              ...input,
-              props: input.props?.map(([key, value]) => [key, key === "Queue" ? (written.head as string) : value]),
-            },
-          ],
-          { expect: written.head },
-        )
+      await expect(readEventQueue(location, "lab")).rejects.toThrow(failures[variant])
+      return
+    }
+    const reading = await readEventQueue(location, "lab")
+    expect(reading.issueEffects[effect.providerId]).toEqual({ id: written.head, effect })
+    expect(reading.notices).toEqual({})
+    if (variant.startsWith("reuse ")) {
+      // Reuse saves immutable anchor reads, while rewrites must validate every surviving fact again.
+      let knownQueue = reading
+      if (variant === "reuse descendant") {
+        const later = await branch.append([changeInput("merged", { queueTip: written.head!, at, commit })], {
+          expect: anchor,
+        })
+        const issueKey = "wk/issue/new-anchor"
+        await writeQueueEvent(location, "lab", {
+          type: "notified",
+          by: QUEUE_RUN_WRITER,
+          at,
+          issueEffect: {
+            ...effect,
+            mergedEvent: later.head!,
+            issueKey,
+            providerId: `yrd1-${createHash("sha256")
+              .update(JSON.stringify([mergeSha, "close", "completed", issueKey]))
+              .digest("hex")}`,
+          },
+        })
+      } else if (variant === "reuse rewrite") {
+        const extra = await writeQueueEvent(location, "lab", { type: "observed", by: QUEUE_RUN_WRITER, at, commit })
+        knownQueue = await readEventQueue(location, "lab")
+        if (store.backend.publish === undefined) throw new Error("fixture lacks queue rewrite publisher")
+        await store.backend.publish(store.repo, [{ ref: queueRef("lab"), expect: extra, oid: written.head! }], "origin")
       }
-      if (variant !== "valid") {
-        const failures: Record<string, RegExp> = {
-          unkept: /keep.*merged event/u,
-          "wrong merge": /mergeSha.*merged event/u,
-          "not merged": /actual merged event/u,
-          "foreign queue": /queue cause/u,
-          "wrong writer": /writer yrd-run/u,
-          duplicate: /duplicate issue effect/u,
-        }
-        await expect(readEventQueue(location, "lab")).rejects.toThrow(failures[variant])
-        return
+      const histories = vi.spyOn(location.backend, "readHistory")
+      try {
+        const current = await readEventQueue(location, "lab", { knownQueue })
+        expect(Object.keys(current.issueEffects)).toHaveLength(variant === "reuse descendant" ? 2 : 1)
+        // One first-parent queue read, plus zero old anchors / one new anchor / one rewritten anchor.
+        expect(histories).toHaveBeenCalledTimes(variant === "reuse same" ? 1 : 2)
+      } finally {
+        histories.mockRestore()
       }
-      const reading = await readEventQueue(location, "lab")
-      expect(reading.issueEffects[effect.providerId]).toEqual({ id: written.head, effect })
-      expect(reading.notices).toEqual({})
-      expect((await queue.events()).map((event) => event.type)).toEqual(["created", "notified"])
-      // The sole completion writer must dedupe an existing fact and retain a new anchor through its queue CAS.
-      expect(
-        await writeQueueEvent(location, "lab", { type: "notified", by: QUEUE_RUN_WRITER, at, issueEffect: effect }),
-      ).toBe(written.head)
-      const issueKey = "wk/issue/another"
-      const next = {
-        ...effect,
-        issueKey,
-        providerId: `yrd1-${createHash("sha256")
-          .update(JSON.stringify([mergeSha, "close", "completed", issueKey]))
-          .digest("hex")}`,
-      }
-      const applied = await writeQueueEvent(location, "lab", {
-        type: "notified",
-        by: QUEUE_RUN_WRITER,
-        at,
-        issueEffect: next,
-      })
-      expect((await readEventQueue(location, "lab")).issueEffects[next.providerId]).toEqual({
-        id: applied,
-        effect: next,
-      })
-      expect((await queue.events()).at(-1)?.links).toEqual([anchor])
-    },
-  )
+      return
+    }
+    expect((await queue.events()).map((event) => event.type)).toEqual(["created", "notified"])
+    // The sole completion writer must dedupe an existing fact and retain a new anchor through its queue CAS.
+    expect(
+      await writeQueueEvent(location, "lab", { type: "notified", by: QUEUE_RUN_WRITER, at, issueEffect: effect }),
+    ).toBe(written.head)
+    const issueKey = "wk/issue/another"
+    const next = {
+      ...effect,
+      issueKey,
+      providerId: `yrd1-${createHash("sha256")
+        .update(JSON.stringify([mergeSha, "close", "completed", issueKey]))
+        .digest("hex")}`,
+    }
+    const applied = await writeQueueEvent(location, "lab", {
+      type: "notified",
+      by: QUEUE_RUN_WRITER,
+      at,
+      issueEffect: next,
+    })
+    expect((await readEventQueue(location, "lab")).issueEffects[next.providerId]).toEqual({
+      id: applied,
+      effect: next,
+    })
+    expect((await queue.events()).at(-1)?.links).toEqual([anchor])
+  })
 
   const GITHUB_5XX = [
     "remote: Internal Server Error",
