@@ -13,6 +13,7 @@
  * add a line it does not need. The incumbent went at M6; the switch goes here.
  */
 
+import { shellQuote } from "git-super/shell-command"
 import {
   existsSync,
   appendFileSync,
@@ -2465,9 +2466,18 @@ export async function coreQueueCommand(
         } catch (error) {
           if (!(error instanceof PinCarrierConflict)) throw error
           const queue = formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))
-          io.stderr(
-            `yrd: pin carrier conflicts with ${error.branch}; inspect: ${formatQueueCommand(io, queue, ["queue", "show", error.branch])}\n`,
-          )
+          const inspection = (() => {
+            const holderKind = error.holderKind
+            switch (holderKind) {
+              case "change":
+                return formatQueueCommand(io, queue, ["queue", "show", error.branch])
+              case "branch":
+                return `git -C ${shellQuote(repo)} ls-remote ${shellQuote(config.target.remote)} ${shellQuote(`refs/heads/${error.branch}`)}`
+            }
+            const unreachable: never = holderKind
+            throw new Error(`pin carrier ${error.branch}: unknown holder kind ${String(unreachable)}`)
+          })()
+          io.stderr(`yrd: ${error.message}; inspect: ${inspection}\n`)
           return 2
         }
         const submission = {

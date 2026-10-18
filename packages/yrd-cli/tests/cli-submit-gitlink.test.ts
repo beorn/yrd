@@ -821,6 +821,7 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
       },
     )
     expect(code, stderr).toBe(2)
+    expect.soft(stderr).toContain(`pin set already has open change ${branch}`)
     expect(commands, stderr).toEqual([{ argv: ["queue", "show", branch, "--queue", queue], cwd: w.work }])
     expect(stderr).toContain(`inspect: ${recipe}`)
     // Execute exactly the printed recipe from another directory, using the real CLI.
@@ -835,8 +836,8 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     expect(inspected.stdout).toContain(branch)
     expect(await refs(w.remote, [])).toBe(before)
 
-    // The public core fact preserves the original diagnostic bytes at both
-    // refusal sites; the CLI can render an action without parsing those bytes.
+    // The producer declares the holder kind; the CLI keeps its reason and
+    // renders an action without interpreting diagnostic text.
     const prepare = () =>
       preparePinCarrier({
         git,
@@ -846,18 +847,20 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
         pins: [{ path: one.path, sha: one.held }],
         env: process.env,
       })
-    await expect(prepare()).rejects.toMatchObject({
+    await expect.soft(prepare()).rejects.toMatchObject({
       branch,
-      message: `pin set already has open change ${branch}; inspect yrd queue show ${branch}`,
+      holderKind: "change",
+      message: `pin set already has open change ${branch}`,
     })
     expect(await refs(w.remote, [])).toBe(before)
     expect((await yrd(w.work, "withdraw", branch, "--queue", queue)).exitCode).toBe(0)
     const heldDraft = `pin/vendor-one/${one.held.slice(0, 12)}`
     await git(["push", "--quiet", "origin", `main:refs/heads/${heldDraft}`])
     const draftRefs = await refs(w.remote, [])
-    await expect(prepare()).rejects.toMatchObject({
+    await expect.soft(prepare()).rejects.toMatchObject({
       branch: heldDraft,
-      message: `${heldDraft} is already held as a draft; inspect yrd queue show ${heldDraft}`,
+      holderKind: "branch",
+      message: `${heldDraft} is already held as a draft`,
     })
     const blockedDraft = await yrd(
       w.work,
@@ -870,7 +873,16 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
       queue,
     )
     expect(blockedDraft.exitCode, blockedDraft.report).toBe(2)
-    expect(blockedDraft.stderr).toContain(`'queue' 'show' '${heldDraft}' '--queue' '${queue}'`)
+    expect.soft(blockedDraft.stderr).toContain(`${heldDraft} is already held as a draft`)
+    const branchRecipe = /; inspect: ([^\n]+)\n/u.exec(blockedDraft.stderr)?.[1]
+    if (branchRecipe === undefined) throw new Error("held remote branch supplied no inspection recipe")
+    const branchInspected = spawnSync("/bin/sh", ["-c", branchRecipe], {
+      cwd: w.root, env: process.env, encoding: "utf8", timeout: 30000,
+    })
+    expect(branchInspected.error).toBeUndefined()
+    expect(branchInspected.status, branchInspected.stderr).toBe(0)
+    const heldHead = (await git(["rev-parse", "refs/heads/main"])).trim()
+    expect(branchInspected.stdout.trim()).toBe(`${heldHead}\trefs/heads/${heldDraft}`)
     expect(await refs(w.remote, [])).toBe(draftRefs)
   }, 90_000)
 

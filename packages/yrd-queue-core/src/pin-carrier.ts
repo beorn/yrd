@@ -25,6 +25,7 @@ export class PinCarrierConflict extends Error {
   constructor(
     message: string,
     readonly branch: string,
+    readonly holderKind: "change" | "branch",
   ) {
     super(message)
   }
@@ -158,8 +159,9 @@ export async function preparePinCarrier(
       .map((row) => ({ path: row.path, sha: row.sha }))
     if (moved.length > 0 && pinIdentity(orderedPins(moved)) === identity) {
       throw new PinCarrierConflict(
-        `pin set already has open change ${change.branch}; inspect yrd queue show ${change.branch}`,
+        `pin set already has open change ${change.branch}`,
         change.branch,
+        "change",
       )
     }
   }
@@ -172,8 +174,9 @@ export async function preparePinCarrier(
     if (held === undefined && remoteHead === undefined) break
     if (held === undefined || held.open) {
       throw new PinCarrierConflict(
-        `${branch} is already held${held === undefined ? " as a draft" : " by an open change"}; inspect yrd queue show ${branch}`,
+        `${branch} is already held${held === undefined ? " as a draft" : " by an open change"}`,
         branch,
+        held === undefined ? "branch" : "change",
       )
     }
     branch = `${baseName}-r${revision + 1}`
