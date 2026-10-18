@@ -4359,6 +4359,7 @@ export async function coreQueueCommand(
         const source: WatchSource = {
           id: first.queue,
           label: formatStoredQueueAddress(first.queue),
+          formatCommand: (argv) => formatYrdCommand(io, [...argv, "--queue", first.queue], io.cwd ?? repo),
           resolveRunAddress: async (operand) => {
             const selected = parseQueueAddress(first.queue)
             if (selected.kind !== "remote") {

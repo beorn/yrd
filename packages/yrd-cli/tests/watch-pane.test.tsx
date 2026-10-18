@@ -5452,6 +5452,7 @@ describe("independent queue watch (22949)", () => {
       queues: [{ branch: "main", label: "one", path: "/one" }],
       rows: [{ row: row({ subject: "first repository", position: 1, run: RUN_ID }) }],
       decisions: [],
+      stopped: { by: "operator", cause: "operator", change: null, since: NOW.toISOString() },
     })
     const second = snapshot({
       queue: "example.test/two#main",
@@ -5462,13 +5463,14 @@ describe("independent queue watch (22949)", () => {
       ],
       decisions: [],
       pause: "second queue is held",
+      stopped: { by: "yrd", cause: "stuck", change: `task/repair@${"1".repeat(40)}`, since: NOW.toISOString() },
     })
     const app = render(
       <WatchPane
         snapshot={first}
         sources={[
-          { id: "one#main", label: "one", snapshot: first },
-          { id: "two#main", label: "two", snapshot: second },
+          { id: "one#main", label: "one", snapshot: first, formatCommand: (argv) => `one-host ${argv.join(" ")}` },
+          { id: "two#main", label: "two", snapshot: second, formatCommand: (argv) => `two-host ${argv.join(" ")}` },
         ]}
         live={false}
       />,
@@ -5486,6 +5488,10 @@ describe("independent queue watch (22949)", () => {
     expect(app.text).toContain("2 waiting")
     expect(app.text).toContain("second repository")
     expect(app.text).toContain("second queue is held")
+    // Each visible queue owns its viewer-local command context. The ordinary
+    // listing render cannot catch losing it in multi-queue or focused panes.
+    expect(app.text).toContain("one-host queue resume")
+    expect(app.text).toContain("two-host queue withdraw task/repair")
     if (process.env.YRD_CAPTURE_DIR) {
       const ansi = bufferToStyledText(app.term.buffer)
       writeCaptureIfConfigured("22949-multi-queue-352x117.ansi", ansi)
@@ -5508,6 +5514,7 @@ describe("independent queue watch (22949)", () => {
     await settle(app)
     expect(app.text).toContain("example.test/one#main")
     expect(app.text).not.toContain("example.test/two#main")
+    expect(app.text).toContain("one-host queue resume")
     app.press("Escape")
     await settle(app)
     expect(app.text).toContain("example.test/two#main")

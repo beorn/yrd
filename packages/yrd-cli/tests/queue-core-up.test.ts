@@ -92,6 +92,7 @@ import { readRunnerFacts } from "../src/watch-runner.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { transientPushRetry } from "../../yrd-queue-core/src/transient-push.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
+import type { WatchSource } from "../src/watch-pane.tsx"
 import { installSelectedGit } from "./support/selected-git.ts"
 
 // A mutable facade, so a test can catch each health document at the rename
@@ -2828,6 +2829,24 @@ describe("yrd queue up, the service", () => {
     const runnerBox = page.slice(runnerBoxStart, runnerBoxEnd === -1 ? undefined : runnerBoxEnd + 1).join("\n")
     expect(runnerBox, listed.stdout()).toContain("paused")
     const selectedQueue = `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`
+    const liveSources: WatchSource[] = []
+    expect(
+      await coreQueueCommand(
+        w.work,
+        listedIO,
+        { command: "list", watch: true },
+        {
+          workdir: w.workdir,
+          watchSource: (source) => liveSources.push(source),
+        },
+      ),
+    ).toBe(0)
+    // The production source must carry the viewer formatter into the live
+    // pane; component-only callback fixtures cannot prove this boundary.
+    expect(liveSources).toHaveLength(1)
+    expect(liveSources[0]?.formatCommand?.(["queue", "resume"])).toBe(
+      `viewer ${w.work} yrd queue resume --queue ${selectedQueue}`,
+    )
     expect(displayedCommands).toContainEqual({
       argv: ["queue", "resume", "--queue", selectedQueue],
       cwd: w.work,
