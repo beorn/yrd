@@ -576,6 +576,8 @@ export type Journals<Run extends JournalSummary = JournalRun> = Readonly<{
   dir: string
   /** Why there is nothing, when there is nothing: a sentence naming what was looked for and where. */
   absent?: string
+  /** Event segments whose journals could not be selected because they name no Run trailer. */
+  missingRunTrailers?: readonly Readonly<{ branch: string; head: string; segment?: string }>[]
   /**
    * Every journal row in the window that could not be read, each naming the run
    * it was in, the `<branch>@<head>` it was about, and what was wrong with it.

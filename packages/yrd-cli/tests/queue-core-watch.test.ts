@@ -1763,6 +1763,37 @@ describe("what a watch says it looked at", () => {
     expect(listed.changes.find((change) => change.branch === "task/other")?.malformed).toBeUndefined()
     // Narration is stderr's; the product a consumer parses stays on stdout.
     expect(json.stderr()).toBe("")
+
+    // Selecting the healthy change must retain a counted warning about the
+    // global gap without expanding the unrelated malformed change's identity.
+    const selectedJson = capture(w.work)
+    await coreQueueCommand(
+      w.work,
+      selectedJson.io,
+      { command: "list", all: true, terms: ["task/other"] },
+      { json: true, workdir: w.workdir },
+    )
+    const selected = JSON.parse(selectedJson.stdout()) as {
+      changes: readonly { branch: string }[]
+      journal: { absent?: string; malformed?: readonly { key: string }[] }
+    }
+    expect(selected.changes.map((change) => change.branch)).toEqual(["task/other"])
+    expect.soft(selected.journal.malformed ?? []).toEqual([])
+    expect.soft(selected.journal.absent).toMatch(/global.*\b1\b.*malformed/i)
+    expect.soft(selected.journal.absent).toContain("yrd list --all --json")
+    expect.soft(JSON.stringify(selected.journal)).not.toContain(`task/good@${head}`)
+
+    const selectedHuman = capture(w.work)
+    await coreQueueCommand(
+      w.work,
+      selectedHuman.io,
+      { command: "list", all: true, terms: ["task/other"] },
+      { workdir: w.workdir },
+    )
+    expect(selectedHuman.stdout()).toContain("task/other")
+    expect.soft(selectedHuman.stderr()).not.toContain(`task/good@${head}`)
+    expect.soft(selectedHuman.stderr()).toMatch(/global.*\b1\b.*malformed/i)
+    expect.soft(selectedHuman.stderr()).toContain("yrd list --all --json")
   })
 
   it("puts submit- and merge-round checks into a merged change's interactive detail", async () => {
