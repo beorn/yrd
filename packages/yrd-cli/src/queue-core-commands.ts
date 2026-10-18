@@ -1397,12 +1397,12 @@ export async function coreQueueCommand(
   const echoAdmission = (outcome: AdmissionOutcome, dryRun = false): void => {
     if (outcome.kind === "warn") {
       io.stderr(
-        `yrd: ADMISSION POLICY WARNING: ${outcome.reason}; ${dryRun ? "dry run would proceed without publishing" : "submit proceeds with a recorded change warning"}\n`,
+        `yrd: TARGET POLICY WARNING (recorded guidance): ${outcome.reason}; ${dryRun ? "dry run would proceed without publishing" : "submit proceeds with a recorded change warning"}\n`,
       )
     }
     if (outcome.kind === "cannot-judge") {
       io.stderr(
-        `yrd: ADMISSION CANNOT JUDGE: ${outcome.reason}; ${dryRun ? "dry run would proceed without publishing" : "submit proceeds with a recorded change warning"}\n`,
+        `yrd: TARGET POLICY CANNOT JUDGE (recorded guidance): ${outcome.reason}; ${dryRun ? "dry run would proceed without publishing" : "submit proceeds with a recorded change warning"}\n`,
       )
     }
   }
@@ -2528,7 +2528,9 @@ export async function coreQueueCommand(
         await echoStop(stop)
         echoComponentAuthors(published)
         if (admission.kind === "warn" || admission.kind === "cannot-judge") {
-          io.stderr(`preparation admission ${admission.kind}: ${admission.reason}\n`)
+          io.stderr(
+            `preparation target policy ${admission.kind === "warn" ? "warning" : "could not judge"} (recorded guidance): ${admission.reason}\n`,
+          )
         }
         return 0
       }
