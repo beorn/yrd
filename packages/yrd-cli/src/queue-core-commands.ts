@@ -4326,8 +4326,10 @@ export async function coreQueueCommand(
         const { printListing } = await import("./watch-print.tsx")
         const single = one.rows.length === 1 ? one.rows[0] : undefined
         const snapshot = snapshotOf(one)
+        const formatCommand = (argv: readonly string[]) =>
+          formatQueueCommand(io, formatStoredQueueAddress(snapshot.queue), argv)
         const listing = await printListing(snapshot, {
-          formatCommand: (argv) => formatQueueCommand(io, formatStoredQueueAddress(snapshot.queue), argv),
+          formatCommand,
           color: io.color === true,
           columns: io.columns ?? 120,
           ...(one.scope === undefined ? {} : { scope: one.scope }),
@@ -4341,9 +4343,14 @@ export async function coreQueueCommand(
               }),
         })
         // Append after the bounded terminal render: recorded warnings must never be clipped by its height.
-        return [listing, ...one.rows.flatMap((item) => diagnosticLines(item.row, journalFor(item, one.journals)))].join(
-          "\n",
+        const warnedBranches = new Set(
+          one.rows.flatMap((item) => (item.row.diagnostic === undefined ? [] : [item.row.branch])),
         )
+        return [
+          listing,
+          ...one.rows.flatMap((item) => diagnosticLines(item.row, journalFor(item, one.journals))),
+          ...[...warnedBranches].map((branch) => `Raw events: ${formatCommand(["queue", "show", branch, "--json"])}`),
+        ].join("\n")
       }
 
       if (request.watch !== true) {
@@ -4480,9 +4487,14 @@ export async function coreQueueCommand(
               journal,
               workdir,
             )
-            return journalNote === undefined
-              ? detail
-              : { ...detail, note: [detail.note, journalNote].filter((note) => note !== undefined).join("; ") }
+            const notes = [
+              detail.note,
+              journalNote,
+              ...(item.row.diagnostic === undefined
+                ? []
+                : [`Raw events: ${formatCommand(["queue", "show", item.row.branch, "--json"])}`]),
+            ].filter((note) => note !== undefined)
+            return notes.length === 0 ? detail : { ...detail, note: notes.join("; ") }
           },
           snapshot: snapshotOf(first),
         }
@@ -4971,6 +4983,28 @@ export async function coreQueueCommand(
             ...(declared.note === undefined ? {} : { note: declared.note }),
           })
         }
+        const selectedBranches = new Set(branches)
+        const historicalDiagnostics = new Set(
+          histories.flatMap((row) => (row.diagnostic === undefined ? [] : [row.diagnostic])),
+        )
+        const projectedWarnings =
+          options.json === true
+            ? []
+            : reading.all.flatMap((row) =>
+                row.diagnostic === undefined || !selectedBranches.has(row.branch)
+                  ? []
+                  : [{ branch: row.branch, diagnostic: row.diagnostic }],
+              )
+        const extraDiagnostics = [...new Set(projectedWarnings.map((row) => row.diagnostic))]
+          .filter((diagnostic) => !historicalDiagnostics.has(diagnostic))
+          .map((diagnostic) => `  diagnostic: ${diagnostic}`)
+        const inspectionLines =
+          options.json === true
+            ? []
+            : [...new Set(projectedWarnings.map((row) => row.branch))].map(
+                (branch) =>
+                  `Raw events: ${formatQueueCommand(io, formatStoredQueueAddress(name), ["queue", "show", branch, "--json"])}`,
+              )
         emit(
           io,
           options.json,
@@ -4991,60 +5025,66 @@ export async function coreQueueCommand(
           },
           histories.length === 0
             ? `no change for ${request.branch} on ${name}. ${scope}`
-            : histories
-                .map(({ events, ...row }, index) => {
-                  const view = views.get(`${row.branch}@${row.head}`)
-                  // #28195: the row’s stored diagnostic is its reverted-paths reason, and `show` renders
-                  // that reason in FULL exactly once, from the event that carries it. The raw event line
-                  // below states the same finding as the one-line summary, so the report is neither
-                  // dropped nor printed twice; `list` shows that one line and never the full reason.
-                  const reverted = events.flatMap((event) => {
-                    if (event.type !== "admission-warning") return []
-                    if (event.props.find(([key]) => key === "Warning-Kind")?.[1] !== "reverted-paths") return []
-                    const reason = event.props.find(([key]) => key === "Reason")?.[1]
-                    return reason === undefined ? [] : [reason]
-                  })
-                  return [
-                    rowLine({ row }),
-                    ...(view?.note === undefined ? [] : [`  (${view.note})`]),
-                    ...(view?.checks ?? []).flatMap(checkLines),
-                    ...(row.diagnostic === undefined ? [] : [`  diagnostic: ${row.diagnostic}`]),
-                    ...(reverted.length === 0 ? [] : [`  diagnostic: ${reverted.join("; ")}`]),
-                    `  queue: ${config.target.branch}`,
-                    ...events.map((event) => {
-                      const at = event.props.find(([key]) => key === "Time")?.[1]
+            : [
+                histories
+                  .map(({ events, ...row }, index) => {
+                    const view = views.get(`${row.branch}@${row.head}`)
+                    // #28195: the row’s stored diagnostic is its reverted-paths reason, and `show` renders
+                    // that reason in FULL exactly once, from the event that carries it. The raw event line
+                    // below states the same finding as the one-line summary, so the report is neither
+                    // dropped nor printed twice; `list` shows that one line and never the full reason.
+                    const reverted = events.flatMap((event) => {
+                      if (event.type !== "admission-warning") return []
+                      if (event.props.find(([key]) => key === "Warning-Kind")?.[1] !== "reverted-paths") return []
                       const reason = event.props.find(([key]) => key === "Reason")?.[1]
-                      const summarised =
-                        event.type === "admission-warning" &&
-                        event.props.find(([key]) => key === "Warning-Kind")?.[1] === "reverted-paths"
-                      // A warning the row’s own `diagnostic:` line already states is not repeated here: a
-                      // reverted-paths reason is printed there in full, and a policy or could-not-judge
-                      // sentence is folded into it. The raw JSON keeps every stored Reason verbatim.
-                      // The folded sentence is matched as a WHOLE `; `-separated segment that names the
-                      // admission and ends at the reason, never a bare substring: a short event reason
-                      // that merely occurs inside a longer, unrelated diagnostic must still print.
-                      const stated =
-                        reason !== undefined &&
-                        (reverted.includes(reason) ||
-                          (row.diagnostic !== undefined &&
-                            row.diagnostic
-                              .split("; ")
-                              .some((part) => part.startsWith("admission ") && part.endsWith(`: ${reason}`))))
-                      const detail = summarised
-                        ? row.revertWarning === undefined
-                          ? "the stored reason is the diagnostic above"
-                          : revertWarningLine(row)
-                        : stated
-                          ? "the stored reason is the diagnostic above"
-                          : reason
-                      return `  ${at ?? "Time absent"} ${event.type}${event.writer == null ? "" : ` by ${event.writer}`}${detail === undefined ? "" : ` — ${detail}`}`
-                    }),
-                    ...(index !== 0 || request.branch === undefined || reading.changes.get(request.branch) === undefined
-                      ? []
-                      : eventNoticeLines(reading.changes.get(request.branch) as EventChange)),
-                  ].join("\n")
-                })
-                .join("\n"),
+                      return reason === undefined ? [] : [reason]
+                    })
+                    return [
+                      rowLine({ row }),
+                      ...(view?.note === undefined ? [] : [`  (${view.note})`]),
+                      ...(view?.checks ?? []).flatMap(checkLines),
+                      ...(row.diagnostic === undefined ? [] : [`  diagnostic: ${row.diagnostic}`]),
+                      ...(reverted.length === 0 ? [] : [`  diagnostic: ${reverted.join("; ")}`]),
+                      `  queue: ${config.target.branch}`,
+                      ...events.map((event) => {
+                        const at = event.props.find(([key]) => key === "Time")?.[1]
+                        const reason = event.props.find(([key]) => key === "Reason")?.[1]
+                        const summarised =
+                          event.type === "admission-warning" &&
+                          event.props.find(([key]) => key === "Warning-Kind")?.[1] === "reverted-paths"
+                        // A warning the row’s own `diagnostic:` line already states is not repeated here: a
+                        // reverted-paths reason is printed there in full, and a policy or could-not-judge
+                        // sentence is folded into it. The raw JSON keeps every stored Reason verbatim.
+                        // The folded sentence is matched as a WHOLE `; `-separated segment that names the
+                        // admission and ends at the reason, never a bare substring: a short event reason
+                        // that merely occurs inside a longer, unrelated diagnostic must still print.
+                        const stated =
+                          reason !== undefined &&
+                          (reverted.includes(reason) ||
+                            (row.diagnostic !== undefined &&
+                              row.diagnostic
+                                .split("; ")
+                                .some((part) => part.startsWith("admission ") && part.endsWith(`: ${reason}`))))
+                        const detail = summarised
+                          ? row.revertWarning === undefined
+                            ? "the stored reason is the diagnostic above"
+                            : revertWarningLine(row)
+                          : stated
+                            ? "the stored reason is the diagnostic above"
+                            : reason
+                        return `  ${at ?? "Time absent"} ${event.type}${event.writer == null ? "" : ` by ${event.writer}`}${detail === undefined ? "" : ` — ${detail}`}`
+                      }),
+                      ...(index !== 0 ||
+                      request.branch === undefined ||
+                      reading.changes.get(request.branch) === undefined
+                        ? []
+                        : eventNoticeLines(reading.changes.get(request.branch) as EventChange)),
+                    ].join("\n")
+                  })
+                  .join("\n"),
+                ...extraDiagnostics,
+                ...inspectionLines,
+              ].join("\n"),
         )
         const projectRoot = options.projectRoot
         if (projectRoot === undefined) return 0

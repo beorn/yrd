@@ -176,7 +176,7 @@ function foldEqualEndings(branch: string, segments: readonly EventChange[]) {
         root === undefined || priorRoot === undefined || prior.ending === undefined || segment.ending === undefined
           ? "equality unproven"
           : "contradictory endings"
-      const diagnostic = `${branch}: ${problem}: ending ${prior.ending?.id ?? "missing"} merge ${priorRoot ?? "missing"}; ending ${segment.ending?.id ?? "missing"} merge ${root ?? "missing"}; both rows retained; inspect yrd queue show ${branch} --json`
+      const diagnostic = `${branch}: ${problem}: ending ${prior.ending?.id ?? "missing"} merge ${priorRoot ?? "missing"}; ending ${segment.ending?.id ?? "missing"} merge ${root ?? "missing"}; both rows retained`
       entry.diagnostic = [entry.diagnostic, diagnostic].filter((line) => line !== undefined).join("; ")
       diagnostics.push(diagnostic)
     }

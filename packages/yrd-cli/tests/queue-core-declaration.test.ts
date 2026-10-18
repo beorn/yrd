@@ -955,23 +955,26 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(settled.journal.fallbacks).toBeUndefined()
   }, 15_000)
 
-  it("keeps an equal-head duplicate in the current list and both submissions in show", async () => {
+  it("keeps an equal-head duplicate inspectable in list, show and watch after contradictory endings", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
+    const queueBranch = "release"
+    await git(["checkout", "--quiet", "-b", queueBranch])
+    await git(["push", "--quiet", "origin", queueBranch])
     const store = createEventStore(repo, "origin", git.selection)
     const target = (await git(["rev-parse", "HEAD"])).trim()
     const time = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000)
-    const queueTip = await createQueue(repo, "main", target, time(40))
-    const branch = "task/twice"
+    const queueTip = await createQueue(repo, queueBranch, target, time(40))
+    const branch = "task/twi'ce"
     await git(["checkout", "--quiet", "-b", branch])
     writeFileSync(join(repo, "twice.txt"), "twice\n")
     await git(["add", "twice.txt"])
     await git(["commit", "--quiet", "-m", "twice"])
     const head = (await git(["rev-parse", "HEAD"])).trim()
-    await git(["checkout", "--quiet", "main"])
+    await git(["checkout", "--quiet", queueBranch])
     await git(["merge", "--quiet", "--no-ff", "-m", "landed twice", branch])
     const merge = (await git(["rev-parse", "HEAD"])).trim()
-    await git(["push", "--quiet", "origin", "main"])
+    await git(["push", "--quiet", "origin", queueBranch])
     const logs = join(await workdirOf(git, { cwd: repo }), "logs")
     for (const minutesAgo of [29, 19]) {
       const journal = openLog(logs, () => time(minutesAgo))
@@ -981,7 +984,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       if (minutesAgo === 29) journal.write({ kind: "merge", branch, head, commit: merge })
     }
     await (
-      await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+      await openEvents({ ...store, ref: changesRef(queueBranch, branch), writer: "yrd" })
     ).append(
       [
         changeInput("opened", { queueTip, at: time(30), commit: head, by: "yrd" }),
@@ -997,7 +1000,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         repo,
         listed.io,
         { command: "list", latest: true, terms: [branch] },
-        { json: true, queue: "main" },
+        { json: true, queue: queueBranch },
       ),
     ).toBe(0)
     const current = (
@@ -1005,7 +1008,9 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).changes
     expect(current).toEqual([expect.objectContaining({ head, duplicates: [expect.any(Object)] })])
     const shown = capture(repo)
-    expect(await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" })).toBe(0)
+    expect(
+      await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: queueBranch }),
+    ).toBe(0)
     const segments = (
       JSON.parse(shown.stdout()) as {
         changes: readonly { head: string; events: readonly { type: string; id: string }[] }[]
@@ -1029,7 +1034,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         repo,
         historical.io,
         { command: "list", all: true, terms: [branch] },
-        { json: true, queue: "main" },
+        { json: true, queue: queueBranch },
       ),
     ).toBe(0)
     const runs = (JSON.parse(historical.stdout()) as { changes: readonly { merge?: string; duplicates: unknown }[] })
@@ -1038,12 +1043,100 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(runs.map((row) => row.merge)).toEqual([undefined, merge])
     for (const row of runs) expect(row.duplicates).toEqual(proof)
     const bulk = capture(repo)
-    expect(await coreQueueCommand(repo, bulk.io, { command: "show", all: true }, { json: true, queue: "main" })).toBe(0)
+    expect(
+      await coreQueueCommand(repo, bulk.io, { command: "show", all: true }, { json: true, queue: queueBranch }),
+    ).toBe(0)
     expect(
       (JSON.parse(bulk.stdout()) as { changes: readonly { branch: string }[] }).changes.filter(
         (row) => row.branch === branch,
       ),
     ).toEqual(segments)
+    // Contradictory endings keep both roots and a viewer-local inspection recipe (29721).
+    writeFileSync(join(repo, "later-root.txt"), "a different retained merge root\n")
+    await git(["add", "later-root.txt"])
+    await git(["commit", "--quiet", "-m", "another target root"])
+    const laterMerge = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["push", "--quiet", "origin", queueBranch])
+    await (
+      await openEvents({ ...store, ref: changesRef(queueBranch, branch), writer: "yrd" })
+    ).append(
+      [
+        changeInput("opened", { queueTip, at: time(10), commit: head, by: "yrd" }),
+        changeInput("merged", {
+          queueTip,
+          at: time(9),
+          commit: laterMerge,
+          reason: `observed on target at ${laterMerge}`,
+        }),
+      ],
+      { expect: endings[0]! },
+    )
+    const remote = join(dirname(repo), "remote.git")
+    const queue = `${remote}#${queueBranch}`
+    const inspections: { argv: readonly string[]; cwd: string; recipe: string }[] = []
+    const formatCommand: NonNullable<YrdCliIO["formatYrdCommand"]> = (argv, cwd) => {
+      const recipe = `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`
+      inspections.push({ argv, cwd, recipe })
+      return recipe
+    }
+    const remoteGit = gitIn(remote)
+    const beforeInspection = await remoteGit(["for-each-ref", "--format=%(refname) %(objectname)"])
+    for (const command of ["list", "show", "detail"] as const) {
+      inspections.length = 0
+      const human = capture(repo)
+      human.io.formatYrdCommand = formatCommand
+      let text: string
+      if (command === "detail") {
+        const sources: WatchSource[] = []
+        expect(
+          await coreQueueCommand(
+            repo,
+            human.io,
+            { command: "list", all: true, watch: true },
+            {
+              queue: queueBranch,
+              watchSource: (source) => sources.push(source),
+            },
+          ),
+          human.stderr(),
+        ).toBe(0)
+        expect(sources).toHaveLength(1)
+        const source = sources[0]!
+        const item = source.snapshot?.rows.find(
+          (item) => item.row.branch === branch && item.row.diagnostic !== undefined,
+        )
+        expect(item).toBeDefined()
+        expect(source.open).toBeDefined()
+        const detail = await source.open!(item!)
+        text = detail.note ?? ""
+      } else {
+        expect(
+          await coreQueueCommand(
+            repo,
+            human.io,
+            command === "list" ? { command, all: true, terms: [branch] } : { command, branch },
+            { queue: queueBranch },
+          ),
+          human.stderr(),
+        ).toBe(0)
+        text = human.stdout()
+        expect(text).toContain("contradictory endings")
+        expect(text).toContain(merge)
+        expect(text).toContain(laterMerge)
+      }
+      expect(inspections.length, command).toBeGreaterThan(0)
+      for (const inspection of inspections) {
+        expect(inspection).toMatchObject({ argv: ["queue", "show", branch, "--json", "--queue", queue], cwd: repo })
+        expect(text).toContain(inspection.recipe)
+      }
+      // Execute the displayed recipe, rather than reconstructing its argv at the assertion.
+      const inspected = spawnSync("/bin/sh", ["-c", inspections[0]!.recipe], { cwd: dirname(repo), encoding: "utf8" })
+      expect(inspected.status, inspected.stderr).toBe(0)
+      expect((JSON.parse(inspected.stdout) as { changes: readonly unknown[] }).changes).toHaveLength(3)
+      expect(inspected.stdout).toContain(merge)
+      expect(inspected.stdout).toContain(laterMerge)
+      expect(await remoteGit(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(beforeInspection)
+    }
   }, 25_000)
 
   // 25656: the event runner stores Check: evidence, and watch detail must give

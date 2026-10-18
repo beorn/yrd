@@ -197,6 +197,8 @@ describe("event changes use the shared table row", () => {
       expect(new Set(watchRows(rows).map(watchRowKey)).size).toBe(rows.length)
       for (const row of rows) {
         expect(row.duplicates).toBeUndefined()
+        expect(row.diagnostic).toContain("both rows retained")
+        expect(row.diagnostic).not.toContain("inspect yrd queue show")
         for (const evidence of [
           "task/unproven",
           diagnostic,
