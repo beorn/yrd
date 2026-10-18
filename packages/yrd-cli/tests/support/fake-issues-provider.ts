@@ -39,7 +39,7 @@ if (mode === "json") {
 } else if (mode === "sleep") {
   await Bun.sleep(30_000)
 } else if (mode === "stall") {
-  process.stderr.write("fake provider: started\n")
+  process.stderr.write(`fake provider: started pid=${process.pid}\n`)
   await Bun.sleep(30_000)
 } else {
   process.stderr.write(`fake provider: unknown mode ${String(mode)}\n`)
