@@ -79,7 +79,17 @@ export async function resolveDeclaredQueueLocations(
       locations.push({
         kind: "resolved",
         declaration,
-        location: await resolveQueueLocation(path, declaration.queue.base, env, "queue"),
+        location: await resolveQueueLocation(
+          path,
+          (
+            await originQueueAddress(
+              gitIn(path, undefined, await resolveGitSelection(path, { env }), { env }),
+              declaration.queue.base,
+            )
+          ).canonical,
+          env,
+          "queue",
+        ),
       })
     } catch (error: unknown) {
       locations.push({
