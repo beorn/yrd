@@ -20,7 +20,7 @@ afterAll(() => {
 })
 
 async function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "yrd-runner-ref-"))
+  const root = mkdtempSync(join(tmpdir(), "yrd-runner-ref 'quoted-"))
   roots.push(root)
   const boot = gitIn(root)
   const remote = join(root, "remote.git")
@@ -48,6 +48,7 @@ async function fixture() {
     "main",
     (status) => statuses.push(status.kind),
     (notice) => notices.push(notice),
+    work,
   )
   const ref = runnerRef("main")
   const remoteTip = () => readRemoteCommit(git, "origin", ref)
@@ -59,7 +60,7 @@ async function fixture() {
     await git(["push", "--quiet", `--force-with-lease=${ref}:${prior ?? "0".repeat(40)}`, "origin", `${oid}:${ref}`])
     return oid
   }
-  return { git, own, publisher, ref, remoteTip, replace, statuses, notices }
+  return { root, work, git, own, publisher, ref, remoteTip, replace, statuses, notices }
 }
 
 describe("runner ref publication", () => {
@@ -137,13 +138,14 @@ describe("runner ref publication", () => {
           "main",
           () => {},
           () => {},
+          f.work,
         )
         const publishers = [f.publisher, second]
         await Promise.all(publishers.map((publisher, index) => publisher.publish(claims[index]!)))
         expect(publishers.filter((publisher) => publisher.owns)).toHaveLength(1)
         expect(publishers.filter((publisher) => publisher.conflict?.name === "RunnerConflict")).toHaveLength(1)
         const winner = publishers.findIndex((publisher) => publisher.owns)
-        const published = await readPublishedRunner(f.git, "main", "origin", await f.remoteTip())
+        const published = await readPublishedRunner(f.git, f.work, "main", "origin", await f.remoteTip())
         expect(published.claim?.Runner).toBe(`${hostname()}/${String(claims[winner]!.pid)}`)
       } finally {
         child.kill("SIGKILL")
@@ -281,7 +283,7 @@ describe("runner ref publication", () => {
     const f = await fixture()
     const deadline = new Date(Date.parse(f.own.at) + 30 * 60_000).toISOString()
     const tip = await f.replace({ ...f.own, state: "checking" }, `Deadline: ${deadline}\nIntent: later\n`)
-    const published = await readPublishedRunner(f.git, "main", "origin", tip, new Date(f.own.at))
+    const published = await readPublishedRunner(f.git, f.work, "main", "origin", tip, new Date(f.own.at))
     expect(published).toMatchObject({
       signal: "fresh",
       claim: { Deadline: deadline, Intent: "later" },
@@ -294,7 +296,14 @@ describe("runner ref publication", () => {
         new Date(f.own.at),
       ).detail,
     ).toContain("unjudged trailers: Intent")
-    const skewed = await readPublishedRunner(f.git, "main", "origin", tip, new Date(Date.parse(f.own.at) - 31_000))
+    const skewed = await readPublishedRunner(
+      f.git,
+      f.work,
+      "main",
+      "origin",
+      tip,
+      new Date(Date.parse(f.own.at) - 31_000),
+    )
     expect(skewed).toMatchObject({ signal: "unreadable", unjudgedTrailers: ["Intent"] })
     expect(
       runnerLine(
@@ -310,7 +319,9 @@ describe("runner ref publication", () => {
     const since = new Date(now - 40 * 60_000).toISOString()
     const deadline = new Date(now - 10 * 60_000).toISOString()
     await f.publisher.publish({ ...f.own, started: since, since, deadline, state: "checking" })
-    expect(await readPublishedRunner(f.git, "main", "origin", await f.remoteTip(), new Date(now))).toMatchObject({
+    expect(
+      await readPublishedRunner(f.git, f.work, "main", "origin", await f.remoteTip(), new Date(now)),
+    ).toMatchObject({
       signal: "fresh",
       claim: { Deadline: deadline },
       phase: { status: "overdue" },
@@ -328,7 +339,7 @@ describe("runner ref publication", () => {
     const deadline = new Date(now + 29 * 60_000).toISOString()
     const claim: RunnerClaim = { ...f.own, started, round, since, due, deadline, candidates: 3, state: "checking" }
     await f.publisher.publish(claim)
-    const published = await readPublishedRunner(f.git, "main", "origin", await f.remoteTip(), new Date(now))
+    const published = await readPublishedRunner(f.git, f.work, "main", "origin", await f.remoteTip(), new Date(now))
     expect(published).toMatchObject({
       signal: "fresh",
       phase: { status: "within" },
@@ -355,18 +366,18 @@ describe("runner ref publication", () => {
     const tip = await f.remoteTip()
     expect(tip).toMatch(/^[0-9a-f]{40}$/u)
     expect((await f.git(["rev-list", "--parents", "-n", "1", tip!])).trim()).toBe(tip)
-    expect(await readPublishedRunner(f.git, "main", "origin", tip)).toMatchObject({
+    expect(await readPublishedRunner(f.git, f.work, "main", "origin", tip)).toMatchObject({
       signal: "fresh",
       claim: { Runner: "host/42", State: "idle" },
     })
     expect(
-      await readPublishedRunner(f.git, "main", "origin", tip, new Date(Date.parse(f.own.at) + 180_001)),
+      await readPublishedRunner(f.git, f.work, "main", "origin", tip, new Date(Date.parse(f.own.at) + 180_001)),
     ).toMatchObject({
       signal: "silent",
       claim: { Runner: "host/42" },
     })
     expect(
-      await readPublishedRunner(f.git, "main", "origin", tip, new Date(Date.parse(f.own.at) - 30_001)),
+      await readPublishedRunner(f.git, f.work, "main", "origin", tip, new Date(Date.parse(f.own.at) - 30_001)),
     ).toMatchObject({
       signal: "unreadable",
       why: expect.stringContaining("clock-skew"),
@@ -392,7 +403,7 @@ describe("runner ref publication", () => {
       })
       const after = await f.remoteTip()
       expect(after, scenario).not.toBe(first)
-      expect(await readPublishedRunner(f.git, "main", "origin", after), scenario).toMatchObject({
+      expect(await readPublishedRunner(f.git, f.work, "main", "origin", after), scenario).toMatchObject({
         signal: "fresh",
         claim: { Runner: "host/42", State: "checking" },
       })
@@ -407,7 +418,9 @@ describe("runner ref publication", () => {
     await stopped.publisher.publish(stopped.own)
     expect(stopped.publisher.conflict).toBeUndefined()
     expect(stopped.notices.join(" ")).toContain("taking over relinquished runner predecessor/7 started")
-    expect(await readPublishedRunner(stopped.git, "main", "origin", await stopped.remoteTip())).toMatchObject({
+    expect(
+      await readPublishedRunner(stopped.git, stopped.work, "main", "origin", await stopped.remoteTip()),
+    ).toMatchObject({
       signal: "fresh",
       claim: { Runner: "host/42" },
     })
@@ -425,19 +438,51 @@ describe("runner ref publication", () => {
     expect(live.statuses.at(-1)).toBe("failed")
   })
 
-  it("names the safe removal command when a foreign claim is unreadable", async () => {
+  /** @failure Copied claim removal can target the caller's repo or delete a replacement claim without a lease. @level l2 */
+  it("removes only the observed unreadable claim from another directory", async () => {
     const f = await fixture()
     const future = new Date(Date.now() + 60_000).toISOString()
-    await f.replace({ ...f.own, host: "rival", pid: 8, at: future })
-    await f.publisher.publish(f.own)
+    const prior = { ...f.own, host: "rival", pid: 8, at: future }
+    const oldTip = await f.replace(prior)
+    const remote = "remote's;literal"
+    await f.git(["remote", "add", remote, (await f.git(["remote", "get-url", "origin"])).trim()])
+    const publisher = new RunnerPublisher(
+      f.git,
+      remote,
+      "main",
+      (status) => f.statuses.push(status.kind),
+      (notice) => f.notices.push(notice),
+      f.work,
+    )
+    await publisher.publish(f.own)
     expect(f.statuses).toEqual(["failed"])
     expect(f.notices.join(" ")).toContain("verifying no live runner")
-    expect(f.notices.join(" ")).toContain(`git push origin :${f.ref}`)
+    const command = /run `([^`]+)` to remove the claim/u.exec(f.notices.join(" "))?.[1]
+    if (command === undefined) throw new Error("unreadable claim notice supplied no removal command")
+    const unrelated = "refs/heads/keep-unrelated"
+    await f.git(["push", "--quiet", "origin", `${oldTip}:${unrelated}`])
+    const execute = async () => {
+      const child = Bun.spawn(["/bin/sh", "-c", command], { cwd: f.root, stdout: "pipe", stderr: "pipe" })
+      const [exit, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ])
+      return { exit, stdout, stderr }
+    }
+    const replacement = await f.replace({ ...prior, pid: 9 })
+    expect((await execute()).exit).not.toBe(0)
+    expect(await f.remoteTip()).toBe(replacement)
+    await f.git(["push", "--quiet", `--force-with-lease=${f.ref}:${replacement}`, "origin", `${oldTip}:${f.ref}`])
+    const removed = await execute()
+    expect(removed, removed.stderr).toMatchObject({ exit: 0 })
+    expect(await f.remoteTip()).toBeUndefined()
+    expect(await readRemoteCommit(f.git, "origin", unrelated)).toBe(oldTip)
   })
   describe("a runner ref whose tip object was never fetched", () => {
     /** A reader clone that never fetched the runner ref, plus the live remote tip. */
     async function unfetchedFixture() {
-      const root = mkdtempSync(join(tmpdir(), "yrd-runner-unfetched-"))
+      const root = mkdtempSync(join(tmpdir(), "yrd-runner-unfetched 'quoted-"))
       roots.push(root)
       const boot = gitIn(root)
       const remote = join(root, "remote.git")
@@ -463,19 +508,20 @@ describe("runner ref publication", () => {
         "main",
         () => {},
         () => {},
+        work,
       )
       await publisher.publish(claim)
       const ref = runnerRef("main")
       const tip = await readRemoteCommit(git, "origin", ref)
       const readerRoot = join(root, "reader")
       await boot(["clone", "--no-local", "--quiet", remote, readerRoot])
-      return { reader: gitIn(readerRoot), tip, ref, git, publisher, claim }
+      return { root, readerRoot, reader: gitIn(readerRoot), tip, ref, git, publisher, claim }
     }
 
     /** @failure The remote tip was reported unreadable instead of fetching its object. @level l2 */
     it("fetches the runner ref before reading a tip whose object is not local", async () => {
       const f = await unfetchedFixture()
-      const published = await readPublishedRunner(f.reader, "main", "origin", f.tip)
+      const published = await readPublishedRunner(f.reader, f.readerRoot, "main", "origin", f.tip)
       expect(published.signal).not.toBe("unreadable")
       expect(published.claim?.Runner).toBe("host/42")
     })
@@ -493,7 +539,7 @@ describe("runner ref publication", () => {
       })
       expect(await readRemoteCommit(f.git, "origin", f.ref)).not.toBe(f.tip)
 
-      const published = await readPublishedRunner(f.reader, "main", "origin", f.tip)
+      const published = await readPublishedRunner(f.reader, f.readerRoot, "main", "origin", f.tip)
 
       expect(published.signal).toBe("fresh")
       expect(published.claim?.State).toBe("provisioning")
@@ -502,7 +548,7 @@ describe("runner ref publication", () => {
     /** @failure Treating the advertisement as an immutable identity hid a readable current ref behind a bogus stale SHA. @level l2 */
     it("recovers the current ref even when the advertised object cannot be obtained", async () => {
       const f = await unfetchedFixture()
-      const published = await readPublishedRunner(f.reader, "main", "origin", "f".repeat(40))
+      const published = await readPublishedRunner(f.reader, f.readerRoot, "main", "origin", "f".repeat(40))
       expect(published.signal).toBe("fresh")
       expect(published.claim?.Runner).toBe("host/42")
     })
@@ -510,9 +556,9 @@ describe("runner ref publication", () => {
     /** @failure A failed fetch was hidden behind the same bare `rev-list` failure. @level l2 */
     it("names a failed fetch when the remote cannot be reached", async () => {
       const f = await unfetchedFixture()
-      const published = await readPublishedRunner(f.reader, "main", "no-such-remote", "f".repeat(40))
+      const remote = "missing's;remote"
+      const published = await readPublishedRunner(f.reader, f.readerRoot, "main", remote, "f".repeat(40))
       expect(published.signal).toBe("not-fetched")
-      expect(published.why).toContain(`git fetch no-such-remote ${f.ref} failed:`)
       expect(published.why).toContain("f".repeat(40))
       expect(published.why).toContain("missing locally")
       expect(published.why).toContain("git cat-file")
@@ -522,13 +568,26 @@ describe("runner ref publication", () => {
           new Date(),
         ).holds,
       ).toContain(`runner status not fetched: ${published.why}`)
+      const command = /; (git [\s\S]+?) failed:/u.exec(published.why ?? "")?.[1]
+      if (command === undefined) throw new Error("failed fetch supplied no acquisition command")
+      await f.reader(["remote", "add", remote, (await f.git(["remote", "get-url", "origin"])).trim()])
+      const remoteRefs = await f.git(["ls-remote", "origin"])
+      const child = Bun.spawn(["/bin/sh", "-c", command], { cwd: f.root, stdout: "pipe", stderr: "pipe" })
+      const [exit, , stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ])
+      expect(exit, stderr).toBe(0)
+      expect((await f.reader(["cat-file", "-t", f.tip!])).trim()).toBe("commit")
+      expect(await f.git(["ls-remote", "origin"])).toBe(remoteRefs)
     })
 
     /** @failure A ref removed after advertisement was confused with an invalid runner claim. @level l2 @consumer off-machine runner status readers */
     it("reports an absent ref when it disappears before acquisition", async () => {
       const f = await unfetchedFixture()
       await f.git(["push", "--quiet", "origin", `:${f.ref}`])
-      const published = await readPublishedRunner(f.reader, "main", "origin", f.tip)
+      const published = await readPublishedRunner(f.reader, f.readerRoot, "main", "origin", f.tip)
       expect(published.signal).toBe("absent")
       expect(published.why).toContain(`origin ${f.ref}`)
       expect(published.why).toContain(f.tip)
@@ -551,7 +610,7 @@ describe("runner ref publication", () => {
         return await f.reader(args, input)
       }
 
-      const published = await readPublishedRunner(failing, "main", "origin", f.tip)
+      const published = await readPublishedRunner(failing, f.readerRoot, "main", "origin", f.tip)
 
       expect(published.signal).toBe("unreadable")
       expect(queries, "the probe is asked exactly once").toBe(1)
@@ -588,13 +647,13 @@ describe("runner ref publication", () => {
         }
         Object.defineProperties(flaky, Object.getOwnPropertyDescriptors(f.reader))
 
-        const published = await readPublishedRunner(flaky, "main", "origin", f.tip)
+        const published = await readPublishedRunner(flaky, f.readerRoot, "main", "origin", f.tip)
 
         expect(published.signal).toBe(outcome === "failed" ? "unreadable" : "not-fetched")
         expect(queries, "one probe before the fetch, one after").toBe(2)
         expect(fetches, "the proved-missing tip is acquired once").toHaveBeenCalledTimes(1)
         expect(published.why, "absence is not claimed when the query failed").not.toContain("left the object absent")
-        expect(published.why, "the successful fetch is named").toContain(`git fetch origin ${f.ref}`)
+        expect(published.why, "the successful fetch is named").toContain(`fetch 'origin' '${f.ref}'`)
         expect(published.why, "the failed query command is named").toContain(
           "git cat-file --batch-check=%(objectname) %(objecttype)",
         )
@@ -620,7 +679,7 @@ describe("the runner's liveness, for the terminality probe", () => {
       { ...f.own, host: hostname(), pid: process.pid },
       `Boot: ${String(identity.boot)}\nPidNamespace: ${String(identity.pidNamespace)}\nStartTick: ${String(identity.tick)}\n`,
     )
-    expect(await readRunnerLiveness(f.git, "main", "origin", await f.remoteTip())).toEqual({
+    expect(await readRunnerLiveness(f.git, f.work, "main", "origin", await f.remoteTip())).toEqual({
       kind: "live",
       pid: process.pid,
       why: `runner ${hostname()}/${String(process.pid)}: start identity matches a live process`,
@@ -632,7 +691,7 @@ describe("the runner's liveness, for the terminality probe", () => {
     const f = await fixture()
     const gone = process.pid + 100_000
     await f.replace({ ...f.own, host: hostname(), pid: gone }, `Boot: b\nPidNamespace: n\nStartTick: 7\n`)
-    const verdict = await readRunnerLiveness(f.git, "main", "origin", await f.remoteTip())
+    const verdict = await readRunnerLiveness(f.git, f.work, "main", "origin", await f.remoteTip())
     expect(verdict).toEqual({ kind: "dead", pid: gone, why: `runner ${hostname()}/${String(gone)}: PID absent` })
   })
 
@@ -645,7 +704,7 @@ describe("the runner's liveness, for the terminality probe", () => {
       { ...f.own, host: hostname(), pid: process.pid },
       `Boot: ${String(identity.boot)}\nPidNamespace: ${String(identity.pidNamespace)}\nStartTick: ${String(identity.tick! + 1)}\n`,
     )
-    const verdict = await readRunnerLiveness(f.git, "main", "origin", await f.remoteTip())
+    const verdict = await readRunnerLiveness(f.git, f.work, "main", "origin", await f.remoteTip())
     expect(verdict).toEqual({
       kind: "dead",
       pid: process.pid,
@@ -656,7 +715,7 @@ describe("the runner's liveness, for the terminality probe", () => {
   /** @failure An absent claim was guessed dead, licensing a repair no fact supported. @level l2 */
   it("reads an absent claim as unknown, never dead", async () => {
     const f = await fixture()
-    const verdict = await readRunnerLiveness(f.git, "main", "origin", undefined)
+    const verdict = await readRunnerLiveness(f.git, f.work, "main", "origin", undefined)
     expect(verdict.kind).toBe("unknown")
     expect(verdict.kind === "unknown" && verdict.why).toContain(runnerRef("main"))
   })
@@ -665,7 +724,7 @@ describe("the runner's liveness, for the terminality probe", () => {
   it("reads a claim from another host as unknown", async () => {
     const f = await fixture()
     await f.replace({ ...f.own, host: "elsewhere", pid: process.pid })
-    const verdict = await readRunnerLiveness(f.git, "main", "origin", await f.remoteTip())
+    const verdict = await readRunnerLiveness(f.git, f.work, "main", "origin", await f.remoteTip())
     expect(verdict).toEqual({
       kind: "unknown",
       why: `origin ${runnerRef("main")}: runner elsewhere/${String(process.pid)} is not on this host`,
@@ -676,7 +735,7 @@ describe("the runner's liveness, for the terminality probe", () => {
   it.skipIf(process.platform !== "linux")("reads a claim with no recorded identity as unknown", async () => {
     const f = await fixture()
     await f.replace({ ...f.own, host: hostname(), pid: process.pid })
-    const verdict = await readRunnerLiveness(f.git, "main", "origin", await f.remoteTip())
+    const verdict = await readRunnerLiveness(f.git, f.work, "main", "origin", await f.remoteTip())
     expect(verdict).toEqual({
       kind: "unknown",
       why: `runner ${hostname()}/${String(process.pid)}: claim records no start identity to compare`,

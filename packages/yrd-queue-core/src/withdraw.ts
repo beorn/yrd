@@ -102,7 +102,7 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
       if (!custody.ok) throw new Error(custody.reason)
       // The local protected archive also keeps this object after environment closure.
       // Reusing the original name preserves the change and its issue binding on submit.
-      recovery = `git branch ${shellQuote(request.branch)} ${head}`
+      recovery = `git -C ${shellQuote(root)} branch ${shellQuote(request.branch)} ${shellQuote(head)}`
     }
     await retireOriginBranch(store, {
       branch: request.branch,

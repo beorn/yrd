@@ -572,4 +572,55 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     // `--require-match` changes only the exit code, never the document.
     expect(JSON.parse(empty.stdout)).toMatchObject({ changes: [] })
   })
+
+  it("keeps a matched journal reason and counts omitted global incompleteness without exposing unrelated branches", async () => {
+    const work = await queueWithOneChange()
+    const git = gitIn(work)
+    await git(["checkout", "--quiet", "-b", "task/unrelated", "main"])
+    writeFileSync(join(work, "unrelated.txt"), "unrelated\n")
+    await git(["add", "."])
+    await git(["commit", "--quiet", "-m", "task/unrelated does its work"])
+    await git(["checkout", "--quiet", "main"])
+    await submit(git, "origin", {
+      branch: "task/unrelated",
+      submitter: "@dev/11",
+      target: { branch: "main", remote: "origin" },
+    })
+
+    // Both opening events have no Run trailer. A filtered answer keeps its own
+    // missing-journal reason, but tells consumers how many other facts it left out.
+    const result = await yrd(work, { color: false }, "list", "--json", "--require-match", "task/one")
+    expect(result.exitCode, result.report).toBe(0)
+    const document = JSON.parse(result.stdout) as {
+      changes: readonly { branch: string }[]
+      journal: { absent?: string }
+    }
+    expect(document.changes.map((change) => change.branch)).toEqual(["task/one"])
+    const absent = document.journal.absent ?? ""
+    expect(absent).toContain("task/one@")
+    expect(absent).toContain("has no Run trailer")
+    expect.soft(absent).not.toContain("task/unrelated@")
+    const globalLines = absent.split("; ").filter((line) => /global|incomplete/i.test(line) && /\b1\b/.test(line))
+    expect.soft(globalLines).toHaveLength(1)
+    expect.soft(absent).toContain("yrd 'list' '--json'")
+    expect.soft(absent).toContain(`'--queue' '${join(work, "..", "remote.git")}#main'`)
+
+    const empty = await yrd(work, { color: false }, "list", "--json", "--require-match", "no-such-change")
+    expect(empty.exitCode, empty.report).toBe(1)
+    const emptyDocument = JSON.parse(empty.stdout) as typeof document
+    expect(emptyDocument.changes).toEqual([])
+    const emptyAbsent = emptyDocument.journal.absent ?? ""
+    expect.soft(emptyAbsent).not.toContain("task/one@")
+    expect.soft(emptyAbsent).not.toContain("task/unrelated@")
+    expect
+      .soft(emptyAbsent.split("; ").filter((line) => /global|incomplete/i.test(line) && /\b2\b/.test(line)))
+      .toHaveLength(1)
+    expect.soft(emptyAbsent).toContain("yrd 'list' '--json'")
+
+    const unfiltered = await yrd(work, { color: false }, "list", "--json")
+    expect(unfiltered.exitCode, unfiltered.report).toBe(0)
+    const fullDocument = JSON.parse(unfiltered.stdout) as typeof document
+    expect(fullDocument.journal.absent).toContain("task/one@")
+    expect(fullDocument.journal.absent).toContain("task/unrelated@")
+  })
 })

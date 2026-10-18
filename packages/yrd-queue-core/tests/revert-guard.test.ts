@@ -17,6 +17,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
+import { createProcess } from "@yrd/process"
 import {
   detectReverted,
   REVERTED_PATHS_PAYLOAD_CAP,
@@ -296,7 +297,7 @@ describe("revert guard (27363)", () => {
     expect(hit?.reason).toContain("vendor/dep/a.txt")
     expect(hit?.reason).toContain('"count":1')
     const gap = revertedPathsFinding({
-      base: { count: 2, state: "ambiguous" },
+      base: { state: "none" },
       count: 0,
       coverage: "incomplete",
       gaps: [],
@@ -304,7 +305,7 @@ describe("revert guard (27363)", () => {
       swallowed: [],
     })
     expect(gap?.coverage).toBe("incomplete")
-    expect(gap?.reason).toContain("ambiguous")
+    expect(gap?.reason).toContain("revert audit undecidable")
   })
 
   it("durable: a capped gap keeps its component path and depth, not only the reason", () => {
@@ -399,7 +400,7 @@ describe("revert guard (27363)", () => {
     expect(revertGuardAction(hit, "observe")).toBe("warn")
     expect(revertGuardAction(hit, "refuse")).toBe("stick")
     const gap: RevertGuardReport = {
-      base: { count: 2, state: "ambiguous" },
+      base: { state: "none" },
       count: 0,
       coverage: "incomplete",
       gaps: [],
@@ -541,16 +542,113 @@ describe("revert guard review regressions (27363)", () => {
     expect(report.paths.map((row) => row.path)).toContain("vendor/dep/a.txt")
   })
 
-  it("base: an ambiguous base carries no per-path claim", async () => {
-    const w = await ambiguousWorld()
-    const report = await detect(w, w.candidate, w.head)
-    expect(report.base.state).toBe("ambiguous")
+  it.each(["restore", "multi-restore", "shared", "swallowed"] as const)(
+    "base: braided history judges %s against every base",
+    async (kind) => {
+      const w = await ambiguousWorld(kind)
+      const root = await w.checkoutAt(w.candidate)
+      const git = gitIn(root, undefined, undefined, { env })
+      const bases = (await git(["merge-base", "--all", w.target, w.head])).trim().split("\n")
+      expect(bases).toHaveLength(2)
+      // Native ancestor-set exclusion is the oracle: exclude full ancestry, never only first parents.
+      const targetOnly = (excluded: readonly string[]) =>
+        git(["rev-list", "--first-parent", w.target, ...excluded.map((base) => `^${base}`)])
+      const allBases = await targetOnly(bases)
+      expect(allBases).toBe(await targetOnly([w.head]))
+      expect(allBases).toBe(await targetOnly([...bases].reverse()))
+      const report = await detectReverted({ candidate: w.candidate, git, head: w.head, root, targetHead: w.target })
+      expect(await git(["ls-tree", w.target, "vendor/dep"])).toContain("160000 commit")
+      // CTO4aeb221b amends the old blanket ambiguity veto: this real put-back remains a named S2.
+      expect(report.base).toEqual({ state: "multiple", bases: expect.arrayContaining(bases) })
+      expect(report.coverage).toBe("complete")
+      expect(report.gaps).toEqual([])
+      expect(report.paths.map((row) => row.path)).toEqual(
+        kind === "restore" || kind === "multi-restore" ? ["vendor/dep/a.txt"] : [],
+      )
+      expect(report.swallowed.map((row) => row.path)).toEqual(kind === "swallowed" ? ["vendor/dep"] : [])
+      expect(revertGuardAction(report, "observe")).toBe(kind === "shared" ? "clean" : "warn")
+      expect(revertGuardAction(report, "refuse")).toBe(kind === "shared" ? "clean" : "stick")
+      if (kind !== "multi-restore") {
+        const clean = await detect(w, w.head, w.head)
+        expect(clean.base).toEqual({ state: "multiple", bases: expect.arrayContaining(bases) })
+        expect(clean.coverage).toBe("complete")
+        expect(clean.gaps).toEqual([])
+        expect(clean.paths).toEqual([])
+        expect(clean.swallowed).toEqual([])
+        expect(revertedPathsFinding(clean)).toBeUndefined()
+        expect(revertGuardAction(clean, "observe")).toBe("clean")
+        expect(revertGuardAction(clean, "refuse")).toBe("clean")
+      }
+      await using native = createProcess({ cwd: root, env })
+      const reorderedGit = gitIn(
+        root,
+        {
+          async run(request) {
+            const result = await native.run(request)
+            return request.argv.includes("merge-base") && result.exitCode === 0
+              ? { ...result, stdout: result.stdout.trim().split("\n").reverse().join("\n") + "\n" }
+              : result
+          },
+        },
+        undefined,
+        { env },
+      )
+      const reordered = await detectReverted({
+        candidate: w.candidate,
+        git: reorderedGit,
+        head: w.head,
+        root,
+        targetHead: w.target,
+      })
+      expect(reordered.base).toEqual({ state: "multiple", bases: expect.arrayContaining(bases) })
+      expect({ ...reordered, base: report.base }).toEqual(report)
+    },
+  )
+
+  // A missing proof must skip S2, not widen into shared history or erase independently proved S3.
+  it.each(["root", "child"] as const)("base: unreadable %s ancestry stays unjudged", async (failedLevel) => {
+    const w = await ambiguousWorld(failedLevel === "root" ? "swallowed" : "restore")
+    const root = await w.checkoutAt(w.candidate)
+    await using native = createProcess({ cwd: root, env })
+    const git = gitIn(
+      root,
+      {
+        async run(request) {
+          if (
+            request.argv.includes("merge-base") &&
+            request.cwd === (failedLevel === "root" ? root : join(root, "vendor/dep"))
+          ) {
+            throw new Error("fixture ancestry read unavailable")
+          }
+          return native.run(request)
+        },
+      },
+      undefined,
+      { env },
+    )
+    const report = await detectReverted({ candidate: w.candidate, git, head: w.head, root, targetHead: w.target })
     expect(report.coverage).toBe("incomplete")
-    expect(report.gaps.some((gap) => gap.reason.includes("ambiguous"))).toBe(true)
     expect(report.paths).toEqual([])
-    expect(report.swallowed).toEqual([])
-    // An `unjudged` gap — a base the guard could not pick — is still a warning in BOTH modes: nobody judged it.
-    expect(revertedPathsFinding(report)).toBeDefined()
+    expect(report.swallowed.map((row) => row.path)).toEqual(failedLevel === "root" ? ["vendor/dep"] : [])
+    expect(
+      report.gaps.some((gap) => gap.kind === "unjudged" && gap.reason.includes("fixture ancestry read unavailable")),
+    ).toBe(true)
+    expect(revertedPathsReason(report)).toContain("revert audit undecidable")
+    expect(revertGuardAction(report, "observe")).toBe("warn")
+    expect(revertGuardAction(report, "refuse")).toBe("stick")
+    if (failedLevel === "child" && report.base.state === "multiple") {
+      for (const base of report.base.bases) expect(revertedPathsReason(report)).toContain(base)
+    } else expect(report.base).toEqual({ state: "none" })
+  })
+
+  it("base: genuinely unrelated incoming history stays undecidable and preserves S3", async () => {
+    const w = await ambiguousWorld("no-base")
+    const report = await detect(w, w.candidate, w.head)
+    expect(report.base).toEqual({ state: "none" })
+    expect(report.coverage).toBe("incomplete")
+    expect(report.paths).toEqual([])
+    expect(report.swallowed.map((row) => row.path)).toEqual(["vendor/dep"])
+    expect(revertedPathsReason(report)).toContain("no merge base between the target and the change")
     expect(revertGuardAction(report, "observe")).toBe("warn")
     expect(revertGuardAction(report, "refuse")).toBe("stick")
   })
@@ -654,8 +752,10 @@ async function modeWorld(): Promise<RegressionWorld> {
   return { candidate, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
 }
 
-/** A criss-cross history gives the root tree two merge bases, so no path may be claimed. */
-async function ambiguousWorld(): Promise<RegressionWorld> {
+/** Real root criss-crosses, including a child criss-cross whose shared advance may be restored. */
+async function ambiguousWorld(
+  kind: "restore" | "multi-restore" | "shared" | "swallowed" | "no-base",
+): Promise<RegressionWorld> {
   const root = mkdtempSync(join(tmpdir(), "yrd-revert-ambiguous-"))
   roots.push(root)
   const dep = join(root, "dep")
@@ -664,12 +764,43 @@ async function ambiguousWorld(): Promise<RegressionWorld> {
   await commit(dep, { "a.txt": "base\n" }, "base")
   const c1 = await commit(dep, { "a.txt": "target\n" }, "target advance")
   const c2 = await commit(dep, { "a.txt": "base\n" }, "stale restore")
+  const dg = gitIn(dep, undefined, undefined, { env })
+  let targetPin = c1
+  let incomingPin = c1
+  let candidatePin = c2
+  if (kind === "shared" || kind === "multi-restore") {
+    await dg(["checkout", "--quiet", "-b", "dep-left", c1])
+    const left = await commit(dep, { "dep-left.txt": "left\n" }, "left from shared advance")
+    await dg(["checkout", "--quiet", "-b", "dep-right", c1])
+    const right = await commit(dep, { "dep-right.txt": "right\n" }, "right from shared advance")
+    await dg(["checkout", "--quiet", "dep-left"])
+    await dg([...author, "merge", "--no-ff", "--quiet", "-m", "left merges right", right])
+    targetPin = (await dg(["rev-parse", "HEAD"])).trim()
+    if (kind === "multi-restore") {
+      targetPin = await commit(dep, { "a.txt": "target-only\n" }, "target-only advance beyond both bases")
+    }
+    await dg(["checkout", "--quiet", "dep-right"])
+    await dg([...author, "merge", "--no-ff", "--quiet", "-m", "right merges left", left])
+    incomingPin = await commit(
+      dep,
+      { "a.txt": kind === "multi-restore" ? "target\n" : "base\n" },
+      "deliberately restore prior content",
+    )
+    candidatePin = incomingPin
+    expect((await dg(["merge-base", "--all", targetPin, incomingPin])).trim().split("\n")).toHaveLength(2)
+  } else if (kind === "swallowed" || kind === "no-base") {
+    await dg(["checkout", "--quiet", "--detach", c1])
+    incomingPin = await commit(dep, { "b.txt": "incoming\n" }, "incoming-only change")
+    candidatePin = c1
+  }
   const product = join(root, "product")
   mkdirSync(product)
   const pg = gitIn(product, undefined, undefined, { env })
   await pg(["init", "--quiet", "--initial-branch=main"])
   await commit(product, { "readme.txt": "product\n" }, "product base")
-  const root0 = await pin(product, "vendor/dep", dep, c1, "target pins the advance")
+  const root0 = await pin(product, "vendor/dep", dep, targetPin, "target pins the advance")
+  // Later commit() calls stage the worktree: materialize the pin so add -A cannot delete it.
+  await pg(["submodule", "update", "--init", "--quiet"])
   await pg(["checkout", "--quiet", "-b", "left"])
   await commit(product, { "left.txt": "l\n" }, "left")
   const left0 = (await pg(["rev-parse", "HEAD"])).trim()
@@ -681,9 +812,18 @@ async function ambiguousWorld(): Promise<RegressionWorld> {
   const target = (await pg(["rev-parse", "HEAD"])).trim()
   await pg(["checkout", "--quiet", "right"])
   await pg([...author, "merge", "--no-ff", "--quiet", "-m", "right merges left", left0])
-  const head = (await pg(["rev-parse", "HEAD"])).trim()
+  let head =
+    incomingPin === targetPin
+      ? (await pg(["rev-parse", "HEAD"])).trim()
+      : await pin(product, "vendor/dep", dep, incomingPin, "head carries incoming change")
+  if (kind === "no-base") {
+    head = (await pg([...author, "commit-tree", `${head}^{tree}`, "-m", "unrelated incoming root"])).trim()
+  }
   await pg(["checkout", "--quiet", "-b", "stale", root0])
-  const candidate = await pin(product, "vendor/dep", dep, c2, "candidate restores the stale value")
+  const candidate =
+    candidatePin === targetPin
+      ? (await pg(["rev-parse", "HEAD"])).trim()
+      : await pin(product, "vendor/dep", dep, candidatePin, "candidate selects component result")
   return { candidate, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
 }
 

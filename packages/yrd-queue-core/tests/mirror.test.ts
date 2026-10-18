@@ -160,6 +160,7 @@ describe("refreshMirror", () => {
     expect(mirrorRefreshedAt(created.path)).toEqual(refreshed.refreshedAt)
     expect(JSON.parse(readFileSync(join(created.path, MIRROR_REFRESHED_AT), "utf8"))).toEqual({
       at: refreshed.refreshedAt.toISOString(),
+      asOf: refreshed.asOf.toISOString(),
       remote: "origin",
       refspecs,
     })
@@ -172,6 +173,28 @@ describe("refreshMirror", () => {
     })
     expect(warm.outcome).toBe("fresh")
     expect(readRemoteCalls(counted.dir).verbs.fetch).toBe(1)
+    // Old scoped stamps know completion time but cannot certify acquisition.
+    // Repair that disposable metadata once, without refusing or guessing it.
+    const legacy = { at: warm.refreshedAt.toISOString(), remote: "origin", refspecs }
+    writeFileSync(join(created.path, MIRROR_REFRESHED_AT), `${JSON.stringify(legacy)}\n`)
+    const upgraded = await refreshMirror({
+      path: created.path,
+      url,
+      gitIn: through(counted.env),
+      refspecs,
+      maxAgeMs: 60_000,
+    })
+    expect(upgraded.outcome).toBe("fetched")
+    expect(readRemoteCalls(counted.dir).verbs.fetch).toBe(2)
+    const upgradedWarm = await refreshMirror({
+      path: created.path,
+      url,
+      gitIn: through(counted.env),
+      refspecs,
+      maxAgeMs: 60_000,
+    })
+    expect(upgradedWarm.outcome).toBe("fresh")
+    expect(readRemoteCalls(counted.dir).verbs.fetch).toBe(2)
     writeFileSync(
       join(created.path, MIRROR_REFRESHED_AT),
       `${JSON.stringify({ at: new Date().toISOString(), remote: "origin", refspecs: ["+refs/heads/main:refs/heads/main"] })}\n`,
@@ -243,14 +266,62 @@ describe("refreshMirror", () => {
     const created = await refreshMirror({ root: store, url, gitIn: through(env) })
 
     const counted = traced(env, root)
-    const [left, right] = await Promise.all([
-      refreshMirror({ root: store, url, gitIn: through(counted.env) }),
-      refreshMirror({ root: store, url, gitIn: through(counted.env) }),
-    ])
+    let entered!: () => void
+    let release!: () => void
+    const fetching = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const continueFetch = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const blockedGitIn = (cwd: string): Git => {
+      const git = gitIn(cwd, undefined, undefined, { env: counted.env })
+      return async (args, input) => {
+        if (args[0] === "fetch") {
+          entered()
+          await continueFetch
+        }
+        return git(args, input)
+      }
+    }
+    const first = refreshMirror({ root: store, url, gitIn: blockedGitIn })
+    await fetching
+    const second = refreshMirror({ root: store, url, gitIn: through(counted.env) })
+    release()
+    const [left, right] = await Promise.all([first, second])
     expect([left.outcome, right.outcome].sort()).toEqual(["coalesced", "fetched"])
     expect(readRemoteCalls(counted.dir).verbs.fetch).toBe(1)
     expect(left.refreshedAt.getTime()).toBe(right.refreshedAt.getTime())
     expect(left.refreshedAt.getTime()).toBeGreaterThanOrEqual(created.refreshedAt.getTime())
+  })
+
+  it("does not date a snapshot after a remote change its fetch did not acquire", async () => {
+    const { store, upstream, env } = host()
+    const work = await upstreamRepository(upstream, "child", env)
+    const url = `${HOSTED}child.git`
+    const created = await refreshMirror({ root: store, url, gitIn: through(env) })
+    let publicationStartedAt: Date | undefined
+    let publishedAt: Date | undefined
+    const publishingGitIn = (cwd: string): Git => {
+      const git = gitIn(cwd, undefined, undefined, { env })
+      return async (args, input) => {
+        const result = await git(args, input)
+        if (args[0] === "fetch") {
+          const writer = gitIn(work, undefined, undefined, { env })
+          await writer(["branch", "task/just-opened"])
+          publicationStartedAt = new Date()
+          await writer(["push", "--quiet", "origin", "task/just-opened"])
+          publishedAt = new Date()
+        }
+        return result
+      }
+    }
+    const refreshed = await refreshMirror({ path: created.path, url, gitIn: publishingGitIn, maxAgeMs: 0 })
+    const local = gitIn(created.path, undefined, undefined, { env })
+    expect((await local(["for-each-ref", "--format=%(refname)", "refs/heads/task/just-opened"])).trim()).toBe("")
+    expect(publishedAt).toBeDefined()
+    expect(refreshed.asOf.getTime()).toBeLessThanOrEqual(publicationStartedAt!.getTime())
+    expect(refreshed.refreshedAt.getTime()).toBeGreaterThanOrEqual(publishedAt!.getTime())
   })
 
   it("a writer invalidating during fetch leaves the completed refresh uncertified", async () => {

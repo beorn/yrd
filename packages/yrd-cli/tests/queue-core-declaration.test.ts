@@ -14,7 +14,6 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
-  renameSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -178,11 +177,11 @@ function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout
   }
 }
 
-async function world(config?: string): Promise<string> {
+async function world(config?: string, name = "repo"): Promise<string> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-declaration-"))
   roots.push(root)
   const remote = join(root, "remote.git")
-  const repo = join(root, "repo")
+  const repo = join(root, name)
   const seed = gitIn(root)
   await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
   await seed(["clone", "--quiet", remote, repo])
@@ -371,16 +370,26 @@ it("reads a fresh queue-owned store without remote Git calls and refreshes once 
     })
     expect(readRemoteCalls(firstTrace).verbs.fetch).toBe(1)
 
+    // A cached snapshot's acquisition time can precede refresh completion.
+    // List and show must expose the former even when no fetch is needed.
+    const stampPath = join(owned, MIRROR_REFRESHED_AT)
+    const stamp = JSON.parse(readFileSync(stampPath, "utf8")) as { at: string }
+    const acquiredAt = new Date(Date.parse(stamp.at) - 1_000).toISOString()
+    writeFileSync(stampPath, `${JSON.stringify({ ...stamp, asOf: acquiredAt })}\n`)
+
     process.env.GIT_TRACE2_EVENT = warmTrace
     const warm = capture(repo)
     expect(await coreQueueCommand(repo, warm.io, { command: "list", all: true }, options), warm.stderr()).toBe(0)
-    expect(JSON.parse(warm.stdout())).toMatchObject({ changes: [{ branch, state: "merged", merge: target }] })
+    expect(JSON.parse(warm.stdout())).toMatchObject({
+      asOf: acquiredAt,
+      changes: [{ branch, state: "merged", merge: target }],
+    })
     const shown = capture(repo)
     expect(
       await coreQueueCommand(repo, shown.io, { command: "show", branch: "task/absent" }, options),
       shown.stderr(),
     ).toBe(0)
-    expect(JSON.parse(shown.stdout())).toMatchObject({ source: "local", asOf: expect.any(String) })
+    expect(JSON.parse(shown.stdout())).toMatchObject({ source: "local", asOf: acquiredAt })
     expect(readRemoteCalls(warmTrace).verbs).toEqual({})
     expect(readRemoteCalls(warmTrace).unreadable).toBe(0)
   } finally {
@@ -2271,6 +2280,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         const exit = await runYrdProcess([...args, ...flags], out.io)
         return { exit, out }
       }
+      let retiredWhileGone: { exit: number; stdout: string; stderr: string } | undefined
       if (mode === "ended") {
         const measure = async (name: string) => {
           const trace = join(dirname(repo), name)
@@ -2314,20 +2324,27 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect(human.exit, human.out.stderr()).toBe(0)
         expect(human.out.stdout()).toContain(`Skipped ${join(absent, "child")}: not materialized`)
 
-        // A prunable root registration still needs a subject and holds every root.
+        // A detached registered root whose directory is already gone does not fail --apply.
+        // Measured: both issue branches are removed, each with an archive ref, and the gone row names the path.
         const missing = join(dirname(repo), "prunable-author")
         const saved = `${missing}-saved`
         await git(["worktree", "add", "--quiet", "--detach", missing, "HEAD"])
         fs.renameSync(missing, saved)
         try {
           const stopped = await run(["--apply"])
-          expect(stopped.exit).toBe(1)
-          expect(JSON.parse(stopped.out.stdout())).toMatchObject({
-            failed: [expect.objectContaining({ repo: missing, reason: "unreadable" })],
-            kept: expect.arrayContaining([expect.objectContaining({ branch: rootBranch, reason: "held" })]),
-          })
-          expect((await git(["rev-parse", `refs/heads/${rootBranch}`])).trim()).toBe(rootTip)
-          expect((await childGit(["rev-parse", `refs/heads/${childBranch}`])).trim()).toBe(childTip)
+          const body = JSON.parse(stopped.out.stdout()) as {
+            failed: unknown[]
+            gone?: { path: string; adminDirectoryExists?: boolean }[]
+            removed: { branch: string; archiveRef?: string }[]
+            kept: unknown[]
+          }
+          expect(stopped.exit, stopped.out.stderr()).toBe(0)
+          expect(body.failed).toEqual([])
+          expect(body.kept).toEqual([])
+          expect(body.gone).toContainEqual(expect.objectContaining({ path: missing, adminDirectoryExists: true }))
+          expect(body.removed.map((row) => row.branch)).toEqual([childBranch, rootBranch])
+          for (const row of body.removed) expect(row.archiveRef).toEqual(expect.any(String))
+          retiredWhileGone = { exit: stopped.exit, stdout: stopped.out.stdout(), stderr: stopped.out.stderr() }
         } finally {
           fs.renameSync(saved, missing)
         }
@@ -2344,7 +2361,12 @@ describe("a queue is the selected origin branch carrying config", () => {
         })
         held = false
       }
-      const applied = await run(["--apply"])
+      const applied = retiredWhileGone
+        ? {
+            exit: retiredWhileGone.exit,
+            out: { stdout: () => retiredWhileGone.stdout, stderr: () => retiredWhileGone.stderr },
+          }
+        : await run(["--apply"])
       expect(applied.exit, applied.out.stderr()).toBe(0)
       const result = JSON.parse(applied.out.stdout()) as {
         removed: {
@@ -2377,6 +2399,94 @@ describe("a queue is the selected origin branch carrying config", () => {
     },
     60_000,
   )
+
+  /** @failure Applying issue cleanup while the issue branch is checked out in a vanished worktree fails the run.
+   * @level l3 @consumer Authors whose own worktree was removed without git worktree remove
+   * @testonly none
+   */
+  it("applies issue cleanup when the checked-out worktree has vanished", async () => {
+    const repo = await world("checks: []\n")
+    const seed = await world()
+    const git = gitIn(repo)
+    await git([
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "--quiet",
+      join(dirname(seed), "remote.git"),
+      "child",
+    ])
+    await git(["commit", "--quiet", "-am", "register child"])
+    await git(["push", "--quiet", "origin", "main"])
+    const rootTip = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", rootTip, new Date())
+    const child = join(repo, "child")
+    const childGit = gitIn(child)
+    const childTip = (await childGit(["rev-parse", "HEAD"])).trim()
+    const rootBranch = "task/1234-root"
+    const childBranch = "task/1234-child"
+    const issue = "@example/1234-retirement"
+    await git(["branch", rootBranch, rootTip])
+    await git(["push", "--quiet", "origin", rootBranch])
+    await childGit(["branch", childBranch, childTip])
+    await childGit(["push", "--quiet", "origin", childBranch])
+    const chain = await openEvents({
+      ...createEventStore(repo, "origin", git.selection),
+      ref: changesRef("main", rootBranch),
+      writer: "fixture",
+    })
+    await chain.append(
+      [
+        changeInput("opened", { queueTip, at: new Date(), commit: rootTip, by: "fixture", issue }),
+        changeInput("merged", { queueTip, at: new Date(), commit: rootTip }),
+      ],
+      { expect: null },
+    )
+    const attached = join(dirname(repo), "attached-author")
+    await git(["worktree", "add", "--quiet", attached, rootBranch])
+    const saved = `${attached}-saved`
+    fs.renameSync(attached, saved)
+    try {
+      const out = capture(repo)
+      out.io.branchIssue = ({ branch, recordedIssue }) =>
+        recordedIssue ?? (branch.startsWith("task/1234-") ? issue : undefined)
+      out.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
+      const exit = await runYrdProcess(
+        ["bun", "yrd", "drop", "--issue", issue, "--submodules", "--submitter", "fixture", "--json", "--apply"],
+        out.io,
+      )
+      const body = JSON.parse(out.stdout()) as {
+        failed: unknown[]
+        gone?: { path: string }[]
+        removed: { branch: string; archiveRef?: string; reason?: string }[]
+        kept: { branch: string; reason: string; detail?: string }[]
+      }
+      const brief = {
+        exit,
+        stderr: out.stderr(),
+        failed: body.failed,
+        gone: body.gone,
+        removed: body.removed.map((row) => ({ branch: row.branch, reason: row.reason, archiveRef: row.archiveRef })),
+        kept: body.kept.map((row) => ({ branch: row.branch, reason: row.reason, detail: row.detail })),
+      }
+      expect(exit, JSON.stringify(brief)).toBe(0)
+      expect(body.failed).toEqual([])
+      expect(body.gone).toContainEqual(expect.objectContaining({ path: attached }))
+      expect(body.removed).toContainEqual(
+        expect.objectContaining({ branch: childBranch, archiveRef: expect.any(String) }),
+      )
+      expect(body.kept).toContainEqual(
+        expect.objectContaining({
+          branch: rootBranch,
+          reason: "held",
+          detail: expect.stringContaining(attached),
+        }),
+      )
+    } finally {
+      if (existsSync(saved)) fs.renameSync(saved, attached)
+    }
+  }, 60_000)
 
   /** @failure Default issue cleanup omits a store-only population or continues after a retirement failure.
    * @level l3 @consumer Authors retiring root-only, component-only or shared issue branches
@@ -2993,9 +3103,9 @@ describe("a queue is the selected origin branch carrying config", () => {
    * @consumer The closer running yrd drop --issue after durable issue closure
    */
   it("drop by issue keeps unpublished work and advanced submitted tips; explicit abandonment retains custody", async () => {
-    const originalRepo = await world("{}\n")
-    const repo = join(dirname(originalRepo), "work tree's")
-    renameSync(originalRepo, repo)
+    const repo = await world("{}\n", "work tree's")
+    const outside = outsideRepositoryRoot()
+    roots.push(outside)
     const git = gitIn(repo)
     await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
     const issue = "@example/28791-retirement"
@@ -3099,9 +3209,14 @@ describe("a queue is the selected origin branch carrying config", () => {
     }
     expect(manualReport.removed).toEqual([expect.objectContaining({ branch: "task/manual-only" })])
     expect((await git(["ls-remote", "origin", manualReport.removed[0]!.archiveRef])).split("\t")[0]).toBe(manualHead)
-    expect(manualReport.removed[0]!.recovery).toBe(
-      `git -C ${repo} fetch ${(await git(["config", "--get", "remote.origin.url"])).trim()} ${manualReport.removed[0]!.archiveRef}:refs/heads/task/manual-only`,
-    )
+    const remoteRefs = await git(["ls-remote", "origin"])
+    const originRecovery = manualReport.removed[0]!.recovery
+    if (originRecovery === undefined) throw new Error("origin archive supplied no recovery command")
+    const restored = spawnSync("/bin/sh", ["-c", originRecovery], { cwd: outside, encoding: "utf8" })
+    expect(restored.status, restored.stderr).toBe(0)
+    expect((await git(["rev-parse", "refs/heads/task/manual-only"])).trim()).toBe(manualHead)
+    expect(await git(["ls-remote", "origin"])).toBe(remoteRefs)
+    await git(["update-ref", "-d", "refs/heads/task/manual-only", manualHead])
     expect((await git(["rev-parse", `refs/heads/${advancedBranch}`])).trim()).toBe(advanced)
     // Accepted29301: local expected=head, but the recorded change has an older head.
     // Existing assertions only check the reason token, so they miss identical SHAs in the detail.
@@ -3172,8 +3287,6 @@ describe("a queue is the selected origin branch carrying config", () => {
     )?.detail
     const recipe = nativeDetail?.split("move the branch back with ")[1]?.split(", then ")[0]
     expect(recipe, nativeDetail).toBeDefined()
-    const outside = outsideRepositoryRoot("yrd-native-advanced-cure-")
-    roots.push(outside)
     const originBefore = await git(["ls-remote", "origin"])
     const applied = spawnSync("/bin/sh", ["-c", recipe!], { cwd: outside, encoding: "utf8", timeout: 30_000 })
     expect(applied.status, applied.stderr).toBe(0)
@@ -3215,8 +3328,8 @@ describe("a queue is the selected origin branch carrying config", () => {
     const curedArchive = curedReport.removed[0]!.archiveRef
     expect((await git(["ls-remote", "origin", curedArchive])).trim()).toBe("")
     const localRecovery = curedReport.removed[0]!.recovery
-    expect(localRecovery).toBeDefined()
-    const localRestored = spawnSync("/bin/sh", ["-c", localRecovery!], { cwd: outside, encoding: "utf8" })
+    if (localRecovery === undefined) throw new Error("local archive supplied no recovery command")
+    const localRestored = spawnSync("/bin/sh", ["-c", localRecovery], { cwd: outside, encoding: "utf8" })
     expect(localRestored.status, localRestored.stderr).toBe(0)
     expect((await git(["rev-parse", `refs/heads/${advancedBranch}`])).trim()).toBe(saved.get(advancedBranch))
     await git(["update-ref", "-d", `refs/heads/${advancedBranch}`, saved.get(advancedBranch)!])

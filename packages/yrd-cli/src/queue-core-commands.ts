@@ -816,7 +816,7 @@ export async function coreQueueCommand(
       refspecs,
       maxAgeMs: 60_000,
     })
-    statusAsOf = refreshed.refreshedAt.toISOString()
+    statusAsOf = refreshed.asOf.toISOString()
   }
   const statusSource = localStatus === undefined ? "remote" : "local"
   const statusFact = () => ({ source: statusSource, asOf: statusAsOf ?? new Date().toISOString() })
@@ -1810,9 +1810,16 @@ export async function coreQueueCommand(
           io,
           options.json,
           report,
-          `issue ${report.issue}: inspected ${report.counts.inspected} repositories in ${authorRepo}, ${report.counts.notMaterialized} not materialized; eligible ${report.eligible.length}, retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}\n${report.mode}` +
+          `issue ${report.issue}: inspected ${report.counts.inspected} repositories in ${authorRepo}, ${report.counts.notMaterialized} not materialized; eligible ${report.eligible.length}, retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}, gone ${report.gone.length}\n${report.mode}` +
             report.notMaterialized
               .map((row) => `\nSkipped ${row.repo}: not materialized (checkout Git pointer and private store absent)`)
+              .join("") +
+            report.gone
+              .map((row) =>
+                row.adminDirectoryExists
+                  ? `\n${row.path}: gone (worktree admin directory ${row.adminDirectory} still exists; module stores were not inspected)`
+                  : `\n${row.path}: gone (no admin directory under ${row.adminParent} points at it; module stores were not inspected)`,
+              )
               .join("") +
             report.excluded
               .map(
@@ -1946,8 +1953,8 @@ export async function coreQueueCommand(
               ? {
                   recovery:
                     result.archiveLocation === "origin"
-                      ? `git -C ${authorRepo} fetch ${eventStore.remote} ${result.archiveRef}:refs/heads/${branch}`
-                      : `git -C ${authorRepo} branch ${branch} ${result.archiveRef}`,
+                      ? `git -C ${shellQuote(authorRepo)} fetch ${shellQuote(eventStore.remote)} ${shellQuote(`${result.archiveRef}:refs/heads/${branch}`)}`
+                      : `git -C ${shellQuote(authorRepo)} branch ${shellQuote(branch)} ${shellQuote(result.archiveRef)}`,
                 }
               : {}),
           }
@@ -2973,6 +2980,7 @@ export async function coreQueueCommand(
           log?.warn?.(line)
           io.stderr(`yrd: ${line}\n`)
         },
+        repo,
       )
       const setRunnerState = (
         state: RunnerClaim["state"],
@@ -4097,7 +4105,6 @@ export async function coreQueueCommand(
           onRetry: (message) => io.stderr(message),
         })
         const { journals, all, drafts, observation } = reading
-        if (options.json !== true) narrateJournalReading(io, journals, said)
         // The run-history lens is for stats and watch detail. List is the
         // current head of each branch in both output formats; JSON expands
         // that head by run unless --latest selects its single row.
@@ -4106,11 +4113,36 @@ export async function coreQueueCommand(
         const changes = filterRows(listed, request.terms ?? []).filter((item) => item.row.state !== "draft")
         const rows = filterRows(watchRows(all, { journals }), request.terms ?? [])
         const documentRows = request.drafts === true ? filterRows(listed, request.terms ?? []) : changes
+        const diagnosticKeys =
+          request.terms === undefined || request.terms.length === 0
+            ? undefined
+            : new Set(
+                documentRows.flatMap((item) => [
+                  journalKey(item.row.branch, item.row.head),
+                  ...(item.run === undefined ? [] : [journalKey(item.run.branch, item.run.head)]),
+                ]),
+              )
+        const queue = queueName(config.target, await remoteUrl(git, config.target.remote))
+        const diagnostics = journalDiagnostics(journals, diagnosticKeys, () =>
+          formatQueueCommand(io, formatStoredQueueAddress(queue), [
+            "list",
+            ...(request.all === true ? ["--all"] : []),
+            ...(request.drafts === true ? ["--drafts"] : []),
+            "--json",
+          ]),
+        )
+        if (options.json !== true) narrateJournalReading(io, diagnostics.facts, said, diagnostics.omitted)
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
         const pause = reading.pause
         const stopped = stopFact(pause)
-        const published = await readPublishedRunner(git, config.target.branch, config.target.remote, reading.runnerTip)
+        const published = await readPublishedRunner(
+          git,
+          repo,
+          config.target.branch,
+          config.target.remote,
+          reading.runnerTip,
+        )
         const localRunner = await readRunnerFacts(workdir)
         const runner: RunnerFacts = { ...localRunner, published }
         const service = localRunner.service
@@ -4165,7 +4197,7 @@ export async function coreQueueCommand(
                 ? row.row
                 : { ...row.row, diagnosticSummary: revertWarningLine(row.row) },
             ),
-            journal: journalFact(journals),
+            journal: journalFact(diagnostics.facts, diagnostics.omitted),
             // The runner belongs to the whole queue, even when a selector hides every row.
             ...(runnerStatus === undefined ? {} : { runner: runnerStatus }),
             pause: pause ?? null,
@@ -4179,7 +4211,7 @@ export async function coreQueueCommand(
           eventChanges: reading.changes,
           eventInvalid: reading.invalid,
           journals,
-          queue: queueName(config.target, await remoteUrl(git, config.target.remote)),
+          queue,
           // Pre-M8 a repository has exactly one queue: the target's branch, on
           // this repository. M8 turns this list of one into N.
           queues: [{ branch: config.target.branch, label: config.target.branch, path: repo }],
@@ -4188,7 +4220,7 @@ export async function coreQueueCommand(
           // not the view, and a change checked twice made two decisions.
           decisions: decisionsOfRows(unfiltered),
           ...(pause === undefined ? {} : { pause: pauseLine(pause) }),
-          ...(journals.absent === undefined ? {} : { journalAbsent: journals.absent }),
+          ...(diagnostics.facts.absent === undefined ? {} : { journalAbsent: diagnostics.facts.absent }),
           ...(scope === undefined ? {} : { scope }),
           rows,
           unfiltered,
@@ -6440,19 +6472,64 @@ function journalFor<Run extends JournalSummary>(item: WatchRow, journals: Journa
  * sees no `live` and no `run` can tell a queue with nothing running from a
  * machine that holds no journal at all.
  */
-function journalFact(journals: Journals<JournalSummary>): Readonly<{
+function journalFact(
+  journals: Journals<JournalSummary>,
+  omitted?: string,
+): Readonly<{
   dir: string
   absent?: string
   malformed?: Journals["malformed"]
   fallbacks?: Journals["fallbacks"]
   unread?: number
 }> {
+  const { facts } = journalDiagnostics(journals)
+  const absent = [facts.absent, omitted].filter((part) => part !== undefined).join("; ")
   return {
-    dir: journals.dir,
-    ...(journals.absent === undefined ? {} : { absent: journals.absent }),
-    ...(journals.malformed.length === 0 ? {} : { malformed: journals.malformed }),
-    ...(journals.fallbacks === undefined ? {} : { fallbacks: journals.fallbacks }),
-    ...(journals.unread === undefined ? {} : { unread: journals.unread }),
+    dir: facts.dir,
+    ...(absent === "" ? {} : { absent }),
+    ...(facts.malformed.length === 0 ? {} : { malformed: facts.malformed }),
+    ...(facts.fallbacks === undefined ? {} : { fallbacks: facts.fallbacks }),
+    ...(facts.unread === undefined ? {} : { unread: facts.unread }),
+  }
+}
+
+/** Scope diagnostic presentation only; acquisition and the run facts remain shared. */
+function journalDiagnostics<Run extends JournalSummary>(
+  journals: Journals<Run>,
+  selectedKeys?: ReadonlySet<string>,
+  unfilteredCommand?: () => string,
+): Readonly<{ facts: Journals<Run>; omitted?: string }> {
+  const { missingRunTrailers = [], absent: baseAbsent, ...base } = journals
+  const selectedMissing =
+    selectedKeys === undefined
+      ? missingRunTrailers
+      : missingRunTrailers.filter((entry) => selectedKeys.has(journalKey(entry.branch, entry.head)))
+  const malformed =
+    selectedKeys === undefined ? base.malformed : base.malformed.filter((entry) => selectedKeys.has(entry.key))
+  const missingCount = missingRunTrailers.length - selectedMissing.length
+  const malformedCount = base.malformed.length - malformed.length
+  const omittedParts = [
+    ...(missingCount === 0 ? [] : [`${String(missingCount)} missing-Run segment(s)`]),
+    ...(malformedCount === 0 ? [] : [`${String(malformedCount)} malformed row(s)`]),
+  ]
+  const absent = [
+    baseAbsent,
+    ...selectedMissing.map(
+      ({ branch, head, segment }) =>
+        `journal detail unavailable: ${branch}@${head}, segment ${segment ?? "without opening identity"}, has no Run trailer; unlinked journal files were not searched`,
+    ),
+  ]
+    .filter((part) => part !== undefined)
+    .join("; ")
+  return {
+    facts: { ...base, malformed, ...(absent === "" ? {} : { absent }) },
+    ...(omittedParts.length === 0
+      ? {}
+      : {
+          // An unknown key is global too: it is not evidence that a selected
+          // change is clean, and it must remain counted and inspectable.
+          omitted: `global journal incompleteness: ${omittedParts.join(", ")} outside or not attributable to the selected change identities; run ${unfilteredCommand?.()} for unfiltered diagnostics`,
+        }),
   }
 }
 
@@ -6467,11 +6544,17 @@ function journalFact(journals: Journals<JournalSummary>): Readonly<{
  * scoped to one invocation, so a watch refreshing every few seconds states a
  * defect once while a NEW one still reaches the reader the round it appears.
  */
-function narrateJournalReading(io: YrdCliIO, journals: Journals<JournalSummary>, said: Set<string>): void {
+function narrateJournalReading(
+  io: YrdCliIO,
+  journals: Journals<JournalSummary>,
+  said: Set<string>,
+  omitted?: string,
+): void {
   // ONE line, with its counts, whatever the window holds: every round of a
   // queue whose projections are absent falls back together, and 3,006 lines of
   // the same sentence is the cost this states instead (@i/10-yrd/28799).
   const parts = [
+    ...(omitted === undefined ? [] : [omitted]),
     ...(journals.fallbacks?.reasons ?? []).map(
       ({ reason, count, example }) =>
         `the projection was ${reason} for ${String(count)} round(s) — those facts were rebuilt by reading their raw journals (e.g. ${example})`,
@@ -6790,13 +6873,14 @@ export async function readEventListing(
         ({ events }) => !events.some((event) => trailer(event, EVENT_TRAILERS.run) !== undefined),
       )
       if (legacy.length === 0) return journals
-      const missing = legacy
-        .map(
-          ({ row, events }) =>
-            `journal detail unavailable: ${row.branch}@${row.head}, segment ${events[0]?.id ?? "without opening identity"}, has no Run trailer; unlinked journal files were not searched`,
-        )
-        .join("; ")
-      return { ...journals, absent: [journals.absent, missing].filter((part) => part !== undefined).join("; ") }
+      return {
+        ...journals,
+        missingRunTrailers: legacy.map(({ row, events }) => ({
+          branch: row.branch,
+          head: row.head,
+          ...(events[0] === undefined ? {} : { segment: events[0].id }),
+        })),
+      }
     }
     // A source-changed artifact is repaired only when its round's writer is
     // proven gone (28918), and that proof costs a Git read of the runner claim.
@@ -6811,7 +6895,7 @@ export async function readEventListing(
     })
     if (asked.size === 0 || [...asked].every((id) => terminalJournalRuns.has(id))) return journals
     const left: string[] = []
-    const liveness = await readRunnerLiveness(git, config.target.branch, config.target.remote, runnerTip)
+    const liveness = await readRunnerLiveness(git, repo, config.target.branch, config.target.remote, runnerTip)
     const judged = read(runTerminalProbe(liveness, dir, (message) => left.push(message)))
     return left.length === 0
       ? judged
