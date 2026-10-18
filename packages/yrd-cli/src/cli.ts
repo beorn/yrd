@@ -1636,11 +1636,12 @@ function buildProgram(
       "When this caller's same-UID CWD census cannot read every pid:",
       "The close is not certified and not refused: the request is queued under the queue workdir " +
         "(`state/yrd/env-close-requests/`) and the queue's own round, whose census reads every pid, " +
-        "runs the same close lifecycle and journals the outcome. That queued consumer runs under " +
-        "DIRECT ADMISSION (clean, unlocked, no holder) WITHOUT the ancestry check the automatic sweep " +
-        "applies, so a held environment with a standing close request will be closed: withdraw the " +
-        "request to keep it held. That ending exits 4, named `queued` in --json, because the " +
-        "environment still exists. A request this caller cannot write is refused loudly instead.",
+        "runs the same close lifecycle and journals the outcome. That queued consumer applies direct " +
+        "admission (clean, unlocked, no holder), without the sweep's ancestry check: an environment the " +
+        "sweep kept only for ancestry IS closed by a standing request; an environment with a recorded " +
+        "hold is not: the request is journaled STALE and dropped. That ending exits 4, named `queued` " +
+        "in --json, because the environment still exists. A request this caller cannot write is " +
+        "refused loudly instead.",
     )
     .option(
       "--retain <directory>",
