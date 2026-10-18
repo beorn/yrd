@@ -5008,7 +5008,7 @@ export async function coreQueueCommand(
           const issueInspection =
             request.branch !== undefined && options.projectRoot !== undefined
               ? `Inspect issue display: ${formatQueueCommand(io, formatStoredQueueAddress(name), ["queue", "show", request.branch, "--project-root", options.projectRoot])}`
-              : "command syntax: yrd queue show <branch> --project-root <root>; choose the branch and the issues.yml project root"
+              : "Choose one branch and its issues.yml project root to read the issue display."
           io.stderr(
             `yrd: .yrd.yml issuesProvider.read: retired and ignored; delete this key. The issue display reads issues.yml's view. ${issueInspection}\n`,
           )
@@ -5140,7 +5140,7 @@ export async function coreQueueCommand(
         if (projectRoot === undefined) return 0
         if (request.all === true) {
           io.stderr(
-            `yrd: issue display: skipped for --all; command syntax: yrd queue show <branch> --project-root <root>; choose one branch and its issues.yml project root for at most ${ISSUE_DISPLAY_READ_CAP} issue reads\n`,
+            `yrd: issue display: skipped for --all; choose one branch and its issues.yml project root for at most ${ISSUE_DISPLAY_READ_CAP} issue reads\n`,
           )
           return 0
         }

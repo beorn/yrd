@@ -2408,6 +2408,14 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       unread:
         (shown[2] ?? "").includes("not yet read") && (shown[2] ?? "").includes("run draft-host submit task/unread"),
     }).toEqual({ moved: true, read: { load: 0, loadDiff: 0, open: 0 }, unread: true })
+    // A host that supplied no formatter must not gain a standalone submit recipe.
+    const unavailable = render(<WatchPane snapshot={snap} live={false} />, { cols: 220, rows: 50 })
+    await settle(unavailable)
+    unavailable.press("Home")
+    unavailable.press("Enter")
+    await settle(unavailable)
+    expect(unavailable.text).toContain("Submit command unavailable in this view")
+    unavailable.unmount()
   })
 
   it("each row shows AGE / RUN: AGE from since, RUN is attempt runtime when measured (item 5, 24196)", async () => {

@@ -152,7 +152,8 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
     expect(history.changes).toHaveLength(5)
     expect(new Set(history.changes.map((change) => change.issue)).size).toBe(5)
     expect(shown.stderr, shown.report).not.toContain("fake provider:")
-    expect(shown.stderr, shown.report).toContain("command syntax: yrd queue show <branch> --project-root <root>")
+    expect(shown.stderr, shown.report).not.toContain("yrd queue show")
+    expect(shown.stderr, shown.report).toContain("project root")
   })
 
   // The old one-key suite cannot expose eager startup, an excessive batch, or
@@ -208,7 +209,8 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
     const shown = await yrd(work, "queue", "show", "task/one", "--json", "--fresh")
     expect(shown.exitCode, shown.report).toBe(0)
     expect(shown.stderr, shown.report).toContain("issuesProvider.read: retired")
-    expect(shown.stderr, shown.report).toContain("command syntax: yrd queue show <branch> --project-root <root>")
+    expect(shown.stderr, shown.report).not.toContain("yrd queue show")
+    expect(shown.stderr, shown.report).toContain("project root")
     const project = await issuesProject("json")
     const remote = join(work, "..", "remote.git")
     const refs = await gitIn(remote)(["for-each-ref", "--format=%(refname) %(objectname)"])
