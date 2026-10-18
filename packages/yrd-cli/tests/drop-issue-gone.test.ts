@@ -106,6 +106,29 @@ it("reports a registered checkout removed before the walk as gone and exits 0", 
   }
 }, 60_000)
 
+it("keeps a root that still exists with a missing git pointer unreadable", async () => {
+  const repo = await world()
+  const extra = join(dirname(repo), "missing-pointer")
+  await gitIn(repo)(["worktree", "add", "--quiet", "--detach", extra, "HEAD"])
+  const pointer = join(extra, ".git")
+  renameSync(pointer, `${pointer}-saved`)
+  try {
+    const json = await drop(repo, true)
+    expect(json.exit, `${json.stderr}\n${json.stdout}`).toBe(1)
+    const report = reportOf(json.stdout)
+    expect(report.gone ?? []).not.toContainEqual(expect.objectContaining({ path: extra }))
+    expect(report.failed).toContainEqual(
+      expect.objectContaining({
+        repo: extra,
+        reason: "unreadable",
+        detail: expect.stringContaining("checkout Git pointer is absent"),
+      }),
+    )
+  } finally {
+    renameSync(`${pointer}-saved`, pointer)
+  }
+}, 60_000)
+
 it("keeps a non-ENOENT checkout failure unreadable and exits 1", async () => {
   const repo = await world()
   const extra = join(dirname(repo), "damaged-mode")

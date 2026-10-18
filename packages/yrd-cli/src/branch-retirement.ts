@@ -136,10 +136,10 @@ async function visitIssueCheckout(
   commit: string,
   moduleStore: string | undefined,
   registeredRoot: string,
-  prunable?: string,
 ): Promise<void> {
   try {
-    if (repository === registeredRoot && (prunable !== undefined || pathMissing(repository))) {
+    // Prunable is not enough. Git also sets it when the directory remains and only its git pointer is gone.
+    if (repository === registeredRoot && pathMissing(repository)) {
       rememberGone(walk, repository)
       return
     }
@@ -386,8 +386,8 @@ export async function retireIssueBranches(
       authorRepo,
     )
     for (const root of await registeredWorktrees(authorGit)) {
-      // Gone means this registered root itself is gone. An ENOENT inside a root that is still there is damage.
-      if (root.prunable !== undefined || pathMissing(root.path)) {
+      // Gone means this registered root itself is gone. Git's prunable flag also covers a root that still exists.
+      if (pathMissing(root.path)) {
         rememberGone(discovery, root.path)
         continue
       }
@@ -400,7 +400,7 @@ export async function retireIssueBranches(
           reason: "unreadable",
           detail: "registered author worktree has no HEAD",
         })
-      } else await visitIssueCheckout(discovery, root.path, "", root.head, undefined, root.path, root.prunable)
+      } else await visitIssueCheckout(discovery, root.path, "", root.head, undefined, root.path)
     }
     io.stderr(
       `yrd: issue cleanup will inspect ${stores.length} repository stores; ${notMaterialized.length} not materialized. Reading every registered worktree's component stores can take minutes.\n`,
