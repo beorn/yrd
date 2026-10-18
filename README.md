@@ -112,7 +112,7 @@ With `--issue`, an initial `Refs:` commit records the binding before setup and p
 
 Conflicting bindings refuse and name the preserved environment. Setup and output use the resulting head; setup failure preserves that environment.
 
-Submission scans branch history back to its merge-base with the captured target, excluding target history. The first explicit `Refs:` or `Resolves:` binding wins.
+Submission scans branch history back to its merge-base with the captured target, excluding target history. The first explicit `Closes:`, `Fixes:`, `Resolves:`, or `Refs:` binding wins.
 
 Later commits and branch renames retain the binding. Conflicts name both issues and commits; `--issue` must match an existing binding.
 

@@ -942,7 +942,7 @@ describe("event submit", () => {
       "--quiet",
       "--allow-empty",
       "-m",
-      "closing controls\n\nFixes everything\nResolves colonless-binding\n\nCloses: -opaque one, two",
+      "closing controls\n\nFixes everything\nResolves colonless-binding",
     ])
     const head5 = (await w.git(["rev-parse", "HEAD"])).trim()
     expect(await issueOf(w.git, "task/prose-refs", head5, w.target)).toEqual({
@@ -950,11 +950,19 @@ describe("event submit", () => {
       source: "binding",
       commit: head5,
     })
+    await w.git([
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "closing trailer\n\nFixes everything\n\nCloses: -opaque one, two",
+    ])
+    const head6 = (await w.git(["rev-parse", "HEAD"])).trim()
     const closing = []
-    for await (const field of closingReferencesOf(w.git, [`${w.target}..${head5}`], "task/prose-refs")) {
+    for await (const field of closingReferencesOf(w.git, [`${w.target}..${head6}`], "task/prose-refs")) {
       closing.push(field)
     }
-    expect(closing).toEqual([{ value: "-opaque one, two", commit: head5, trailer: "Closes" }])
+    expect(closing).toEqual([{ value: "-opaque one, two", commit: head6, trailer: "Closes" }])
   })
 
   /** @failure An absolute vault path and a vault-relative bead reference refuse as conflicting bindings (25719).
@@ -1041,14 +1049,44 @@ describe("event submit", () => {
   })
 
   /**
+   * @failure Yrd issue binding read only Refs and Resolves, so commits with Closes: or Fixes:
+   *          trailers submitted with "has no issue link; no explicit issue binding was found"
+   *          (29962, specimen 29957-dark-work-duplicate-ref at 05c927cb).
+   * @level   l2 (real git history through issueOf and issueBindingsOf)
+   * @consumer Yrd submit and its opened change record
+   */
+  it.each(["Closes", "Fixes", "Resolves", "Refs"])(
+    "binds %s trailer while ignoring subject and prose (29962)",
+    async (key) => {
+      const w = await world()
+      const slug = key.toLowerCase()
+      await branchWithCommit(w, `task/colon-${slug}`, `colon-${slug}.txt`)
+      await w.git(["checkout", "--quiet", `task/colon-${slug}`])
+      await w.git([
+        "commit",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        `${key} the race in submit\n\n${slug} without a single token is prose.\n\n${key}: @yrd/29962-${slug}`,
+      ])
+      const headColon = (await w.git(["rev-parse", "HEAD"])).trim()
+      expect(await issueOf(w.git, `task/colon-${slug}`, headColon, w.target)).toEqual({
+        issue: `@yrd/29962-${slug}`,
+        source: "binding",
+        commit: headColon,
+      })
+    },
+  )
+
+  /**
    * @failure A Refs trailer linking a follow-up issue refuses the whole branch as
    *          conflicting bindings, and the refusal named neither the trailer that
    *          binds nor the line that keeps the link without binding it (27300).
    * @level   l2 (real git history through issueOf)
    * @consumer a submitter who links a follow-up issue beside the issue being submitted
    */
-  it.each(["Refs", "Resolves"])(
-    "conflicting issue bindings names the %s trailer and the Follow-up: form that does not bind (27300)",
+  it.each(["Closes", "Fixes", "Resolves", "Refs"])(
+    "conflicting issue bindings names the %s trailer and the Follow-up: form that does not bind (27300, 29962)",
     async (key) => {
       const w = await world()
       await branchWithCommit(w, "task/conflict", "change.txt")

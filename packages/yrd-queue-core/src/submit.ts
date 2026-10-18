@@ -1475,7 +1475,7 @@ async function submitEvent(
 }
 
 /**
- * The first explicit Refs/Resolves binding in branch history wins. The
+ * The first explicit Closes/Fixes/Resolves/Refs binding in branch history wins. The
  * merge-base and all target ancestry are excluded; neither later work nor a
  * branch rename loses the binding. Conflicting explicit/declared issues refuse.
  * An unbound branch may use an explicit declaration; branch names never decode issue keys.
@@ -1573,7 +1573,7 @@ export async function* issueBindingsOf(
   revisions: readonly string[],
   branch: string,
 ): AsyncGenerator<Readonly<{ issue: string; commit: string; trailer?: string }>, void> {
-  yield* issueFieldsOf(git, revisions, branch, ["Resolves", "Refs"], true)
+  yield* issueFieldsOf(git, revisions, branch, ["Closes", "Fixes", "Resolves", "Refs"], true)
 }
 
 /** Closing intent is Git's trailer block only; body shorthand never authorizes an outward write. */
