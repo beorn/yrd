@@ -617,8 +617,13 @@ it.each(["compose", "capture"] as const)("sends one failed notice for a gitlink 
   expect(status).toMatchObject({ status: "failed", commit: head })
   expect(status.reason).toContain(phase === "compose" ? "gitlink-compose-refused" : "from its first-parent chain")
   if (phase === "capture") {
-    expect(status.reason).toContain(`Rebase the change's component branch onto main ${futureMain}`)
-    expect(status.reason).toContain(`new branch started at ${futureMain} so main stays the first parent`)
+    expect(status.reason).toContain("Start a new branch from submodule's current main at the moment you act")
+    expect(status.reason).toContain(`this refusal names ${futureMain}, which may have moved`)
+    expect(status.reason).toContain("merge the preserved tip into it so current main stays the first parent")
+    expect(status.reason).toContain("re-record the gitlink at the merge commit, and retry the normal root compose")
+    expect(status.reason).toContain("no force, no rebase, no write to submodule's main, nothing deleted")
+    expect(status.reason).toContain("It needs no separate approval")
+    expect(status.reason).toContain("If any of those properties does not hold, ask for approval before you act")
   }
   expect(status.reason).toContain("submodule")
   expect(Object.values(status.notices ?? {})).toMatchObject([{ result: "delivered", to: "submitter" }])
