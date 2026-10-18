@@ -49,7 +49,7 @@ const HELD = { branch: "task/x", since: NOW, subject: "the change under a check"
 
 /** The runner's row on its own, at the table's own geometry. */
 function runnerRow(facts: RunnerFacts, options: Parameters<typeof runnerLine>[2] = {}) {
-  const line = runnerLine(facts, NOW, options)
+  const line = runnerLine(facts, NOW, options, (argv) => ["yrd", ...argv].join(" "))
   return (
     <NowContext.Provider value={NOW}>
       <MinuteContext.Provider value={NOW}>
