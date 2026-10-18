@@ -38,6 +38,7 @@ import {
   readConfig,
   readChangeEvents,
   readEventQueue,
+  pauseRef,
   queueRef,
   writeQueueEvent,
   readJournals,
@@ -1068,6 +1069,162 @@ process.exit(result.exitCode)
       .split("\n")
       .map((line) => JSON.parse(line) as { changes: readonly { branch: string; state: string }[] })
     expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
+  })
+
+  it("names a moved queue ref on stderr and reaches the change's ending on the next watch tick", async () => {
+    const w = await world()
+    const branch = "task/watched"
+    await change(w, branch, true)
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const queue = await readEventQueue(store, "main")
+    const remote = join(dirname(w.work), "remote.git")
+    const ref = changesRef("main", branch)
+    const chain = await openEvents({ ...store, ref, writer: "yrd" })
+    const before = await chain.head()
+    if (before === null) throw new Error("submitted fixture change has no event tip")
+    const commit = (await w.git(["rev-parse", branch])).trim()
+    await chain.append([changeInput("merged", { queueTip: queue.tip, at: new Date(), commit })], { expect: before })
+    const queueBefore = queue.tip
+    const queueAfter = await writeQueueEvent(store, "main", {
+      type: "paused",
+      by: "yrd",
+      reason: "concurrent queue event",
+      at: new Date(),
+    })
+    await w.git(["--git-dir", remote, "update-ref", queueRef("main"), queueBefore, queueAfter])
+    const moving = movingOnFetchGit(w, {
+      remote,
+      ref: queueRef("main"),
+      from: queueBefore,
+      to: queueAfter,
+      names: pauseRef("main"),
+      moves: 2,
+    })
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const deadline = setTimeout(() => stop.abort(), 10_000)
+    const watched = coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "list", terms: [branch], watch: true, requireMatch: true, stop: stop.signal, intervalSeconds: 1 },
+      {
+        json: true,
+        workdir: w.workdir,
+        selection: {
+          executable: moving.executable,
+          contract: "native",
+          scope: "default",
+          origin: "fetch-race fixture",
+        },
+      },
+    ).finally(() => clearTimeout(deadline))
+    await expect(watched).resolves.toBe(0)
+    expect(moving.moved()).toBe(2)
+    expect(run.stderr()).toBe(
+      `yrd: ${queueRef("main")} moved from ${queueAfter} to ${queueBefore} during listing; retry the read\n`,
+    )
+    const rounds = run
+      .stdout()
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { changes: readonly { branch: string; state: string }[] })
+    expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
+  })
+
+  it("keeps ticking when the queue ref moves on every round and ends only through stop", async () => {
+    const w = await world()
+    const branch = "task/watched"
+    await change(w, branch, true)
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const queue = await readEventQueue(store, "main")
+    const remote = join(dirname(w.work), "remote.git")
+    const queueBefore = queue.tip
+    const queueAfter = await writeQueueEvent(store, "main", {
+      type: "paused",
+      by: "yrd",
+      reason: "concurrent queue event",
+      at: new Date(),
+    })
+    await w.git(["--git-dir", remote, "update-ref", queueRef("main"), queueBefore, queueAfter])
+    const moving = movingOnFetchGit(w, {
+      remote,
+      ref: queueRef("main"),
+      from: queueBefore,
+      to: queueAfter,
+      names: pauseRef("main"),
+      moves: Number.POSITIVE_INFINITY,
+    })
+    const stop = new AbortController()
+    let stderr = ""
+    let stdout = ""
+    let lines = 0
+    const io: YrdCliIO = {
+      localBranchProtections: null,
+      color: false,
+      cwd: w.work,
+      stderr(text) {
+        stderr += text
+        lines += 1
+        if (lines >= 2) stop.abort()
+      },
+      stdout(text) {
+        stdout += text
+      },
+    }
+    const deadline = setTimeout(() => stop.abort(), 10_000)
+    const watched = coreQueueCommand(
+      w.work,
+      io,
+      { command: "list", terms: [branch], watch: true, requireMatch: true, stop: stop.signal, intervalSeconds: 1 },
+      {
+        json: true,
+        workdir: w.workdir,
+        selection: {
+          executable: moving.executable,
+          contract: "native",
+          scope: "default",
+          origin: "fetch-race fixture",
+        },
+      },
+    ).finally(() => clearTimeout(deadline))
+    await expect(watched).resolves.toBe(0)
+    expect(stdout).toBe("")
+    expect(stderr.trim().split("\n")).toEqual([
+      `yrd: ${queueRef("main")} moved from ${queueAfter} to ${queueBefore} during listing; retry the read`,
+      `yrd: ${queueRef("main")} moved from ${queueAfter} to ${queueBefore} during listing; retry the read`,
+    ])
+  })
+
+  it("refuses a one-shot listing with exit 2 when the queue ref moves during the read", async () => {
+    const w = await world()
+    const branch = "task/watched"
+    await change(w, branch, true)
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const queue = await readEventQueue(store, "main")
+    const remote = join(dirname(w.work), "remote.git")
+    const queueBefore = queue.tip
+    const queueAfter = await writeQueueEvent(store, "main", {
+      type: "paused",
+      by: "yrd",
+      reason: "concurrent queue event",
+      at: new Date(),
+    })
+    await w.git(["--git-dir", remote, "update-ref", queueRef("main"), queueBefore, queueAfter])
+    const moving = movingOnFetchGit(w, {
+      remote,
+      ref: queueRef("main"),
+      from: queueBefore,
+      to: queueAfter,
+      names: pauseRef("main"),
+      moves: 2,
+    })
+    await w.git(["config", "yrd.git", JSON.stringify({ executable: moving.executable, contract: "native" })])
+    const run = capture(w.work)
+    await expect(runYrdProcess([process.execPath, "yrd", "list", "--fresh", branch], run.io)).resolves.toBe(2)
+    expect(moving.moved()).toBe(2)
+    expect(run.stderr()).toBe(
+      `yrd: ${queueRef("main")} moved from ${queueAfter} to ${queueBefore} during listing; retry the read\n`,
+    )
   })
 
   // The producer owns its protocol; ordinary Git calls still use the real

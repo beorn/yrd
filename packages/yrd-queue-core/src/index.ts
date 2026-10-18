@@ -119,7 +119,7 @@ export { eventListRows, eventRows } from "./event-table.ts"
 export { transientPush5xxOf } from "./transient-push.ts"
 export { assertPlainEventQueueConfig } from "./event-config.ts"
 export { DIRECT_MERGE, mergedBy, mergedByRun, trailer, trailers } from "./git.ts"
-export { EventRefsAcquireExhausted } from "./event-read.ts"
+export { EventRefsAcquireExhausted, EventRefsMoved } from "./event-read.ts"
 export { incidentLine, incidentLines, incidentTrailers } from "./incident.ts"
 export type { Incident } from "./incident.ts"
 export {
