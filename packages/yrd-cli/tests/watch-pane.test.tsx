@@ -2371,9 +2371,13 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       } as unknown as Row,
     }
     const unread: WatchRow = { row: { branch: "task/unread", head: "c".repeat(40), state: "draft" } as unknown as Row }
+    const mismatch: WatchRow = {
+      ...draft("task/mismatch", "d".repeat(40), ago(20 * MINUTE), "ada"),
+      localHead: "e".repeat(40),
+    }
     const snap = snapshot({
       drafts: { unread: 1, window: "all" },
-      rows: [moved, draft("task/d1", "a".repeat(40), ago(2 * 60 * MINUTE), "ada"), unread],
+      rows: [moved, draft("task/d1", "a".repeat(40), ago(2 * 60 * MINUTE), "ada"), unread, mismatch],
       runner: RUNNER,
     } as Partial<WatchSnapshot>)
     const load = vi.fn(async () => snap)
@@ -2394,7 +2398,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     app.press("Home")
     await settle(app)
     const shown: string[] = []
-    for (const key of ["Enter", "j", "j", "v"]) {
+    for (const key of ["Enter", "j", "j", "j", "v"]) {
       app.press(key)
       await settle(app)
       shown.push(app.text)
@@ -2410,9 +2414,19 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         (shown[2] ?? "").includes("not yet read") &&
         (shown[2] ?? "").includes("fetch") &&
         !(shown[2] ?? "").includes("run draft-host submit task/unread"),
+      mismatchedLocalHead:
+        (shown[3] ?? "").includes("task/mismatch points to eeeeeeeeeeee locally") &&
+        (shown[3] ?? "").includes("select a checkout with the displayed head") &&
+        !(shown[3] ?? "").includes("run draft-host submit task/mismatch"),
       remoteOnlyDated:
         (shown[1] ?? "").includes("fetch") && !(shown[1] ?? "").includes("run draft-host submit task/d1"),
-    }).toEqual({ moved: true, read: { load: 0, loadDiff: 0, open: 0 }, unread: true, remoteOnlyDated: true })
+    }).toEqual({
+      moved: true,
+      read: { load: 0, loadDiff: 0, open: 0 },
+      unread: true,
+      remoteOnlyDated: true,
+      mismatchedLocalHead: true,
+    })
     // A host that supplied no formatter must not gain a standalone submit recipe.
     const unavailable = render(<WatchPane snapshot={snap} live={false} />, { cols: 220, rows: 50 })
     await settle(unavailable)
