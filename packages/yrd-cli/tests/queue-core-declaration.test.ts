@@ -65,6 +65,7 @@ import {
   readEventListing,
 } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { createProcess } from "@yrd/process"
 import { releaseRetainedCheckouts } from "../src/branch-retirement.ts"
 import { archiveRefFor } from "git-super/archive-ref"
 import { shellQuote } from "git-super/shell-command"
@@ -448,6 +449,89 @@ it("refreshes local status after an event queue write in the same workdir (25626
 })
 
 describe("a queue is the selected origin branch carrying config", () => {
+  // Direct core calls already covered closing, but could not catch a lost CLI opt-in.
+  it.each(["run", "merge", "up"] as const)(
+    "carries the explicit issue root through %s and stays off when absent",
+    async (command) => {
+      const repo = await world("checks: []\n")
+      const git = gitIn(repo)
+      const store = createEventStore(repo, "origin", git.selection)
+      const calls = join(repo, "close-calls")
+      const provider = join(import.meta.dirname, "support", "fake-issues-provider.ts")
+      writeFileSync(
+        join(repo, "issues.yml"),
+        JSON.stringify({
+          resolve: [process.execPath, provider, "resolve", "<raw>"],
+          close: [process.execPath, provider, "trace", "<key>", join(repo, "output-marker"), calls, "<reason>", "<id>"],
+        }),
+      )
+      await git(["add", "issues.yml"])
+      await git(["commit", "--quiet", "-m", "declare issue provider"])
+      await git(["push", "--quiet", "origin", "main"])
+      await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+      for (const enabled of [false, true]) {
+        const branch = `task/${command}-${enabled}`
+        const key = `issue-${command}-${enabled}`
+        await git(["fetch", "--quiet", "origin", "main"])
+        await git(["checkout", "--quiet", "-b", branch, "origin/main"])
+        writeFileSync(join(repo, "change.txt"), branch)
+        await git(["add", "change.txt"])
+        await git(["commit", "--quiet", "-m", `change\n\nCloses: ${key}`])
+        const submitted = capture(repo)
+        expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main"], submitted.io), submitted.stderr()).toBe(
+          0,
+        )
+        const args =
+          command === "merge" ? ["merge", branch] : ["queue", command, ...(command === "up" ? ["--interval", "0"] : [])]
+        args.push("--queue", "main", "--json", ...(enabled ? ["--project-root", repo] : []))
+        if (command === "up") {
+          const stop = new AbortController()
+          let output = ""
+          let errors = ""
+          await using child = createProcess({ cwd: repo })
+          const running = child.run({
+            argv: [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), ...args],
+            cwd: repo,
+            signal: stop.signal,
+            timeoutMs: 30_000,
+            onOutput: ({ stream, chunk }) => {
+              const text = new TextDecoder().decode(chunk)
+              output += text
+              if (stream === "stderr") errors += text
+            },
+          })
+          try {
+            await vi.waitFor(
+              async () => {
+                expect((await readStatus(store, "main", branch)).status, output.slice(-2000)).toBe("merged")
+                if (enabled) {
+                  expect(
+                    Object.values((await readEventQueue(store, "main")).issueEffects).some(
+                      ({ effect }) => effect.issueKey === key,
+                    ),
+                    errors,
+                  ).toBe(true)
+                } else expect(output.includes("--project-root"), output.slice(-2000)).toBe(true)
+              },
+              { timeout: 20_000 },
+            )
+          } finally {
+            stop.abort()
+            await running
+          }
+        } else {
+          const run = capture(repo)
+          expect(await runYrdProcess(["bun", "yrd", ...args], run.io), run.stderr()).toBe(0)
+          if (enabled) expect(existsSync(calls), run.stderr()).toBe(true)
+        }
+        expect((await readStatus(store, "main", branch)).status).toBe("merged")
+        if (enabled) expect(readFileSync(calls, "utf8")).toContain(key)
+        else expect(existsSync(calls)).toBe(false)
+      }
+    },
+    60_000,
+  )
+
   it("creates and runs an event queue from a parsed plain-check declaration", async () => {
     // Literal QueueConfig fixtures omit absent optional keys. A real
     // declaration materializes some of them as undefined, and those must not

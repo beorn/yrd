@@ -687,8 +687,8 @@ export async function coreQueueCommand(
     /** One-shot list/show opt-in: an existing queue-owned clone, never a writer's authority. */
     localStatusStore?: Readonly<{ path: string; transport: string }>
     /**
-     * `show`'s project root: whose `issues.yml` `view` decorates each change's issue (29644 Y1). Absent, `show`
-     * makes no display read at all — no issue line and no per-issue unavailable notice.
+     * Explicit project root: `show` uses its committed issues.yml for display; writer commands opt in
+     * to automatic issue closing. Absent, neither display reads nor automatic closes run.
      */
     projectRoot?: string
     /**

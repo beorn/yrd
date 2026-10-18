@@ -455,7 +455,7 @@ export function createPostMerge<C extends Context>(
         if (closed.queue !== undefined) completedQueue = { branch: context.queueBranch, value: closed.queue }
       } else if (context.merged.length > 0 && context.projectRoot === undefined) {
         options.report(
-          "automatic issue close skipped: pass --project-root <CODE root> to opt in; issues.yml must be committed at the delivered merge in that repository",
+          "automatic issue close skipped: pass --project-root <path> to opt in; issues.yml must be committed at the delivered merge in that repository",
         )
       } else if (context.merged.length > 0) {
         const missing = [
