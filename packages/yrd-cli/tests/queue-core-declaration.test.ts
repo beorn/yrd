@@ -3748,13 +3748,22 @@ describe("a queue is the selected origin branch carrying config", () => {
     await authorGit(["branch", "task/kept", "origin/task/kept"])
     const watched = capture(author)
     const sources: WatchSource[] = []
-    expect(await coreQueueCommand(repo, {
-      ...watched.io,
-      formatYrdCommand: (argv, cwd) =>
-        `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`,
-    }, { command: "list", drafts: true }, {
-      queue: "main", watchSource: (source) => sources.push(source),
-    }), watched.stderr()).toBe(0)
+    expect(
+      await coreQueueCommand(
+        repo,
+        {
+          ...watched.io,
+          formatYrdCommand: (argv, cwd) =>
+            `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`,
+        },
+        { command: "list", drafts: true, watch: true },
+        {
+          queue: "main",
+          watchSource: (source) => sources.push(source),
+        },
+      ),
+      watched.stderr(),
+    ).toBe(0)
     const source = sources[0]
     if (source?.snapshot === undefined || source.formatCommand === undefined) throw new Error("watch source missing")
     const ready = source.snapshot.rows.find((item) => item.row.branch === "task/kept")
@@ -3765,10 +3774,14 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(remoteOnly).not.toHaveProperty("localHead")
     const beforeRefs = await git(["ls-remote", "origin", "refs/heads/*"])
     const submitted = spawnSync("/bin/sh", ["-c", source.formatCommand(["submit", "task/kept"])], {
-      cwd: dirname(repo), encoding: "utf8", timeout: 30000,
+      cwd: dirname(repo),
+      encoding: "utf8",
+      timeout: 30000,
     })
     expect(submitted.status, submitted.stderr).toBe(0)
-    expect((await readStatus(createEventStore(repo, "origin", git.selection), "main", "task/kept")).commit).toBe(ready.row.head)
+    expect((await readStatus(createEventStore(repo, "origin", git.selection), "main", "task/kept")).commit).toBe(
+      ready.row.head,
+    )
     expect(await git(["ls-remote", "origin", "refs/heads/*"])).toBe(beforeRefs)
   }, 30_000)
 

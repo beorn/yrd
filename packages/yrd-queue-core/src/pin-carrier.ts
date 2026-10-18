@@ -158,11 +158,7 @@ export async function preparePinCarrier(
       .filter((row) => row.newMode === "160000")
       .map((row) => ({ path: row.path, sha: row.sha }))
     if (moved.length > 0 && pinIdentity(orderedPins(moved)) === identity) {
-      throw new PinCarrierConflict(
-        `pin set already has open change ${change.branch}`,
-        change.branch,
-        "change",
-      )
+      throw new PinCarrierConflict(`pin set already has open change ${change.branch}`, change.branch, "change")
     }
   }
 

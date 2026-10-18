@@ -877,7 +877,10 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     const branchRecipe = /; inspect: ([^\n]+)\n/u.exec(blockedDraft.stderr)?.[1]
     if (branchRecipe === undefined) throw new Error("held remote branch supplied no inspection recipe")
     const branchInspected = spawnSync("/bin/sh", ["-c", branchRecipe], {
-      cwd: w.root, env: process.env, encoding: "utf8", timeout: 30000,
+      cwd: w.root,
+      env: process.env,
+      encoding: "utf8",
+      timeout: 30000,
     })
     expect(branchInspected.error).toBeUndefined()
     expect(branchInspected.status, branchInspected.stderr).toBe(0)

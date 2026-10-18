@@ -4363,7 +4363,7 @@ export async function coreQueueCommand(
       const page = async (one: Awaited<ReturnType<typeof round>>): Promise<string> => {
         const { printListing } = await import("./watch-print.tsx")
         const single = one.rows.length === 1 ? one.rows[0] : undefined
-        const snapshot = snapshotOf(one)
+        const snapshot = await snapshotOf(one, repositoryHere(io.cwd), selection)
         const formatCommand = (argv: readonly string[]) =>
           formatQueueCommand(io, formatStoredQueueAddress(snapshot.queue), argv)
         const listing = await printListing(snapshot, {
@@ -4394,7 +4394,7 @@ export async function coreQueueCommand(
           ...one.rows.flatMap((item) => diagnosticLines(item.row, journalFor(item, one.journals))),
           ...[...warnedBranches].map((branch) => `Raw events: ${formatCommand(["queue", "show", branch, "--json"])}`),
           ...[...recordedWarningBranches].map(
-            (branch) => `Inspect current fields: ${formatCommand(["queue", "list", "--all", "--json", branch])}`,
+            (branch) => `Inspect matching rows: ${formatCommand(["queue", "list", "--all", "--json", branch])}`,
           ),
         ].join("\n")
       }
@@ -4436,6 +4436,7 @@ export async function coreQueueCommand(
         let seen: Readonly<{ drafts?: Readonly<{ unread: readonly string[] }> }> = first
         const formatCommand = (argv: readonly string[]) =>
           formatQueueCommand(io, formatStoredQueueAddress(first.queue), argv)
+        const initialSnapshot = await snapshotOf(first, repositoryHere(io.cwd), selection)
         const source: WatchSource = {
           id: first.queue,
           label: formatStoredQueueAddress(first.queue),
@@ -4482,7 +4483,7 @@ export async function coreQueueCommand(
             eventChanges = next.eventChanges
             eventInvalid = next.eventInvalid
             journals = next.journals
-            return snapshotOf(next)
+            return snapshotOf(next, repositoryHere(io.cwd), selection)
           },
           loadDiff: (item) => readDiff(git, config, item),
           loadCommandOutput: (command) => Promise.resolve(readCommandOutput(command)),
@@ -4541,7 +4542,7 @@ export async function coreQueueCommand(
                 ? []
                 : [`Raw events: ${formatCommand(["queue", "show", item.row.branch, "--json"])}`]),
               ...(diagnostics?.length
-                ? [`Inspect current fields: ${formatCommand(["queue", "list", "--all", "--json", item.row.branch])}`]
+                ? [`Inspect matching rows: ${formatCommand(["queue", "list", "--all", "--json", item.row.branch])}`]
                 : []),
             ].filter((note) => note !== undefined)
             return notes.length === 0
@@ -4552,7 +4553,7 @@ export async function coreQueueCommand(
                   note: notes.join("; "),
                 }
           },
-          snapshot: snapshotOf(first),
+          snapshot: initialSnapshot,
         }
         if (options.watchSource !== undefined) {
           options.watchSource(source)
@@ -4565,7 +4566,7 @@ export async function coreQueueCommand(
         const app = await run(
           createElement(WatchPane, {
             ...source,
-            snapshot: snapshotOf(first),
+            snapshot: initialSnapshot,
             intervalMs: Math.max(1, request.intervalSeconds ?? 5) * 1000,
             onEnding:
               request.terms === undefined || request.terms.length === 0
@@ -6229,7 +6230,7 @@ async function readDiff(git: Git, config: QueueConfig, item: WatchRow): Promise<
   }
 }
 
-function snapshotOf(
+async function snapshotOf(
   round: Readonly<{
     rows: readonly WatchRow[]
     unfiltered: readonly WatchRow[]
@@ -6244,15 +6245,27 @@ function snapshotOf(
     overrides?: readonly OverrideFact[]
     drafts?: Readonly<{ window: DraftWindow; unread: readonly string[]; older: number }>
   }>,
-): WatchSnapshot {
+  authorRepo: string | undefined,
+  selection: Parameters<typeof createLocalEventStore>[1],
+): Promise<WatchSnapshot> {
+  // Fetched objects make a remote draft readable, but submit selects an actual
+  // local branch in the invoking formatter's repository, not the queue reader.
+  const heads =
+    authorRepo !== undefined && round.unfiltered.some((item) => item.row.state === "draft")
+      ? await listRefs("refs/heads/", createLocalEventStore(authorRepo, selection))
+      : new Map<string, string>()
+  const localDraft = (item: WatchRow): WatchRow => {
+    const localHead = item.row.state === "draft" ? heads.get(`refs/heads/${item.row.branch}`) : undefined
+    return localHead === undefined ? item : { ...item, localHead }
+  }
   return {
     at: new Date(),
     observation: round.observation,
     decisions: round.decisions,
     queue: round.queue,
     queues: round.queues,
-    rows: round.rows,
-    unfiltered: round.unfiltered,
+    rows: round.rows.map(localDraft),
+    unfiltered: round.unfiltered.map(localDraft),
     runner: round.runner,
     stopped: round.stopped,
     ...(round.overrides === undefined ? {} : { overrides: round.overrides }),

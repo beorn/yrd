@@ -1272,7 +1272,7 @@ function SingleWatchPane({
       outputs={outputs}
     />
   ) : draft !== undefined ? (
-    <DraftDetail row={draft} formatCommand={formatCommand} />
+    <DraftDetail row={draft} localHead={selected?.localHead} formatCommand={formatCommand} />
   ) : (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       {detailFailure === undefined || detailFailure.key !== selectedKey ? null : (
@@ -1632,7 +1632,15 @@ function readFailureLine(what: string, failure: ReadFailure, still = ""): string
  * A draft, opened: what its row knows and what would make it a change. Drawn
  * from the row alone; a draft has no records, checks or diff to read.
  */
-function DraftDetail({ row, formatCommand }: { row: Row; formatCommand: WatchPaneProps["formatCommand"] }) {
+function DraftDetail({
+  row,
+  localHead,
+  formatCommand,
+}: {
+  row: Row
+  localHead?: string
+  formatCommand: WatchPaneProps["formatCommand"]
+}) {
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}>
       <Text bold wrap="truncate">
@@ -1655,7 +1663,11 @@ function DraftDetail({ row, formatCommand }: { row: Row; formatCommand: WatchPan
       <Text wrap="wrap">
         {formatCommand === undefined
           ? `Submit command unavailable in this view; select a checkout containing ${row.branch}.`
-          : `run ${formatCommand(["submit", row.branch])} to queue this head`}
+          : localHead === undefined
+            ? `first fetch ${row.branch} into a local branch in the selected checkout before submitting this head`
+            : localHead !== row.head
+              ? `${row.branch} points to ${localHead.slice(0, 12)} locally; select a checkout with the displayed head before submitting`
+              : `run ${formatCommand(["submit", row.branch])} to queue this head`}
       </Text>
     </Box>
   )
