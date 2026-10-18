@@ -2372,6 +2372,11 @@ describe("the queue-format boundary", () => {
     expect([1, 128]).toContain(absentObject.status)
     expect((await git(["for-each-ref", "--format=%(refname)", archivedBranchRef])).trim()).toBe("")
     expect((await git(["ls-remote", "origin", archive])).trim()).toBe(`${archivedHead}\t${archive}`)
+    const withoutFetch = spawnSync("git", ["-C", root, "branch", archivedBranch, archivedHead], {
+      cwd: outside,
+      encoding: "utf8",
+    })
+    expect(withoutFetch.status, withoutFetch.stderr).toBe(128)
     const recovery = /(git -C .+)$/u.exec(String(archiveRefusal))?.[1]
     if (recovery === undefined) throw new Error("archive retirement supplied no recovery recipe")
     const beforeRecovery = await git(["ls-remote", "origin"])
