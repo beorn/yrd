@@ -1333,7 +1333,12 @@ export async function coreQueueCommand(
     // incident with `incidentLine`; a stuck round names it the same way on
     // stderr, so "stuck task/one" is never the whole story a person gets
     // (@i/10-yrd/24141 AC2).
-    for (const line of stuckCureLines(outcome)) io.stderr(`yrd: ${line}\n`)
+    if (outcome.stuck.length > 0) {
+      const queue = formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))
+      const command = (argv: readonly string[]): string =>
+        formatYrdCommand(io, [...argv, "--queue", queue], io.cwd ?? globalThis.process.cwd())
+      for (const line of stuckCureLines(outcome, command)) io.stderr(`yrd: ${line}\n`)
+    }
     // A round that HOLDS a stuck stop judged nothing, so it has no stuck line
     // of its own; it names the stop it held and the cures, so a service log
     // read at any round says what the line waits on and what lifts it.
@@ -1348,7 +1353,7 @@ export async function coreQueueCommand(
   const stopGuidance = async (stop: PauseRecord): Promise<string> => {
     const queue = formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))
     const command = (argv: readonly string[]): string =>
-      formatYrdCommand(io, [...argv, "--queue", queue], io.cwd ?? repo)
+      formatYrdCommand(io, [...argv, "--queue", queue], io.cwd ?? globalThis.process.cwd())
     const actions = [
       `resume: ${command(["queue", "resume", "--reason", "<why>"])}`,
       ...(stop.change === undefined
@@ -2126,7 +2131,9 @@ export async function coreQueueCommand(
         return 0
       } catch (error) {
         if (error instanceof QueuePaused || error instanceof QueueNotPaused) {
-          io.stderr(`yrd: ${error.message}\n`)
+          io.stderr(
+            `yrd: ${error.message}${error instanceof QueuePaused ? `; ${await stopGuidance(error.pause)}` : ""}\n`,
+          )
           return 1
         }
         // Exhaustion is this caller's decision (28805): a persistent GitHub 5xx on
@@ -2743,7 +2750,7 @@ export async function coreQueueCommand(
       // retry, naming why and the command that tries again.
       io.stderr(
         `yrd: ${changeName(change)} is still in line, ${state}: ${notMerged(merging.outcome, change)}; ` +
-          `it keeps its place and the queue merges it in turn, or run ${formatYrdCommand(io, ["merge", branch, "--queue", formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))], io.cwd ?? repo)} again\n`,
+          `it keeps its place and the queue merges it in turn, or run ${formatYrdCommand(io, ["merge", branch, "--queue", formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))], io.cwd ?? globalThis.process.cwd())} again\n`,
       )
       return 2
     }
@@ -4303,7 +4310,11 @@ export async function coreQueueCommand(
         const snapshot = snapshotOf(one)
         const listing = await printListing(snapshot, {
           formatCommand: (argv) =>
-            formatYrdCommand(io, [...argv, "--queue", formatStoredQueueAddress(snapshot.queue)], io.cwd ?? repo),
+            formatYrdCommand(
+              io,
+              [...argv, "--queue", formatStoredQueueAddress(snapshot.queue)],
+              io.cwd ?? globalThis.process.cwd(),
+            ),
           color: io.color === true,
           columns: io.columns ?? 120,
           ...(one.scope === undefined ? {} : { scope: one.scope }),
@@ -4361,7 +4372,11 @@ export async function coreQueueCommand(
           id: first.queue,
           label: formatStoredQueueAddress(first.queue),
           formatCommand: (argv) =>
-            formatYrdCommand(io, [...argv, "--queue", formatStoredQueueAddress(first.queue)], io.cwd ?? repo),
+            formatYrdCommand(
+              io,
+              [...argv, "--queue", formatStoredQueueAddress(first.queue)],
+              io.cwd ?? globalThis.process.cwd(),
+            ),
           resolveRunAddress: async (operand) => {
             const selected = parseQueueAddress(first.queue)
             if (selected.kind !== "remote") {
@@ -5761,7 +5776,7 @@ export function describeRun(
  * in the same call (event-run.ts), so this is that run's own record of why, never a
  * second, possibly-later reading of the change ref.
  */
-function stuckCureLines(outcome: QueueRunOutcome): readonly string[] {
+function stuckCureLines(outcome: QueueRunOutcome, command: (argv: readonly string[]) => string): readonly string[] {
   if (outcome.stuck.length === 0) return []
   const rows = readFileSync(outcome.log, "utf8")
     .split("\n")
@@ -5772,9 +5787,10 @@ function stuckCureLines(outcome: QueueRunOutcome): readonly string[] {
       (record) => record.kind === "change" && record.decision === "stuck" && record.branch === branch,
     )
     const reading = incidentIn(row ?? {})
-    if (reading.kind === "incident") return `stuck ${branch}: ${incidentLine(reading.incident)}`
+    const actions = `inspect: ${command(["queue", "show", branch])}; retry after repair: ${command(["merge", branch])}; withdraw: ${command(["queue", "withdraw", branch])}; resume: ${command(["queue", "resume", "--reason", "<why>"])}`
+    if (reading.kind === "incident") return `stuck ${branch}: ${incidentLine(reading.incident)}; ${actions}`
     const reason = reading.kind === "malformed" ? reading.reason : "no incident"
-    return `stuck ${branch}: ${reason} in this run's log (${outcome.log}); see yrd queue show ${branch}`
+    return `stuck ${branch}: ${reason} in this run's log (${outcome.log}); ${actions}`
   })
 }
 

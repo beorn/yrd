@@ -2752,6 +2752,13 @@ describe("yrd queue up, the service", () => {
     })
 
     const duplicatePause = capture(w.work)
+    const refusalCwd = dirname(w.work)
+    duplicatePause.io.cwd = refusalCwd
+    const refusalCommands: { argv: readonly string[]; cwd: string }[] = []
+    duplicatePause.io.formatYrdCommand = (argv, cwd) => {
+      refusalCommands.push({ argv, cwd })
+      return "host-paused-refusal"
+    }
     expect(
       await coreQueueCommand(
         w.work,
@@ -2762,6 +2769,18 @@ describe("yrd queue up, the service", () => {
     ).toBe(1)
     expect(duplicatePause.stderr()).toContain("paused by @chief")
     expect(duplicatePause.stderr()).toContain("49 new failures on main")
+    expect(duplicatePause.stderr()).toContain("host-paused-refusal")
+    expect(refusalCommands).toContainEqual({
+      argv: [
+        "queue",
+        "resume",
+        "--reason",
+        "<why>",
+        "--queue",
+        `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`,
+      ],
+      cwd: refusalCwd,
+    })
 
     for (const dryRun of [true, false]) {
       const accepted = capture(w.work)
@@ -5315,7 +5334,25 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
     })
-    expect(await coreQueueCommand(w.work, capture(w.work).io, { command: "run" }, { workdir: w.workdir })).toBe(2)
+    const stuckRound = capture(w.work)
+    const roundCommands: { argv: readonly string[]; cwd: string }[] = []
+    stuckRound.io.cwd = dirname(w.work)
+    stuckRound.io.formatYrdCommand = (argv, cwd) => {
+      roundCommands.push({ argv, cwd })
+      return "host-stuck-round-action"
+    }
+    expect(await coreQueueCommand(w.work, stuckRound.io, { command: "run" }, { workdir: w.workdir })).toBe(2)
+    expect(stuckRound.stderr()).toContain("recorded guidance:")
+    expect(stuckRound.stderr()).toContain("host-stuck-round-action")
+    const roundQueue = `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`
+    for (const argv of [
+      ["queue", "show", "task/stuck"],
+      ["queue", "withdraw", "task/stuck"],
+      ["merge", "task/stuck"],
+      ["queue", "resume", "--reason", "<why>"],
+    ]) {
+      expect(roundCommands).toContainEqual({ argv: [...argv, "--queue", roundQueue], cwd: dirname(w.work) })
+    }
     const judgedBefore = fault.runs()
 
     for (const dryRun of [true, false]) {
@@ -7121,6 +7158,7 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
       // A deferred merge is the live retry boundary; prior ending rows never
       // reach it, so they cannot catch a bare command losing host/cwd/queue.
       const retry = capture(w.work)
+      retry.io.cwd = dirname(w.work)
       const commands: { argv: readonly string[]; cwd: string }[] = []
       retry.io.formatYrdCommand = (argv, cwd) => {
         commands.push({ argv, cwd })
@@ -7130,21 +7168,21 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
         await coreQueueCommand(
           w.work,
           retry.io,
-          { command: "merge", branch: "task/judged", submitter: "@dev/4" },
+          { command: "merge", branch: "task/judged", submitter: "test-submitter" },
           { workdir: w.workdir },
         ),
       ).toBe(2)
       expect.soft(retry.stderr()).toContain("host-selected-merge-retry")
       expect.soft(commands).toContainEqual({
         argv: ["merge", "task/judged", "--queue", `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`],
-        cwd: w.work,
+        cwd: dirname(w.work),
       })
       const unavailable = capture(w.work)
       expect(
         await coreQueueCommand(
           w.work,
           unavailable.io,
-          { command: "merge", branch: "task/not-submitted", submitter: "@dev/4" },
+          { command: "merge", branch: "task/not-submitted", submitter: "test-submitter" },
           { workdir: w.workdir },
         ),
       ).toBe(2)
