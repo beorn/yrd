@@ -374,7 +374,7 @@ it("local retirement keeps protected tips and preserves custody before removing 
   const merged = await retireLocalBranch(input)
   expect(merged.outcome).toBe("removed")
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
-  expect(await refAt(w.git, merged.archiveRef)).toBe(w.target)
+  expect(await refAt(w.git, merged.archiveRef!)).toBe(w.target)
 
   // Native release and queue cleanup can observe the same completed retirement.
   expect(await retireLocalBranch({ ...input, actor: "@dev/9", date: "2026-10-15" })).toMatchObject({
@@ -382,7 +382,7 @@ it("local retirement keeps protected tips and preserves custody before removing 
     archiveRef: merged.archiveRef,
     detail: `already retired: ${merged.archiveRef} holds ${w.target}; this run deleted no ref`,
   })
-  expect(await refAt(w.git, merged.archiveRef)).toBe(w.target)
+  expect(await refAt(w.git, merged.archiveRef!)).toBe(w.target)
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
   expect(await retireLocalBranch({ ...input, branch: "task/absent-without-custody" })).toMatchObject({
     outcome: "kept",
@@ -412,7 +412,7 @@ it("local retirement keeps protected tips and preserves custody before removing 
   })
   expect(unavailableOrigin).toMatchObject({ outcome: "failed", reason: expect.stringContaining("missing-origin") })
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(head)
-  expect(await refAt(w.git, unavailableOrigin.archiveRef)).toBe(head)
+  expect(await refAt(w.git, unavailableOrigin.archiveRef!)).toBe(head)
   const closed = await retireLocalBranch({
     ...input,
     tip: head,
@@ -428,7 +428,7 @@ it("local retirement keeps protected tips and preserves custody before removing 
   expect(closed.outcome).toBe("removed")
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
   const origin = gitIn(w.remote)
-  expect(await refAt(origin, closed.archiveRef)).toBe(head)
+  expect(await refAt(origin, closed.archiveRef!)).toBe(head)
   expect(await refAt(origin, `refs/heads/${branch}`)).toBe(head)
   const mergedBranch = "task/closed-but-merged"
   await w.git(["branch", mergedBranch, w.target])
@@ -443,8 +443,8 @@ it("local retirement keeps protected tips and preserves custody before removing 
     disposition: { kind: "closed", target: w.target, queue: "main", store: queueStore },
   })
   expect(localOnly.outcome).toBe("removed")
-  expect(await refAt(w.git, localOnly.archiveRef)).toBe(w.target)
-  expect(await refAt(origin, localOnly.archiveRef)).toBeUndefined()
+  expect(await refAt(w.git, localOnly.archiveRef!)).toBe(w.target)
+  expect(await refAt(origin, localOnly.archiveRef!)).toBeUndefined()
   expect(await refAt(origin, queueRef("main"))).toBe(queueBefore)
   const rows = readRunLog(dirname(log.path), log.id)
   expect(rows.find((row) => row.kind === "local-branch-retirement" && row.actor === "@dev/9")).toMatchObject({

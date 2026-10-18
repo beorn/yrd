@@ -223,18 +223,20 @@ describe("automatic retirement is licensed by exact-head ancestry", () => {
     await git(["push", "--quiet", "origin", "main"])
     const held = await retire(repo, branch, async () => ({ protections: ["explicit hold"], evidence: [] }))
     expect(held.result.outcome).toBe("kept")
-    expect(held.result.detail).toContain("explicit hold")
+    expect(held.result.archiveRef).toBeUndefined()
+    expect(held.result.detail).toContain("explicit hold; not archived")
     const advanced = (await git(["commit-tree", head + "^{tree}", "-p", head], "advanced\n")).trim()
     let protectionReads = 0
     const raced = await retire(repo, branch, async () => {
       if (++protectionReads === 2) {
-        expect((await git(["rev-parse", held.result.archiveRef])).trim()).toBe(head)
+        expect((await git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim()).toBe(head)
         await git(["update-ref", "refs/heads/" + branch, advanced, head])
       }
       return { protections: [], evidence: [] }
     })
     expect(protectionReads).toBe(2)
     expect(raced.result.outcome).toBe("kept")
+    expect((await git(["rev-parse", raced.result.archiveRef!])).trim()).toBe(head)
     expect(raced.result.detail).toContain("branch moved")
     expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(advanced)
   })
