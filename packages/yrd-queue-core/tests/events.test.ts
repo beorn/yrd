@@ -16,7 +16,7 @@ import { transientPush5xxOf, transientPushRetry } from "../src/transient-push.ts
 import { EventRefsAcquireExhausted, readEventChain, readEventChains } from "../src/event-read.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
 import { classifyQueueRef, pauseRef, runIndexRef } from "../src/refs.ts"
-import { activateRunIndex, lookupRunIndex } from "../src/run-index.ts"
+import { activateRunIndex, lookupRunIndex, queueReadWithRunIndex } from "../src/run-index.ts"
 import { encodeOps, type OpsState } from "../src/ops-state.ts"
 import { queueResumedAfter } from "../src/index.ts"
 import {
@@ -3204,7 +3204,8 @@ describe("the queue-format boundary", () => {
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const commit = (await target.transact(async (map) => map.set("work", "one"), "work")).oid
     const tip = await seedEventQueue(location, "lab", commit, new Date())
-    const acquired = { ...location, fetch: ["refs/heads/lab"] }
+    await activateRunIndex(location, "lab", new Date())
+    const acquired = queueReadWithRunIndex(location, "lab").store
     expect(await readEventQueue(acquired, "lab")).toMatchObject({ tip, issueEffects: {} })
   })
 
@@ -3214,11 +3215,12 @@ describe("the queue-format boundary", () => {
     "reads retained issue effects on the queue chain: %s",
     async (variant) => {
       const { store, location: remoteLocation } = remoteMemStore(`yrd-queue-issue-effect-${variant}`)
-      const location = { ...remoteLocation, fetch: ["refs/heads/lab"] }
       const target = await open({ ...store, ref: "refs/heads/lab" })
       const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
       const at = new Date("2026-09-22T14:00:00.000Z")
-      const queueTip = await seedEventQueue(location, "lab", commit, at)
+      const queueTip = await seedEventQueue(remoteLocation, "lab", commit, at)
+      await activateRunIndex(remoteLocation, "lab", at)
+      const location = queueReadWithRunIndex(remoteLocation, "lab").store
       const branch = await openEvents({ ...store, ref: changesRef("lab", "task/retained"), writer: QUEUE_RUN_WRITER })
       const opened = await branch.append([changeInput("opened", { queueTip, at, commit, by: "author" })], {
         expect: null,
