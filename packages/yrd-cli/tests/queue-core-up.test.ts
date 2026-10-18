@@ -10,7 +10,7 @@
  *           person's job again (plan § Commands: the service's three exits;
  *           § Milestones M7).
  * @level    l2 (a real remote and a clone under a temporary root;
- *           `coreQueueCommand` driven directly, no process boundary)
+ *           `coreQueueCommand` driven directly, plus copied CLI activation recipes)
  * @consumer hab, which runs `yrd queue up` as the service and relaunches it on
  *           a gitlink-move exit · the mechanic, who edits the target's declaration and
  *           expects the next round to read it
@@ -18,6 +18,7 @@
 
 import * as fs from "node:fs"
 import { execFileSync } from "node:child_process"
+import { shellQuote } from "git-super/shell-command"
 import {
   chmodSync,
   cpSync,
@@ -2444,103 +2445,154 @@ describe("yrd queue up, the service", () => {
    * @level l2 (real Git remote and the service loop)
    * @consumer Hab's Yrd service and @chief, who activates the index after the carrier lands
    */
-  it("waits on a missing remote runs index, then runs after activation without relaunch (26229)", async () => {
-    const w = await world()
-    const eventsRef = queueRef("main")
-    const indexRef = runIndexRef("main")
-    await w.git(["push", "--quiet", "origin", `:${indexRef}`])
-    expect(await w.git(["ls-remote", "--refs", "origin", eventsRef])).toContain(eventsRef)
-    expect(await w.git(["ls-remote", "--refs", "origin", indexRef])).toBe("")
-    const run = capture(w.work)
-    const stop = new AbortController()
-    let rounds = 0
-    let settled = false
-    const service = coreQueueCommand(
-      w.work,
-      run.io,
-      {
-        command: "up",
-        intervalSeconds: 0,
-        stop: stop.signal,
-        heartbeatIntervalMs: 100,
-        heartbeatGraceMs: 500,
-        afterRound: () => {
-          rounds += 1
-          stop.abort()
-        },
-      },
-      { json: true, workdir: w.workdir },
-    ).finally(() => {
-      settled = true
-    })
-    try {
-      await vi.waitFor(
-        async () => {
-          const health = await readQueueHealth(w.workdir, SERVICE)
-          expect(health, run.stderr()).toMatchObject({
-            state: "unhealthy",
-            verdict: { kind: "running" },
-            error: { code: "queue-remote-precondition-missing", cause: expect.stringContaining(indexRef) },
-          })
-          expect(health.error?.resolution.join(" ")).toContain("yrd runs activate")
-          expect(health.error?.resolution.join(" ")).toContain("@chief")
-        },
-        { timeout: 5_000 },
-      )
-      expect(settled, run.stderr()).toBe(false)
-      expect(rounds).toBe(0)
-      const logs = join(w.workdir, "logs")
-      expect(existsSync(logs) ? readdirSync(logs) : []).toEqual([])
-      await delay(700)
-      expect((await readQueueHealth(w.workdir, SERVICE)).error?.code).toBe("queue-remote-precondition-missing")
-
-      // A transport failure is unknown, not evidence that the index is still
-      // absent. Exercise the same remote read while its fixture remote is down.
+  it.each([false, true])(
+    "waits on a missing remote runs index, then runs after activation without relaunch (portableRemote=%s, 26229)",
+    async (portableRemote) => {
+      const w = await world()
+      const queue = "release"
       const remote = join(dirname(w.work), "remote.git")
-      const offline = `${remote}.offline`
-      renameSync(remote, offline)
+      const address = `yrd-precondition.test/org/queue@${queue}`
+      const target = (await w.git(["rev-parse", "HEAD"])).trim()
+      const config = await readConfig(w.git, target, { branch: queue, remote: "origin" })
+      if (config === undefined) throw new Error("activation fixture declaration is absent")
+      await w.git(["push", "--quiet", "origin", `${target}:refs/heads/${queue}`])
+      await createEventQueue(
+        createEventStore(w.work, "origin", gitIn(w.work).selection),
+        queue,
+        target,
+        config,
+        new Date(),
+      )
+      const mainIndex = (await w.git(["ls-remote", "--refs", "origin", runIndexRef("main")])).trim()
+      if (portableRemote) {
+        await w.git(["config", `url.file://${remote}.insteadOf`, "https://yrd-precondition.test/org/queue.git"])
+        await w.git(["remote", "set-url", "origin", "https://yrd-precondition.test/org/queue.git"])
+      }
+      const eventsRef = queueRef(queue)
+      const indexRef = runIndexRef(queue)
+      await w.git(["push", "--quiet", "origin", `:${indexRef}`])
+      expect(await w.git(["ls-remote", "--refs", "origin", eventsRef])).toContain(eventsRef)
+      expect(await w.git(["ls-remote", "--refs", "origin", indexRef])).toBe("")
+      const run = capture(w.work)
+      const commands: { argv: readonly string[]; cwd: string; recipe: string }[] = []
+      run.io.formatYrdCommand = (argv, cwd) => {
+        const recipe = `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`
+        commands.push({ argv, cwd, recipe })
+        return recipe
+      }
+      const stop = new AbortController()
+      let rounds = 0
+      let settled = false
+      const service = coreQueueCommand(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          heartbeatIntervalMs: 100,
+          heartbeatGraceMs: 500,
+          afterRound: () => {
+            rounds += 1
+            stop.abort()
+          },
+        },
+        { queue, workdir: w.workdir },
+      ).finally(() => {
+        settled = true
+      })
       try {
         await vi.waitFor(
           async () => {
             const health = await readQueueHealth(w.workdir, SERVICE)
-            expect(health.facts?.roundReadFailure).toMatchObject({ ref: indexRef, count: expect.any(Number) })
-            expect(health.error?.code).not.toBe("queue-remote-precondition-missing")
+            expect(health, run.stderr()).toMatchObject({
+              state: "unhealthy",
+              verdict: { kind: "running" },
+              error: { code: "queue-remote-precondition-missing", cause: expect.stringContaining(indexRef) },
+            })
+            expect(health.error?.resolution.join(" ")).toContain("Activate the run index")
+            expect(health.error?.resolution.join(" ")).not.toMatch(/@chief|yrd runs activate/u)
+            expect(health.error?.cause).not.toMatch(/@chief|yrd runs activate/u)
           },
           { timeout: 5_000 },
         )
+        expect(settled, run.stderr()).toBe(false)
+        expect(rounds).toBe(0)
+        const logs = join(w.workdir, "logs")
+        expect(existsSync(logs) ? readdirSync(logs) : []).toEqual([])
+        await delay(700)
+        expect((await readQueueHealth(w.workdir, SERVICE)).error?.code).toBe("queue-remote-precondition-missing")
+
+        // A transport failure is unknown, not evidence that the index is still
+        // absent. Exercise the same remote read while its fixture remote is down.
+        const offline = `${remote}.offline`
+        renameSync(remote, offline)
+        try {
+          await vi.waitFor(
+            async () => {
+              const health = await readQueueHealth(w.workdir, SERVICE)
+              expect(health.facts?.roundReadFailure).toMatchObject({ ref: indexRef, count: expect.any(Number) })
+              expect(health.error?.code).not.toBe("queue-remote-precondition-missing")
+            },
+            { timeout: 5_000 },
+          )
+        } finally {
+          renameSync(offline, remote)
+        }
+        expect(rounds).toBe(0)
+        // Exercise the operator's exact step, not a direct call to its core.
+        const previous = { global: process.env.GIT_CONFIG_GLOBAL, state: process.env.XDG_STATE_HOME }
+        const global = join(dirname(w.work), "gitconfig")
+        writeFileSync(global, `[url "file://${remote}"]\n\tinsteadOf = https://yrd-precondition.test/org/queue.git\n`)
+        process.env.GIT_CONFIG_GLOBAL = global
+        process.env.XDG_STATE_HOME = join(dirname(w.work), "state")
+        try {
+          if (portableRemote) {
+            expect(commands).toHaveLength(1)
+            const action = commands[0]!
+            expect(action).toMatchObject({ argv: ["runs", "activate", address], cwd: w.work })
+            expect(run.stdout()).toContain(action.recipe)
+            const child = Bun.spawn(["/bin/sh", "-c", action.recipe], {
+              cwd: dirname(w.work),
+              env: { ...process.env, GIT_CONFIG_GLOBAL: global, XDG_STATE_HOME: join(dirname(w.work), "state") },
+              stdout: "pipe",
+              stderr: "pipe",
+            })
+            const [code, stdout, stderr] = await Promise.all([
+              child.exited,
+              new Response(child.stdout).text(),
+              new Response(child.stderr).text(),
+            ])
+            expect(code, stderr).toBe(0)
+            expect(stdout).toContain(indexRef)
+          } else {
+            expect(commands).toEqual([])
+            expect(run.stdout()).toContain("no portable remote address")
+            const activated = capture(w.work)
+            expect(
+              await runYrdProcess([process.execPath, "/usr/local/bin/yrd", "runs", "activate", address], activated.io),
+              activated.stderr(),
+            ).toBe(0)
+            expect(activated.stdout()).toContain(indexRef)
+          }
+          expect((await w.git(["ls-remote", "--refs", "origin", runIndexRef("main")])).trim()).toBe(mainIndex)
+        } finally {
+          if (previous.global === undefined) delete process.env.GIT_CONFIG_GLOBAL
+          else process.env.GIT_CONFIG_GLOBAL = previous.global
+          if (previous.state === undefined) delete process.env.XDG_STATE_HOME
+          else process.env.XDG_STATE_HOME = previous.state
+        }
+        expect(await service, run.stderr()).toBe(0)
+        expect(rounds).toBe(1)
+        expect(await w.git(["ls-remote", "--refs", "origin", indexRef])).toContain(indexRef)
+        expect((await readQueueHealth(w.workdir, SERVICE)).state).toBe("healthy")
       } finally {
-        renameSync(offline, remote)
+        stop.abort()
+        await service.catch(() => undefined)
       }
-      expect(rounds).toBe(0)
-      // Exercise the operator's exact step, not a direct call to its core.
-      const address = "yrd-precondition.test/org/queue@main"
-      const previous = { global: process.env.GIT_CONFIG_GLOBAL, state: process.env.XDG_STATE_HOME }
-      const global = join(dirname(w.work), "gitconfig")
-      writeFileSync(global, `[url "file://${remote}"]\n\tinsteadOf = https://yrd-precondition.test/org/queue.git\n`)
-      process.env.GIT_CONFIG_GLOBAL = global
-      process.env.XDG_STATE_HOME = join(dirname(w.work), "state")
-      try {
-        const activated = capture(w.work)
-        expect(
-          await runYrdProcess([process.execPath, "/usr/local/bin/yrd", "runs", "activate", address], activated.io),
-          activated.stderr(),
-        ).toBe(0)
-        expect(activated.stdout()).toContain(indexRef)
-      } finally {
-        if (previous.global === undefined) delete process.env.GIT_CONFIG_GLOBAL
-        else process.env.GIT_CONFIG_GLOBAL = previous.global
-        if (previous.state === undefined) delete process.env.XDG_STATE_HOME
-        else process.env.XDG_STATE_HOME = previous.state
-      }
-      expect(await service, run.stderr()).toBe(0)
-      expect(rounds).toBe(1)
-      expect(await w.git(["ls-remote", "--refs", "origin", indexRef])).toContain(indexRef)
-      expect((await readQueueHealth(w.workdir, SERVICE)).state).toBe("healthy")
-    } finally {
-      stop.abort()
-      await service.catch(() => undefined)
-    }
-  }, 20_000)
+    },
+    20_000,
+  )
 
   /**
    * @failure A pre-cutover writer recreates the legacy override ref; the new runner exits instead of holding the line visibly.
@@ -2586,11 +2638,12 @@ describe("yrd queue up, the service", () => {
             error: { code: "legacy-override-present", cause: expect.stringContaining(legacyRef) },
           })
           expect(health.error?.cause).toContain(target)
-          expect(health.error?.resolution.join(" ")).toContain("@chief")
+          expect(health.error?.resolution.join(" ")).not.toContain("@chief")
         },
         { timeout: 5_000 },
       )
       expect(settled, run.stderr()).toBe(false)
+      expect(run.stderr()).not.toContain("@chief")
       expect(rounds).toBe(0)
       await w.git(["push", "--quiet", "origin", `:${legacyRef}`])
       expect(await service, run.stderr()).toBe(0)
@@ -2942,72 +2995,147 @@ describe("yrd queue up, the service", () => {
    * on the original 5xx at once.
    * @level l2 @consumer the operator running `yrd queue pause`/`resume`
    */
-  it("fails loud, naming the ambiguity, when the pause publish exhausts a 5xx", async () => {
-    const sleep = transientPushRetry.sleep
-    transientPushRetry.sleep = async () => {}
-    const write = process.stderr.write.bind(process.stderr)
-    process.stderr.write = ((chunk: unknown, encoding?: unknown, callback?: unknown) => {
-      if (typeof encoding === "function") encoding()
-      if (typeof callback === "function") callback()
-      return true
-    }) as typeof process.stderr.write
-    try {
-      const w = await world()
-      const ref = queueRef("main")
-      const github5xx = [
-        "remote: Internal Server Error",
-        "fatal: unable to access 'https://github.com/beorn/hh.git/': The requested URL returned error: 500",
-      ].join("\n")
-      const originalBackend = gitomic.createShellBackend
-      let uploads = 0
-      let outage = false
-      using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
-        const backend = originalBackend(options)
-        const publish = backend.publish
-        const fetchRefs = backend.fetchRefs
-        if (publish === undefined || fetchRefs === undefined) {
-          throw new Error("fixture needs Gitomic publish and ref reads")
+  it.each(["pause", "submit"] as const)(
+    "fails loud with selected inspection when the %s publish exhausts a 5xx",
+    async (operation) => {
+      const sleep = transientPushRetry.sleep
+      transientPushRetry.sleep = async () => {}
+      const write = process.stderr.write.bind(process.stderr)
+      process.stderr.write = ((chunk: unknown, encoding?: unknown, callback?: unknown) => {
+        if (typeof encoding === "function") encoding()
+        if (typeof callback === "function") callback()
+        return true
+      }) as typeof process.stderr.write
+      try {
+        const w = await world()
+        const queue = "release"
+        const target = (await w.git(["rev-parse", "HEAD"])).trim()
+        const config = await readConfig(w.git, target, { branch: queue, remote: "origin" })
+        if (config === undefined) throw new Error("pause fixture declaration is absent")
+        await w.git(["push", "--quiet", "origin", `${target}:refs/heads/${queue}`])
+        await createEventQueue(
+          createEventStore(w.work, "origin", gitIn(w.work).selection),
+          queue,
+          target,
+          config,
+          new Date(),
+        )
+        const branch = "task/submit's-proof"
+        if (operation === "submit") {
+          await w.git(["checkout", "--quiet", "-b", branch, "main"])
+          writeFileSync(join(w.work, "submit-change.txt"), "candidate\n")
+          await w.git(["add", "submit-change.txt"])
+          await w.git(["commit", "--quiet", "-m", "submit candidate"])
         }
-        return {
-          ...backend,
-          publish: async (repo, updates, remote) => {
-            const landed = await publish(repo, updates, remote)
-            if (updates.some((update) => update.ref === ref)) {
-              uploads++
-              outage = true
-              // The push APPLIED; the 500 rides every response.
-              throw new gitomic.PublicationRejected(updates, [github5xx], github5xx)
-            }
-            return landed
-          },
-          fetchRefs: async (repo, refs, remote, fetchOptions) => {
-            const asked = Array.isArray(refs) ? refs : [refs]
-            if (outage && asked.includes(ref)) throw new Error("fatal: Connection reset by peer")
-            return fetchRefs(repo, refs, remote, fetchOptions)
-          },
+        const ref = operation === "pause" ? queueRef(queue) : changesRef(queue, branch)
+        const mainBefore = (await w.git(["ls-remote", "--refs", "origin", queueRef("main")])).trim()
+        const github5xx = [
+          "remote: Internal Server Error",
+          "fatal: unable to access 'https://github.com/beorn/hh.git/': The requested URL returned error: 500",
+        ].join("\n")
+        const originalBackend = gitomic.createShellBackend
+        let uploads = 0
+        let outage = false
+        using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
+          const backend = originalBackend(options)
+          const publish = backend.publish
+          const fetchRefs = backend.fetchRefs
+          if (publish === undefined || fetchRefs === undefined) {
+            throw new Error("fixture needs Gitomic publish and ref reads")
+          }
+          return {
+            ...backend,
+            publish: async (repo, updates, remote) => {
+              const landed = await publish(repo, updates, remote)
+              if (updates.some((update) => update.ref === ref)) {
+                uploads++
+                outage = true
+                // The push APPLIED; the 500 rides every response.
+                throw new gitomic.PublicationRejected(updates, [github5xx], github5xx)
+              }
+              return landed
+            },
+            fetchRefs: async (repo, refs, remote, fetchOptions) => {
+              const asked = Array.isArray(refs) ? refs : [refs]
+              if (outage && asked.includes(ref)) throw new Error("fatal: Connection reset by peer")
+              return fetchRefs(repo, refs, remote, fetchOptions)
+            },
+          }
+        })
+        const run = capture(w.work)
+        const viewer = join(w.work, "inspection's cwd")
+        mkdirSync(viewer)
+        run.io.cwd = viewer
+        const commands: { argv: readonly string[]; cwd: string; recipe: string }[] = []
+        run.io.formatYrdCommand = (argv, cwd) => {
+          const recipe = `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`
+          commands.push({ argv, cwd, recipe })
+          return recipe
         }
-      })
-      const run = capture(w.work)
-      expect(
-        await coreQueueCommand(
-          w.work,
-          run.io,
-          { by: "@chief", command: "pause", reason: "repair" },
-          {
-            workdir: w.workdir,
-          },
-        ),
-      ).toBe(1)
-      expect(run.stderr()).toContain("GitHub returned Internal Server Error on the pause of")
-      expect(run.stderr()).toContain("it may or may not have been recorded")
-      expect(run.stderr()).toContain("Read the standing pause state (yrd pause) before retrying")
-      // The probe failed, so the push was never re-run: exactly one attempt.
-      expect(uploads).toBe(1)
-    } finally {
-      process.stderr.write = write
-      transientPushRetry.sleep = sleep
-    }
-  }, 15_000)
+        const request =
+          operation === "pause"
+            ? { by: "fixture", command: "pause" as const, reason: "repair" }
+            : { branch, command: "submit" as const, submitter: "fixture" }
+        const attempt = coreQueueCommand(w.work, run.io, request, {
+          queue,
+          workdir: w.workdir,
+        })
+        if (operation === "pause") {
+          expect(await attempt).toBe(1)
+          expect(run.stderr()).toContain("GitHub returned Internal Server Error on the pause of")
+          expect(run.stderr()).toContain("it may or may not have been recorded")
+        } else {
+          await expect(attempt).rejects.toThrow("it may or may not have been recorded")
+        }
+        // The probe failed, so the push was never re-run: exactly one attempt.
+        expect(uploads).toBe(1)
+        expect((await w.git(["ls-remote", "--refs", "origin", queueRef("main")])).trim()).toBe(mainBefore)
+        const remote = (await w.git(["remote", "get-url", "origin"])).trim()
+        const inspections =
+          operation === "pause"
+            ? commands
+            : commands.filter(
+                ({ argv }) =>
+                  argv[0] === "queue" && argv[1] === "show" && argv[2] === branch && argv.includes("--json"),
+              )
+        expect(inspections).toHaveLength(1)
+        expect(inspections[0]).toMatchObject({
+          argv: [
+            ...(operation === "pause" ? ["queue", "list", "--json"] : ["queue", "show", branch, "--json"]),
+            "--queue",
+            `${remote}#${queue}`,
+          ],
+          cwd: viewer,
+        })
+        const recipe = inspections[0]?.recipe
+        if (recipe === undefined) throw new Error("pause inspection recipe is absent")
+        expect(run.stderr()).toContain(
+          operation === "pause"
+            ? `Read the standing pause state (${recipe}) before retrying`
+            : `Inspect the submission before retrying: ${recipe}`,
+        )
+        outage = false
+        const inspected = execFileSync("bash", ["-c", recipe], {
+          cwd: dirname(w.work),
+          encoding: "utf8",
+          env: { ...process.env, XDG_STATE_HOME: join(viewer, "inspection-state") },
+        })
+        if (operation === "pause") {
+          expect(JSON.parse(inspected)).toMatchObject({ pause: { kind: "paused", reason: "repair" } })
+        } else {
+          expect(JSON.stringify(JSON.parse(inspected))).toContain(JSON.stringify(branch))
+          const retried = capture(w.work)
+          expect(await coreQueueCommand(w.work, retried.io, request, { queue, json: true, workdir: w.workdir })).toBe(0)
+          expect(records(retried)[0]).toMatchObject({ retry: true })
+        }
+        expect(uploads).toBe(1)
+      } finally {
+        process.stderr.write = write
+        transientPushRetry.sleep = sleep
+      }
+    },
+    15_000,
+  )
 
   // 27187: the target's declaration is read by the SUBMITTER's Yrd. A key the
   // queue's newer parser reads and this one does not must not refuse the submit —
@@ -3039,7 +3167,7 @@ describe("yrd queue up, the service", () => {
       expect(records(run)[0]).toMatchObject({ head })
       expect(run.stderr()).toContain("has a key this environment's Yrd does not know: later:")
       expect(run.stderr()).toContain("The queue runs it; submit does not")
-      expect(run.stderr()).toContain("Run with main's yrd to apply it")
+      expect(run.stderr()).toContain("Run with a current build of Yrd to apply it")
       expect(run.stderr()).toMatch(/yrd \S+\+\S+/)
       if (!eventQueue) {
         expect(creationWarning).toHaveBeenCalledWith(expect.stringContaining("newer declaration keys later:"))
@@ -3082,7 +3210,7 @@ describe("yrd queue up, the service", () => {
       expect(records(run)[0]).toMatchObject({ head })
       expect(run.stderr()).toContain("submitter: future-ending")
       expect(run.stderr()).toMatch(/this environment's Yrd does not know/iu)
-      expect(run.stderr()).toContain("Run with main's yrd to apply it")
+      expect(run.stderr()).toContain("Run with a current build of Yrd to apply it")
       expect(run.stderr()).toMatch(/yrd \S+\+\S+/)
       if (!eventQueue) {
         expect(creationWarning).toHaveBeenCalledWith(expect.stringContaining("notify events this"))
@@ -6195,6 +6323,9 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     )
     expect(exit).toBe(2)
     expect(run.stdout()).toContain("hooks-disabled")
+    expect(run.stdout()).toContain("remove the named entries")
+    expect(run.stdout()).toContain("another queue round")
+    expect(run.stdout()).not.toContain("then run yrd queue run")
   })
 
   /** @failure 25946: a second change-ref write between the rival status and its selected history read

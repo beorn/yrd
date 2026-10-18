@@ -59,6 +59,7 @@ import { repositoryHere as findRepository } from "./declaration.ts"
 import { originHead } from "./queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
+import { formatYrdCommand } from "./command-format.ts"
 import { envOpenRecordFromFlags, writeEnvOpenRecord } from "./env-open-record.ts"
 import { admitEnvironmentClose, type CloseAdmission, type CloseCensusReceipt } from "./env-close-holders.ts"
 import {
@@ -506,16 +507,22 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
           `environment ${existing.path} is locked${existing.locked === "" ? "" : `: ${existing.locked}`}; resolve the hold before reopening`,
         )
       }
-      const reopen = [
-        "yrd env open",
-        ...(options.bay === undefined ? [] : [`--bay ${shellQuote(options.bay)}`]),
-        ...(options.issue === undefined ? [] : [`--issue ${shellQuote(options.issue)}`]),
-        ...(options.hold === undefined ? [] : [`--hold ${shellQuote(options.hold)}`]),
-        ...(options.keep === true ? ["--keep"] : []),
-        ...(options.json === true ? ["--json"] : []),
-      ].join(" ")
+      const close = formatYrdCommand(io, ["env", "close", existing.path], root)
+      const reopen = formatYrdCommand(
+        io,
+        [
+          "env",
+          "open",
+          ...(options.bay === undefined ? [] : ["--bay", options.bay]),
+          ...(options.issue === undefined ? [] : ["--issue", options.issue]),
+          ...(options.hold === undefined ? [] : ["--hold", options.hold]),
+          ...(options.keep === true ? ["--keep"] : []),
+          ...(options.json === true ? ["--json"] : []),
+        ],
+        root,
+      )
       throw new Error(
-        `environment ${existing.path} is clean and merged into requested base ${base}; to continue: yrd env close ${shellQuote(existing.path)} && ${reopen}`,
+        `environment ${existing.path} is clean and merged into requested base ${base}; close must finish before reopening; exit 4 means accepted, not closed. If close is queued, wait for completion before reopening. To continue: ${close} && ${reopen}`,
       )
     }
     const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })

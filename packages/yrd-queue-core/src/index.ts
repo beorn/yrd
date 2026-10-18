@@ -230,7 +230,7 @@ export {
   issueBindingsOf,
   closingReferencesOf,
 } from "./submit.ts"
-export { pinCarrierName, preparePinCarrier } from "./pin-carrier.ts"
+export { pinCarrierName, preparePinCarrier, PinCarrierConflict } from "./pin-carrier.ts"
 export type { PinCarrierPin, PreparedPinCarrier } from "./pin-carrier.ts"
 export type {
   AdmissionOutcome,

@@ -116,7 +116,7 @@ export function diagnosticLines(
     // #28195: the listing states a revert finding in ONE line; `yrd queue show` renders the stored
     // reason itself, in full, for the one row asked.
     ...(row.revertWarning === undefined ? [] : [`${row.branch}@${row.head}: ⚠ ${revertWarningLine(row)}`]),
-    ...(row.diagnostics ?? []).flatMap((record) => {
+    ...(row.diagnostics ?? journal?.diagnostics ?? []).flatMap((record) => {
       const usable = (value: unknown): value is string => typeof value === "string" && value.trim() !== ""
       const text = usable(record.text) ? record.text : undefined
       const inspect = usable(record.inspect) ? record.inspect : undefined
@@ -135,6 +135,7 @@ export function diagnosticLines(
       return [
         `${row.branch}@${row.head} run ${record.run}: ⚠ ref-write warning (${String(record.reason)})${usable(record.ref) ? ` — ${record.ref}` : ""}`,
         ...(journal !== undefined && journal.decision === undefined ? ["no run decision recorded"] : []),
+        ...(text === undefined && inspect === undefined && next === undefined ? [] : ["recorded guidance:"]),
         ...(text === undefined ? [] : [text]),
         ...commands.flatMap(([name, command]) =>
           command === undefined
@@ -148,7 +149,7 @@ export function diagnosticLines(
         ...(missing.length === 0
           ? []
           : [
-              `The record has no ${missing.join(" or ")}${usable(record.remote) ? ` (remote: ${record.remote})` : ""}. Inspect the stored fields with \`yrd list --json\`.`,
+              `The record has no ${missing.join(" or ")}${usable(record.remote) ? ` (remote: ${record.remote})` : ""}. Inspect this change's retained fields.`,
             ]),
       ]
     }),
