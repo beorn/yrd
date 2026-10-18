@@ -1841,6 +1841,7 @@ export async function coreQueueCommand(
         target: targetLabel,
         base: target,
         config: config.blob,
+        pid: process.pid,
       })
       log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
       type Row = {
