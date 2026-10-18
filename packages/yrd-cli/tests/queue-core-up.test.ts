@@ -1650,7 +1650,7 @@ describe("yrd queue up, the service", () => {
       unlinkRecord: true,
       closes: false,
       generalSweepCloses: true,
-      why: "opening lifetime unrecorded",
+      why: undefined,
     },
     {
       label: "--issue still files",
@@ -1739,8 +1739,11 @@ describe("yrd queue up, the service", () => {
         expect(listCloseRequests(workdir), run.stderr()).toEqual([])
         const filed = allCleanupRows(workdir).filter((row) => row.result === "filed" && row.path === environment.path)
         expect(filed, JSON.stringify(allCleanupRows(workdir))).toHaveLength(closes ? 1 : 0)
-        if (!closes) {
+        if (!closes && why !== undefined) {
           expect(run.stderr()).toContain(why)
+        }
+        if (generalSweepCloses) {
+          expect(run.stderr()).not.toContain("opening lifetime unrecorded")
         }
         const closed = allCleanupRows(workdir).find((row) => row.result === "closed" && row.path === environment.path)
         if (closes) {

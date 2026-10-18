@@ -25,6 +25,7 @@ export type EnvOpenRecord = Readonly<{
 export type EnvOpenRecordRead =
   | Readonly<{ status: "recorded"; record: EnvOpenRecord }>
   | Readonly<{ status: "unrecorded"; why: "opening lifetime unrecorded" }>
+  | Readonly<{ status: "unreadable"; why: string }>
 
 export function envOpenRecordPath(gitDir: string): string {
   return join(gitDir, ENV_OPEN_RECORD_FILE)
@@ -40,15 +41,18 @@ export function writeEnvOpenRecord(gitDir: string, record: EnvOpenRecord): void 
   atomicWriteFileSync(envOpenRecordPath(gitDir), `${JSON.stringify(record)}\n`)
 }
 
-/** MERGED-close: job continues the Slice 3 filer; standing and unrecorded keep. */
+/** MERGED-close: job continues the Slice 3 filer; standing and unreadable keep, while unrecorded defers to the general sweep. */
 export function mergedCloseKeepReason(opening: EnvOpenRecordRead): string | undefined {
-  if (opening.status === "unrecorded") return opening.why
+  if (opening.status === "unrecorded" || opening.status === "unreadable") return opening.why
   if (opening.record.lifetime === "standing") return "opening lifetime standing"
   return undefined
 }
 
-/** Sweep skips recorded standing; unrecorded stays eligible as today. */
+/** Sweep skips recorded standing and unreadable records; unrecorded stays eligible as today. */
 export function throwIfStandingLifetime(opening: EnvOpenRecordRead): void {
+  if (opening.status === "unreadable") {
+    throw new Error(opening.why)
+  }
   if (opening.status === "recorded" && opening.record.lifetime === "standing") {
     throw new Error("opening lifetime standing")
   }
@@ -66,6 +70,10 @@ export function envOpenRecordFromFlags(
   }
 }
 
+function unreadableOpenRecord(path: string, cause: string): EnvOpenRecordRead {
+  return { status: "unreadable", why: `opening record unreadable at ${path}: ${cause}` }
+}
+
 export function readEnvOpenRecord(gitDir: string): EnvOpenRecordRead {
   if (gitDir.trim() === "") return { status: "unrecorded", why: "opening lifetime unrecorded" }
   const path = envOpenRecordPath(gitDir)
@@ -73,15 +81,18 @@ export function readEnvOpenRecord(gitDir: string): EnvOpenRecordRead {
   let parsed: unknown
   try {
     parsed = JSON.parse(readFileSync(path, "utf8"))
-  } catch {
-    return { status: "unrecorded", why: "opening lifetime unrecorded" }
+  } catch (cause) {
+    return unreadableOpenRecord(path, cause instanceof Error ? cause.message : String(cause))
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { status: "unrecorded", why: "opening lifetime unrecorded" }
+    return unreadableOpenRecord(path, "not a JSON object")
   }
   const row = parsed as Record<string, unknown>
   if (row.version !== 1 || (row.lifetime !== "job" && row.lifetime !== "standing")) {
-    return { status: "unrecorded", why: "opening lifetime unrecorded" }
+    return unreadableOpenRecord(
+      path,
+      `expected version 1 and lifetime "job" or "standing" (got version=${JSON.stringify(row.version)}, lifetime=${JSON.stringify(row.lifetime)})`,
+    )
   }
   return {
     status: "recorded",

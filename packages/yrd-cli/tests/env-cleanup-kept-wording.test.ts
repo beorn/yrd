@@ -351,23 +351,23 @@ it("persists a refused registry even when the retained cursor points past a shru
   const fresh = new Date().toISOString()
   const stale = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString()
   const w = await world(fresh)
-  // Eight more environments whose opening records are PAST the grace window, so the first charged row is
-  // eligible and the sweep closes it, shrinking the registry from nine rows to eight. `env-fresh` sorts
-  // last and is never charged: the batch STOPS at it, leaving the cursor on index 8 of nine.
+  // Seven fresh environments followed by one past the grace window (`env-7`), so the first seven charged
+  // rows stay kept on grace, the eighth charged row (`env-7`) closes, and `env-fresh` sorts last as the
+  // ninth row where the batch stops (`stoppedAt = 8` of nine).
   const added: string[] = []
-  for (let index = 0; index < 8; index++) added.push(await addEnvironment(w, `env-${index}`, stale))
+  for (let index = 0; index < 8; index++) added.push(await addEnvironment(w, `env-${index}`, index < 7 ? fresh : stale))
 
   const cleanup = createEnvironmentCleanup()
   const census = vi.mocked(removely.inspectProcessCwds)
   try {
-    // Round 1 fills the batch, closes exactly one environment and stops with the cursor on the last row.
+    // Round 1 fills the batch, closes `env-7` (the 8th charged row) and stops with the cursor on `env-fresh` (index 8).
     const first = await runRound(w, cleanup, "stale-cursor-1", [])
     expect(
       first.filter((row) => row.result === "closed").map((row) => row.path),
       JSON.stringify(first),
-    ).toEqual([added[0]])
+    ).toEqual([added[7]])
     // The sweep's OWN close retires the environment: the registry it leaves is one row smaller.
-    await w.git(["worktree", "remove", "--force", added[0]!])
+    await w.git(["worktree", "remove", "--force", added[7]!])
     const stateFile = join(w.workdir, "state", "yrd", "environment-cleanup.json")
     expect(
       (JSON.parse(readFileSync(stateFile, "utf8")) as { cursorEnv?: string }).cursorEnv,
@@ -379,7 +379,7 @@ it("persists a refused registry even when the retained cursor points past a shru
     // the refusal map here; without it nothing is written and the restart reprints.
     census.mockResolvedValue(refusalCensus())
     const refused = await runRound(w, cleanup, "stale-cursor-2", [])
-    const surviving = added.slice(1)
+    const surviving = added.slice(0, 7)
     for (const path of surviving) {
       expect(
         refused.find((row) => row.result === "kept" && row.path === path),

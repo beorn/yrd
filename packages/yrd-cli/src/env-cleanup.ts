@@ -598,9 +598,18 @@ async function fileTerminalCloseRequests(
         await gitIn(row.path, undefined, input.selection, { env: input.env })(["rev-parse", "--absolute-git-dir"])
       ).trim()
       const opening = readEnvOpenRecord(gitDir)
-      const keep = input.automaticKeep(row.path, opening, true) ?? mergedCloseKeepReason(opening)
+      const keep = input.automaticKeep(row.path, opening, true)
       if (keep !== undefined) {
         input.record(row.path, "kept", keep)
+        continue
+      }
+      if (opening.status === "unrecorded") {
+        // The general ancestry sweep owns unrecorded rows; recording a keep here clobbers its state.
+        continue
+      }
+      const lifetimeKeep = mergedCloseKeepReason(opening)
+      if (lifetimeKeep !== undefined) {
+        input.record(row.path, "kept", lifetimeKeep)
         continue
       }
       // env open ties task/<name> to this path. A later checkout must not
@@ -1074,171 +1083,174 @@ async function cleanupEnvironments(
   const ordered = [...inventory.rows.slice(offset), ...inventory.rows.slice(0, offset)]
   let charged = 0
   let stoppedAt = -1
-  for (const [index, row] of ordered.entries()) {
-    try {
-      if (requests.handled.has(row.path)) {
-        // This round already ran the direct close lifecycle for this path under a
-        // filed request; evaluating it again here only repeats the census.
-        continue
-      }
-      let entry = cache.get(row.path)
-      if (entry === undefined) {
-        entry = { paths: [], branches: [] }
-        cache.set(row.path, entry)
-      }
-      const holder = busy(row.path, snapshot)
-      if (entry.hold !== row.hold || entry.busy !== holder) entry.expensiveKey = undefined
-      entry.hold = row.hold
-      entry.busy = holder
-      if (row.hold !== null) throw new Error(`held${row.hold === "" ? "" : `: ${row.hold}`}`)
-      // Opening-record lookup spawns Git too: protected rows consume the batch.
-      if (charged >= ENVIRONMENT_BATCH) {
-        stoppedAt = index
-        break
-      }
-      charged++
-      const openingGit = gitIn(row.path, undefined, git.selection, { env: input.env })
-      const openingDir = (await openingGit(["rev-parse", "--absolute-git-dir"])).trim()
-      const opening = readEnvOpenRecord(openingDir)
-      throwIfStandingLifetime(opening)
-      const protection = automaticKeep(row.path, opening)
-      if (protection !== undefined) throw new Error(protection)
-      const treeGit = gitIn(row.path, undefined, git.selection, { env: input.env })
-      const head = row.head
-      if (head === undefined) throw new Error(`registered environment ${row.path} has no HEAD`)
-      if (entry.paths.length === 0) {
-        for (const resource of ["index", "logs/HEAD"]) {
-          const path = (await treeGit(["rev-parse", "--git-path", resource])).trim()
-          if (path === "") throw new Error(`environment ${row.path}: Git returned no ${resource} path`)
-          entry.paths.push({ path: resolve(row.path, path), optional: false })
-        }
-      }
-      const ownLog = entry.paths[1]
-      if (ownLog === undefined) throw new Error(`environment ${row.path}: HEAD reflog identity absent`)
-      const bindingKey = async (): Promise<string> =>
-        JSON.stringify([
-          head,
-          row.branch,
-          config.blob,
-          identity(ownLog),
-          await Promise.all(
-            [...new Set([...(row.branch === undefined ? [] : [row.branch]), ...entry.branches])].map(async (branch) => [
-              branch,
-              (await historyOf(branch)).history?.events.at(-1)?.id,
-            ]),
-          ),
-        ])
-      const key = await bindingKey()
-      if (entry.bindingKey !== key) {
-        entry.bindingKey = key
-        entry.expensiveKey = undefined
-      }
-      if (holder !== undefined) throw new Error(holder)
-      const expensiveKey = (): string =>
-        JSON.stringify([
-          head,
-          row.branch,
-          config.blob,
-          outcome.target,
-          entry.bindingKey,
-          entry.paths.map((file) => [file.path, identity(file)]),
-        ])
-      if (entry.expensiveKey === expensiveKey()) {
-        if (entry.verdict !== undefined) throw new Error(entry.verdict)
-      } else {
-        try {
-          await proveEnvironmentRemovable({
-            path: row.path,
-            head,
-            repo,
-            env: input.env,
-            target: outcome.target,
-            originBranch: config.target.branch,
-            treeGit,
-            entry,
-            ancestor,
-          })
-          entry.verdict = undefined
-          entry.expensiveKey = expensiveKey()
-        } catch (cause) {
-          entry.verdict = String(cause)
-          entry.expensiveKey = expensiveKey()
-          throw cause
-        }
-      }
-      // One close per round lets the queue judge a waiting merge before another removal.
-      if (closed > 0) {
-        throw new Error("eligible; yielding to the next queue round before removal")
-      }
-      const freshHolder = busy(row.path, await census())
-      if (freshHolder !== undefined) throw new Error(freshHolder)
-      const current = (await environmentInventory(registry, registryGit, workdir)).rows.find(
-        (entry) => entry.path === row.path,
-      )
-      if (current === undefined || current.hold !== null || current.head !== head) {
-        throw new Error("registration, hold or HEAD changed before close")
-      }
-      const finalProtection = automaticKeep(row.path, readEnvOpenRecord(openingDir))
-      if (finalProtection !== undefined) throw new Error(finalProtection)
-      let output = ""
-      let closedProof: WorktreeRemovalProof | undefined
-      const exit = await closeEnvironment(
-        row.path,
-        { json: true, noRehome: true },
-        {
-          ...io,
-          cwd: registry,
-          stdout: (text) => {
-            output += text
-          },
-        },
-        undefined,
-        // A sweep close is not asked for by anyone: an uncertifiable census is
-        // the pre-22894 loud refusal, never a filed request (22894).
-        "refuse",
-        undefined,
-        (proof) => {
-          closedProof = proof
-          proofs.push(proof)
-        },
-      )
-      if (exit !== 0) {
-        // #27120 AC2: a refusal that names a class is still a refusal — the environment stays — but the
-        // sweep reports it as one named class with its retire path, never as a per-seat note. A refusal
-        // that names nothing still falls through to the loud throw below.
-        const named = namedCloseRefusal(output)
-        if (named !== undefined) {
-          preserve(row.path, named)
+  if (requests.closed === 0) {
+    for (const [index, row] of ordered.entries()) {
+      try {
+        if (requests.handled.has(row.path)) {
+          // This round already ran the direct close lifecycle for this path under a
+          // filed request; evaluating it again here only repeats the census.
           continue
         }
-        throw new Error(`native close exited ${exit}: ${output}`)
-      }
-      const result: unknown = JSON.parse(output)
-      if (typeof result !== "object" || result === null) throw new Error(`malformed close result ${output}`)
-      if ("closed" in result && result.closed === row.path) {
-        closed++
-        cache.delete(row.path)
-        record(row.path, "closed", "native retained removal proof accepted")
-        // Telling never gates the close (29720): the close is already
-        // committed, so a telling failure is named here, at the source, and
-        // never rethrown into the sweep's keep bookkeeping.
-        try {
-          await input.onEnvironmentClosed?.({
-            ...(row.branch === undefined ? {} : { branch: row.branch }),
-            head,
-            path: row.path,
-            ...(closedProof === undefined ? {} : { proof: closedProof }),
-          })
-        } catch (cause) {
-          record(row.path, "tell-failed", `closed, but telling about it failed: ${reasonText(cause)}`)
+        let entry = cache.get(row.path)
+        if (entry === undefined) {
+          entry = { paths: [], branches: [] }
+          cache.set(row.path, entry)
         }
-      } else if ("kept" in result && result.kept === row.path) preserve(row.path, output.trim())
-      else throw new Error(`unproven close result ${output}`)
-    } catch (cause) {
-      preserve(row.path, namedPrivateStoreRefusal(cause, row.path) ?? reasonText(cause))
+        const holder = busy(row.path, snapshot)
+        if (entry.hold !== row.hold || entry.busy !== holder) entry.expensiveKey = undefined
+        entry.hold = row.hold
+        entry.busy = holder
+        if (row.hold !== null) throw new Error(`held${row.hold === "" ? "" : `: ${row.hold}`}`)
+        // Opening-record lookup spawns Git too: protected rows consume the batch.
+        if (charged >= ENVIRONMENT_BATCH) {
+          stoppedAt = index
+          break
+        }
+        charged++
+        const openingGit = gitIn(row.path, undefined, git.selection, { env: input.env })
+        const openingDir = (await openingGit(["rev-parse", "--absolute-git-dir"])).trim()
+        const opening = readEnvOpenRecord(openingDir)
+        throwIfStandingLifetime(opening)
+        const protection = automaticKeep(row.path, opening)
+        if (protection !== undefined) throw new Error(protection)
+        const treeGit = gitIn(row.path, undefined, git.selection, { env: input.env })
+        const head = row.head
+        if (head === undefined) throw new Error(`registered environment ${row.path} has no HEAD`)
+        if (entry.paths.length === 0) {
+          for (const resource of ["index", "logs/HEAD"]) {
+            const path = (await treeGit(["rev-parse", "--git-path", resource])).trim()
+            if (path === "") throw new Error(`environment ${row.path}: Git returned no ${resource} path`)
+            entry.paths.push({ path: resolve(row.path, path), optional: false })
+          }
+        }
+        const ownLog = entry.paths[1]
+        if (ownLog === undefined) throw new Error(`environment ${row.path}: HEAD reflog identity absent`)
+        const bindingKey = async (): Promise<string> =>
+          JSON.stringify([
+            head,
+            row.branch,
+            config.blob,
+            identity(ownLog),
+            await Promise.all(
+              [...new Set([...(row.branch === undefined ? [] : [row.branch]), ...entry.branches])].map(
+                async (branch) => [branch, (await historyOf(branch)).history?.events.at(-1)?.id],
+              ),
+            ),
+          ])
+        const key = await bindingKey()
+        if (entry.bindingKey !== key) {
+          entry.bindingKey = key
+          entry.expensiveKey = undefined
+        }
+        if (holder !== undefined) throw new Error(holder)
+        const expensiveKey = (): string =>
+          JSON.stringify([
+            head,
+            row.branch,
+            config.blob,
+            outcome.target,
+            entry.bindingKey,
+            entry.paths.map((file) => [file.path, identity(file)]),
+          ])
+        if (entry.expensiveKey === expensiveKey()) {
+          if (entry.verdict !== undefined) throw new Error(entry.verdict)
+        } else {
+          try {
+            await proveEnvironmentRemovable({
+              path: row.path,
+              head,
+              repo,
+              env: input.env,
+              target: outcome.target,
+              originBranch: config.target.branch,
+              treeGit,
+              entry,
+              ancestor,
+            })
+            entry.verdict = undefined
+            entry.expensiveKey = expensiveKey()
+          } catch (cause) {
+            entry.verdict = String(cause)
+            entry.expensiveKey = expensiveKey()
+            throw cause
+          }
+        }
+        // One close per round lets the queue judge a waiting merge before another removal.
+        if (closed > 0) {
+          preserve(row.path, "eligible; yielding to the next queue round before removal")
+          stoppedAt = index
+          break
+        }
+        const freshHolder = busy(row.path, await census())
+        if (freshHolder !== undefined) throw new Error(freshHolder)
+        const current = (await environmentInventory(registry, registryGit, workdir)).rows.find(
+          (entry) => entry.path === row.path,
+        )
+        if (current === undefined || current.hold !== null || current.head !== head) {
+          throw new Error("registration, hold or HEAD changed before close")
+        }
+        const finalProtection = automaticKeep(row.path, readEnvOpenRecord(openingDir))
+        if (finalProtection !== undefined) throw new Error(finalProtection)
+        let output = ""
+        let closedProof: WorktreeRemovalProof | undefined
+        const exit = await closeEnvironment(
+          row.path,
+          { json: true, noRehome: true },
+          {
+            ...io,
+            cwd: registry,
+            stdout: (text) => {
+              output += text
+            },
+          },
+          undefined,
+          // A sweep close is not asked for by anyone: an uncertifiable census is
+          // the pre-22894 loud refusal, never a filed request (22894).
+          "refuse",
+          undefined,
+          (proof) => {
+            closedProof = proof
+            proofs.push(proof)
+          },
+        )
+        if (exit !== 0) {
+          // #27120 AC2: a refusal that names a class is still a refusal — the environment stays — but the
+          // sweep reports it as one named class with its retire path, never as a per-seat note. A refusal
+          // that names nothing still falls through to the loud throw below.
+          const named = namedCloseRefusal(output)
+          if (named !== undefined) {
+            preserve(row.path, named)
+            continue
+          }
+          throw new Error(`native close exited ${exit}: ${output}`)
+        }
+        const result: unknown = JSON.parse(output)
+        if (typeof result !== "object" || result === null) throw new Error(`malformed close result ${output}`)
+        if ("closed" in result && result.closed === row.path) {
+          closed++
+          cache.delete(row.path)
+          record(row.path, "closed", "native retained removal proof accepted")
+          // Telling never gates the close (29720): the close is already
+          // committed, so a telling failure is named here, at the source, and
+          // never rethrown into the sweep's keep bookkeeping.
+          try {
+            await input.onEnvironmentClosed?.({
+              ...(row.branch === undefined ? {} : { branch: row.branch }),
+              head,
+              path: row.path,
+              ...(closedProof === undefined ? {} : { proof: closedProof }),
+            })
+          } catch (cause) {
+            record(row.path, "tell-failed", `closed, but telling about it failed: ${reasonText(cause)}`)
+          }
+        } else if ("kept" in result && result.kept === row.path) preserve(row.path, output.trim())
+        else throw new Error(`unproven close result ${output}`)
+      } catch (cause) {
+        preserve(row.path, namedPrivateStoreRefusal(cause, row.path) ?? reasonText(cause))
+      }
     }
+    progress.cursor = stoppedAt < 0 ? 0 : (offset + stoppedAt) % inventory.rows.length
   }
-  progress.cursor = stoppedAt < 0 ? 0 : (offset + stoppedAt) % inventory.rows.length
   // The state is written in the same step as the round row that reports what the round did, so a
   // restart resumes at the next environment (ruling 27723) with the map the round actually wrote.
   persistState()
@@ -1257,6 +1269,7 @@ async function cleanupEnvironments(
       remaining: inventory.rows.length - closed,
       ms: Date.now() - startedAt,
       lookups,
+      ...(requests.closed > 0 ? { why: `general sweep skipped: ${requests.closed} request closes this round` } : {}),
       ...(censusReceipt === undefined ? {} : { census: censusReceipt }),
     })}\n`,
   )

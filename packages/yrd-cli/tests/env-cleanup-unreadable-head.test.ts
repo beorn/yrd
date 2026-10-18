@@ -36,6 +36,14 @@ vi.mock("../src/env-commands.ts", async (importOriginal) => {
   }
 })
 
+const { readBranchHistory } = vi.hoisted(() => ({
+  readBranchHistory: vi.fn(async () => ({ history: undefined })),
+}))
+vi.mock("@yrd/queue-core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@yrd/queue-core")>()
+  return { ...actual, readBranchHistory }
+})
+
 const roots: string[] = []
 afterAll(() => {
   for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true })
@@ -92,7 +100,7 @@ async function runRound(w: Awaited<ReturnType<typeof world>>, run: string): Prom
         stderr: () => {},
       },
       selection: w.git.selection,
-      outcome: { run, log: join(w.workdir, "journal.jsonl"), merged: [] } as never,
+      outcome: { run, log: join(w.workdir, "journal.jsonl"), merged: [], target: w.head } as never,
     })
   } finally {
     census.mockRestore()
@@ -346,4 +354,198 @@ it("re-reads the inventory after an attempt so a second environment whose HEAD m
   expect(existsSync(secondFile)).toBe(false)
   expect(attemptedPaths).not.toContain(second)
   expect(rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([w.env, ...rest])
+})
+
+it("skips the general sweep when round 1 closes a request, preserves the cursor on the eligible unrecorded row, and closes it in round 2", async () => {
+  const w = await world()
+  await w.git(["remote", "add", "origin", w.repo])
+  await w.git(["fetch", "--quiet", "origin", "main"])
+  const uid = process.getuid?.()
+  if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
+  const eligible = join(w.repo, ".bays", "z-eligible-unrecorded")
+  await w.git(["worktree", "add", "--quiet", "--detach", eligible, "HEAD"])
+  writeCloseRequest(w.workdir, {
+    name: "env-valid",
+    path: w.env,
+    requester: "@dev/12",
+    uid,
+    at: "2026-10-15T00:00:00.000Z",
+    predicate: "direct-admission",
+    options: { noRehome: true },
+    head: w.head,
+  })
+  const cleanup = createEnvironmentCleanup()
+  const runCleanupRound = async (run: string) => {
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const config: QueueConfig = {
+      target: { remote: "origin", branch: "main" },
+      archiveAfter: "never",
+      revertGuard: "observe",
+      ignore: [],
+      checks: [],
+      notify: [],
+      health: { stallAfterMs: 0, declared: false },
+      blob: w.head,
+    }
+    try {
+      await cleanup({
+        repo: w.repo,
+        git: w.git,
+        config,
+        workdir: w.workdir,
+        io: {
+          localBranchProtections: null,
+          cwd: w.repo,
+          stdout: () => {},
+          stderr: () => {},
+        },
+        selection: w.git.selection,
+        outcome: { run, log: join(w.workdir, "journal.jsonl"), merged: [], target: w.head } as never,
+      })
+    } finally {
+      census.mockRestore()
+    }
+  }
+  // Point the persisted cursor directly at `z-eligible-unrecorded` before round 1.
+  const statePath = join(w.workdir, "state", "yrd", "environment-cleanup.json")
+  mkdirSync(dirname(statePath), { recursive: true })
+  writeFileSync(
+    statePath,
+    `${JSON.stringify({
+      cursorEnv: "z-eligible-unrecorded",
+      runId: "seed",
+      at: "2026-10-18T00:00:00.000Z",
+      reported: {},
+    })}\n`,
+  )
+  await runCleanupRound("round-1-closes-request")
+  const stateAfterRound1 = JSON.parse(readFileSync(statePath, "utf8")) as {
+    cursorEnv: string
+    reported: Record<string, string>
+  }
+  expect(stateAfterRound1.cursorEnv).toBe("z-eligible-unrecorded")
+  const round1Rows = cleanupRows(w.workdir).filter((row) => row.run === "round-1-closes-request")
+  expect(round1Rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([w.env])
+  const round1Obs = round1Rows.find((row) => row.kind === "observation" && row.result === undefined)
+  expect(round1Obs?.why).toBe("general sweep skipped: 1 request closes this round")
+
+  await runCleanupRound("round-2-closes-eligible-unrecorded")
+  const round2Rows = cleanupRows(w.workdir).filter((row) => row.run === "round-2-closes-eligible-unrecorded")
+  expect(round2Rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([eligible])
+})
+
+it("stops the general sweep cursor on the second eligible row after one sweep removal", async () => {
+  const w = await world()
+  await w.git(["remote", "add", "origin", w.repo])
+  await w.git(["fetch", "--quiet", "origin", "main"])
+  const second = join(w.repo, ".bays", "z-second-eligible")
+  await w.git(["worktree", "add", "--quiet", "--detach", second, "HEAD"])
+  const third = join(w.repo, ".bays", "z-third-eligible")
+  await w.git(["worktree", "add", "--quiet", "--detach", third, "HEAD"])
+
+  await runRound(w, "sweep-stops-on-second-eligible")
+  const rows = cleanupRows(w.workdir).filter((row) => row.run === "sweep-stops-on-second-eligible")
+  expect(rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([w.env])
+  const yielded = rows.filter(
+    (row) => row.result === "kept" && row.why === "eligible; yielding to the next queue round before removal",
+  )
+  expect(yielded.map((row) => row.path)).toEqual([second])
+  const statePath = join(w.workdir, "state", "yrd", "environment-cleanup.json")
+  const state = JSON.parse(readFileSync(statePath, "utf8")) as { cursorEnv: string }
+  expect(state.cursorEnv).toBe("z-second-eligible")
+})
+
+it("leaves the general sweep's recorded reason in place when the terminal filing pass sees an unrecorded row", async () => {
+  const w = await world()
+  await w.git(["remote", "add", "origin", w.repo])
+  await w.git(["fetch", "--quiet", "origin", "main"])
+  await w.git(["branch", "task/env-valid", "HEAD"])
+  const envGit = testGitIn(w.env)
+  await envGit(["checkout", "--quiet", "task/env-valid"])
+  writeFileSync(join(w.env, "untracked.txt"), "dirty\n")
+  await runRound(w, "round-1-sweep-records-dirty")
+  const statePath = join(w.workdir, "state", "yrd", "environment-cleanup.json")
+  const afterSweep = JSON.parse(readFileSync(statePath, "utf8")) as { reported: Record<string, string> }
+  expect(afterSweep.reported[w.env]).toContain("dirty root/components")
+
+  const reqEnv = join(w.repo, ".bays", "z-req-env")
+  await w.git(["worktree", "add", "--quiet", "--detach", reqEnv, "HEAD"])
+  const uid = process.getuid?.()
+  if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
+  writeCloseRequest(w.workdir, {
+    name: "z-req-env",
+    path: reqEnv,
+    requester: "@dev/12",
+    uid,
+    at: "2026-10-15T00:00:00.000Z",
+    predicate: "direct-admission",
+    options: { noRehome: true },
+    head: w.head,
+  })
+  const census = vi
+    .spyOn(removely, "inspectProcessCwds")
+    .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+  const config: QueueConfig = {
+    target: { remote: "origin", branch: "main" },
+    archiveAfter: "never",
+    revertGuard: "observe",
+    ignore: [],
+    checks: [],
+    notify: [],
+    health: { stallAfterMs: 0, declared: false },
+    blob: w.head,
+  }
+  try {
+    readBranchHistory.mockResolvedValue({
+      ref: "refs/yrd/changes/task/env-valid",
+      history: { state: { status: "merged", commit: w.head, tip: "b".repeat(40) }, events: [] },
+    } as never)
+    await createEnvironmentCleanup()({
+      repo: w.repo,
+      git: w.git,
+      config,
+      workdir: w.workdir,
+      io: {
+        localBranchProtections: null,
+        cwd: w.repo,
+        stdout: () => {},
+        stderr: () => {},
+      },
+      selection: w.git.selection,
+      outcome: {
+        run: "round-2-merged-catchup",
+        log: join(w.workdir, "journal.jsonl"),
+        merged: ["task/env-valid"],
+        target: w.head,
+      } as never,
+    })
+  } finally {
+    readBranchHistory.mockResolvedValue({ history: undefined })
+    census.mockRestore()
+  }
+  const afterCatchup = JSON.parse(readFileSync(statePath, "utf8")) as { reported: Record<string, string> }
+  expect(afterCatchup.reported[w.env]).not.toContain("opening lifetime unrecorded")
+  expect(afterCatchup.reported[w.env]).toContain("dirty root/components")
+  const round2KeepUnrecorded = cleanupRows(w.workdir).filter(
+    (row) => row.run === "round-2-merged-catchup" && row.path === w.env && row.why === "opening lifetime unrecorded",
+  )
+  expect(round2KeepUnrecorded).toEqual([])
+})
+
+it("keeps an environment with a corrupt opening record by name and never treats it as eligible", async () => {
+  const w = await world()
+  await w.git(["remote", "add", "origin", w.repo])
+  await w.git(["fetch", "--quiet", "origin", "main"])
+  const envGit = testGitIn(w.env)
+  const gitDir = (await envGit(["rev-parse", "--absolute-git-dir"])).trim()
+  const recordPath = join(gitDir, "yrd-open.json")
+  writeFileSync(recordPath, "{corrupt json\n")
+
+  await runRound(w, "corrupt-opening-record")
+  const rows = cleanupRows(w.workdir).filter((row) => row.run === "corrupt-opening-record")
+  expect(rows.filter((row) => row.result === "closed")).toEqual([])
+  const kept = rows.find((row) => row.result === "kept" && row.path === w.env)
+  expect(String(kept?.why)).toContain(`opening record unreadable at ${recordPath}: `)
 })
