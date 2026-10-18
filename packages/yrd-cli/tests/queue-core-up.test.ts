@@ -4801,8 +4801,22 @@ describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)",
     // names the branch and the cure on stderr.
     const ranRun = capture(w.work)
     expect(await coreQueueCommand(w.work, ranRun.io, { command: "run" }, { workdir: w.workdir })).toBe(2)
-    expect(ranRun.stderr()).toContain("stuck task/stuck:")
-    expect(ranRun.stderr()).toContain(cure)
+    // Pin the complete valid-incident line; normalize only fixture identities.
+    expect(
+      ranRun
+        .stderr()
+        .split("\n")
+        .filter((line) => line.startsWith("yrd: stuck task/stuck:"))
+        .map((line) =>
+          line
+            .replaceAll(dirname(w.work), "<root>")
+            .replaceAll(/q-\d{8}T\d{9}Z-[0-9a-f]+/gu, "<run>")
+            .replaceAll(/\b[0-9a-f]{40}\b/gu, "<head>")
+            .replaceAll(/\b[0-9a-f]{12}\b/gu, "<commit>"),
+        ),
+    ).toEqual([
+      "yrd: stuck task/stuck: setup stuck on candidate; settled base setup failed; setup stuck for <commit>: exit 128 (exit 128 is not a verdict); log <root>/queue/checks/task/stuck@<head>/<run>/attempt-2/submit/setup.log; http-5xx: fatal: unable to access https://example.invalid/: The requested URL returned error: 504 [yrd-setup-unreachable]; via: setup in yrd queue main [<run>]; evidence: <root>/queue/logs/<run>.jsonl; recorded guidance: nothing here is the change's fault: setup could not reach a remote (http-5xx), and the round's one retry could not either; once the remote answers, resume the queue; four ways out of the line: withdraw task/stuck (end the change), submit a replacement head for task/stuck that clears this reason (the same content sticks on the same ground), merge a queued fix (it runs alone on the stopped line, then task/stuck is judged once more), or resume the queue once it is repaired; until one of them, the line stays stopped; inspect: cd '<root>/work' && yrd 'queue' 'show' 'task/stuck' '--queue' '<root>/remote.git#main'; resume: cd '<root>/work' && yrd 'queue' 'resume' '--reason' '<why>' '--queue' '<root>/remote.git#main'; withdraw: cd '<root>/work' && yrd 'queue' 'withdraw' 'task/stuck' '--queue' '<root>/remote.git#main'; retry after repair: cd '<root>/work' && yrd 'merge' 'task/stuck' '--queue' '<root>/remote.git#main'",
+    ])
 
     // AC3: `up`, pointed at the same still-stuck change, names the same branch
     // and the same cure.
@@ -5386,8 +5400,22 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
       return "host-stuck-round-action"
     }
     expect(await coreQueueCommand(w.work, stuckRound.io, { command: "run" }, { workdir: w.workdir })).toBe(2)
-    expect(stuckRound.stderr()).toContain("recorded guidance:")
-    expect(stuckRound.stderr()).toContain("host-stuck-round-action")
+    // Pin the complete valid-incident line; normalize only fixture identities.
+    expect(
+      stuckRound
+        .stderr()
+        .split("\n")
+        .filter((line) => line.startsWith("yrd: stuck task/stuck:"))
+        .map((line) =>
+          line
+            .replaceAll(dirname(w.work), "<root>")
+            .replaceAll(/q-\d{8}T\d{9}Z-[0-9a-f]+/gu, "<run>")
+            .replaceAll(/\b[0-9a-f]{40}\b/gu, "<head>")
+            .replaceAll(/\b[0-9a-f]{12}\b/gu, "<commit>"),
+        ),
+    ).toEqual([
+      "yrd: stuck task/stuck: setup fail on candidate; settled base setup failed; setup fail for <commit>: exit 1; log <root>/queue/checks/task/stuck@<head>/<run>/attempt-1/submit/setup.log [yrd-setup-unusable]; via: setup in yrd queue main [<run>]; evidence: <root>/queue/logs/<run>.jsonl; recorded guidance: repair the queue setup, then resume the queue; four ways out of the line: withdraw task/stuck (end the change), submit a replacement head for task/stuck that clears this reason (the same content sticks on the same ground), merge a queued fix (it runs alone on the stopped line, then task/stuck is judged once more), or resume the queue once it is repaired; until one of them, the line stays stopped; inspect: host-stuck-round-action; resume: host-stuck-round-action; withdraw: host-stuck-round-action; retry after repair: host-stuck-round-action",
+    ])
     const roundQueue = `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`
     for (const argv of [
       ["queue", "show", "task/stuck"],
