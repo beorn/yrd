@@ -24,7 +24,7 @@ import type { Event, GitObservation, JournalCommand, JournalRun, Row } from "@yr
 import { checksOf, journalKey, watchRows as perRunRows } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
-import { DETAIL_BG, WatchPane, watchTier, type WatchSnapshot } from "../src/watch-pane.tsx"
+import { DETAIL_BG, WatchPane, watchTier, type WatchSnapshot, type WatchSource } from "../src/watch-pane.tsx"
 import {
   CHANGES_TAB,
   RunStatusBox,
@@ -1363,6 +1363,44 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
     })
     expect(current(app)).not.toContain("⚠︎ the queue read failed")
     app.unmount()
+  })
+
+  it("a single unreadable declared queue recovers its paused runner and viewer remedies", async () => {
+    const { load, rounds } = gatedLoader()
+    let readable = false
+    const source: WatchSource = {
+      id: "example.test/repo#main",
+      label: "recovering queue",
+      error: "initial queue read failed",
+      get formatCommand() {
+        return readable ? (argv) => `recovered-host ${argv.join(" ")}` : undefined
+      },
+      async load() {
+        const next = await load()
+        readable = true
+        return next
+      },
+    }
+    const app = render(<WatchPane snapshot={snapshot({ rows: [] })} sources={[source]} intervalMs={10} live />, {
+      cols: 240,
+      rows: 40,
+    })
+    try {
+      await waitFor(() => expect(rounds).toHaveLength(1), { timeout: 10000 })
+      expect(current(app)).toContain("initial queue read failed")
+      rounds[0]?.resolve(
+        snapshot({
+          rows: [],
+          pause: "maintenance",
+          stopped: { by: "operator", cause: "operator", change: null, since: NOW.toISOString() },
+        }),
+      )
+      await waitFor(() => expect(current(app)).toContain("recovered-host queue resume"), { timeout: 10000 })
+      expect(current(app)).toContain("PAUSED")
+      expect(current(app)).not.toContain("initial queue read failed")
+    } finally {
+      app.unmount()
+    }
   })
 
   it("a detail that fails to read is said in the detail pane, not fatal, and the next round reads it again", async () => {

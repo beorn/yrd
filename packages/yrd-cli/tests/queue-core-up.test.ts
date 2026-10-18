@@ -2822,9 +2822,11 @@ describe("yrd queue up, the service", () => {
     expect(await w.git(["ls-remote", "--refs", "origin", ref])).toContain(ref)
 
     const listed = capture(w.work)
+    const listCwd = dirname(w.work)
     const displayedCommands: { argv: readonly string[]; cwd: string }[] = []
     const listedIO = {
       ...listed.io,
+      cwd: listCwd,
       formatYrdCommand(argv: readonly string[], cwd: string) {
         displayedCommands.push({ argv, cwd })
         return `viewer ${cwd} yrd ${argv.join(" ")}`
@@ -2867,14 +2869,14 @@ describe("yrd queue up, the service", () => {
     // pane; component-only callback fixtures cannot prove this boundary.
     expect(liveSources).toHaveLength(1)
     expect(liveSources[0]?.formatCommand?.(["queue", "resume"])).toBe(
-      `viewer ${w.work} yrd queue resume --queue ${selectedQueue}`,
+      `viewer ${listCwd} yrd queue resume --queue ${selectedQueue}`,
     )
     expect(displayedCommands).toContainEqual({
       argv: ["queue", "resume", "--queue", selectedQueue],
-      cwd: w.work,
+      cwd: listCwd,
     })
     expect(runnerBox.replace(/[│┃\s]/gu, ""), listed.stdout()).toContain(
-      `to resume: viewer ${w.work} yrd queue resume --queue ${selectedQueue}`.replace(/\s/gu, ""),
+      `to resume: viewer ${listCwd} yrd queue resume --queue ${selectedQueue}`.replace(/\s/gu, ""),
     )
     expect(runnerBox, listed.stdout()).not.toContain("refs/yrd/main/runner")
     const listedJson = capture(w.work)

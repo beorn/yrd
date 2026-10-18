@@ -773,7 +773,8 @@ function QueuesWatchPane({
 
 function SingleWatchPane({
   snapshot,
-  formatCommand,
+  formatCommand: suppliedFormatCommand,
+  sources,
   initialKey,
   navigationSerial,
   queueShortcuts = true,
@@ -792,6 +793,9 @@ function SingleWatchPane({
   live = true,
   onEnding,
 }: WatchPaneProps) {
+  // A declared source can acquire its viewer context after its first read recovers.
+  const formatCommand =
+    (sources?.length === 1 ? sources[0]?.formatCommand : undefined) ?? suppliedFormatCommand
   const liveNow = useNow()
   const now = nowProp ?? liveNow
   const { columns, rows: terminalRows } = useWindowSize()
