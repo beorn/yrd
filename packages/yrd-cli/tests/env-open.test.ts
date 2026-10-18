@@ -77,7 +77,7 @@ async function command(
   cwd: string,
   argv: readonly string[],
 ): Promise<Readonly<{ exit: number; stderr: string; stdout: string }>> {
-  const child = Bun.spawn([...argv], { cwd, stderr: "pipe", stdin: "ignore", stdout: "pipe" })
+  const child = Bun.spawn([...argv], { cwd, env: { ...process.env }, stderr: "pipe", stdin: "ignore", stdout: "pipe" })
   const [exit, stderr, stdout] = await Promise.all([
     child.exited,
     new Response(child.stderr).text(),
