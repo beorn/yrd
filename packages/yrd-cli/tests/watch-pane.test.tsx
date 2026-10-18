@@ -2023,7 +2023,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(W.pending).toMatchObject({ word: "pending", color: "$fg-warning" })
     expect(W.verifying).toMatchObject({ word: "verifying", color: "$fg-info" })
     const said = ({ color: _color, ...entry }: Entry) => entry
-    expect({ stopped: W.stopped.next, paused: W.paused.next }).toEqual({
+    const { STATE_WORDS } = await import("../src/watch-format.ts")
+    expect({ stopped: STATE_WORDS.stopped.next, paused: STATE_WORDS.paused.next }).toEqual({
       stopped: "start the runner for this queue",
       paused: "resume this queue after resolving the pause",
     })

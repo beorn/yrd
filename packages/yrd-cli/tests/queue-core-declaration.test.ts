@@ -3901,7 +3901,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).toBe(0)
     expect(prepared.stderr()).toContain("target policy warning (recorded guidance)")
     expect(prepared.stderr()).toContain(reason)
-    expect(JSON.parse(prepared.stdout()).admission).toEqual({ kind: "warn", reason })
+    expect(JSON.parse(prepared.stdout())).toHaveProperty("admission", { kind: "warn", reason })
     const submitted = capture(repo)
     expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], submitted.io)).toBe(0)
     expect(submitted.stderr()).toContain("TARGET POLICY WARNING (recorded guidance)")
