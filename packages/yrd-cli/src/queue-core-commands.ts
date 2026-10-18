@@ -4059,10 +4059,16 @@ export async function coreQueueCommand(
                   ...(item.run === undefined ? [] : [journalKey(item.run.branch, item.run.head)]),
                 ]),
               )
+        const queue = queueName(config.target, await remoteUrl(git, config.target.remote))
         const diagnostics = journalDiagnostics(
           journals,
           diagnosticKeys,
-          `yrd list${request.all === true ? " --all" : ""}${request.drafts === true ? " --drafts" : ""} --json`,
+          formatQueueCommand(io, formatStoredQueueAddress(queue), [
+            "list",
+            ...(request.all === true ? ["--all"] : []),
+            ...(request.drafts === true ? ["--drafts"] : []),
+            "--json",
+          ]),
         )
         if (options.json !== true) narrateJournalReading(io, diagnostics.facts, said, diagnostics.omitted)
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
@@ -4138,7 +4144,7 @@ export async function coreQueueCommand(
           eventChanges: reading.changes,
           eventInvalid: reading.invalid,
           journals,
-          queue: queueName(config.target, await remoteUrl(git, config.target.remote)),
+          queue,
           // Pre-M8 a repository has exactly one queue: the target's branch, on
           // this repository. M8 turns this list of one into N.
           queues: [{ branch: config.target.branch, label: config.target.branch, path: repo }],
@@ -6347,7 +6353,7 @@ function journalFact(
 function journalDiagnostics<Run extends JournalSummary>(
   journals: Journals<Run>,
   selectedKeys?: ReadonlySet<string>,
-  unfilteredCommand = "yrd list --json",
+  unfilteredCommand?: string,
 ): Readonly<{ facts: Journals<Run>; omitted?: string }> {
   const { missingRunTrailers = [], absent: baseAbsent, ...base } = journals
   const selectedMissing =

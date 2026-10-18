@@ -602,7 +602,8 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     expect.soft(absent).not.toContain("task/unrelated@")
     const globalLines = absent.split("; ").filter((line) => /global|incomplete/i.test(line) && /\b1\b/.test(line))
     expect.soft(globalLines).toHaveLength(1)
-    expect.soft(absent).toContain("yrd list --json")
+    expect.soft(absent).toContain("yrd 'list' '--json'")
+    expect.soft(absent).toContain(`'--queue' '${join(work, "..", "remote.git")}#main'`)
 
     const empty = await yrd(work, { color: false }, "list", "--json", "--require-match", "no-such-change")
     expect(empty.exitCode, empty.report).toBe(1)
@@ -614,7 +615,7 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     expect
       .soft(emptyAbsent.split("; ").filter((line) => /global|incomplete/i.test(line) && /\b2\b/.test(line)))
       .toHaveLength(1)
-    expect.soft(emptyAbsent).toContain("yrd list --json")
+    expect.soft(emptyAbsent).toContain("yrd 'list' '--json'")
 
     const unfiltered = await yrd(work, { color: false }, "list", "--json")
     expect(unfiltered.exitCode, unfiltered.report).toBe(0)
