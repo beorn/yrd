@@ -215,7 +215,9 @@ async function closeMergedIssues(
           const fulfilled = completed.issueEffects[providerId]
           if (fulfilled !== undefined) {
             if (fulfilled.effect.declaration.blob !== pinnedBlob) {
-              throw new Error(`${branch}@${mergeSha}: applied declaration blob ${fulfilled.effect.declaration.blob} differs from pinned ${pinnedBlob}`)
+              throw new Error(
+                `${branch}@${mergeSha}: applied declaration blob ${fulfilled.effect.declaration.blob} differs from pinned ${pinnedBlob}`,
+              )
             }
             outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
             continue

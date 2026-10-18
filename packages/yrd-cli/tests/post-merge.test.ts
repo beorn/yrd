@@ -21,8 +21,9 @@ import {
   appendChangeEvent,
   createEventStore,
   readBranchHistory,
+  readEventQueue,
+  queueRef,
   readConfig,
-  readIssueEffect,
   readStatus,
   submit,
   trailer,
@@ -587,9 +588,7 @@ it.each([
         runner.nudge(action)
         await runner[Symbol.asyncDispose]()
         const { history } = await readBranchHistory(store, "main", "task/first")
-        expect(history!.events.filter((event) => readIssueEffect(event) !== undefined)).toHaveLength(
-          restart === 0 ? 0 : 1,
-        )
+        expect(Object.values((await readEventQueue(store, "main")).issueEffects)).toHaveLength(restart === 0 ? 0 : 1)
         expect(history!.state.status).toBe("merged")
       }
       expect(existsSync(closeReady), "provider applied before its first failed reply").toBe(true)
@@ -647,10 +646,8 @@ it.each([
       })
       await runner[Symbol.asyncDispose]()
       const after = (await readBranchHistory(store, "main", "task/first")).history!
-      expect(after.state).toEqual({ ...before, tip: expect.any(String) })
-      const applied = after.events
-        .flatMap((event) => trailer(event, "Issue-Effect") ?? [])
-        .map((value) => JSON.parse(value) as Record<string, unknown>)
+      expect(after.state).toEqual(before)
+      const applied = Object.values((await readEventQueue(store, "main")).issueEffects).map(({ effect }) => effect)
       expect(applied).toContainEqual(
         expect.objectContaining({ mergedEvent, mergeSha, issueKey: "issue-first", semanticEnding: "completed" }),
       )
@@ -702,8 +699,7 @@ it.each([
       expect(calls[0]).toEqual(calls[1])
       writeFileSync(closeRelease, "go")
       await Promise.all([first[Symbol.asyncDispose](), second[Symbol.asyncDispose]()])
-      const { history } = await readBranchHistory(store, "main", "task/first")
-      const effects = history!.events.flatMap((event) => readIssueEffect(event) ?? [])
+      const effects = Object.values((await readEventQueue(store, "main")).issueEffects).map(({ effect }) => effect)
       expect(effects).toHaveLength(1)
       expect(effects[0]!.providerId).toBe(calls[0]![2])
       expect(readFileSync(closeCalls, "utf8").trim().split("\n")).toHaveLength(2)
@@ -716,14 +712,18 @@ it.each([
       let firstAppends = 0
       const fault =
         mode === "append-conflict"
-          ? new Conflict("fixture CAS lost", { refs: ["refs/yrd/main/changes/task/first"] })
+          ? new Conflict("fixture CAS lost", { refs: [queueRef("main")] })
           : new Error("fixture permanent append failure")
       const faultStore = {
         ...store,
         backend: {
           ...store.backend,
           publish: async (...args: Parameters<typeof publish>) => {
-            if (args[1].some((update) => update.ref.endsWith("/task/first"))) {
+            // Only the first provider action loses its publication; the second still records normally.
+            if (
+              args[1].some((update) => update.ref === queueRef("main")) &&
+              readFileSync(closeCalls, "utf8").trim().split("\n").length === 1
+            ) {
               firstAppends++
               if (mode === "append-lost-reply" && firstAppends === 1) {
                 await publish(...args)
@@ -753,9 +753,11 @@ it.each([
       await runner[Symbol.asyncDispose]()
       expect(firstAppends).toBe(mode === "append-conflict" ? 2 : 1)
       const { history } = await readBranchHistory(store, "main", "task/first")
-      expect(history!.events.filter((event) => trailer(event, "Issue-Effect") !== undefined)).toHaveLength(
-        mode === "append-error" ? 0 : 1,
-      )
+      expect(
+        Object.values((await readEventQueue(store, "main")).issueEffects).filter(
+          ({ effect }) => effect.mergedEvent === history!.state.ending!.id,
+        ),
+      ).toHaveLength(mode === "append-error" ? 0 : 1)
       expect(readFileSync(closeCalls, "utf8").trim().split("\n")).toHaveLength(2)
       if (mode === "append-error") expect(diagnostics.join(" ")).toContain("fixture permanent append failure")
       return
@@ -765,6 +767,7 @@ it.each([
       expect(pid).toBeGreaterThan(0)
       expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }))
       expect(diagnostics.join(" ")).toContain("stopped: queue shutdown fixture")
+      expect((await readEventQueue(store, "main")).issueEffects).toEqual({})
       for (const branch of ["task/first", "task/second"]) {
         const { history } = await readBranchHistory(store, "main", branch)
         expect(history!.events.flatMap((event) => trailer(event, "Issue-Effect") ?? [])).toEqual([])
@@ -839,7 +842,9 @@ it.each([
                   for (const branch of ["task/first", "task/second"]) {
                     const { history } = await readBranchHistory(store, "main", branch)
                     expect(
-                      history!.events.filter((event) => trailer(event, "Issue-Effect") !== undefined),
+                      Object.values((await readEventQueue(store, "main")).issueEffects).filter(
+                        ({ effect }) => effect.mergedEvent === history!.state.ending!.id,
+                      ),
                     ).toHaveLength(1)
                   }
                 },
@@ -906,11 +911,11 @@ it.each([
     const byBranch = new Map(
       ["task/first", "task/second", "task/refs"].map((branch, index) => [branch, effects[index]!.history!]),
     )
+    const completed = Object.values((await readEventQueue(store, "main")).issueEffects)
     const durable = (branch: string) =>
-      byBranch.get(branch)!.events.flatMap((event) => {
-        const value = trailer(event, "Issue-Effect")
-        return value === undefined ? [] : [JSON.parse(value) as Record<string, unknown>]
-      })
+      completed
+        .filter(({ effect }) => effect.mergedEvent === byBranch.get(branch)!.state.ending!.id)
+        .map(({ effect }) => effect)
     for (const [branch, key] of [
       ["task/first", "issue-first"],
       ["task/second", "issue-second"],
@@ -973,8 +978,8 @@ it.each([
       await seed(["--git-dir", remote, "gc", "--prune=now"])
       await git(["gc", "--prune=now"])
       expect(
-        (await readBranchHistory(store, "main", "task/first")).history!.events.some(
-          (event) => trailer(event, "Issue-Effect") !== undefined,
+        Object.values((await readEventQueue(store, "main")).issueEffects).some(
+          ({ effect }) => effect.mergedEvent === reading.history!.state.ending!.id,
         ),
       ).toBe(true)
     }
@@ -1045,9 +1050,9 @@ it.each([
     )
     if (mode === "blob-mismatch") {
       const reading = await readBranchHistory(store, "main", "task/first")
-      const applied = reading
-        .history!.events.map((event) => readIssueEffect(event))
-        .find((effect) => effect !== undefined)!
+      const applied = Object.values((await readEventQueue(store, "main")).issueEffects).find(
+        ({ effect }) => effect.mergedEvent === reading.history!.state.ending!.id,
+      )!.effect
       const wrongBlob = (await git(["rev-parse", `${applied.mergeSha}:.yrd.yml`])).trim()
       expect(wrongBlob).not.toBe(applied.declaration.blob)
       await appendChangeEvent(store, "main", "task/first", reading.history!.state.tip!, {

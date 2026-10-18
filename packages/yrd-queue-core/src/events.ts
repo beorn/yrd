@@ -1551,7 +1551,13 @@ export type WriteQueueEvent =
   | Readonly<{ type: "resumed"; reason: string; by: string; at: Date }>
   | Readonly<{ type: "observed"; commit: string; branch?: string; by: string; at: Date }>
   | Readonly<{ type: "notified"; notice: NoticeWrite; issueEffect?: never; by: string; at: Date }>
-  | Readonly<{ type: "notified"; issueEffect: AppliedIssueEffect; notice?: never; by: typeof QUEUE_RUN_WRITER; at: Date }>
+  | Readonly<{
+      type: "notified"
+      issueEffect: AppliedIssueEffect
+      notice?: never
+      by: typeof QUEUE_RUN_WRITER
+      at: Date
+    }>
   | Readonly<{ type: "notify-floors"; floors: NotifyFloorsSnapshot; by: string; at: Date }>
 
 const STUCK_RELEASE_PREFIX = "yrd-stuck-release:"
@@ -1584,9 +1590,10 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
     }
     if (write.type === "observed") existing = current.observed[write.commit]?.id
     if (write.type === "notified") {
-      existing = write.issueEffect === undefined
-        ? current.notices[write.notice.key]?.id
-        : current.issueEffects[write.issueEffect.providerId]?.id
+      existing =
+        write.issueEffect === undefined
+          ? current.notices[write.notice.key]?.id
+          : current.issueEffects[write.issueEffect.providerId]?.id
     }
     if (write.type === "notify-floors") {
       // A CAS retry folds the chain again; a snapshot already at this exact tip is the same write, not a second one.
@@ -1604,7 +1611,14 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
       keeps = [write.commit]
     } else if (write.type === "notified" && write.issueEffect !== undefined) {
       const anchor = await readRetainedEvent(chain, write.issueEffect.mergedEvent)
-      assertIssueEffectAnchor(ref, "pending", write.issueEffect, anchor, new Map(events.map((event, index) => [event.id, index])), events.length)
+      assertIssueEffectAnchor(
+        ref,
+        "pending",
+        write.issueEffect,
+        anchor,
+        new Map(events.map((event, index) => [event.id, index])),
+        events.length,
+      )
       details.push([EVENT_TRAILERS.issueEffect, JSON.stringify(checkedIssueEffect(write.issueEffect, ref))])
       keeps = [write.issueEffect.mergedEvent]
     } else if (write.type === "notified") {
