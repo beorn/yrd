@@ -38,8 +38,10 @@ import {
   readConfig,
   readChangeEvents,
   readEventQueue,
+  formatRunnerClaim,
   pauseRef,
   queueRef,
+  runnerRef,
   writeQueueEvent,
   readJournals,
   submit,
@@ -407,11 +409,14 @@ describe("event queue observation refusals", () => {
     )
     lock(startedAt - 2_000)
     const provisioning = await list()
-    expect(provisioning.state).toBe("provisioning")
+    // The word is no longer read from the lock, so the state reads
+    // idle; the not-yet-written relabel now stands on the run-owned proof in
+    // projectionFallbackReport alone (open journal, lock at or before start).
+    expect(provisioning.state).toBe("idle")
     expect(provisioning.projectionFallback).toMatchObject({
       run: pending,
       reason: "not-yet-written",
-      runnerState: "provisioning",
+      runnerState: "idle",
     })
 
     // The same run finished (it wrote `remote-calls`) while a newer round holds
@@ -420,12 +425,15 @@ describe("event queue observation refusals", () => {
     writeFileSync(join(logs, `${pending}.jsonl`), completedLines.join("\n") + "\n")
     lock(startedAt + 60_000)
     const newerRound = await list()
-    expect(newerRound.state).toBe("provisioning")
+    // The newer round's lock body no longer supplies the word at all,
+    // so the state is the journal's own reading and the missing projection
+    // carries no runnerState context.
+    expect(newerRound.state).toBe("idle")
     expect(newerRound.projectionFallback).toMatchObject({
       run: pending,
       reason: "missing",
-      runnerState: "provisioning",
     })
+    expect(newerRound.projectionFallback?.runnerState).toBe("idle")
 
     // The completed run's OWN lock body still on disk (the between-rounds case):
     // the lock predates the run's start, and the closing row still decides.
@@ -434,8 +442,8 @@ describe("event queue observation refusals", () => {
     expect(betweenRounds.projectionFallback).toMatchObject({
       run: pending,
       reason: "missing",
-      runnerState: "provisioning",
     })
+    expect(betweenRounds.projectionFallback?.runnerState).toBe("idle")
 
     // The same run finished with an unreadable trace: run.ts replaces the
     // closing `remote-calls` row with a warning under that subject, and that is
@@ -463,8 +471,49 @@ describe("event queue observation refusals", () => {
     expect(unreadableTrace.projectionFallback).toMatchObject({
       run: pending,
       reason: "missing",
-      runnerState: "provisioning",
     })
+    expect(unreadableTrace.projectionFallback?.runnerState).toBe("idle")
+  })
+
+  // Queue list built the claim-bearing runner one line above the state
+  // derivation and then read the state from the claim-less local facts, so the
+  // JSON printed the published claim beside a state word that never saw it —
+  // measured on hh-dev as state "provisioning" over claim State "idle" in five
+  // consecutive samples, the only provisioning evidence being a lingering
+  // round-lock body. The state in the document must be the merged runner's.
+  it("reads the list JSON runner state from the claim-bearing runner, not the local facts", async () => {
+    const w = await world()
+    await change(w, "task/claim-state", false)
+    await drain(w)
+    // The runner's own published claim, fresh, saying idle: a parentless root
+    // commit on the runner ref, in the publisher's own format.
+    const now = new Date()
+    const claim = formatRunnerClaim({
+      host: "queue-host",
+      pid: process.pid,
+      started: now.toISOString(),
+      at: now.toISOString(),
+      beatMs: 60_000,
+      state: "idle",
+      since: now.toISOString(),
+    })
+    const tree = (await w.git(["hash-object", "-t", "tree", "/dev/null"])).trim()
+    const claimCommit = (await w.git(["commit-tree", tree, "-m", claim])).trim()
+    await w.git(["push", "--quiet", "origin", `${claimCommit}:${runnerRef("main")}`])
+    // The between-rounds residue: a released round's lock body, still naming a
+    // live pid (this process), left on disk after the round ended.
+    writeFileSync(
+      join(w.workdir, "round.lock"),
+      JSON.stringify({ pid: process.pid, command: "yrd", since: new Date(Date.now() - 60_000).toISOString() }),
+    )
+    const out = capture(w.work)
+    expect(await coreQueueCommand(w.work, out.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    const listed = JSON.parse(out.stdout()) as {
+      runner: { state: string; published?: { signal: string; claim?: { State: string } } }
+    }
+    expect(listed.runner.published?.signal).toBe("fresh")
+    expect(listed.runner.state).toBe(listed.runner.published?.claim?.State)
+    expect(listed.runner.state).not.toBe("provisioning")
   })
 
   // AC (28918): a source-changed artifact is repaired ONLY once its round's

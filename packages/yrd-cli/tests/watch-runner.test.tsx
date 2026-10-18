@@ -28,6 +28,7 @@ import {
 import { SERVICE } from "../src/queue-health.ts"
 import { clock } from "../src/watch-format.ts"
 import {
+  projectionFallbackReport,
   readRunnerFacts,
   readRunnerService,
   runnerLine,
@@ -117,6 +118,29 @@ function workdirWith(
   }
   return workdir
 }
+
+describe("projectionFallbackReport, the not-yet-written proof", () => {
+  const missing = { run: "q-x", reason: "missing" as const, detail: "the projection was missing" }
+  const lock = { pid: 99999, since: new Date(NOW.getTime() - 60_000).toISOString() }
+  const run = (over: Partial<NonNullable<RunnerFacts["latest"]>>): NonNullable<RunnerFacts["latest"]> => {
+    const base: NonNullable<RunnerFacts["latest"]> = { alive: true, id: "q-x", lastWriteAt: NOW, startedAt: NOW }
+    return { ...base, ...over }
+  }
+
+  it("relabels only while the writer is live: a crashed unclosed run stays missing", () => {
+    const crashed: RunnerFacts = {
+      journalDir: "/w/logs",
+      service: BEATING,
+      roundLockLastHolder: lock,
+      latest: run({ alive: false }),
+    }
+    expect(projectionFallbackReport(missing, crashed, "stopped")?.reason).toBe("missing")
+    const live: RunnerFacts = { ...crashed, latest: run({ alive: true }) }
+    expect(projectionFallbackReport(missing, live, "idle")?.reason).toBe("not-yet-written")
+    const ended: RunnerFacts = { ...crashed, latest: run({ alive: true, ended: true }) }
+    expect(projectionFallbackReport(missing, ended, "idle")?.reason).toBe("missing")
+  })
+})
 
 describe("readRunnerFacts", () => {
   // AC3 requires a growth witness, not one fixed payload. Both production
@@ -908,6 +932,54 @@ describe("runnerWord, the one word", () => {
     // The age itself is still READ — the row's second line reports it — so the
     expect(runnerLine(hours, NOW).detail).toMatch(/round started \d\d:\d\d/u)
   })
+
+  /**
+   * @failure `yrd queue list --json` printed runner.state "provisioning" in
+   *          five consecutive samples while the runner's own published claim
+   *          in the same document read idle. The only evidence of
+   *          provisioning was a lingering round-lock BODY naming a live
+   *          service pid: the body is a claim, never the flock, so a released
+   *          round leaves the word behind between rounds. Without a claim
+   *          the state must NOT read provisioning; the body is context only.
+   * @level   l1
+   */
+  it("never reads provisioning from a lingering round lock alone on the no-claim paths", () => {
+    const lock = {
+      pid: 99999,
+      since: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
+    }
+    // Beating service, a finished round's journal, a lock body left behind.
+    expect(runnerWord({ ...facts({ alive: true }), roundLockLastHolder: lock }, false)).toBe("idle")
+    // No journal at all: an empty local reading, not a phase.
+    const noJournal: RunnerFacts = {
+      journalDir: "/w/logs",
+      absent: "none",
+      service: { kind: "absent", why: "none" },
+      roundLockLastHolder: lock,
+    }
+    expect(runnerWord(noJournal, false)).toBe("unpublished")
+    // The hand-runner edge: the run's own pid is the liveness fact, not the lock.
+    const hand: RunnerService = { kind: "absent", why: "no health document at /w/service-health.json" }
+    expect(runnerWord({ ...facts({ alive: true }, hand), roundLockLastHolder: lock }, true)).toBe("checking")
+    expect(runnerWord({ ...facts({ alive: false }, hand), roundLockLastHolder: lock }, false)).toBe("idle")
+    // A fresh published claim still outranks the lock in both directions.
+    const claimed: RunnerFacts = {
+      ...facts({ alive: true }),
+      roundLockLastHolder: lock,
+      published: {
+        signal: "fresh",
+        claim: {
+          Runner: "queue-host/42",
+          Started: NOW.toISOString(),
+          At: NOW.toISOString(),
+          Beat: "60000ms",
+          State: "idle",
+          Since: NOW.toISOString(),
+        },
+      },
+    }
+    expect(runnerWord(claimed, false)).toBe("idle")
+  })
 })
 
 describe("the runner's row", () => {
@@ -1391,8 +1463,7 @@ describe("the runner's row", () => {
       const idleWithLock: RunnerFacts = {
         journalDir: "/w/logs",
         service: BEATING,
-        roundLockHolder: {
-          command: "bun yrd queue up",
+        roundLockLastHolder: {
           pid: 99999,
           since: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
         },
@@ -1404,9 +1475,13 @@ describe("the runner's row", () => {
         },
       }
       const line = runnerLine(idleWithLock, NOW, { waiting: 3 })
-      expect(line.state).toBe("provisioning")
-      expect(line.duration).toBe("provisioning 10:00")
-      expect(line.holds).toBe(`runner since ${clock(NOW)} · provisioning 10:00`)
+      // The word half of 25630 is superseded: a lock body left between
+      // rounds is named context on the row, never the word — without a
+      // claim the state must not read provisioning from it.
+      expect(line.state).toBe("idle")
+      expect(line.duration).toBe("idle 0:00")
+      expect(line.holds).toContain("lock body names pid 99999")
+      expect(line.holds).toContain("the body's claim, not measured ownership")
     })
   })
 })

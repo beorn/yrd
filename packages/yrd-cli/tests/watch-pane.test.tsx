@@ -4571,29 +4571,30 @@ describe("runner steps, lock guard, and detail step list (25716)", () => {
     mergeApp.unmount()
   })
 
-  it("RUNNER box never reads idle while a round lock is held", async () => {
+  it("RUNNER box reads idle over a lingering round lock, with the body named as context", async () => {
     const layout = listLayout([], 120, NOW)
     const snap = snapshot({
       runner: {
         journalDir: "/w/logs",
         service: { kind: "beating", state: "healthy" },
-        roundLockHolder: {
-          command: "bun yrd queue up",
+        roundLockLastHolder: {
           pid: 88888,
           since: NOW.toISOString(),
         },
       },
     })
     const runner = runnerOf(snap, NOW)
-    expect(runner.state).not.toBe("idle")
-    expect(runner.state).toBe("provisioning")
+    expect(runner.state).toBe("idle")
+    expect(runner.state).not.toBe("provisioning")
     expect(runner.holds).not.toContain("round lock held by pid")
-    expect(runner.holds).toContain("provisioning 0:00")
+    expect(runner.holds).toContain("idle 0:00")
+    expect(runner.holds).toContain("lock body names pid 88888")
+    expect(runner.holds).toContain("the body's claim, not measured ownership")
 
     const app = render(<RunnerTitledBox line={runner} snapshot={snap} layout={layout} />, { cols: 120, rows: 5 })
     await settle(app)
-    expect(app.text).toContain("provisioning")
-    expect(app.text).not.toContain("idle")
+    expect(app.text).toContain("idle")
+    expect(app.text).not.toContain("provisioning")
     expect(app.text).not.toContain("round lock held by pid")
     app.unmount()
   })
@@ -5161,13 +5162,12 @@ describe("bead 25630 watch rulings", () => {
   })
 
   describe("row 21: RUNNER line formatting and two-line wrapping", () => {
-    it("formats roundLockHolder without warning language", () => {
+    it("formats the lock body claim without warning language", () => {
       const snap = snapshot({
         runner: {
           journalDir: "/w/logs",
           service: { kind: "beating", state: "healthy", since: new Date(NOW.getTime() - 120_000) },
-          roundLockHolder: {
-            command: "bun yrd queue up",
+          roundLockLastHolder: {
             pid: 12345,
             since: new Date(NOW.getTime() - 15_000).toISOString(),
           },
@@ -5176,7 +5176,8 @@ describe("bead 25630 watch rulings", () => {
       const runner = runnerOf(snap, NOW)
       expect(runner.holds).not.toContain("round lock held by pid")
       expect(runner.holds).toContain("runner since")
-      expect(runner.holds).toContain("provisioning 0:15")
+      expect(runner.holds).toContain("idle 0:00")
+      expect(runner.holds).toContain("lock body names pid 12345")
     })
 
     it("RunnerRow wraps long task text across two lines without truncation", () => {
