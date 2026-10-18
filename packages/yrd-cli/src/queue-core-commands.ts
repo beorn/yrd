@@ -123,6 +123,7 @@ import {
   prepareSubmit,
   inspectSubmitAtHead,
   preparePinCarrier,
+  PinCarrierConflict,
   freshnessLine,
   readRemoteCommit,
   readRemoteCommits,
@@ -149,6 +150,7 @@ import {
   type QueueReadStore,
   type OverrideTable,
   type PinCarrierPin,
+  type PreparedPinCarrier,
   notifyOutsideRound,
   notifyRetiredRoot,
   notifyEnvRetired,
@@ -2431,14 +2433,24 @@ export async function coreQueueCommand(
         if (request.issue === undefined) throw new Error("--gitlink needs --issue <id>")
         if (options.populateReference !== true) throw new Error("--gitlink needs the queue-owned clone")
         const canonicalIssue = request.issue
-        const prepared = await preparePinCarrier({
-          git,
-          repo,
-          target: config.target,
-          issue: canonicalIssue,
-          pins: request.pins,
-          env: env ?? process.env,
-        })
+        let prepared: PreparedPinCarrier
+        try {
+          prepared = await preparePinCarrier({
+            git,
+            repo,
+            target: config.target,
+            issue: canonicalIssue,
+            pins: request.pins,
+            env: env ?? process.env,
+          })
+        } catch (error) {
+          if (!(error instanceof PinCarrierConflict)) throw error
+          const queue = formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))
+          io.stderr(
+            `yrd: pin carrier conflicts with ${error.branch}; inspect: ${formatQueueCommand(io, queue, ["queue", "show", error.branch])}\n`,
+          )
+          return 2
+        }
         const submission = {
           branch: prepared.branch,
           submitter: request.submitter,

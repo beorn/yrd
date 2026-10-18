@@ -20,12 +20,14 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { spawnSync } from "node:child_process"
+import { shellQuote } from "git-super/shell-command"
 import { afterAll, describe, expect, it } from "vitest"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
-import { createLocalEventStore, freshWorktree, readRunLog, readStatus } from "@yrd/queue-core"
+import { createLocalEventStore, freshWorktree, preparePinCarrier, readRunLog, readStatus } from "@yrd/queue-core"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -180,8 +182,9 @@ async function world(): Promise<World> {
   return { root, remote, work, base, components }
 }
 
-const refs = async (remote: string): Promise<string> =>
-  gitIn(remote)(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/pin", "refs/yrd"])
+// An empty prefix list asks Git for every ref, for journeys that must retain unrelated heads too.
+const refs = async (remote: string, prefixes: readonly string[] = ["refs/heads/pin", "refs/yrd"]): Promise<string> =>
+  gitIn(remote)(["for-each-ref", "--format=%(refname) %(objectname)", ...prefixes])
 
 const remoteHead = async (remote: string, branch: string): Promise<string> =>
   (await gitIn(remote)(["rev-parse", `refs/heads/${branch}`])).trim()
@@ -764,30 +767,111 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     const w = await world()
     const one = w.components[0]!
     const git = gitIn(w.work)
-    await git(["checkout", "--quiet", "-b", "task/manual-pin", "main"])
+    const branch = "task/manual'pin"
+    const queue = `${w.remote}#release`
+    await git(["branch", "release", "main"])
+    await git(["push", "--quiet", "origin", "main:refs/heads/release"])
+    await birthEventQueue(w.work, "release", { localStore: false })
+    await git(["checkout", "--quiet", "-b", branch, "main"])
     const child = gitIn(join(w.work, one.path))
     await child(["fetch", "--quiet", "origin", "main"])
     await child(["checkout", "--quiet", one.held])
     await git(["add", one.path])
     await git(["commit", "--quiet", "-m", "pin one manually\n\nRefs: 25804"])
     await git(["checkout", "--quiet", "main"])
-    const opened = await yrd(w.work, "submit", "task/manual-pin", "--issue", "25804", "--submitter", "@dev/2")
+    const opened = await yrd(w.work, "submit", branch, "--issue", "25804", "--submitter", "@dev/2", "--queue", queue)
     expect(opened.exitCode, opened.report).toBe(0)
 
-    const before = await refs(w.remote)
-    const duplicate = await yrd(
+    const before = await refs(w.remote, [])
+    expect(before).toContain("refs/heads/main ")
+    expect(before).toContain("refs/heads/release ")
+    expect(before).toContain(`refs/heads/${branch} `)
+    // The requested generated carrier differs from the conflict. Existing substring
+    // checks cannot detect a recipe for that wrong branch, queue, host or cwd.
+    let stderr = ""
+    let recipe = ""
+    const commands: Array<{ argv: readonly string[]; cwd: string }> = []
+    const code = await runYrdProcess(
+      [
+        process.execPath,
+        "/usr/local/bin/yrd",
+        "submit",
+        "--gitlink",
+        `${one.path}=${one.held}`,
+        "--issue",
+        "25804",
+        "--submitter",
+        "@dev/2",
+        "--queue",
+        queue,
+      ],
+      {
+        localBranchProtections: null,
+        color: false,
+        cwd: w.work,
+        stdout: () => {},
+        stderr: (text) => {
+          stderr += text
+        },
+        formatYrdCommand: (argv, cwd) => {
+          commands.push({ argv: [...argv], cwd })
+          recipe = `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`
+          return recipe
+        },
+      },
+    )
+    expect(code, stderr).toBe(2)
+    expect(commands, stderr).toEqual([{ argv: ["queue", "show", branch, "--queue", queue], cwd: w.work }])
+    expect(stderr).toContain(`inspect: ${recipe}`)
+    // Execute exactly the printed recipe from another directory, using the real CLI.
+    const inspected = spawnSync("/bin/sh", ["-c", recipe], {
+      cwd: w.root,
+      env: process.env,
+      encoding: "utf8",
+      timeout: 30000,
+    })
+    expect(inspected.error).toBeUndefined()
+    expect(inspected.status, inspected.stderr).toBe(0)
+    expect(inspected.stdout).toContain(branch)
+    expect(await refs(w.remote, [])).toBe(before)
+
+    // The public core fact preserves the original diagnostic bytes at both
+    // refusal sites; the CLI can render an action without parsing those bytes.
+    const prepare = () =>
+      preparePinCarrier({
+        git,
+        repo: w.work,
+        target: { remote: "origin", branch: "release" },
+        issue: "25804",
+        pins: [{ path: one.path, sha: one.held }],
+        env: process.env,
+      })
+    await expect(prepare()).rejects.toMatchObject({
+      branch,
+      message: `pin set already has open change ${branch}; inspect yrd queue show ${branch}`,
+    })
+    expect(await refs(w.remote, [])).toBe(before)
+    expect((await yrd(w.work, "withdraw", branch, "--queue", queue)).exitCode).toBe(0)
+    const heldDraft = `pin/vendor-one/${one.held.slice(0, 12)}`
+    await git(["push", "--quiet", "origin", `main:refs/heads/${heldDraft}`])
+    const draftRefs = await refs(w.remote, [])
+    await expect(prepare()).rejects.toMatchObject({
+      branch: heldDraft,
+      message: `${heldDraft} is already held as a draft; inspect yrd queue show ${heldDraft}`,
+    })
+    const blockedDraft = await yrd(
       w.work,
       "submit",
       "--gitlink",
       `${one.path}=${one.held}`,
       "--issue",
       "25804",
-      "--submitter",
-      "@dev/2",
+      "--queue",
+      queue,
     )
-    expect(duplicate.exitCode, duplicate.report).toBe(2)
-    expect(duplicate.stderr, duplicate.report).toContain("task/manual-pin")
-    expect(await refs(w.remote)).toBe(before)
+    expect(blockedDraft.exitCode, blockedDraft.report).toBe(2)
+    expect(blockedDraft.stderr).toContain(`'queue' 'show' '${heldDraft}' '--queue' '${queue}'`)
+    expect(await refs(w.remote, [])).toBe(draftRefs)
   }, 90_000)
 
   it("refuses an already-open pin when the pin was moved in a multi-commit ordinary change", async () => {
