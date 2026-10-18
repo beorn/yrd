@@ -4504,16 +4504,23 @@ describe("a queue is the selected origin branch carrying config", () => {
       pause.stderr(),
     ).toBe(0)
     const accepted = capture(repo)
+    const formattedCommands: { argv: readonly string[]; cwd: string }[] = []
     expect(
-      await runYrdProcess(
-        ["bun", "yrd", "submit", "--queue", `${destination}#main`, "--dry-run", "--json"],
-        accepted.io,
-      ),
+      await runYrdProcess(["bun", "yrd", "submit", "--queue", `${destination}#main`, "--dry-run", "--json"], {
+        ...accepted.io,
+        formatYrdCommand: (argv, cwd) => {
+          formattedCommands.push({ argv, cwd })
+          return "FORMATTED_DESTINATION_RESUME"
+        },
+      }),
       accepted.stderr(),
     ).toBe(0)
     expect(accepted.stderr()).toContain("inspect destination")
     expect(accepted.stderr()).toContain("paused by @dev/3 since")
-    expect(accepted.stderr()).toContain(`yrd queue resume --queue '${destination}#main' --reason '<text>'`)
+    expect(accepted.stderr()).toContain("FORMATTED_DESTINATION_RESUME")
+    expect(formattedCommands).toEqual([
+      { argv: ["queue", "resume", "--reason", "<why>", "--queue", `${destination}#main`], cwd: repo },
+    ])
     expect(JSON.parse(accepted.stdout())).toMatchObject({
       dryRun: true,
       stopped: { by: "@dev/3", cause: "operator", change: null },

@@ -19,6 +19,7 @@ import { RunnerTitledBox, runnerOf } from "../src/watch-frame.tsx"
 import { NowProvider } from "../src/watch-clock.ts"
 
 const NOW = new Date("2026-09-24T12:00:00.000Z")
+const layoutFormatCommand = (argv: readonly string[]): string => ["yrd", ...argv].join(" ")
 
 function fgOf(token: string): string {
   const app = render(<Text color={token}>X</Text>, { cols: 4, rows: 1 })
@@ -114,6 +115,7 @@ describe("25556: seven rows on yrd watch", () => {
           },
         })}
         live={false}
+        formatCommand={layoutFormatCommand}
       />,
       { cols: 140, rows: 30 },
     )
@@ -140,6 +142,7 @@ describe("25556: seven rows on yrd watch", () => {
           },
         })}
         live={false}
+        formatCommand={layoutFormatCommand}
       />,
       { cols: 140, rows: 30 },
     )
