@@ -3213,7 +3213,8 @@ describe("the queue-format boundary", () => {
   it.each(["valid", "unkept", "wrong merge", "not merged", "foreign queue", "wrong writer", "duplicate"])(
     "reads retained issue effects on the queue chain: %s",
     async (variant) => {
-      const { store, location } = remoteMemStore(`yrd-queue-issue-effect-${variant}`)
+      const { store, location: remoteLocation } = remoteMemStore(`yrd-queue-issue-effect-${variant}`)
+      const location = { ...remoteLocation, fetch: ["refs/heads/lab"] }
       const target = await open({ ...store, ref: "refs/heads/lab" })
       const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
       const at = new Date("2026-09-22T14:00:00.000Z")

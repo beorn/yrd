@@ -1322,8 +1322,9 @@ export async function readEventQueueWithChain(
   queue: string,
 ): Promise<Readonly<{ queue: EventQueue; events: readonly Event[] }>> {
   const ref = queueRef(queue)
-  const events = await readEventChain(await openEvents({ ...store, ref }))
-  return { queue: await eventQueueFromHistory(store, queue, events), events }
+  const chain = await openEvents({ ...store, ref })
+  const events = await readEventChain(chain)
+  return { queue: await eventQueueFromHistory(store, queue, events, chain), events }
 }
 
 /** One projection and validation policy, independent of how its exact tip was acquired. */
@@ -1331,16 +1332,16 @@ async function eventQueueFromHistory(
   store: QueueReadStore,
   queue: string,
   events: readonly Event[],
+  chain: Awaited<ReturnType<typeof openEvents>>,
 ): Promise<EventQueue> {
   const ref = queueRef(queue)
   const projected = projectEventQueue(events, ref, store.repo)
   const positions = new Map(events.map((event, index) => [event.id, index]))
   // The acquired queue ref retains these exact objects through extra parents.
   // Decode only each immutable anchor; never discover or fetch other branch refs.
-  const anchors = await openEvents({ ...store, ref, remote: undefined, fetch: undefined })
   const readAnchors = new Map<string, Event>()
   for (const { id, effect } of Object.values(projected.issueEffects)) {
-    const anchor = readAnchors.get(effect.mergedEvent) ?? (await readRetainedEvent(anchors, effect.mergedEvent))
+    const anchor = readAnchors.get(effect.mergedEvent) ?? (await readRetainedEvent(chain, effect.mergedEvent))
     if (anchor.type !== "merged") {
       throw new Error(`${ref}: issue effect ${id} does not retain an actual merged event ${effect.mergedEvent}`)
     }
@@ -1411,10 +1412,11 @@ export async function readEventOpsWithRefs(
     if (tip === undefined) {
       throw new Error(`${where}: required queue ref ${ref} is missing; admission refused. Check the queue declaration`)
     }
-    projected =
-      knownQueue?.tip === tip
-        ? knownQueue
-        : await eventQueueFromHistory(store, queue, await readEventChain(await openEvents({ ...store, ref }), tip))
+    if (knownQueue?.tip === tip) projected = knownQueue
+    else {
+      const chain = await openEvents({ ...store, ref })
+      projected = await eventQueueFromHistory(store, queue, await readEventChain(chain, tip), chain)
+    }
   } else if (knownQueue !== undefined && store.remote === undefined) {
     const chain = await openEvents({ ...store, ref: queueRef(queue) })
     projected = (await chain.head()) === knownQueue.tip ? knownQueue : await readEventQueue(store, queue)
