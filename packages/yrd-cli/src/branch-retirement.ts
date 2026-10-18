@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, realpathSync } from "node:fs"
+import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { archiveRefFor, ensureArchiveRef, findArchiveRefFor, readArchiveRows } from "git-super/archive-ref"
 import { readCommitSubmodules } from "git-super/commit-graph"
@@ -59,6 +59,135 @@ export async function readBranchProtections(
     throw new Error("localBranchProtections authority reader is missing; standalone callers must explicitly pass null")
   }
   return io.localBranchProtections(input)
+}
+
+/**
+ * Git's admin directory for one linked checkout (`<common>/worktrees/<name>`).
+ * This reads that directory's `gitdir` pointer only. It does not open the checkout or its module stores.
+ */
+function linkedWorktreeAdmin(
+  commonDirectory: string,
+  checkoutPath: string,
+): { adminDirectory: string | null; adminDirectoryExists: boolean } {
+  const parent = join(commonDirectory, "worktrees")
+  let names: string[]
+  try {
+    names = readdirSync(parent)
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+      return { adminDirectory: null, adminDirectoryExists: false }
+    }
+    throw cause
+  }
+  const needle = join(checkoutPath, ".git")
+  for (const name of names) {
+    const adminDirectory = join(parent, name)
+    let pointed: string
+    try {
+      pointed = readFileSync(join(adminDirectory, "gitdir"), "utf8").trim()
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue
+      throw cause
+    }
+    if (pointed === needle) return { adminDirectory, adminDirectoryExists: true }
+  }
+  return { adminDirectory: null, adminDirectoryExists: false }
+}
+
+type GoneCheckout = { path: string; adminDirectory: string | null; adminDirectoryExists: boolean }
+
+type CheckoutDiscovery = {
+  selection: GitSelection
+  env: NodeJS.ProcessEnv | undefined
+  failed: { repo: string; path: string; branch: string; head: string; reason: string; detail?: string }[]
+  notMaterialized: { repo: string; path: string; reason: "not-materialized" }[]
+  seenStores: Set<string>
+  seenCheckouts: Set<string>
+  stores: { repository: string; path: string; git: Git; commonDirectory: string; commit: string }[]
+  gone: GoneCheckout[]
+  authorCommon: string
+}
+
+function absoluteGitPath(repo: string, raw: string): string {
+  if (isAbsolute(raw)) return raw
+  return join(repo, raw)
+}
+
+function pathMissing(path: string): boolean {
+  try {
+    lstatSync(path)
+    return false
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return true
+    throw cause
+  }
+}
+
+function rememberGone(walk: CheckoutDiscovery, checkoutPath: string): void {
+  if (walk.gone.some((row) => row.path === checkoutPath)) return
+  walk.gone.push({ path: checkoutPath, ...linkedWorktreeAdmin(walk.authorCommon, checkoutPath) })
+}
+
+/** One registered checkout. A vanished root is gone; damage inside a root that is still there stays unreadable. */
+async function visitIssueCheckout(
+  walk: CheckoutDiscovery,
+  repository: string,
+  path: string,
+  commit: string,
+  moduleStore: string | undefined,
+  registeredRoot: string,
+  prunable?: string,
+): Promise<void> {
+  try {
+    if (repository === registeredRoot && (prunable !== undefined || pathMissing(repository))) {
+      rememberGone(walk, repository)
+      return
+    }
+    if (pathMissing(join(repository, ".git"))) {
+      if (moduleStore !== undefined && pathMissing(moduleStore)) {
+        walk.notMaterialized.push({ repo: repository, path, reason: "not-materialized" })
+        return
+      }
+      throw new Error(
+        `${repository}: checkout Git pointer is absent${moduleStore === undefined ? "" : `; existing module store ${moduleStore} cannot be inspected through it`}`,
+      )
+    }
+    const canonical = realpathSync(repository)
+    if (walk.seenCheckouts.has(canonical)) return
+    const childGit = gitIn(repository, undefined, walk.selection, { env: walk.env })
+    if (realpathSync((await childGit(["rev-parse", "--show-toplevel"])).trim()) !== canonical) {
+      throw new Error(`registered repository ${repository} is not materialized at its named path`)
+    }
+    const metadata = await inspectCheckoutGitMetadata(repository)
+    walk.seenCheckouts.add(canonical)
+    if (!walk.seenStores.has(metadata.commonDirectory)) {
+      walk.seenStores.add(metadata.commonDirectory)
+      walk.stores.push({ repository, path, git: childGit, commonDirectory: metadata.commonDirectory, commit })
+    }
+    for (const child of await readCommitSubmodules(seamProcess(childGit, repository), repository, commit)) {
+      await visitIssueCheckout(
+        walk,
+        join(repository, child.path),
+        path === "" ? child.path : `${path}/${child.path}`,
+        child.target,
+        join(metadata.gitDirectory, "modules", child.name),
+        registeredRoot,
+      )
+    }
+  } catch (cause) {
+    if (pathMissing(registeredRoot)) {
+      rememberGone(walk, registeredRoot)
+      return
+    }
+    walk.failed.push({
+      repo: repository,
+      path,
+      branch: "",
+      head: commit,
+      reason: "unreadable",
+      detail: String(cause),
+    })
+  }
 }
 
 /** The existing issue retirement walk, coordinated with component author stores before root removal. */
@@ -213,49 +342,17 @@ export async function retireIssueBranches(
       }
     }
   }
-  const missing = (path: string): boolean => {
-    try {
-      lstatSync(path)
-      return false
-    } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return true
-      throw cause
-    }
-  }
-  const visit = async (repository: string, path: string, commit: string, moduleStore?: string): Promise<void> => {
-    try {
-      if (missing(join(repository, ".git"))) {
-        if (moduleStore !== undefined && missing(moduleStore)) {
-          notMaterialized.push({ repo: repository, path, reason: "not-materialized" })
-          return
-        }
-        throw new Error(
-          `${repository}: checkout Git pointer is absent${moduleStore === undefined ? "" : `; existing module store ${moduleStore} cannot be inspected through it`}`,
-        )
-      }
-      const canonical = realpathSync(repository)
-      if (seenCheckouts.has(canonical)) return
-      const childGit = gitIn(repository, undefined, selection, { env })
-      if (realpathSync((await childGit(["rev-parse", "--show-toplevel"])).trim()) !== canonical) {
-        throw new Error(`registered repository ${repository} is not materialized at its named path`)
-      }
-      const metadata = await inspectCheckoutGitMetadata(repository)
-      seenCheckouts.add(canonical)
-      if (!seenStores.has(metadata.commonDirectory)) {
-        seenStores.add(metadata.commonDirectory)
-        stores.push({ repository, path, git: childGit, commonDirectory: metadata.commonDirectory, commit })
-      }
-      for (const child of await readCommitSubmodules(seamProcess(childGit, repository), repository, commit)) {
-        await visit(
-          join(repository, child.path),
-          path === "" ? child.path : `${path}/${child.path}`,
-          child.target,
-          join(metadata.gitDirectory, "modules", child.name),
-        )
-      }
-    } catch (cause) {
-      failed.push({ repo: repository, path, branch: "", head: commit, reason: "unreadable", detail: String(cause) })
-    }
+  const gone: GoneCheckout[] = []
+  const discovery: CheckoutDiscovery = {
+    selection,
+    env,
+    failed,
+    notMaterialized,
+    seenStores,
+    seenCheckouts,
+    stores,
+    gone,
+    authorCommon: absoluteGitPath(authorRepo, (await authorGit(["rev-parse", "--git-common-dir"])).trim()),
   }
   const targetFor = (candidate: Candidate) => {
     const key = `${candidate.commonDirectory}\0${candidate.remote}`
@@ -280,8 +377,20 @@ export async function retireIssueBranches(
     return target
   }
   try {
-    await visit(authorRepo, "", (await authorGit(["rev-parse", "HEAD"])).trim())
+    await visitIssueCheckout(
+      discovery,
+      authorRepo,
+      "",
+      (await authorGit(["rev-parse", "HEAD"])).trim(),
+      undefined,
+      authorRepo,
+    )
     for (const root of await registeredWorktrees(authorGit)) {
+      // Gone means this registered root itself is gone. An ENOENT inside a root that is still there is damage.
+      if (root.prunable !== undefined || pathMissing(root.path)) {
+        rememberGone(discovery, root.path)
+        continue
+      }
       if (root.head === undefined) {
         failed.push({
           repo: root.path,
@@ -291,7 +400,7 @@ export async function retireIssueBranches(
           reason: "unreadable",
           detail: "registered author worktree has no HEAD",
         })
-      } else await visit(root.path, "", root.head)
+      } else await visitIssueCheckout(discovery, root.path, "", root.head, undefined, root.path, root.prunable)
     }
     io.stderr(
       `yrd: issue cleanup will inspect ${stores.length} repository stores; ${notMaterialized.length} not materialized. Reading every registered worktree's component stores can take minutes.\n`,
@@ -536,6 +645,7 @@ export async function retireIssueBranches(
     // These unselected names explain a different binding; they are not child holds.
     kept: [...kept, ...mismatches],
     failed,
+    gone,
   }
   return report
 }

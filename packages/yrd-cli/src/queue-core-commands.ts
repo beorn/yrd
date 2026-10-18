@@ -1790,9 +1790,15 @@ export async function coreQueueCommand(
           io,
           options.json,
           report,
-          `issue ${report.issue}: inspected ${report.counts.inspected} repositories in ${authorRepo}, ${report.counts.notMaterialized} not materialized; eligible ${report.eligible.length}, retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}\n${report.mode}` +
+          `issue ${report.issue}: inspected ${report.counts.inspected} repositories in ${authorRepo}, ${report.counts.notMaterialized} not materialized; eligible ${report.eligible.length}, retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}, gone ${report.gone.length}\n${report.mode}` +
             report.notMaterialized
               .map((row) => `\nSkipped ${row.repo}: not materialized (checkout Git pointer and private store absent)`)
+              .join("") +
+            report.gone
+              .map(
+                (row) =>
+                  `\n${row.path}: gone (worktree admin directory ${row.adminDirectory ?? "not found"} ${row.adminDirectoryExists ? "still exists" : "is absent"}; module stores were not inspected)`,
+              )
               .join("") +
             report.excluded
               .map(

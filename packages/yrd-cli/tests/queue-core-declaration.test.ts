@@ -2031,17 +2031,17 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect(human.exit, human.out.stderr()).toBe(0)
         expect(human.out.stdout()).toContain(`Skipped ${join(absent, "child")}: not materialized`)
 
-        // A prunable root registration still needs a subject and holds every root.
+        // A registered root whose directory is already gone is gone. It does not fail the run or hold retirement.
         const missing = join(dirname(repo), "prunable-author")
         const saved = `${missing}-saved`
         await git(["worktree", "add", "--quiet", "--detach", missing, "HEAD"])
         fs.renameSync(missing, saved)
         try {
-          const stopped = await run(["--apply"])
-          expect(stopped.exit).toBe(1)
+          const stopped = await run(["--dry-run"])
+          expect(stopped.exit, stopped.out.stderr()).toBe(0)
           expect(JSON.parse(stopped.out.stdout())).toMatchObject({
-            failed: [expect.objectContaining({ repo: missing, reason: "unreadable" })],
-            kept: expect.arrayContaining([expect.objectContaining({ branch: rootBranch, reason: "held" })]),
+            failed: [],
+            gone: [expect.objectContaining({ path: missing, adminDirectoryExists: true })],
           })
           expect((await git(["rev-parse", `refs/heads/${rootBranch}`])).trim()).toBe(rootTip)
           expect((await childGit(["rev-parse", `refs/heads/${childBranch}`])).trim()).toBe(childTip)

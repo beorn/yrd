@@ -281,13 +281,20 @@ export function claimWorktrees(directory: string, pid: number = process.pid): vo
   writeFileSync(join(directory, RUN_PID), `${String(pid)}\n`)
 }
 
-export type RegisteredWorktree = Readonly<{ path: string; head?: string; branch?: string; locked?: string }>
+export type RegisteredWorktree = Readonly<{
+  path: string
+  head?: string
+  branch?: string
+  locked?: string
+  /** Set when Git already calls the checkout prunable. The text is Git's reason, and it may be empty. */
+  prunable?: string
+}>
 
 /** Git's own registry, shared by environment list/close and queue cleanup.
  * NUL-delimited fields preserve paths containing whitespace or newlines. */
 export async function registeredWorktrees(git: Git): Promise<readonly RegisteredWorktree[]> {
   const rows: RegisteredWorktree[] = []
-  let current: { path?: string; head?: string; branch?: string; locked?: string } = {}
+  let current: { path?: string; head?: string; branch?: string; locked?: string; prunable?: string } = {}
   const take = (): void => {
     if (current.path !== undefined) rows.push({ ...current, path: current.path })
     current = {}
@@ -301,6 +308,8 @@ export async function registeredWorktrees(git: Git): Promise<readonly Registered
     else if (field.startsWith("branch ")) current.branch = field.slice("branch ".length).replace(/^refs\/heads\//u, "")
     else if (field === "locked" || field.startsWith("locked ")) {
       current.locked = field.slice("locked".length).trimStart()
+    } else if (field === "prunable" || field.startsWith("prunable ")) {
+      current.prunable = field.slice("prunable".length).trimStart()
     }
   }
   take()
