@@ -44,6 +44,7 @@ import {
   readEventOps,
   readEventOpsWithRefs,
   readEventQueue,
+  readEventQueueWithChain,
   readEventQueueWithChanges,
   readStatus,
   setBranchIgnored,
@@ -3264,6 +3265,7 @@ describe("the queue-format boundary", () => {
       keeps: variant === "unkept" ? [] : [anchor],
     }
     const written = await queue.append([input], { expect: queueTip })
+    const duplicatePrefix = variant === "duplicate" ? await readEventQueue(location, "lab") : undefined
     if (variant === "duplicate") {
       await queue.append(
         [
@@ -3284,7 +3286,7 @@ describe("the queue-format boundary", () => {
         "wrong writer": /writer yrd-run/u,
         duplicate: /duplicate issue effect/u,
       }
-      await expect(readEventQueue(location, "lab")).rejects.toThrow(failures[variant])
+      await expect(readEventQueue(location, "lab", { knownQueue: duplicatePrefix })).rejects.toThrow(failures[variant])
       return
     }
     const reading = await readEventQueue(location, "lab")
@@ -3747,6 +3749,10 @@ describe("the queue-format boundary", () => {
       [first.location, "lab", { ...queue }],
     ] as const) {
       await expect(readEventOps(location, gitIn(first.store.repo), name, commit, { knownQueue })).rejects.toThrow(
+        /validated queue.*same location/,
+      )
+      await expect(readEventQueue(location, name, { knownQueue })).rejects.toThrow(/validated queue.*same location/)
+      await expect(readEventQueueWithChain(location, name, { knownQueue })).rejects.toThrow(
         /validated queue.*same location/,
       )
     }

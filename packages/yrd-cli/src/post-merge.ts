@@ -12,6 +12,7 @@ import {
   isAncestor,
   trailer,
   type AppliedIssueEffect,
+  type EventQueue,
   type GitRunner,
   type QueueLocation,
 } from "@yrd/queue-core"
@@ -118,13 +119,15 @@ async function closeMergedIssues(
     env?: NodeJS.ProcessEnv
     report: (message: string) => void
     stop?: AbortSignal
+    knownQueue?: EventQueue
   }>,
-): Promise<Array<Record<string, unknown>>> {
+): Promise<Readonly<{ outcomes: Array<Record<string, unknown>>; queue?: EventQueue }>> {
   const outcomes: Array<Record<string, unknown>> = []
+  let completed = input.knownQueue
   const seen = new Set<string>()
 
   for (const branch of new Set(input.branches)) {
-    if (input.stop?.aborted) return outcomes
+    if (input.stop?.aborted) return { outcomes, queue: completed }
     const reading = await readBranchHistory(input.store, input.queue, branch)
     const history = reading.history
     if (history === undefined) throw new Error(`post-merge named branch ${branch} has no event history`)
@@ -171,7 +174,7 @@ async function closeMergedIssues(
       }
       const refs = references()
       for await (const reference of refs) {
-        if (input.stop?.aborted) return outcomes
+        if (input.stop?.aborted) return { outcomes, queue: completed }
         const resolved = await runIssuesVerb({
           verb: "resolve",
           args: [reference.value],
@@ -211,7 +214,7 @@ async function closeMergedIssues(
               .digest("hex")
           if (seen.has(providerId)) continue
           seen.add(providerId)
-          const completed = await readEventQueue(input.store, input.queue)
+          completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
           const fulfilled = completed.issueEffects[providerId]
           if (fulfilled !== undefined) {
             if (fulfilled.effect.declaration.blob !== pinnedBlob) {
@@ -270,8 +273,8 @@ async function closeMergedIssues(
               })
             } catch (error) {
               // A rival append or lost publication reply can already have fulfilled this identity.
-              const after = await readEventQueue(input.store, input.queue)
-              if (after.issueEffects[providerId] === undefined) throw error
+              completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
+              if (completed.issueEffects[providerId] === undefined) throw error
             }
             outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
           } catch (error) {
@@ -290,7 +293,7 @@ async function closeMergedIssues(
       }
     }
   }
-  return outcomes
+  return { outcomes, queue: completed }
 }
 
 /** Private sequential housekeeping. Derived attempt evidence never supplies replay authority. */
@@ -351,6 +354,8 @@ export function createPostMerge<C extends Context>(
   let pending: C | undefined
   let active: Promise<void> | undefined
   let closing = false
+  // The existing service stays resident: keep only its last validated snapshot across sequential attempts.
+  let completedQueue: Readonly<{ branch: string; value: EventQueue }> | undefined
   const dropPending = (): void => {
     if (pending === undefined) return
     options.report(
@@ -440,7 +445,7 @@ export function createPostMerge<C extends Context>(
         context.projectRoot !== undefined &&
         context.queueBranch !== undefined
       ) {
-        issueActions = await closeMergedIssues({
+        const closed = await closeMergedIssues({
           branches: context.merged,
           queue: context.queueBranch,
           store: options.store,
@@ -451,7 +456,10 @@ export function createPostMerge<C extends Context>(
           env: options.env,
           report: options.report,
           stop: options.stop,
+          knownQueue: completedQueue?.branch === context.queueBranch ? completedQueue.value : undefined,
         })
+        issueActions = closed.outcomes
+        if (closed.queue !== undefined) completedQueue = { branch: context.queueBranch, value: closed.queue }
       } else if (context.merged.length > 0 && context.projectRoot === undefined) {
         options.report("automatic issue close skipped: this queue invocation has no explicit projectRoot")
       }

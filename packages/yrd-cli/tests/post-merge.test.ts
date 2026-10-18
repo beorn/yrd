@@ -481,6 +481,13 @@ it.each([
                   { timeout: 5000 },
                 )
                 await vi.waitFor(() => expect(existsSync(finished)).toBe(true), { timeout: 5000 })
+                // A provider call can finish before its queue fact is published; shutdown must wait for custody.
+                await vi.waitFor(
+                  async () => {
+                    expect(Object.keys((await readEventQueue(store, "main")).issueEffects)).toHaveLength(expectedCloses)
+                  },
+                  { timeout: 5000 },
+                )
                 stop.abort()
               } else if (rounds > 3) stop.abort()
             },
