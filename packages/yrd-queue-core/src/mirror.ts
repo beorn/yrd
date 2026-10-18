@@ -55,9 +55,11 @@ export type MirrorRefresh = Readonly<{
   /** Loose objects plus packs, from `count-objects -v`; the alarm while gc is off. */
   bytes: number
   refreshedAt: Date
+  /** Conservative boundary of the acquired refs, captured before the successful fetch or clone. */
+  asOf: Date
 }>
 
-export type MirrorStamp = Readonly<{ at: Date; remote: string; refspecs: readonly string[] }>
+export type MirrorStamp = Readonly<{ at: Date; asOf?: Date; remote: string; refspecs: readonly string[] }>
 
 export type RefreshMirrorOptions = Readonly<
   {
@@ -130,7 +132,15 @@ function readMirrorStamp(path: string): MirrorStamp | undefined {
   ) {
     throw new Error(`${stamp} has no complete remote/refspec freshness record`)
   }
-  return { at, remote: record.remote, refspecs: record.refspecs as string[] }
+  // Legacy completion-only metadata cannot certify when acquisition began.
+  // Missing or unusable acquisition metadata is repaired by the next refresh.
+  const asOf = new Date(typeof record.asOf === "string" ? record.asOf : "")
+  return {
+    at,
+    ...(Number.isNaN(asOf.getTime()) || asOf.getTime() > at.getTime() ? {} : { asOf }),
+    remote: record.remote,
+    refspecs: record.refspecs as string[],
+  }
 }
 
 /** The last completed refresh instant; kept as a Date for existing callers. */
@@ -185,13 +195,14 @@ export async function refreshMirror(options: RefreshMirrorOptions): Promise<Mirr
   const remote = "origin"
   const refspecs = options.refspecs ?? MIRROR_REFSPECS
   const asked = new Date()
-  const result = async (outcome: MirrorRefresh["outcome"], refreshedAt: Date): Promise<MirrorRefresh> => ({
+  const result = async (outcome: MirrorRefresh["outcome"], refreshedAt: Date, asOf: Date): Promise<MirrorRefresh> => ({
     url: options.url,
     path,
     outcome,
     ms: Date.now() - started,
     bytes: await storeBytes(options.gitIn(path)),
     refreshedAt,
+    asOf,
   })
   const before = recordedScope(path, options.path === undefined)
   if (options.path !== undefined && before !== undefined && !covers(before, remote, refspecs)) {
@@ -204,9 +215,10 @@ export async function refreshMirror(options: RefreshMirrorOptions): Promise<Mirr
   if (
     options.maxAgeMs !== undefined &&
     covers(before, remote, refspecs) &&
+    before.asOf !== undefined &&
     asked.getTime() - before.at.getTime() < options.maxAgeMs
   ) {
-    return result("fresh", before.at)
+    return result("fresh", before.at, before.asOf)
   }
   using _lock = await lockMirror(options.url, path, options.lockWaitMs ?? MIRROR_LOCK_WAIT_MS)
   const meanwhile = recordedScope(path, options.path === undefined)
@@ -217,15 +229,23 @@ export async function refreshMirror(options: RefreshMirrorOptions): Promise<Mirr
       `${join(path, MIRROR_REFRESHED_AT)} does not cover the requested remote and refs`,
     )
   }
-  if (covers(meanwhile, remote, refspecs) && meanwhile.at.getTime() >= asked.getTime()) {
-    return await result("coalesced", meanwhile.at)
+  if (
+    covers(meanwhile, remote, refspecs) &&
+    meanwhile.asOf !== undefined &&
+    meanwhile.at.getTime() >= asked.getTime()
+  ) {
+    return await result("coalesced", meanwhile.at, meanwhile.asOf)
   }
+  const asOf = new Date()
   const outcome = existsSync(path) ? await fetchMirror(options, path) : await createMirror(options, path)
   const refreshedAt = new Date()
   const stamp = join(path, MIRROR_REFRESHED_AT)
-  writeFileSync(`${stamp}.tmp`, `${JSON.stringify({ at: refreshedAt.toISOString(), remote, refspecs })}\n`)
+  writeFileSync(
+    `${stamp}.tmp`,
+    `${JSON.stringify({ at: refreshedAt.toISOString(), asOf: asOf.toISOString(), remote, refspecs })}\n`,
+  )
   renameSync(`${stamp}.tmp`, stamp)
-  return await result(outcome, refreshedAt)
+  return await result(outcome, refreshedAt, asOf)
 }
 
 /**

@@ -370,16 +370,26 @@ it("reads a fresh queue-owned store without remote Git calls and refreshes once 
     })
     expect(readRemoteCalls(firstTrace).verbs.fetch).toBe(1)
 
+    // A cached snapshot's acquisition time can precede refresh completion.
+    // List and show must expose the former even when no fetch is needed.
+    const stampPath = join(owned, MIRROR_REFRESHED_AT)
+    const stamp = JSON.parse(readFileSync(stampPath, "utf8")) as { at: string }
+    const acquiredAt = new Date(Date.parse(stamp.at) - 1_000).toISOString()
+    writeFileSync(stampPath, `${JSON.stringify({ ...stamp, asOf: acquiredAt })}\n`)
+
     process.env.GIT_TRACE2_EVENT = warmTrace
     const warm = capture(repo)
     expect(await coreQueueCommand(repo, warm.io, { command: "list", all: true }, options), warm.stderr()).toBe(0)
-    expect(JSON.parse(warm.stdout())).toMatchObject({ changes: [{ branch, state: "merged", merge: target }] })
+    expect(JSON.parse(warm.stdout())).toMatchObject({
+      asOf: acquiredAt,
+      changes: [{ branch, state: "merged", merge: target }],
+    })
     const shown = capture(repo)
     expect(
       await coreQueueCommand(repo, shown.io, { command: "show", branch: "task/absent" }, options),
       shown.stderr(),
     ).toBe(0)
-    expect(JSON.parse(shown.stdout())).toMatchObject({ source: "local", asOf: expect.any(String) })
+    expect(JSON.parse(shown.stdout())).toMatchObject({ source: "local", asOf: acquiredAt })
     expect(readRemoteCalls(warmTrace).verbs).toEqual({})
     expect(readRemoteCalls(warmTrace).unreadable).toBe(0)
   } finally {
