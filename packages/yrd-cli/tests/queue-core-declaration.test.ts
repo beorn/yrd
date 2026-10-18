@@ -2875,6 +2875,10 @@ describe("a queue is the selected origin branch carrying config", () => {
     const applied = spawnSync("/bin/sh", ["-c", recipe!], { cwd: outside, encoding: "utf8", timeout: 30_000 })
     expect(applied.status, applied.stderr).toBe(0)
     expect((await git(["rev-parse", `refs/heads/${advancedBranch}`])).trim()).toBe(saved.get(advancedBranch))
+    // The copied command's old-tip lease is stale after its first successful use.
+    const stale = spawnSync("/bin/sh", ["-c", recipe!], { cwd: outside, encoding: "utf8", timeout: 30_000 })
+    expect(stale.status, stale.stderr).toBe(128)
+    expect((await git(["rev-parse", `refs/heads/${advancedBranch}`])).trim()).toBe(saved.get(advancedBranch))
     expect(await git(["ls-remote", "origin"])).toBe(originBefore)
     const cured = capture(repo)
     expect(
