@@ -2456,7 +2456,13 @@ describe("yrd queue up, the service", () => {
       const config = await readConfig(w.git, target, { branch: queue, remote: "origin" })
       if (config === undefined) throw new Error("activation fixture declaration is absent")
       await w.git(["push", "--quiet", "origin", `${target}:refs/heads/${queue}`])
-      await createEventQueue(createEventStore(w.work, "origin", gitIn(w.work).selection), queue, target, config, new Date())
+      await createEventQueue(
+        createEventStore(w.work, "origin", gitIn(w.work).selection),
+        queue,
+        target,
+        config,
+        new Date(),
+      )
       const mainIndex = (await w.git(["ls-remote", "--refs", "origin", runIndexRef("main")])).trim()
       if (portableRemote) {
         await w.git(["config", `url.file://${remote}.insteadOf`, "https://yrd-precondition.test/org/queue.git"])
