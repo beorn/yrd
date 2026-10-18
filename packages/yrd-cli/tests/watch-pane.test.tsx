@@ -1240,25 +1240,38 @@ describe("the running step and the check-less declaration", () => {
   })
 
   it("says when no check-step detail was recorded, instead of a bare tab strip", async () => {
-    const detail = detailOf({ row: row() }, [])
-    const text = await paint(at(<WatchDetail detail={detail} />))
+    const inspection = "Raw events: yrd 'queue' 'show' 'task/x' '--json' '--queue' 'release'"
+    for (const note of [undefined, `Check detail unavailable; ${inspection}`]) {
+      const detail = detailOf({ row: row({ branch: "task/x" }) }, [], { note })
+      const text = await paint(at(<WatchDetail detail={detail} />))
 
-    expect(text).toContain("no check-step detail is recorded")
-    expect(text).toContain("Timeline")
+      expect(text).toContain("no check-step detail is recorded")
+      expect(text).toContain("Timeline")
+      if (note !== undefined) expect(text).toContain(inspection)
+    }
   })
 
   it("puts a migrated change's retained evidence in the Checking stage", async () => {
     const source = "refs/yrd/main/task/old@head@record"
-    const detail = detailOf({ row: row() }, [], {
-      note: `Migrated change has no check-step detail. Retained legacy record: ${source}. Old check logs: /tmp/checks/task/old@head.`,
-    })
-    const timeline = await paint(at(<WatchDetail detail={detail} selected={CHANGES_TAB} />))
-    const checking = await paint(at(<WatchDetail detail={detail} selected="checking" />))
+    const inspection = "Raw events: yrd 'queue' 'show' 'task/old' '--json' '--queue' 'release'"
+    for (const currentInspection of [undefined, inspection]) {
+      const detail = detailOf({ row: row({ branch: "task/old" }) }, [], {
+        note: `Migrated change has no check-step detail. Retained legacy record: ${source}. Old check logs: /tmp/checks/task/old@head.${currentInspection === undefined ? "" : `; ${currentInspection}`}`,
+      })
+      const timeline = await paint(at(<WatchDetail detail={detail} selected={CHANGES_TAB} />))
+      const checking = await paint(at(<WatchDetail detail={detail} selected="checking" />))
 
-    expect(timeline).toContain("Migrated change has no check-step detail")
-    expect(timeline).not.toContain(source)
-    expect(checking).toContain(source)
-    expect(checking).toContain("/tmp/checks/task/old@head.")
+      expect(timeline).toContain("Migrated change has no check-step detail")
+      expect(timeline).not.toContain(source)
+      expect(checking).toContain(source)
+      expect(checking).toContain("/tmp/checks/task/old@head.")
+      if (currentInspection !== undefined) {
+        expect(timeline).not.toContain("Raw events:")
+        expect(checking).toMatch(/Raw\s+events:/u)
+        expect(checking).toContain("'task/old'")
+        expect(checking).toContain("'release'")
+      }
+    }
   })
 
   it("gives a direct row's box its one line about the commit where a subject would stand", async () => {
