@@ -1165,10 +1165,7 @@ export async function closeEnvironment(
   // unchanged: a clean no-submodule close never reaches git-super.
   let removalProof: WorktreeRemovalProof | undefined
   if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true || options.preserve === true) {
-    const retain =
-      options.retain === undefined
-        ? join(workdir, "retained-modules")
-        : resolve(io.cwd, options.retain)
+    const retain = options.retain === undefined ? join(workdir, "retained-modules") : resolve(io.cwd, options.retain)
     let removed: unknown
     try {
       removed = JSON.parse(

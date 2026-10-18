@@ -794,8 +794,7 @@ function SingleWatchPane({
   onEnding,
 }: WatchPaneProps) {
   // A declared source can acquire its viewer context after its first read recovers.
-  const formatCommand =
-    (sources?.length === 1 ? sources[0]?.formatCommand : undefined) ?? suppliedFormatCommand
+  const formatCommand = (sources?.length === 1 ? sources[0]?.formatCommand : undefined) ?? suppliedFormatCommand
   const liveNow = useNow()
   const now = nowProp ?? liveNow
   const { columns, rows: terminalRows } = useWindowSize()
