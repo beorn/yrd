@@ -4,13 +4,15 @@
  * provider argv declared for the verb. Resolve validates opaque keys; other provider JSON is passed back whole.
  *
  * Never a clone, a fetch or a working-tree read: the declaration in force is the one committed on `main`.
+ * Automatic replay pins the delivered declaration. If its provider no longer runs, replay fails loudly;
+ * moving old merges to a new backend requires an explicit operator action.
  */
 import { realpathSync, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { fileURLToPath } from "node:url"
 import { cleanGitEnvironment, createProcess } from "@yrd/process"
 // Gitomic only through Yrd's one configured git seam (gitomic-boundary.test.ts): scrubbed env, bounded calls.
-import { createLegacyBackend, openReader } from "@yrd/queue-core"
+import { createLegacyBackend, gitIn, isAncestor, openReader, resolveGitSelection } from "@yrd/queue-core"
 import {
   ISSUES_CLOSE_REASONS,
   ISSUES_CODES,
@@ -45,6 +47,8 @@ export type RunIssuesVerbOptions = Readonly<{
   id?: string
   /** The project root; absent, the toplevel of `cwd`'s repository. */
   projectRoot?: string
+  /** Read this exact ancestor of main; automatic effects use their delivered merge commit. */
+  declarationCommit?: string
   /** The caller's directory: where discovery starts and where the provider runs. */
   cwd: string
   /** The provider's environment, inherited whole. Defaults to this process's. */
@@ -54,6 +58,8 @@ export type RunIssuesVerbOptions = Readonly<{
   /** Kill the provider after this long without output, once it has written a byte; fails with
    * {@link ISSUES_CODES.providerStalled}. */
   noProgressTimeoutMs?: number
+  /** Cancel and reap this provider when its caller stops. */
+  signal?: AbortSignal
   /** Where the provider's stderr passes through. Defaults to this process's stderr. */
   stderr?: (text: string) => void
 }>
@@ -216,6 +222,23 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
   try {
     const reader = await openReader({ repo: repository, ref: "main", backend: createLegacyBackend("git", env) })
     commit = await reader.head()
+    if (options.declarationCommit !== undefined) {
+      await using ancestryProcess = createProcess({ cwd: repository, env: cleanGitEnvironment(env) })
+      const selection = await resolveGitSelection(repository, { process: ancestryProcess, env })
+      const ancestryGit = gitIn(repository, ancestryProcess, selection, { env })
+      const pinned = (
+        await ancestryGit(["rev-parse", "--verify", "--end-of-options", `${options.declarationCommit}^{commit}`])
+      ).trim()
+      if (!(await isAncestor(ancestryGit, pinned, commit))) {
+        return fail(
+          1,
+          ISSUES_CODES.noMain,
+          repository,
+          `declaration commit ${pinned} is not an ancestor of main ${commit}`,
+        )
+      }
+      commit = pinned
+    }
     text = await reader.at(commit).get(ISSUES_DECLARATION_PATH)
   } catch (error) {
     return fail(
@@ -243,6 +266,9 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
 
   const argv = substituteArgv(declared, request.values)
   const command = commandText(declared)
+  const stopped = (): IssuesFailure =>
+    fail(1, ISSUES_CODES.providerFailed, `${verb} ${command}`, `stopped: ${String(options.signal?.reason)}`)
+  if (options.signal?.aborted) return stopped()
   const decoder = new TextDecoder()
   await using provider = createProcess({ cwd: options.cwd, env })
   let result: Awaited<ReturnType<typeof provider.run>>
@@ -251,6 +277,7 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       argv,
       cwd: options.cwd,
       env,
+      signal: options.signal,
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
       onOutput: ({ stream, chunk }) => {
@@ -258,6 +285,7 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       },
     })
   } catch (error) {
+    if (options.signal?.aborted) return stopped()
     if ((error as { code?: unknown } | null)?.code === "ENOENT") {
       return fail(1, ISSUES_CODES.providerMissing, `${verb} ${command}`, `command ${JSON.stringify(argv[0])} not found`)
     }
@@ -268,6 +296,7 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       `could not start: ${error instanceof Error ? error.message : String(error)}`,
     )
   }
+  if (options.signal?.aborted) return stopped()
   if (result.timedOut) {
     return fail(1, ISSUES_CODES.providerTimedOut, `${verb} ${command}`, `killed after ${options.timeoutMs} ms`)
   }

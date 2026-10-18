@@ -65,6 +65,7 @@ import {
   readEventListing,
 } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { createProcess } from "@yrd/process"
 import { releaseRetainedCheckouts } from "../src/branch-retirement.ts"
 import { archiveRefFor } from "git-super/archive-ref"
 import { shellQuote } from "git-super/shell-command"
@@ -448,6 +449,89 @@ it("refreshes local status after an event queue write in the same workdir (25626
 })
 
 describe("a queue is the selected origin branch carrying config", () => {
+  // Direct core calls already covered closing, but could not catch a lost CLI opt-in.
+  it.each(["run", "merge", "up"] as const)(
+    "carries the explicit issue root through %s and stays off when absent",
+    async (command) => {
+      const repo = await world("checks: []\n")
+      const git = gitIn(repo)
+      const store = createEventStore(repo, "origin", git.selection)
+      const calls = join(repo, "close-calls")
+      const provider = join(import.meta.dirname, "support", "fake-issues-provider.ts")
+      writeFileSync(
+        join(repo, "issues.yml"),
+        JSON.stringify({
+          resolve: [process.execPath, provider, "resolve", "<raw>"],
+          close: [process.execPath, provider, "trace", "<key>", join(repo, "output-marker"), calls, "<reason>", "<id>"],
+        }),
+      )
+      await git(["add", "issues.yml"])
+      await git(["commit", "--quiet", "-m", "declare issue provider"])
+      await git(["push", "--quiet", "origin", "main"])
+      await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+      for (const enabled of [false, true]) {
+        const branch = `task/${command}-${enabled}`
+        const key = `issue-${command}-${enabled}`
+        await git(["fetch", "--quiet", "origin", "main"])
+        await git(["checkout", "--quiet", "-b", branch, "origin/main"])
+        writeFileSync(join(repo, "change.txt"), branch)
+        await git(["add", "change.txt"])
+        await git(["commit", "--quiet", "-m", `change\n\nCloses: ${key}`])
+        const submitted = capture(repo)
+        expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main"], submitted.io), submitted.stderr()).toBe(
+          0,
+        )
+        const args =
+          command === "merge" ? ["merge", branch] : ["queue", command, ...(command === "up" ? ["--interval", "0"] : [])]
+        args.push("--queue", "main", "--json", ...(enabled ? ["--project-root", repo] : []))
+        if (command === "up") {
+          const stop = new AbortController()
+          let output = ""
+          let errors = ""
+          await using child = createProcess({ cwd: repo })
+          const running = child.run({
+            argv: [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), ...args],
+            cwd: repo,
+            signal: stop.signal,
+            timeoutMs: 30_000,
+            onOutput: ({ stream, chunk }) => {
+              const text = new TextDecoder().decode(chunk)
+              output += text
+              if (stream === "stderr") errors += text
+            },
+          })
+          try {
+            await vi.waitFor(
+              async () => {
+                expect((await readStatus(store, "main", branch)).status, output.slice(-2000)).toBe("merged")
+                if (enabled) {
+                  expect(
+                    Object.values((await readEventQueue(store, "main")).issueEffects).some(
+                      ({ effect }) => effect.issueKey === key,
+                    ),
+                    errors,
+                  ).toBe(true)
+                } else expect(output.includes("--project-root"), output.slice(-2000)).toBe(true)
+              },
+              { timeout: 20_000 },
+            )
+          } finally {
+            stop.abort()
+            await running
+          }
+        } else {
+          const run = capture(repo)
+          expect(await runYrdProcess(["bun", "yrd", ...args], run.io), run.stderr()).toBe(0)
+          if (enabled) expect(existsSync(calls), run.stderr()).toBe(true)
+        }
+        expect((await readStatus(store, "main", branch)).status).toBe("merged")
+        if (enabled) expect(readFileSync(calls, "utf8")).toContain(key)
+        else expect(existsSync(calls)).toBe(false)
+      }
+    },
+    60_000,
+  )
+
   it("creates and runs an event queue from a parsed plain-check declaration", async () => {
     // Literal QueueConfig fixtures omit absent optional keys. A real
     // declaration materializes some of them as undefined, and those must not
@@ -963,61 +1047,95 @@ describe("a queue is the selected origin branch carrying config", () => {
 
   // 25656: the event runner stores Check: evidence, and watch detail must give
   // that evidence to the existing check tabs instead of discarding it.
-  it("projects stored event Check results into watch detail", async () => {
-    const repo = await world('checks:\n  - unit: {run: "bun run unit"}\n')
-    const git = gitIn(repo)
-    const store = createEventStore(repo, "origin", git.selection)
-    const head = (await git(["rev-parse", "HEAD"])).trim()
-    const config = await readConfig(git, head, { branch: "main", remote: "origin" })
-    if (config === undefined) throw new Error("fixture target lost its declaration")
-    const queueTip = await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
-    const branch = "task/judged-event"
-    const log = join(repo, "unit.log")
-    const oldLog = join(repo, "old-unit.log")
-    writeFileSync(log, "unit passed\n")
-    writeFileSync(oldLog, "old attempt failed\n")
-    await (
-      await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
-    ).append(
-      [
-        changeInput("opened", { queueTip, at: new Date("2026-09-22T14:00:30.000Z"), commit: head, by: "yrd" }),
-        changeInput("verifying", { queueTip, at: new Date("2026-09-22T14:00:35.000Z"), commit: head }),
-        changeInput("checking", { queueTip, at: new Date("2026-09-22T14:00:40.000Z") }),
-        changeInput("failed", {
-          queueTip,
-          at: new Date("2026-09-22T14:00:45.000Z"),
-          commit: head,
-          base: head,
-          config: config.blob,
-          checks: [
-            { run: { name: "unit", result: "fail", exit: 1, durationMs: 7, log: oldLog }, attempt: 1, phase: "merge" },
-          ],
-        }),
-        changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "yrd" }),
-        changeInput("verifying", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), commit: head }),
-        changeInput("checking", { queueTip, at: new Date("2026-09-22T14:03:00.000Z") }),
-        changeInput("merging", {
-          queueTip,
-          at: new Date("2026-09-22T14:04:00.000Z"),
-          commit: head,
-          base: head,
-          config: config.blob,
-          checks: [{ run: { name: "unit", result: "pass", exit: 0, durationMs: 12, log }, attempt: 1, phase: "merge" }],
-        }),
-        changeInput("merged", { queueTip, at: new Date("2026-09-22T14:05:00.000Z"), commit: head }),
-      ],
-      { expect: null },
-    )
-    const selected = (await listChanges(store, "main")).get(branch)
-    if (selected === undefined) throw new Error("fixture event change is missing")
-    const item = watchRows(eventRows(new Map([[branch, selected]])))[0]
-    if (item === undefined) throw new Error("fixture event row is missing")
-    const detail = await openEventDetail(git, config, item, "main", repo, selected)
-    expect(detail.checks).toEqual([
-      expect.objectContaining({ name: "unit", state: "passed", log, output: "unit passed\n" }),
-    ])
-    expect(detail.note).toBeUndefined()
-  }, 15_000)
+  // Custody bases on opened/observed-merged events do not say which checks were measured.
+  it.each([true, false])(
+    "projects stored event Check results into watch detail (judgment base=%s)",
+    async (measured) => {
+      const repo = await world('checks:\n  - unit: {run: "bun run unit"}\n')
+      const git = gitIn(repo)
+      const store = createEventStore(repo, "origin", git.selection)
+      const head = (await git(["rev-parse", "HEAD"])).trim()
+      const config = await readConfig(git, head, { branch: "main", remote: "origin" })
+      if (config === undefined) throw new Error("fixture target lost its declaration")
+      writeFileSync(join(repo, ".yrd.yml"), 'checks:\n  - opened-only: {run: "true"}\n')
+      await git(["add", ".yrd.yml"])
+      await git(["commit", "-m", "opened custody declaration"])
+      const openedBase = (await git(["rev-parse", "HEAD"])).trim()
+      writeFileSync(join(repo, ".yrd.yml"), 'checks:\n  - merged-only: {run: "true"}\n')
+      await git(["add", ".yrd.yml"])
+      await git(["commit", "-m", "merged custody declaration"])
+      const mergedBase = (await git(["rev-parse", "HEAD"])).trim()
+      const queueTip = await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
+      const branch = "task/judged-event"
+      const log = join(repo, "unit.log")
+      const oldLog = join(repo, "old-unit.log")
+      writeFileSync(log, "unit passed\n")
+      writeFileSync(oldLog, "old attempt failed\n")
+      await (
+        await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+      ).append(
+        [
+          changeInput("opened", { queueTip, at: new Date("2026-09-22T14:00:30.000Z"), commit: head, by: "yrd" }),
+          changeInput("verifying", { queueTip, at: new Date("2026-09-22T14:00:35.000Z"), commit: head }),
+          changeInput("checking", { queueTip, at: new Date("2026-09-22T14:00:40.000Z") }),
+          changeInput("failed", {
+            queueTip,
+            at: new Date("2026-09-22T14:00:45.000Z"),
+            commit: head,
+            base: head,
+            config: config.blob,
+            checks: [
+              {
+                run: { name: "unit", result: "fail", exit: 1, durationMs: 7, log: oldLog },
+                attempt: 1,
+                phase: "merge",
+              },
+            ],
+          }),
+          changeInput("opened", {
+            queueTip,
+            at: new Date("2026-09-22T14:01:00.000Z"),
+            commit: head,
+            base: openedBase,
+            by: "yrd",
+          }),
+          changeInput("verifying", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), commit: head }),
+          changeInput("checking", { queueTip, at: new Date("2026-09-22T14:03:00.000Z") }),
+          changeInput("merging", {
+            queueTip,
+            at: new Date("2026-09-22T14:04:00.000Z"),
+            commit: head,
+            config: config.blob,
+            ...(measured
+              ? {
+                  base: head,
+                  checks: [
+                    { run: { name: "unit", result: "pass", exit: 0, durationMs: 12, log }, attempt: 1, phase: "merge" },
+                  ],
+                }
+              : {}),
+          }),
+          changeInput("merged", { queueTip, at: new Date("2026-09-22T14:05:00.000Z"), commit: head, base: mergedBase }),
+        ],
+        { expect: null },
+      )
+      const selected = (await listChanges(store, "main")).get(branch)
+      if (selected === undefined) throw new Error("fixture event change is missing")
+      const item = watchRows(eventRows(new Map([[branch, selected]])))[0]
+      if (item === undefined) throw new Error("fixture event row is missing")
+      const detail = await openEventDetail(git, config, item, "main", repo, selected)
+      if (measured) {
+        expect(detail.checks).toEqual([
+          expect.objectContaining({ name: "unit", state: "passed", log, output: "unit passed\n" }),
+        ])
+        expect(detail.note).toBeUndefined()
+      } else {
+        expect(detail.checks.map((check) => check.name)).toEqual(["unit"])
+        expect(detail.note).toContain("record names no base")
+      }
+    },
+    15_000,
+  )
 
   it("names retained evidence and old check logs when a migrated event has no check detail", async () => {
     const repo = await world("{}\n")

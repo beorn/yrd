@@ -258,6 +258,18 @@ export type AppliedIssueEffect = Readonly<{
   declaration: Readonly<{ path: "issues.yml"; blob: Oid }>
 }>
 
+/** Stable provider replay identity, shared by the effect writer and stored-effect reader. */
+export function issueProviderId(
+  mergeSha: string,
+  verb: AppliedIssueEffect["verb"] | "resolve",
+  semanticEnding: AppliedIssueEffect["semanticEnding"],
+  issueKey: string,
+): string {
+  return `yrd1-${createHash("sha256")
+    .update(JSON.stringify([mergeSha, verb, semanticEnding ?? null, issueKey]))
+    .digest("hex")}`
+}
+
 type ChangeInputDetails = Readonly<{
   queueTip: string
   at: Date
@@ -575,8 +587,12 @@ function checkedIssueEffect(value: unknown, where: string): AppliedIssueEffect {
   if (declaration.path !== "issues.yml" || typeof declaration.blob !== "string" || !COMMIT_OID.test(declaration.blob)) {
     refuse("declaration needs issues.yml and a blob id")
   }
-  const identity = JSON.stringify([raw.mergeSha, raw.verb, raw.semanticEnding ?? null, raw.issueKey])
-  const expectedId = `yrd1-${createHash("sha256").update(identity).digest("hex")}`
+  const expectedId = issueProviderId(
+    raw.mergeSha as string,
+    raw.verb as AppliedIssueEffect["verb"],
+    raw.semanticEnding as AppliedIssueEffect["semanticEnding"],
+    raw.issueKey as string,
+  )
   if (raw.providerId !== expectedId) refuse(`providerId must be ${expectedId}`)
   const expectedKeys = [
     "kind",
@@ -608,7 +624,7 @@ function checkedIssueEffect(value: unknown, where: string): AppliedIssueEffect {
   }
 }
 
-function readIssueEffect(event: EventShape): AppliedIssueEffect | undefined {
+export function readIssueEffect(event: EventShape): AppliedIssueEffect | undefined {
   const serialized = prop(event, EVENT_TRAILERS.issueEffect)
   if (serialized === undefined) return undefined
   if (event.type !== "notified") {
@@ -1308,8 +1324,12 @@ export async function createEventQueue(
 }
 
 /** Read and validate the queue declaration and its current operator stop. */
-export async function readEventQueue(store: QueueReadStore, queue: string): Promise<EventQueue> {
-  return (await readEventQueueWithChain(store, queue)).queue
+export async function readEventQueue(
+  store: QueueReadStore,
+  queue: string,
+  options: Readonly<{ knownQueue?: EventQueue }> = {},
+): Promise<EventQueue> {
+  return (await readEventQueueWithChain(store, queue, options)).queue
 }
 
 /**
@@ -1320,40 +1340,46 @@ export async function readEventQueue(store: QueueReadStore, queue: string): Prom
 export async function readEventQueueWithChain(
   store: QueueReadStore,
   queue: string,
+  options: Readonly<{ knownQueue?: EventQueue }> = {},
 ): Promise<Readonly<{ queue: EventQueue; events: readonly Event[] }>> {
+  if (options.knownQueue !== undefined) assertQueueLocation(store, queue, options.knownQueue)
   const ref = queueRef(queue)
   const chain = await openEvents({ ...store, ref })
   const events = await readEventChain(chain)
-  return { queue: await eventQueueFromHistory(store, queue, events, chain), events }
+  return { queue: await eventQueueFromHistory(store, queue, events, chain, options.knownQueue), events }
 }
 
-/** One projection and validation policy, independent of how its exact tip was acquired. */
+/** One validation/reuse policy for an already-read chain or an already-acquired immutable tip. */
 async function eventQueueFromHistory(
   store: QueueReadStore,
   queue: string,
-  events: readonly Event[],
+  eventsOrTip: readonly Event[] | Oid,
   chain: Awaited<ReturnType<typeof openEvents>>,
+  knownQueue?: EventQueue,
 ): Promise<EventQueue> {
+  if (knownQueue !== undefined) assertQueueLocation(store, queue, knownQueue)
+  if (typeof eventsOrTip === "string" && knownQueue?.tip === eventsOrTip) return knownQueue
+  const events = typeof eventsOrTip === "string" ? await readEventChain(chain, eventsOrTip) : eventsOrTip
   const ref = queueRef(queue)
   const projected = projectEventQueue(events, ref, store.repo)
   const positions = new Map(events.map((event, index) => [event.id, index]))
+  const knownPosition = knownQueue === undefined ? undefined : positions.get(knownQueue.tip)
   // The acquired queue ref retains these exact objects through extra parents.
   // Decode only each immutable anchor; never discover or fetch other branch refs.
   const readAnchors = new Map<string, Event>()
   for (const { id, effect } of Object.values(projected.issueEffects)) {
-    const anchor = readAnchors.get(effect.mergedEvent) ?? (await readRetainedEvent(chain, effect.mergedEvent))
-    if (anchor.type !== "merged") {
-      throw new Error(`${ref}: issue effect ${id} does not retain an actual merged event ${effect.mergedEvent}`)
-    }
-    if (keptCommit(anchor) !== effect.mergeSha) {
-      throw new Error(`${ref}: issue effect ${id} mergeSha does not match merged event ${effect.mergedEvent}`)
-    }
-    const cause = prop(anchor, EVENT_TRAILERS.queue)
-    const causePosition = cause === undefined ? undefined : positions.get(cause)
     const effectPosition = positions.get(id)
-    if (causePosition === undefined || effectPosition === undefined || causePosition >= effectPosition) {
-      throw new Error(`${ref}: issue effect ${id} merged event ${effect.mergedEvent} has no earlier queue cause`)
+    // A retained snapshot tip proves an identical immutable prefix. The full fold above still checks duplicates.
+    if (
+      knownPosition !== undefined &&
+      effectPosition !== undefined &&
+      effectPosition <= knownPosition &&
+      knownQueue?.issueEffects[effect.providerId]?.id === id
+    ) {
+      continue
     }
+    const anchor = readAnchors.get(effect.mergedEvent) ?? (await readRetainedEvent(chain, effect.mergedEvent))
+    assertIssueEffectAnchor(ref, id, effect, anchor, positions, effectPosition)
     readAnchors.set(anchor.id, anchor)
   }
   const result: EventQueue = {
@@ -1362,6 +1388,28 @@ async function eventQueueFromHistory(
   }
   queueLocations.set(result, { repo: store.repo, remote: store.remote, queue, backend: store.backend })
   return result
+}
+
+/** The reader and sole queue writer share the same immutable retained-anchor proof. */
+function assertIssueEffectAnchor(
+  ref: string,
+  id: string,
+  effect: AppliedIssueEffect,
+  anchor: Event,
+  positions: ReadonlyMap<string, number>,
+  effectPosition: number | undefined,
+): void {
+  if (anchor.type !== "merged") {
+    throw new Error(`${ref}: issue effect ${id} does not retain an actual merged event ${effect.mergedEvent}`)
+  }
+  if (keptCommit(anchor) !== effect.mergeSha) {
+    throw new Error(`${ref}: issue effect ${id} mergeSha does not match merged event ${effect.mergedEvent}`)
+  }
+  const cause = prop(anchor, EVENT_TRAILERS.queue)
+  const causePosition = cause === undefined ? undefined : positions.get(cause)
+  if (causePosition === undefined || effectPosition === undefined || causePosition >= effectPosition) {
+    throw new Error(`${ref}: issue effect ${id} merged event ${effect.mergedEvent} has no earlier queue cause`)
+  }
 }
 
 type EventOps = Readonly<{
@@ -1412,14 +1460,11 @@ export async function readEventOpsWithRefs(
     if (tip === undefined) {
       throw new Error(`${where}: required queue ref ${ref} is missing; admission refused. Check the queue declaration`)
     }
-    if (knownQueue?.tip === tip) projected = knownQueue
-    else {
-      const chain = await openEvents({ ...store, ref })
-      projected = await eventQueueFromHistory(store, queue, await readEventChain(chain, tip), chain)
-    }
+    const chain = await openEvents({ ...store, ref })
+    projected = await eventQueueFromHistory(store, queue, tip, chain, knownQueue)
   } else if (knownQueue !== undefined && store.remote === undefined) {
     const chain = await openEvents({ ...store, ref: queueRef(queue) })
-    projected = (await chain.head()) === knownQueue.tip ? knownQueue : await readEventQueue(store, queue)
+    projected = await eventQueueFromHistory(store, queue, (await chain.head()) ?? [], chain, knownQueue)
     acquiredRefs = await listRefs(queueRefPrefix(queue), store)
   } else {
     projected = await readEventQueue(store, queue)
@@ -1539,7 +1584,14 @@ export type WriteQueueEvent =
     }>
   | Readonly<{ type: "resumed"; reason: string; by: string; at: Date }>
   | Readonly<{ type: "observed"; commit: string; branch?: string; by: string; at: Date }>
-  | Readonly<{ type: "notified"; notice: NoticeWrite; by: string; at: Date }>
+  | Readonly<{ type: "notified"; notice: NoticeWrite; issueEffect?: never; by: string; at: Date }>
+  | Readonly<{
+      type: "notified"
+      issueEffect: AppliedIssueEffect
+      notice?: never
+      by: typeof QUEUE_RUN_WRITER
+      at: Date
+    }>
   | Readonly<{ type: "notify-floors"; floors: NotifyFloorsSnapshot; by: string; at: Date }>
 
 const STUCK_RELEASE_PREFIX = "yrd-stuck-release:"
@@ -1558,6 +1610,11 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
     throw new TypeError(`${write.type} needs Reason:`)
   }
   if (Number.isNaN(write.at.getTime())) throw new TypeError("Time: needs a valid instant")
+  if (write.type === "notified" && write.issueEffect !== undefined) {
+    if (write.notice !== undefined) throw new TypeError("issue effect cannot carry ordinary notice detail")
+    if (write.by !== QUEUE_RUN_WRITER) throw new TypeError("issue effect requires yrd-run writer")
+    checkedIssueEffect(write.issueEffect, ref)
+  }
   const chain = await openEvents({ ...store, ref, writer: write.by })
   let existing: string | undefined
   const decide: Decide = async (events) => {
@@ -1566,7 +1623,12 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
       throw new Error(`${ref}: ${write.type} needs ops-cutover; pre-cutover pause and release authoring is retired`)
     }
     if (write.type === "observed") existing = current.observed[write.commit]?.id
-    if (write.type === "notified") existing = current.notices[write.notice.key]?.id
+    if (write.type === "notified") {
+      existing =
+        write.issueEffect === undefined
+          ? current.notices[write.notice.key]?.id
+          : current.issueEffects[write.issueEffect.providerId]?.id
+    }
     if (write.type === "notify-floors") {
       // A CAS retry folds the chain again; a snapshot already at this exact tip is the same write, not a second one.
       const encoded = encodeNotifyFloors(write.floors)
@@ -1581,6 +1643,18 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
       details.push([EVENT_TRAILERS.commit, write.commit], [EVENT_TRAILERS.reason, "direct"])
       if (write.branch !== undefined) details.push([EVENT_TRAILERS.branch, write.branch])
       keeps = [write.commit]
+    } else if (write.type === "notified" && write.issueEffect !== undefined) {
+      const anchor = await readRetainedEvent(chain, write.issueEffect.mergedEvent)
+      assertIssueEffectAnchor(
+        ref,
+        "pending",
+        write.issueEffect,
+        anchor,
+        new Map(events.map((event, index) => [event.id, index])),
+        events.length,
+      )
+      details.push([EVENT_TRAILERS.issueEffect, JSON.stringify(checkedIssueEffect(write.issueEffect, ref))])
+      keeps = [write.issueEffect.mergedEvent]
     } else if (write.type === "notified") {
       details.push(
         [EVENT_TRAILERS.for, write.notice.for],
@@ -2344,7 +2418,7 @@ type ChangeWrite = Readonly<{
   retry?: Readonly<{ retried: 1; reason?: string }>
   deferred?: DeferredWrite
   notice?: NoticeWrite
-  issueEffect?: AppliedIssueEffect
+  issueEffect?: never
   run?: string
   writer?: string
   landedGitlinks?: readonly CommitGitlink[]
@@ -2364,18 +2438,18 @@ export async function appendChangeEvent(
   write: ChangeWrite,
   onPrepared?: (oid: Oid, runNumber?: number) => void,
 ): Promise<string> {
-  assertChangeWriter(write)
+  assertChangeWriter(queue, write)
   return (await appendDecision(store, queue, branch, selectedTip, write, onPrepared)).event
 }
 
-function assertChangeWriter(write: ChangeWrite): void {
-  const isIssueEffect = write.type === "notified" && write.issueEffect !== undefined
-  if (write.writer === QUEUE_RUN_WRITER && !isIssueEffect) {
-    throw new TypeError(`${QUEUE_RUN_WRITER} writer is reserved for an atomic published merge`)
+function assertChangeWriter(queue: string, write: ChangeWrite): void {
+  if (write.issueEffect !== undefined) {
+    throw new TypeError(
+      `branch issue-effect authoring is retired; use writeQueueEvent on ${queueRef(queue)} with writer yrd-run`,
+    )
   }
-  if (write.issueEffect !== undefined && !isIssueEffect) throw new TypeError("issue effect belongs on notified")
-  if (isIssueEffect && write.writer !== QUEUE_RUN_WRITER) {
-    throw new TypeError(`issue effect requires ${QUEUE_RUN_WRITER} writer`)
+  if (write.writer === QUEUE_RUN_WRITER) {
+    throw new TypeError(`${QUEUE_RUN_WRITER} writer is reserved for an atomic published merge`)
   }
 }
 
@@ -2389,7 +2463,7 @@ export async function appendNumberedChangeEvent(
   identity: RunIndexIdentity,
   onPrepared?: (oid: Oid, runNumber?: number) => void,
 ): Promise<Readonly<{ event: string; number: number }>> {
-  assertChangeWriter(write)
+  assertChangeWriter(queue, write)
   const result = await appendDecision(store, queue, branch, selectedTip, write, onPrepared, identity)
   if (result.number === undefined) throw new Error(`${runIndexRef(queue)}: numbered publication returned no run number`)
   return { event: result.event, number: result.number }
@@ -2535,7 +2609,6 @@ async function appendDecision(
     ...(write.warningKind === undefined ? {} : { warningKind: write.warningKind }),
     ...(write.deferred === undefined ? {} : { deferred: write.deferred }),
     ...(write.notice === undefined ? {} : { notice: write.notice }),
-    ...(write.issueEffect === undefined ? {} : { issueEffect: write.issueEffect }),
     ...(write.run === undefined ? {} : { run: write.run }),
   })
   const planned = decide(history, input)
@@ -2549,9 +2622,6 @@ async function appendDecision(
       ? [{ ref: queueRef(queue), expect: queueTip, oid: queueTip }, ...(write.also ?? [])]
       : write.also
   const chain = await openEvents({ ...store, ref, writer: write.writer ?? "yrd" })
-  const validateIssueEffect = async (tip: Oid): Promise<void> => {
-    if (write.issueEffect !== undefined) project(await readEventChain(chain, tip), ref, store.repo)
-  }
   if (numbered !== undefined) {
     const indexRef = runIndexRef(queue)
     if (
@@ -2564,7 +2634,6 @@ async function appendDecision(
     }
     if (indexRead === undefined) throw new Error(`${indexRef}: numbered queue read was absent`)
     const staged = await chain.stage(planned, { expect: selectedTip })
-    await validateIssueEffect(staged.head)
     const updates = [...(also ?? []), ...((await write.prepareAlso?.(staged.head)) ?? [])]
     const index = await stageRunIndexEntry(store, queue, indexRead.tip(), numbered, queueTip, write.at)
     // The staged head AND the run number it consumed are one atomic push; a
@@ -2595,11 +2664,10 @@ async function appendDecision(
   // publisher needs the exact event OID before that call so its remote read can
   // distinguish this attempt from another writer with identical trailers.
   const result =
-    onPrepared === undefined && write.prepareAlso === undefined && write.issueEffect === undefined
+    onPrepared === undefined && write.prepareAlso === undefined
       ? await chain.append(planned, { expect: selectedTip, ...(also === undefined ? {} : { also }) })
       : await (async () => {
           const staged = await chain.stage(planned, { expect: selectedTip })
-          await validateIssueEffect(staged.head)
           onPrepared?.(staged.head)
           const prepared = await write.prepareAlso?.(staged.head)
           const updates = [...(also ?? []), ...(prepared ?? [])]
