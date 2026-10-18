@@ -51,6 +51,7 @@ import {
 import { type PauseRecord } from "./pause.ts"
 import { remoteHead, remoteUrl } from "./remote.ts"
 import {
+  admissionWarningReason,
   changeInput,
   changesRef,
   createEventQueue,
@@ -1346,7 +1347,7 @@ async function submitEvent(
               (event) =>
                 event.type === "admission-warning" &&
                 event.props.some(([key, value]) => key === "Commit" && value === head) &&
-                event.props.some(([key, value]) => key === "Reason" && value === warning.reason) &&
+                admissionWarningReason(event) === warning.reason &&
                 event.props.find(([key]) => key === "Warning-Kind")?.[1] === warning.kind,
             ),
         )

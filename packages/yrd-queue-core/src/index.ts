@@ -70,6 +70,7 @@ export {
   QueueEventShapeUnreadable,
   isQueueEventShapeUnreadable,
   adoptedChange,
+  admissionWarningReason,
   appendChangeEvent,
   appendNumberedChangeEvent,
   archiveQueue,

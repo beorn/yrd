@@ -12,7 +12,7 @@
  * (position, age, wait) are NOT here; they moved to the status box.
  */
 
-import type { Event, Row } from "@yrd/queue-core"
+import { admissionWarningReason, type Event, type Row } from "@yrd/queue-core"
 import { DISCLOSURE_MARKERS } from "silvery"
 import { clock, mediaDuration } from "./watch-format.ts"
 
@@ -33,9 +33,10 @@ export function eventHistoryEntries(events: readonly Event[]): readonly HistoryE
     if (time === undefined) throw new Error(`event ${event.id} has no Time:`)
     const at = new Date(time)
     if (Number.isNaN(at.getTime())) throw new Error(`event ${event.id} has invalid Time: ${time}`)
-    const reason = field("Reason")
+    const reason = event.type === "admission-warning" ? admissionWarningReason(event) : field("Reason")
+    const guidance = field("Admission-Output") === undefined ? reason : `recorded target-policy guidance: ${reason}`
     const commit = field("Commit")
-    const detail = [reason, commit === undefined ? undefined : `commit ${commit.slice(0, 12)}`]
+    const detail = [guidance, commit === undefined ? undefined : `commit ${commit.slice(0, 12)}`]
       .filter((part): part is string => part !== undefined)
       .join(" · ")
     return {
