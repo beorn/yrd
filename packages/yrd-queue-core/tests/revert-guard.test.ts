@@ -541,37 +541,40 @@ describe("revert guard review regressions (27363)", () => {
     expect(report.paths.map((row) => row.path)).toContain("vendor/dep/a.txt")
   })
 
-  it("base: braided history decides a clean tree and names a real interior restore", async () => {
-    const w = await ambiguousWorld()
-    const root = await w.checkoutAt(w.candidate)
-    const git = gitIn(root, undefined, undefined, { env })
-    const bases = (await git(["merge-base", "--all", w.target, w.head])).trim().split("\n")
-    expect(bases).toHaveLength(2)
-    // Native ancestor-set exclusion is the oracle: exclude full ancestry, never only first parents.
-    const targetOnly = (excluded: readonly string[]) =>
-      git(["rev-list", "--first-parent", w.target, ...excluded.map((base) => `^${base}`)])
-    const allBases = await targetOnly(bases)
-    expect(allBases).toBe(await targetOnly([w.head]))
-    expect(allBases).toBe(await targetOnly([...bases].reverse()))
-    const report = await detectReverted({ candidate: w.candidate, git, head: w.head, root, targetHead: w.target })
-    // CTO4aeb221b amends the old blanket ambiguity veto: this real put-back remains a named S2.
-    expect(report.base).toEqual({ state: "multiple", bases: expect.arrayContaining(bases) })
-    expect(report.coverage).toBe("complete")
-    expect(report.gaps).toEqual([])
-    expect(report.paths.map((row) => row.path)).toEqual(["vendor/dep/a.txt"])
-    expect(report.swallowed).toEqual([])
-    expect(revertGuardAction(report, "observe")).toBe("warn")
-    expect(revertGuardAction(report, "refuse")).toBe("stick")
-    const clean = await detect(w, w.head, w.head)
-    expect(clean.base).toEqual({ state: "multiple", bases: expect.arrayContaining(bases) })
-    expect(clean.coverage).toBe("complete")
-    expect(clean.gaps).toEqual([])
-    expect(clean.paths).toEqual([])
-    expect(clean.swallowed).toEqual([])
-    expect(revertedPathsFinding(clean)).toBeUndefined()
-    expect(revertGuardAction(clean, "observe")).toBe("clean")
-    expect(revertGuardAction(clean, "refuse")).toBe("clean")
-  })
+  it.each(["restore", "shared", "swallowed"] as const)(
+    "base: braided history judges %s against every base",
+    async (kind) => {
+      const w = await ambiguousWorld(kind)
+      const root = await w.checkoutAt(w.candidate)
+      const git = gitIn(root, undefined, undefined, { env })
+      const bases = (await git(["merge-base", "--all", w.target, w.head])).trim().split("\n")
+      expect(bases).toHaveLength(2)
+      // Native ancestor-set exclusion is the oracle: exclude full ancestry, never only first parents.
+      const targetOnly = (excluded: readonly string[]) =>
+        git(["rev-list", "--first-parent", w.target, ...excluded.map((base) => `^${base}`)])
+      const allBases = await targetOnly(bases)
+      expect(allBases).toBe(await targetOnly([w.head]))
+      expect(allBases).toBe(await targetOnly([...bases].reverse()))
+      const report = await detectReverted({ candidate: w.candidate, git, head: w.head, root, targetHead: w.target })
+      // CTO4aeb221b amends the old blanket ambiguity veto: this real put-back remains a named S2.
+      expect(report.base).toEqual({ state: "multiple", bases: expect.arrayContaining(bases) })
+      expect(report.coverage).toBe("complete")
+      expect(report.gaps).toEqual([])
+      expect(report.paths.map((row) => row.path)).toEqual(kind === "restore" ? ["vendor/dep/a.txt"] : [])
+      expect(report.swallowed.map((row) => row.path)).toEqual(kind === "swallowed" ? ["vendor/dep"] : [])
+      expect(revertGuardAction(report, "observe")).toBe(kind === "shared" ? "clean" : "warn")
+      expect(revertGuardAction(report, "refuse")).toBe(kind === "shared" ? "clean" : "stick")
+      const clean = await detect(w, w.head, w.head)
+      expect(clean.base).toEqual({ state: "multiple", bases: expect.arrayContaining(bases) })
+      expect(clean.coverage).toBe("complete")
+      expect(clean.gaps).toEqual([])
+      expect(clean.paths).toEqual([])
+      expect(clean.swallowed).toEqual([])
+      expect(revertedPathsFinding(clean)).toBeUndefined()
+      expect(revertGuardAction(clean, "observe")).toBe("clean")
+      expect(revertGuardAction(clean, "refuse")).toBe("clean")
+    },
+  )
 
   it("add-only: the untouched paths cost one traversal per level, not one walk per path", async () => {
     const w = await addOnlyWorld()
@@ -672,8 +675,8 @@ async function modeWorld(): Promise<RegressionWorld> {
   return { candidate, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
 }
 
-/** A real criss-cross root with two bases and an interior stale-restore candidate. */
-async function ambiguousWorld(): Promise<RegressionWorld> {
+/** Real root criss-crosses, including a child criss-cross whose shared advance may be restored. */
+async function ambiguousWorld(kind: "restore" | "shared" | "swallowed"): Promise<RegressionWorld> {
   const root = mkdtempSync(join(tmpdir(), "yrd-revert-ambiguous-"))
   roots.push(root)
   const dep = join(root, "dep")
@@ -682,12 +685,34 @@ async function ambiguousWorld(): Promise<RegressionWorld> {
   await commit(dep, { "a.txt": "base\n" }, "base")
   const c1 = await commit(dep, { "a.txt": "target\n" }, "target advance")
   const c2 = await commit(dep, { "a.txt": "base\n" }, "stale restore")
+  const dg = gitIn(dep, undefined, undefined, { env })
+  let targetPin = c1
+  let incomingPin = c1
+  let candidatePin = c2
+  if (kind === "shared") {
+    await dg(["checkout", "--quiet", "-b", "dep-left", c1])
+    const left = await commit(dep, { "dep-left.txt": "left\n" }, "left from shared advance")
+    await dg(["checkout", "--quiet", "-b", "dep-right", c1])
+    const right = await commit(dep, { "dep-right.txt": "right\n" }, "right from shared advance")
+    await dg(["checkout", "--quiet", "dep-left"])
+    await dg([...author, "merge", "--no-ff", "--quiet", "-m", "left merges right", right])
+    targetPin = (await dg(["rev-parse", "HEAD"])).trim()
+    await dg(["checkout", "--quiet", "dep-right"])
+    await dg([...author, "merge", "--no-ff", "--quiet", "-m", "right merges left", left])
+    incomingPin = await commit(dep, { "a.txt": "base\n" }, "deliberately restore shared history")
+    candidatePin = incomingPin
+    expect((await dg(["merge-base", "--all", targetPin, incomingPin])).trim().split("\n")).toHaveLength(2)
+  } else if (kind === "swallowed") {
+    await dg(["checkout", "--quiet", "--detach", c1])
+    incomingPin = await commit(dep, { "b.txt": "incoming\n" }, "incoming-only change")
+    candidatePin = c1
+  }
   const product = join(root, "product")
   mkdirSync(product)
   const pg = gitIn(product, undefined, undefined, { env })
   await pg(["init", "--quiet", "--initial-branch=main"])
   await commit(product, { "readme.txt": "product\n" }, "product base")
-  const root0 = await pin(product, "vendor/dep", dep, c1, "target pins the advance")
+  const root0 = await pin(product, "vendor/dep", dep, targetPin, "target pins the advance")
   await pg(["checkout", "--quiet", "-b", "left"])
   await commit(product, { "left.txt": "l\n" }, "left")
   const left0 = (await pg(["rev-parse", "HEAD"])).trim()
@@ -699,9 +724,15 @@ async function ambiguousWorld(): Promise<RegressionWorld> {
   const target = (await pg(["rev-parse", "HEAD"])).trim()
   await pg(["checkout", "--quiet", "right"])
   await pg([...author, "merge", "--no-ff", "--quiet", "-m", "right merges left", left0])
-  const head = (await pg(["rev-parse", "HEAD"])).trim()
+  const head =
+    incomingPin === targetPin
+      ? (await pg(["rev-parse", "HEAD"])).trim()
+      : await pin(product, "vendor/dep", dep, incomingPin, "head carries incoming change")
   await pg(["checkout", "--quiet", "-b", "stale", root0])
-  const candidate = await pin(product, "vendor/dep", dep, c2, "candidate restores the stale value")
+  const candidate =
+    candidatePin === targetPin
+      ? (await pg(["rev-parse", "HEAD"])).trim()
+      : await pin(product, "vendor/dep", dep, candidatePin, "candidate selects component result")
   return { candidate, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
 }
 
