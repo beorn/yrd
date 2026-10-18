@@ -48,7 +48,7 @@ import {
   stateWord,
   toHms,
 } from "./watch-format.ts"
-import type { RunnerLine } from "./watch-runner.ts"
+import { renderRunnerHolds, type RunnerLine } from "./watch-runner.ts"
 
 /** The status filter buckets, in the order the pills show them (items 9, 32). */
 export const BUCKETS = ["open", "running", "done", "failed"] as const
@@ -312,7 +312,7 @@ export type LineStatus = Readonly<{
   /** How long the queue has been in that status, or live status timer node (25556, 25630). */
   timer?: React.ReactNode
   /** Why the line is stopped, in the pause record's or the runner's own words; absent while it runs. */
-  reason?: string
+  reason?: RunnerLine["holds"]
   /** The marker pulses while the line runs, or while it is stopped with a reason (25416). */
   pulse: boolean
 }>
@@ -363,7 +363,7 @@ export function TopLine({
   const timerLen =
     (typeof timerText === "string" ? timerText.length : timerText !== undefined ? 8 : 0) +
     (timerText !== undefined ? 3 : 0)
-  const statusParts = [timerLen, status.reason ? status.reason.length : 0].filter((n) => n > 0)
+  const statusParts = [timerLen, typeof status.reason === "string" ? status.reason.length : 0].filter((n) => n > 0)
   const statusGaps = Math.max(0, statusParts.length - 1)
   const statusRightLen = statusParts.reduce((a, b) => a + b, 0) + statusGaps
 
@@ -439,7 +439,7 @@ export function TopLine({
       >
         {status.word === "STOPPED" && status.reason !== undefined ? (
           <Text color="$fg-on-inverse-muted" wrap="truncate">
-            {status.reason}
+            {renderRunnerHolds(status.reason)}
           </Text>
         ) : null}
         {timerText === undefined ? null : (
@@ -782,7 +782,7 @@ export function RunnerRow({
   const { color } = STATE_WORDS[line.state]
   const forced = cursor ? "$fg-on-selected" : undefined
   const timeText = line.at !== undefined ? clock(line.at) : "—"
-  const parsed = splitRunnerCure(line.holds)
+  const parsed = splitRunnerCure(renderRunnerHolds(line.holds))
   const isStoppedOrPaused = line.state === "stopped" || line.state === "paused"
   const displayText =
     line.state === "stopped"

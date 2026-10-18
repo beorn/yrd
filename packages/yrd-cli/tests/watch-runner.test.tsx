@@ -31,6 +31,7 @@ import {
   readRunnerFacts,
   readRunnerService,
   runnerLine,
+  renderRunnerHolds,
   runnerWord,
   type RunnerFacts,
   type RunnerService,
@@ -1018,22 +1019,70 @@ describe("the runner's row", () => {
 
   it("names the change the line stopped at and what lifts it, and an operator's pause by who", () => {
     const since = new Date(NOW.getTime() - 6 * 60_000)
-    const stopped = runnerLine(latest({}), NOW, {
+    // Metadata callers do not render recipes. Missing host context stays
+    // explicit until a rendering caller asks for the hold text.
+    const missing = runnerLine(latest({}), NOW, {
+      stopped: { by: "operator", cause: "operator", change: null, since: since.toISOString() },
+    })
+    expect(missing.state).toBe("paused")
+    expect(missing.duration).toBe("paused 6:00")
+    expect(missing.holds).toEqual({ kind: "missing-formatter", argv: [["queue", "resume"]] })
+    expect(JSON.parse(JSON.stringify(missing)).holds).toEqual(missing.holds)
+    expect(() => renderRunnerHolds(missing.holds)).toThrow(
+      /runnerLine: rendering holds requires formatCommand; caller omitted/u,
+    )
+    const withFlow = runnerLine(
+      latest({}, { ...BEATING, flow: { slow: true, stallAfterMs: 2_700_000, unjudgedForMs: 720_000, waiting: 11 } }),
+      NOW,
+      {
+        stopped: { by: "operator", cause: "operator", change: null, since: since.toISOString() },
+      },
+    )
+    expect(withFlow.holds).toEqual(missing.holds)
+    expect(withFlow.duration).toBe("paused 6:00")
+    const missingStuck = runnerLine(latest({}), NOW, {
       stopped: { by: "yrd", cause: "stuck", change: `task/s@${"4".repeat(40)}`, since: since.toISOString() },
     })
+    expect(missingStuck.holds).toEqual({
+      kind: "missing-formatter",
+      argv: [
+        ["merge", "<fix>"],
+        ["queue", "withdraw", "task/s"],
+        ["queue", "resume"],
+      ],
+    })
+    expect(() => renderRunnerHolds(missingStuck.holds)).toThrow(/runnerLine: rendering holds requires formatCommand/u)
+    const formatCommand = (argv: readonly string[]) => `host ${JSON.stringify(argv)}`
+    const stopped = runnerLine(
+      latest({}),
+      NOW,
+      {
+        stopped: { by: "yrd", cause: "stuck", change: `task/s@${"4".repeat(40)}`, since: since.toISOString() },
+      },
+      formatCommand,
+    )
     expect(stopped.state).toBe("stuck")
     expect(stopped.duration).toBe("stuck 6:00")
     expect(stopped.holds).toContain("line stopped at task/s since")
     // EVERY cure a reader is handed must be a command they can run: the verb is
     // `yrd queue withdraw` (cli.ts), and there is no `yrd cancel`.
-    expect(stopped.holds).toContain("fix and yrd merge <fix>")
-    expect(stopped.holds).toContain("yrd queue withdraw task/s")
-    expect(stopped.holds).toContain("yrd queue resume")
+    expect(stopped.holds).toContain('fix and host ["merge","<fix>"]')
+    expect(stopped.holds).toContain('host ["queue","withdraw","task/s"]')
+    expect(stopped.holds).toContain('host ["queue","resume"]')
+    expect(stopped.holds).toBe(
+      `line stopped at task/s since ${clock(since)} — fix and host ["merge","<fix>"], or host ["queue","withdraw","task/s"], or host ["queue","resume"]`,
+    )
+    expect(renderRunnerHolds(stopped.holds)).toBe(stopped.holds)
     expect(stopped.holds).not.toContain("yrd cancel")
 
-    const paused = runnerLine(latest({}), NOW, {
-      stopped: { by: "@chief", cause: "operator", change: null, since: since.toISOString() },
-    })
+    const paused = runnerLine(
+      latest({}),
+      NOW,
+      {
+        stopped: { by: "@chief", cause: "operator", change: null, since: since.toISOString() },
+      },
+      formatCommand,
+    )
     expect(paused.state).toBe("paused")
     expect(paused.holds).toContain("by @chief")
     // The pause RECORD's own sentence is the loud line at the top of the page
@@ -1063,11 +1112,16 @@ describe("the runner's row", () => {
    * summary this file would have to keep in step with the writer.
    */
   it("says how long the service has been overdue, why, and the one command that starts it", () => {
-    const line = runnerLine(latest({}, STOPPED_SERVICE), NOW, { waiting: 3 })
+    const missing = runnerLine(latest({}, STOPPED_SERVICE), NOW, { waiting: 3 })
+    expect(missing.state).toBe("stopped")
+    expect(missing.duration).toBe("stopped 5:00")
+    expect(missing.holds).toEqual({ kind: "missing-formatter", argv: [["queue", "up"]] })
+    expect(() => renderRunnerHolds(missing.holds)).toThrow(/runnerLine: rendering holds requires formatCommand/u)
+    const line = runnerLine(latest({}, STOPPED_SERVICE), NOW, { waiting: 3 }, () => "selected-start")
 
     expect(line.state).toBe("stopped")
     expect(line.duration).toBe("stopped 5:00")
-    expect(line.holds).toBe(" · start: yrd queue up")
+    expect(line.holds).toBe(" · start: selected-start")
     expect(line.detail).toContain("no longer a measurement of anything")
     // The journal's own facts are not lost behind the document's.
     expect(line.detail).toMatch(/round started \d\d:\d\d/u)
@@ -1080,11 +1134,11 @@ describe("the runner's row", () => {
    */
   it("says a dead run under a live check with no document at all, without inventing a duration", () => {
     const hand: RunnerService = { kind: "absent", why: "no health document at /w/service-health.json" }
-    const line = runnerLine(latest({ alive: false }, hand), NOW, { held })
+    const line = runnerLine(latest({ alive: false }, hand), NOW, { held }, () => "selected-start")
 
     expect(line.state).toBe("stopped")
     expect(line.duration).toBeUndefined()
-    expect(line.holds).toBe(" · start: yrd queue up")
+    expect(line.holds).toBe(" · start: selected-start")
     expect(line.detail).toMatch(/no process · round started \d\d:\d\d/u)
   })
 
