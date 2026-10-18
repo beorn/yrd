@@ -1114,6 +1114,9 @@ function buildProgram(
             label: id,
             snapshot,
             error,
+            get formatCommand() {
+              return reader?.formatCommand
+            },
             load: async (request) => {
               if (reader === undefined) return initialize()
               if (reader.load === undefined) throw new Error(`${id} has no refresh reader`)

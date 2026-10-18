@@ -49,6 +49,7 @@ import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { openLog } from "../../yrd-queue-core/src/log.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { formatStoredQueueAddress } from "../src/address.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { stageInfo, type ChangeDetail } from "../src/watch-detail.tsx"
@@ -2345,11 +2346,27 @@ describe("bare watch declared queues", () => {
     rendered.onWait = undefined
     try {
       const watched = capture(first.work)
-      expect(await runYrdProcess([process.execPath, "yrd", "watch"], watched.io), watched.stderr()).toBe(0)
+      const viewerCwd = join(root, "viewer")
+      mkdirSync(viewerCwd)
+      expect(
+        await runYrdProcess([process.execPath, "yrd", "watch"], {
+          ...watched.io,
+          cwd: viewerCwd,
+          formatYrdCommand: (argv, cwd) => JSON.stringify({ argv, cwd }),
+        }),
+        watched.stderr(),
+      ).toBe(0)
       const sources = rendered.sources
       expect(sources?.map((source) => source.id)).toEqual(["first#main", "second#main", "missing#main"])
       const a = sources?.[0]
       const b = sources?.[1]
+      for (const source of [a, b]) {
+        if (source?.snapshot === undefined) throw new Error("both declared queues must be readable")
+        expect(JSON.parse(source.formatCommand?.(["queue", "resume"]) ?? "null")).toEqual({
+          argv: ["queue", "resume", "--queue", formatStoredQueueAddress(source.snapshot.queue)],
+          cwd: viewerCwd,
+        })
+      }
       expect(sources?.[2]?.error).toContain("absent")
       const aRow = a?.snapshot?.rows.find((item) => item.row.branch === "task/shared")
       const bRow = b?.snapshot?.rows.find((item) => item.row.branch === "task/shared")
@@ -2368,6 +2385,8 @@ describe("bare watch declared queues", () => {
       expect((await sources?.[2]?.load?.())?.rows.find((item) => item.row.branch === "task/shared")?.row.state).toBe(
         "queued",
       )
+      const recovered = sources?.[2]
+      expect(JSON.parse(recovered?.formatCommand?.(["queue", "resume"]) ?? "null")).toMatchObject({ cwd: viewerCwd })
       declaredQueues.length = 0
       const fallback = capture(first.work)
       expect(await runYrdProcess([process.execPath, "yrd", "watch"], fallback.io), fallback.stderr()).toBe(0)
