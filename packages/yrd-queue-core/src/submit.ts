@@ -383,12 +383,14 @@ async function componentAuthor(
       symbolic.failure === undefined
     ) {
       const shown = await process.run({ repo: pin.checkout, args: ["log", "-1", "--format=%an", pin.sha] })
+      // Untested: the fixture does not fail this log read.
       if (shown.code !== 0 || shown.timedOut || shown.failure !== undefined) {
         return unavailable(
           `cannot read the published commit's author: exit ${shown.code}; ${shown.failure ?? shown.stderr}`,
         )
       }
       const name = shown.stdout.trim()
+      // Untested: the fixture does not commit an empty author name.
       if (name.length === 0) return unavailable("commit has no author")
       return { author: { name, tip: pin.sha } }
     }
@@ -1243,6 +1245,7 @@ async function submitEvent(
       throw new Error(`${request.branch}: its history read carried no remote tip for ${branchRef}`)
     }
     const branchAt = selected.branchTip
+    // A detached author has no branch, so there is nothing to retire.
     const componentAuthors = published.flatMap(({ path, author }) =>
       author !== undefined && "branch" in author ? [{ path, branch: author.branch, tip: author.tip }] : [],
     )

@@ -161,7 +161,19 @@ async function world(): Promise<World> {
     await child(["push", "--quiet", "origin", "main"])
     await child(["push", "--quiet", "origin", `${component.held}:refs/git-super/pins/${component.held}`])
     writeFileSync(join(component.work, component.path.endsWith("one") ? "one.txt" : "two.txt"), "unheld\n")
-    await child(["commit", "--quiet", "-am", "unheld"])
+    const unheld =
+      component.path === "vendor/one"
+        ? gitIn(component.work, undefined, undefined, {
+            env: {
+              ...process.env,
+              GIT_AUTHOR_NAME: "yrd-detached-pin",
+              GIT_AUTHOR_EMAIL: "detached-pin@yrd.test",
+              GIT_COMMITTER_NAME: "yrd-detached-pin",
+              GIT_COMMITTER_EMAIL: "detached-pin@yrd.test",
+            },
+          })
+        : child
+    await unheld(["commit", "--quiet", "-am", "unheld"])
     component.unheld = (await child(["rev-parse", "HEAD"])).trim()
   }
   mkdirSync(join(root, "queue"), { recursive: true })
@@ -1011,13 +1023,11 @@ describe("ordinary submit with a local-only component pin", () => {
     expect(receipt.head).toBe(head)
     // @failure A detached component checkout hides the published commit's author behind authorUnavailable.
     // @level l2 @consumer submit --prepare callers reading structured publication and diagnostics
-    const authorName = (await child(["log", "-1", "--format=%an", one.unheld])).trim()
-    expect(authorName).not.toBe("")
     const publishedPin = receipt.published.find((row) => row.path === one.path)
     expect(publishedPin).toMatchObject({
       path: one.path,
       sha: one.unheld,
-      author: { name: authorName, tip: one.unheld },
+      author: { name: "yrd-detached-pin", tip: one.unheld },
     })
     expect(publishedPin).not.toHaveProperty("authorUnavailable")
     expect(ran.stderr).not.toContain("detached HEAD")
