@@ -38,6 +38,7 @@ export type LocalBranchRetirement = Readonly<{
 export type LocalBranchRetirementResult = Readonly<{
   outcome: "removed" | "kept" | "failed" | "eligible"
   archiveRef?: string
+  archiveLocation?: "local" | "origin"
   reason: string
   detail?: string
 }>
@@ -63,6 +64,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
   let firstProtectionRead = true
   let completedArchive: string | undefined
   let writtenArchive: string | undefined
+  let archiveLocation: "local" | "origin" | undefined
   const protection = async (): Promise<Kept | undefined> => {
     const firstRead = firstProtectionRead
     firstProtectionRead = false
@@ -74,6 +76,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       completedArchive = findArchiveRefFor(repo, branch, tip)
       if (completedArchive !== undefined && (await refAt(git, completedArchive)) === tip) {
         writtenArchive = completedArchive
+        archiveLocation = "local"
       }
     }
     const reasons = await input.protections()
@@ -85,12 +88,14 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       if (saw !== undefined) return { code: "moved", detail: `branch reappeared at ${saw} after completed retirement` }
       if ((await refAt(git, completedArchive)) !== tip) {
         writtenArchive = undefined
+        archiveLocation = undefined
         return {
           code: "moved",
           detail: `completed retirement custody changed: ${completedArchive} no longer holds ${tip}`,
         }
       }
       writtenArchive = completedArchive
+      archiveLocation = "local"
     }
     for (const row of await store.list()) {
       if (row.branch === `refs/heads/${branch}`) return { code: "held", detail: `branch is checked out at ${row.path}` }
@@ -131,6 +136,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     await git(["check-ref-format", archiveRef])
     if (disposition.kind === "archived" && (await refAt(git, disposition.ref)) === tip) {
       writtenArchive = disposition.ref
+      archiveLocation = "origin"
     }
     if (disposition.kind === "merged") {
       const mergeBase = (await git(["merge-base", disposition.base, tip])).trim()
@@ -155,6 +161,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       const custody = ensureArchiveRef(repo, archiveRef, tip)
       if (!custody.ok) throw new Error(custody.reason)
       writtenArchive = archiveRef
+      archiveLocation = disposition.kind === "archived" ? "origin" : "local"
     }
     const alreadyMerged =
       kept === undefined && disposition.kind === "closed" && (await isAncestor(git, tip, disposition.target))
@@ -167,6 +174,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
         note: reason,
         localArchive: { ref: archiveRef, tip },
       })
+      archiveLocation = "origin"
     }
     if (kept === undefined) kept = await protection()
     if (kept === undefined && completedArchive !== undefined) kept = await reachability()
@@ -178,6 +186,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       result = {
         outcome: "removed",
         archiveRef: completedArchive,
+        ...(archiveLocation === undefined ? {} : { archiveLocation }),
         reason,
         detail: `already retired: ${completedArchive} holds ${tip}; this run deleted no ref`,
       }
@@ -191,7 +200,12 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
           if (held !== undefined) throw new RetirementKept(held)
         },
       })
-      result = { outcome: "removed", archiveRef, reason }
+      result = {
+        outcome: "removed",
+        archiveRef,
+        ...(archiveLocation === undefined ? {} : { archiveLocation }),
+        reason,
+      }
     }
   } catch (error) {
     if (error instanceof RetirementKept) {

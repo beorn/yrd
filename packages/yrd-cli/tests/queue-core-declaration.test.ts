@@ -2522,9 +2522,14 @@ describe("a queue is the selected origin branch carrying config", () => {
       ),
       manual.stderr(),
     ).toBe(0)
-    const manualReport = JSON.parse(manual.stdout()) as { removed: { branch: string; archiveRef: string }[] }
+    const manualReport = JSON.parse(manual.stdout()) as {
+      removed: { branch: string; archiveRef: string; recovery?: string }[]
+    }
     expect(manualReport.removed).toEqual([expect.objectContaining({ branch: "task/manual-only" })])
     expect((await git(["ls-remote", "origin", manualReport.removed[0]!.archiveRef])).split("\t")[0]).toBe(manualHead)
+    expect(manualReport.removed[0]!.recovery).toBe(
+      `git -C ${repo} fetch ${(await git(["config", "--get", "remote.origin.url"])).trim()} ${manualReport.removed[0]!.archiveRef}:refs/heads/task/manual-only`,
+    )
     expect((await git(["rev-parse", "refs/heads/task/28791-advanced"])).trim()).toBe(advanced)
     // Accepted29301: local expected=head, but the recorded change has an older head.
     // Existing assertions only check the reason token, so they miss identical SHAs in the detail.
@@ -2623,10 +2628,24 @@ describe("a queue is the selected origin branch carrying config", () => {
       ),
       cured.stderr(),
     ).toBe(0)
-    expect(JSON.parse(cured.stdout())).toMatchObject({
+    const curedReport = JSON.parse(cured.stdout()) as {
+      kept: unknown[]
+      removed: { branch: string; head: string; archiveRef: string; recovery?: string }[]
+    }
+    expect(curedReport).toMatchObject({
       kept: [],
       removed: [{ branch: "task/28791-advanced", head: saved.get("task/28791-advanced") }],
     })
+    // 29949: A landed branch dropped with --local writes its archive ref only locally, never to origin;
+    // the printed recovery command must name the local archive ref and resolve when executed.
+    const curedArchive = curedReport.removed[0]!.archiveRef
+    expect((await git(["ls-remote", "origin", curedArchive])).trim()).toBe("")
+    expect(curedReport.removed[0]!.recovery).toBe(`git -C ${repo} branch task/28791-advanced ${curedArchive}`)
+    const recoveryArgs = curedReport.removed[0]!.recovery!.split(" ")
+    expect(recoveryArgs.slice(0, 3)).toEqual(["git", "-C", repo])
+    await git(recoveryArgs.slice(3))
+    expect((await git(["rev-parse", "refs/heads/task/28791-advanced"])).trim()).toBe(saved.get("task/28791-advanced"))
+    await git(["update-ref", "-d", "refs/heads/task/28791-advanced", saved.get("task/28791-advanced")!])
     // AC5: the command's journal must remain readable by the existing projection reader.
     // Custody assertions alone miss a writer that omits the required run header.
     const logs = join(await workdirOf(git, { cwd: repo }), "logs")

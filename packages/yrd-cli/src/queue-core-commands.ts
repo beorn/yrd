@@ -1957,9 +1957,12 @@ export async function coreQueueCommand(
                 : result.reason,
             ...(result.detail === undefined ? {} : { detail: result.detail }),
             ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
-            ...(result.outcome === "removed" && disposition.kind === "closed"
+            ...(result.outcome === "removed" && disposition.kind === "closed" && result.archiveRef !== undefined
               ? {
-                  recovery: `git -C ${authorRepo} fetch ${eventStore.remote} ${result.archiveRef}:refs/heads/${branch}`,
+                  recovery:
+                    result.archiveLocation === "origin"
+                      ? `git -C ${authorRepo} fetch ${eventStore.remote} ${result.archiveRef}:refs/heads/${branch}`
+                      : `git -C ${authorRepo} branch ${branch} ${result.archiveRef}`,
                 }
               : {}),
           }
