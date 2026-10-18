@@ -541,18 +541,36 @@ describe("revert guard review regressions (27363)", () => {
     expect(report.paths.map((row) => row.path)).toContain("vendor/dep/a.txt")
   })
 
-  it("base: an ambiguous base carries no per-path claim", async () => {
+  it("base: braided history decides a clean tree and names a real interior restore", async () => {
     const w = await ambiguousWorld()
-    const report = await detect(w, w.candidate, w.head)
-    expect(report.base.state).toBe("ambiguous")
-    expect(report.coverage).toBe("incomplete")
-    expect(report.gaps.some((gap) => gap.reason.includes("ambiguous"))).toBe(true)
-    expect(report.paths).toEqual([])
+    const root = await w.checkoutAt(w.candidate)
+    const git = gitIn(root, undefined, undefined, { env })
+    const bases = (await git(["merge-base", "--all", w.target, w.head])).trim().split("\n")
+    expect(bases).toHaveLength(2)
+    // Native ancestor-set exclusion is the oracle: exclude full ancestry, never only first parents.
+    const targetOnly = (excluded: readonly string[]) =>
+      git(["rev-list", "--first-parent", w.target, ...excluded.map((base) => `^${base}`)])
+    const allBases = await targetOnly(bases)
+    expect(allBases).toBe(await targetOnly([w.head]))
+    expect(allBases).toBe(await targetOnly([...bases].reverse()))
+    const report = await detectReverted({ candidate: w.candidate, git, head: w.head, root, targetHead: w.target })
+    // CTO4aeb221b amends the old blanket ambiguity veto: this real put-back remains a named S2.
+    expect(report.base).toEqual({ state: "multiple", bases: expect.arrayContaining(bases) })
+    expect(report.coverage).toBe("complete")
+    expect(report.gaps).toEqual([])
+    expect(report.paths.map((row) => row.path)).toEqual(["vendor/dep/a.txt"])
     expect(report.swallowed).toEqual([])
-    // An `unjudged` gap — a base the guard could not pick — is still a warning in BOTH modes: nobody judged it.
-    expect(revertedPathsFinding(report)).toBeDefined()
     expect(revertGuardAction(report, "observe")).toBe("warn")
     expect(revertGuardAction(report, "refuse")).toBe("stick")
+    const clean = await detect(w, w.head, w.head)
+    expect(clean.base).toEqual({ state: "multiple", bases: expect.arrayContaining(bases) })
+    expect(clean.coverage).toBe("complete")
+    expect(clean.gaps).toEqual([])
+    expect(clean.paths).toEqual([])
+    expect(clean.swallowed).toEqual([])
+    expect(revertedPathsFinding(clean)).toBeUndefined()
+    expect(revertGuardAction(clean, "observe")).toBe("clean")
+    expect(revertGuardAction(clean, "refuse")).toBe("clean")
   })
 
   it("add-only: the untouched paths cost one traversal per level, not one walk per path", async () => {
@@ -654,7 +672,7 @@ async function modeWorld(): Promise<RegressionWorld> {
   return { candidate, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
 }
 
-/** A criss-cross history gives the root tree two merge bases, so no path may be claimed. */
+/** A real criss-cross root with two bases and an interior stale-restore candidate. */
 async function ambiguousWorld(): Promise<RegressionWorld> {
   const root = mkdtempSync(join(tmpdir(), "yrd-revert-ambiguous-"))
   roots.push(root)
