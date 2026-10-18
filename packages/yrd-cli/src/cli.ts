@@ -1471,7 +1471,8 @@ function buildProgram(
       "after",
       "\nFor a component branch, run from its component author checkout:\n" +
         "  yrd drop <branch> --local --tip <full-oid>\n" +
-        "Plain --local has no preview: it archives at origin, then deletes the local branch.\n",
+        "Plain --local has no preview: it archives at origin, then deletes the local branch.\n" +
+        "To archive at origin and detach the branch while keeping checkout bytes: yrd drop <branch> --local --release-checkout --tip <full-oid> --issue <id> --reason <why> [--apply]\n",
     )
     .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
 
