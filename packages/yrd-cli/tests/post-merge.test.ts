@@ -402,7 +402,7 @@ it.each([
           repo,
           {
             cwd: repo,
-            stdout: () => {},
+            stdout: (s) => diagnostics.push(s),
             stderr: (s) => diagnostics.push(s),
             localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
           },
