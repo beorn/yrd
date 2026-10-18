@@ -226,7 +226,7 @@ it.each([
       mode === "concurrent" ||
       mode === "provider-lost-reply" ||
       mode === "observed-legacy"
-    const expectedCloses = mode.startsWith("observed-") ? 3 : 2
+    const expectedCloses = mode === "observed-stacked-merge" ? 4 : mode.startsWith("observed-") ? 3 : 2
     const root = world(),
       remote = join(root, "remote.git"),
       repo = join(root, "author"),
@@ -357,7 +357,14 @@ it.each([
       })
       await git(["checkout", "--quiet", "main"])
       if (mode === "observed-stacked-merge") {
-        await git(["merge", "--quiet", "--no-ff", "task/aa-stacked", "-m", "deliver the whole stack"])
+        await git([
+          "merge",
+          "--quiet",
+          "--no-ff",
+          "task/aa-stacked",
+          "-m",
+          "deliver the whole stack\n\nCloses: issue-merge",
+        ])
         firstObservedMerge = (await git(["rev-parse", "HEAD"])).trim()
         await git(["push", "--quiet", "origin", "main"])
       } else {
@@ -490,7 +497,12 @@ it.each([
     }
     if (mode === "observed-stacked-merge") {
       const before = readFileSync(closeCalls, "utf8").trim().split("\n")
-      expect(before).toHaveLength(3)
+      expect(before.map((line) => line.split("\t")[0]).sort()).toEqual([
+        "issue-first",
+        "issue-merge",
+        "issue-second",
+        "issue-stacked",
+      ])
       expect((await readStatus(store, "main", "task/aa-stacked")).merge).toBe(firstObservedMerge)
       await using runner = createPostMerge({
         workdir,
@@ -510,7 +522,7 @@ it.each([
       await runner[Symbol.asyncDispose]()
       expect(
         readFileSync(closeCalls, "utf8").trim().split("\n"),
-        "an upper-only rerun must not repeat the lower issue's close",
+        "an upper-only rerun must not repeat any already delivered issue close",
       ).toEqual(before)
       return
     }
