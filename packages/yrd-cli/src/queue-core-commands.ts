@@ -1045,6 +1045,14 @@ export async function coreQueueCommand(
   type RetryExhaustedRound = Readonly<{ kind: "retry-exhausted"; error: QueueRunEventRetryExhausted }>
   type LegacyOverrideRound = Readonly<{ kind: "legacy-override-present"; error: LegacyOverridePresent }>
   type CleanupOutcome = Pick<QueueRunOutcome, "run" | "log" | "base" | "merged" | "target">
+  /**
+   * One housekeeping journal per service start, shared by the startup catch-up and every round's cleanup (30105).
+   * Before this, each merged round opened its own logs/post-merge file — about 1,700 a day, none of them read.
+   * The separation from the round journal stays: cleanup still cannot stale a completed round's projection.
+   */
+  let housekeepingLog: ReturnType<typeof openLog> | undefined
+  const housekeepingFor = (): ReturnType<typeof openLog> =>
+    (housekeepingLog ??= openLog(join(workdir, "logs", "post-merge")))
   const cleanupAfterRound = async (
     outcome: CleanupOutcome,
     declared: CapturedDeclaration,
@@ -1294,9 +1302,10 @@ export async function coreQueueCommand(
         ...(noCheck === undefined ? {} : { noCheck }),
       })
       roundCleanup = async (merged) => {
-        // The queue journal is complete. Housekeeping owns a separate log,
-        // just like startup catch-up, so later cleanup cannot stale its projection.
-        const cleanupLog = openLog(join(workdir, "logs", "post-merge"))
+        // The queue journal is complete. Housekeeping owns one shared log per
+        // service start, so later cleanup cannot stale its projection and
+        // several rounds do not mint a file each (30105).
+        const cleanupLog = housekeepingFor()
         cleanupLog.write({
           kind: "run",
           command: "post-merge cleanup",
@@ -1306,12 +1315,14 @@ export async function coreQueueCommand(
         })
         try {
           await cleanupAfterRound(
-            { ...outcome, run: cleanupLog.id, log: cleanupLog.path, merged },
+            { ...outcome, log: cleanupLog.path, merged },
             declared,
             baseOptions.render,
           )
         } finally {
-          cleanupLog.finish()
+          // A service keeps its journal for its whole life; a one-shot command
+          // owns it for one round.
+          if (request.command !== "up") cleanupLog.finish()
         }
       }
     } catch (error) {
@@ -3746,7 +3757,7 @@ export async function coreQueueCommand(
             const declared = await declaration()
             if (declared !== undefined) {
               // Housekeeping evidence is not a queue round; keep it outside the round reader's population.
-              const startupLog = openLog(join(workdir, "logs", "post-merge"))
+              const startupLog = housekeepingFor()
               startupLog.write({
                 kind: "run",
                 command: "post-merge startup",
@@ -3795,15 +3806,11 @@ export async function coreQueueCommand(
                 ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
                 queueBranch: declared.config.target.branch,
                 cleanup: async (merged) => {
-                  try {
-                    await cleanupAfterRound(
-                      { run: startupLog.id, log: startupLog.path, base: declared.oid, target: declared.oid, merged },
-                      declared,
-                      () => {},
-                    )
-                  } finally {
-                    startupLog.finish()
-                  }
+                  await cleanupAfterRound(
+                    { run: startupLog.id, log: startupLog.path, base: declared.oid, target: declared.oid, merged },
+                    declared,
+                    () => {},
+                  )
                 },
               })
               startupCatchup = false
@@ -4016,6 +4023,8 @@ export async function coreQueueCommand(
           await publisher.publish(stoppedRunnerClaim())
         }
         postMergeStop.abort()
+        housekeepingLog?.finish()
+        housekeepingLog = undefined
       }
     }
     case "list": {
