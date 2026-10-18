@@ -1339,13 +1339,15 @@ export async function coreQueueCommand(
           target: targetLabel,
           queueRun: outcome.run,
         })
-        try {
-          await cleanupAfterRound({ ...outcome, log: cleanupLog.path, merged }, declared, baseOptions.render)
-        } finally {
-          // A service keeps its journal for its whole life; a one-shot command
-          // owns it for one round.
-          if (request.command !== "up") cleanupLog.finish()
-        }
+        // Every row in this journal carries the journal's own id; a round is
+        // found by its marker's position, never by a foreign run id. The
+        // journal is finished by the disposable registered above, after the
+        // post-merge worker drains, whatever the command is.
+        await cleanupAfterRound(
+          { ...outcome, run: cleanupLog.id, log: cleanupLog.path, merged },
+          declared,
+          baseOptions.render,
+        )
       }
     } catch (error) {
       // Cleanup used to run outside this catch. Keep its original process
