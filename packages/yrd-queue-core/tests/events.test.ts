@@ -2269,18 +2269,22 @@ describe("the queue-format boundary", () => {
         [changeInput("failed", { queueTip, at: new Date(), reason: "fixture ending" })],
         { expect: start.head },
       )
+      const startTip = start.head
+      const endTip = end.head
+      if (startTip === null || endTip === null) throw new Error("retirement race fixture lacks its event tips")
       const authority =
-        kind === "event" ? { kind, ref: eventRef, tip: end.head } : { kind, ref: "refs/heads/lab", tip: kept }
-      const movedTip = kind === "event" ? start.head : advanced
+        kind === "event" ? { kind, ref: eventRef, tip: endTip } : { kind, ref: "refs/heads/lab", tip: kept }
+      const movedTip = kind === "event" ? startTip : advanced
       let moved = false
       const backend: GitomicBackend = {
         ...git.backend,
         publish: async (repo, updates, remote) => {
-          await publish(repo, updates, remote)
+          const result = await publish(repo, updates, remote)
           if (updates.some((update) => update.ref === branchRef && update.oid === null)) {
             moved = true
             await publish(repo, [{ ref: authority.ref, expect: authority.tip, oid: movedTip }], remote)
           }
+          return result
         },
       }
       const archive = kind === "event" ? archiveRefFor(branch, "fixture", "2000-01-01") : undefined
@@ -2330,13 +2334,17 @@ describe("the queue-format boundary", () => {
       [changeInput("failed", { queueTip, at: new Date(), reason: "archive-only ending" })],
       { expect: archivedStart.head },
     )
+    const archivedStartTip = archivedStart.head
+    const archivedEndTip = archivedEnd.head
+    if (archivedStartTip === null || archivedEndTip === null)
+      throw new Error("archive-only fixture lacks its event tips")
     const archive = archiveRefFor(archivedBranch, "fixture", "2000-01-01")
     const archiveBackend: GitomicBackend = {
       ...git.backend,
       publish: async (repo, updates, remote) => {
-        await publish(repo, updates, remote)
-        if (!updates.some((update) => update.ref === archivedBranchRef && update.oid === null)) return
-        await publish(repo, [{ ref: archivedEventRef, expect: archivedEnd.head, oid: archivedStart.head }], remote)
+        const result = await publish(repo, updates, remote)
+        if (!updates.some((update) => update.ref === archivedBranchRef && update.oid === null)) return result
+        await publish(repo, [{ ref: archivedEventRef, expect: archivedEndTip, oid: archivedStartTip }], remote)
         const localCustody = (
           await git(["for-each-ref", `--contains=${archivedHead}`, "--format=%(refname) %(objectname)"])
         )
@@ -2353,6 +2361,7 @@ describe("the queue-format boundary", () => {
         )
         await git(["reflog", "expire", "--expire=now", "--all"])
         await git(["gc", "--prune=now", "--quiet"])
+        return result
       },
     }
     const archiveRefusal = await retireOriginBranch(
@@ -2361,7 +2370,7 @@ describe("the queue-format boundary", () => {
         branch: archivedBranch,
         head: archivedHead,
         archive,
-        authority: { kind: "event", ref: archivedEventRef, tip: archivedEnd.head },
+        authority: { kind: "event", ref: archivedEventRef, tip: archivedEndTip },
       },
     ).then(
       () => undefined,
