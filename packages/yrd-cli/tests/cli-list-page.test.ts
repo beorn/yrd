@@ -599,10 +599,27 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     const absent = document.journal.absent ?? ""
     expect(absent).toContain("task/one@")
     expect(absent).toContain("has no Run trailer")
-    expect(absent).not.toContain("task/unrelated@")
-    const globalLines = absent
-      .split("; ")
-      .filter((line) => /global|incomplete/i.test(line) && /\b1\b/.test(line))
-    expect(globalLines).toHaveLength(1)
+    expect.soft(absent).not.toContain("task/unrelated@")
+    const globalLines = absent.split("; ").filter((line) => /global|incomplete/i.test(line) && /\b1\b/.test(line))
+    expect.soft(globalLines).toHaveLength(1)
+    expect.soft(absent).toContain("yrd list --json")
+
+    const empty = await yrd(work, { color: false }, "list", "--json", "--require-match", "no-such-change")
+    expect(empty.exitCode, empty.report).toBe(1)
+    const emptyDocument = JSON.parse(empty.stdout) as typeof document
+    expect(emptyDocument.changes).toEqual([])
+    const emptyAbsent = emptyDocument.journal.absent ?? ""
+    expect.soft(emptyAbsent).not.toContain("task/one@")
+    expect.soft(emptyAbsent).not.toContain("task/unrelated@")
+    expect
+      .soft(emptyAbsent.split("; ").filter((line) => /global|incomplete/i.test(line) && /\b2\b/.test(line)))
+      .toHaveLength(1)
+    expect.soft(emptyAbsent).toContain("yrd list --json")
+
+    const unfiltered = await yrd(work, { color: false }, "list", "--json")
+    expect(unfiltered.exitCode, unfiltered.report).toBe(0)
+    const fullDocument = JSON.parse(unfiltered.stdout) as typeof document
+    expect(fullDocument.journal.absent).toContain("task/one@")
+    expect(fullDocument.journal.absent).toContain("task/unrelated@")
   })
 })
