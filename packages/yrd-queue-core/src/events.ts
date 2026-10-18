@@ -1337,7 +1337,7 @@ async function eventQueueFromHistory(
   const positions = new Map(events.map((event, index) => [event.id, index]))
   // The acquired queue ref retains these exact objects through extra parents.
   // Decode only each immutable anchor; never discover or fetch other branch refs.
-  const anchors = await openEvents({ ...store, ref, remote: undefined })
+  const anchors = await openEvents({ ...store, ref, remote: undefined, fetch: undefined })
   const readAnchors = new Map<string, Event>()
   for (const { id, effect } of Object.values(projected.issueEffects)) {
     const anchor = readAnchors.get(effect.mergedEvent) ?? (await readRetainedEvent(anchors, effect.mergedEvent))

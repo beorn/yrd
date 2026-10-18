@@ -3197,6 +3197,17 @@ describe("the queue-format boundary", () => {
     expect(events[1]?.links).toEqual([commit])
   })
 
+  // @failure Per-round fetch refs leaked into the immutable local anchor reader and stopped the live queue.
+  // @level l2 @consumer Queue service read policy @testonly none
+  it("reads an empty completion map with per-round remote fetch refs", async () => {
+    const { store, location } = remoteMemStore("yrd-queue-anchor-fetch-policy")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set("work", "one"), "work")).oid
+    const tip = await seedEventQueue(location, "lab", commit, new Date())
+    const acquired = { ...location, fetch: ["refs/heads/lab"] }
+    expect(await readEventQueue(acquired, "lab")).toMatchObject({ tip, issueEffects: {} })
+  })
+
   // A queue completion must be readable from any branch replay without walking other
   // branches. These cases exercise the retained immutable anchor, not a new writer.
   it.each(["valid", "unkept", "wrong merge", "not merged", "foreign queue", "wrong writer", "duplicate"])(
@@ -3266,6 +3277,8 @@ describe("the queue-format boundary", () => {
       }
       const reading = await readEventQueue(location, "lab")
       expect(reading.issueEffects[effect.providerId]).toEqual({ id: written.head, effect })
+      const acquired = { ...location, fetch: ["refs/heads/lab"] }
+      expect((await readEventQueue(acquired, "lab")).issueEffects).toEqual(reading.issueEffects)
       expect(reading.notices).toEqual({})
       expect((await queue.events()).map((event) => event.type)).toEqual(["created", "notified"])
     },
