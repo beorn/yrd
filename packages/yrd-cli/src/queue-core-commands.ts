@@ -2679,7 +2679,7 @@ export async function coreQueueCommand(
         if (author === undefined || request.author === undefined) {
           io.stderr(
             `yrd: merge needs ${branch} submitted, and no change of it is in line on ${targetName(config.target)}; ` +
-              `submitting needs a clone that has ${branch}: run yrd merge ${branch} inside one\n`,
+              `submit from a clone that contains ${branch}, then merge its queued change\n`,
           )
           return 2
         }
@@ -2743,7 +2743,7 @@ export async function coreQueueCommand(
       // retry, naming why and the command that tries again.
       io.stderr(
         `yrd: ${changeName(change)} is still in line, ${state}: ${notMerged(merging.outcome, change)}; ` +
-          `it keeps its place and the queue merges it in turn, or run yrd merge ${branch} again\n`,
+          `it keeps its place and the queue merges it in turn, or run ${formatYrdCommand(io, ["merge", branch, "--queue", formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))], io.cwd ?? repo)} again\n`,
       )
       return 2
     }

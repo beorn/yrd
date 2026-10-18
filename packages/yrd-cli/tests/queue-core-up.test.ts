@@ -7070,7 +7070,8 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     { file: "fails.txt", ending: "failed", exit: 1, verdict: "fails its check" },
     { file: "cannot-judge.txt", ending: "stuck", exit: 2, verdict: "has a check that cannot judge it" },
     { file: "passes.txt", ending: "merged", exit: 0, verdict: "passes" },
-  ])("a change that $verdict ends $ending, and yrd merge exits $exit", async ({ file, ending, exit }) => {
+    { file: "deferred.txt", ending: "queued", exit: 2, verdict: "defers its check" },
+  ])("a change that $verdict reads $ending, and yrd merge exits $exit", async ({ file, ending, exit }) => {
     const w = await verbWorld()
     const script = join(dirname(w.workdir), "verdict.sh")
     writeFileSync(
@@ -7079,12 +7080,16 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
         "#!/bin/sh",
         "if [ -f fails.txt ]; then echo 'this change fails the verdict' >&2; exit 1; fi",
         "if [ -f cannot-judge.txt ]; then echo 'the verdict cannot judge this change' >&2; exit 2; fi",
+        'if [ -f deferred.txt ]; then echo \'YRD-CHECK-RESULT {"result":"deferred","reason":"too wide","projectedMs":3600000,"boundMs":1800000}\'; exit 3; fi',
         "exit 0",
         "",
       ].join("\n"),
     )
     chmodSync(script, 0o755)
-    await redeclare(w, `checks:\n  - verdict:\n      on: [submit]\n      run: ${script}\n`)
+    await redeclare(
+      w,
+      `checks:\n  - verdict:\n      on: [submit]\n      run: ${script}\n      long: {timeoutMs: 5400000}\n`,
+    )
     const head = await branchWith(w, "task/judged", file)
 
     // Never submitted: merge opens the change itself, then judges it.
@@ -7093,6 +7098,40 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     const judged = await readStatus(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", "task/judged")
     expect(judged, merged.report).toMatchObject({ commit: head, status: ending })
     expect(merged.exitCode, merged.report).toBe(exit)
+    if (ending === "queued") {
+      // A deferred merge is the live retry boundary; prior ending rows never
+      // reach it, so they cannot catch a bare command losing host/cwd/queue.
+      const retry = capture(w.work)
+      const commands: { argv: readonly string[]; cwd: string }[] = []
+      retry.io.formatYrdCommand = (argv, cwd) => {
+        commands.push({ argv, cwd })
+        return "host-selected-merge-retry"
+      }
+      expect(
+        await coreQueueCommand(
+          w.work,
+          retry.io,
+          { command: "merge", branch: "task/judged", submitter: "@dev/4" },
+          { workdir: w.workdir },
+        ),
+      ).toBe(2)
+      expect.soft(retry.stderr()).toContain("host-selected-merge-retry")
+      expect.soft(commands).toContainEqual({
+        argv: ["merge", "task/judged", "--queue", `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`],
+        cwd: w.work,
+      })
+      const unavailable = capture(w.work)
+      expect(
+        await coreQueueCommand(
+          w.work,
+          unavailable.io,
+          { command: "merge", branch: "task/not-submitted", submitter: "@dev/4" },
+          { workdir: w.workdir },
+        ),
+      ).toBe(2)
+      expect.soft(unavailable.stderr()).toContain("a clone that contains task/not-submitted")
+      expect.soft(unavailable.stderr()).not.toContain("run yrd merge")
+    }
   })
 
   // ACCEPTANCE: on a line a stuck change stopped, the fix that sits BEHIND it
