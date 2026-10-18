@@ -16,6 +16,7 @@ import {
   inspectSubmit,
   issueOf,
   issueBindingsOf,
+  closingReferencesOf,
   listChangeHistories,
   lookupRunIndex,
   queueFormat,
@@ -933,6 +934,27 @@ describe("event submit", () => {
     await w.git(["commit", "--quiet", "--allow-empty", "-m", "commit with prose\n\nRefs and tags both move here."])
     const head4 = (await w.git(["rev-parse", "HEAD"])).trim()
     expect(await issueOf(w.git, "task/prose-refs", head4, w.target)).toBeUndefined()
+
+    // The binding fallback still accepts colonless Resolves, while outward closing
+    // intent must keep the actual Git trailer value opaque, including spaces and punctuation.
+    await w.git([
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "closing controls\n\nFixes everything\nResolves colonless-binding\n\nCloses: -opaque one, two",
+    ])
+    const head5 = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(await issueOf(w.git, "task/prose-refs", head5, w.target)).toEqual({
+      issue: "colonless-binding",
+      source: "binding",
+      commit: head5,
+    })
+    const closing = []
+    for await (const field of closingReferencesOf(w.git, [`${w.target}..${head5}`], "task/prose-refs")) {
+      closing.push(field)
+    }
+    expect(closing).toEqual([{ value: "-opaque one, two", commit: head5, trailer: "Closes" }])
   })
 
   /** @failure An absolute vault path and a vault-relative bead reference refuse as conflicting bindings (25719).

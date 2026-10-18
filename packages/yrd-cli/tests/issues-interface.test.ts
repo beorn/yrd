@@ -160,6 +160,43 @@ describe("yrd issues", () => {
     expect(envelopeOf(ran).result).toEqual({ argv: ["k"] })
   })
 
+  it("pins a main ancestor declaration and refuses a non-ancestor without starting its provider", async () => {
+    const root = project({ "issues.yml": declare({ view: provider("json", "old", "<key>") }) })
+    const pin = git(root, "rev-parse", "HEAD")
+    git(root, "checkout", "--quiet", "-b", "unmerged")
+    writeFileSync(join(root, "issues.yml"), declare({ view: provider("json", "unmerged", "<key>") }))
+    git(root, "add", "issues.yml")
+    git(root, "commit", "--quiet", "-m", "unmerged declaration")
+    const unmerged = git(root, "rev-parse", "HEAD")
+    git(root, "checkout", "--quiet", "main")
+    writeFileSync(join(root, "issues.yml"), declare({ view: provider("json", "new", "<key>") }))
+    git(root, "add", "issues.yml")
+    git(root, "commit", "--quiet", "-m", "advance main declaration")
+    const pinned = await runIssuesVerb({
+      verb: "view",
+      args: ["key"],
+      cwd: root,
+      declarationCommit: pin,
+      stderr: () => {},
+    })
+    expect(pinned).toMatchObject({
+      ok: true,
+      envelope: { declaration: { commit: pin }, result: { argv: ["old", "key"] } },
+    })
+    let providerOutput = ""
+    const refused = await runIssuesVerb({
+      verb: "view",
+      args: ["key"],
+      cwd: root,
+      declarationCommit: unmerged,
+      stderr: (text) => {
+        providerOutput += text
+      },
+    })
+    expect(refused).toMatchObject({ ok: false, code: "yrd-issues-no-main" })
+    expect(providerOutput).toBe("")
+  })
+
   it.each([
     ["an absolute path", (path: string) => path],
     ["a file:// URL", (path: string) => pathToFileURL(path).href],
@@ -336,6 +373,42 @@ describe("yrd issues", () => {
     const root = project({ "issues.yml": declare({ list: provider("sleep") }) })
     const outcome = await runIssuesVerb({ verb: "list", args: [], cwd: root, timeoutMs: 300, stderr: () => {} })
     expect(outcome).toMatchObject({ ok: false, exitCode: 1, code: "yrd-issues-provider-timed-out" })
+  })
+
+  it("reaps a stopped write provider and names the owner stop rather than a provider fault", async () => {
+    const root = project({ "issues.yml": declare({ close: provider("stall", "<key>", "<reason>", "<id>") }) })
+    const stop = new AbortController()
+    let pid: number | undefined
+    const outcome = await runIssuesVerb({
+      verb: "close",
+      args: ["opaque-key", "completed"],
+      id: "owner-stop",
+      cwd: root,
+      signal: stop.signal,
+      timeoutMs: 1000,
+      stderr: (text) => {
+        const match = /started pid=(\d+)/u.exec(text)
+        if (match !== null) {
+          pid = Number(match[1])
+          stop.abort("queue shutdown fixture")
+        }
+      },
+    })
+    expect(pid).toBeGreaterThan(0)
+    let reaped = false
+    try {
+      process.kill(pid!, 0)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+      reaped = true
+    }
+    expect(reaped).toBe(true)
+    expect(outcome).toMatchObject({
+      ok: false,
+      exitCode: 1,
+      code: "yrd-issues-provider-failed",
+      message: expect.stringContaining("stopped: queue shutdown fixture"),
+    })
   })
 
   it("passes --timeout-ms to the provider bound, and refuses a non-positive one with exit 2 (rule: CLI timeout)", async () => {

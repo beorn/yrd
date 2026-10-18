@@ -1233,6 +1233,7 @@ async function submitEvent(
     const branchAt = selected.branchTip
     const input = changeInput("opened", {
       queueTip: ops.queue.tip,
+      base: inspected.targetHead,
       at: new Date(),
       commit: head,
       by: request.submitter,
@@ -1572,8 +1573,34 @@ export async function* issueBindingsOf(
   revisions: readonly string[],
   branch: string,
 ): AsyncGenerator<Readonly<{ issue: string; commit: string; trailer?: string }>, void> {
+  yield* issueFieldsOf(git, revisions, branch, ["Resolves", "Refs"], true)
+}
+
+/** Closing intent is Git's trailer block only; body shorthand never authorizes an outward write. */
+export async function* closingReferencesOf(
+  git: Git,
+  revisions: readonly string[],
+  branch: string,
+): AsyncGenerator<Readonly<{ value: string; commit: string; trailer: string }>, void> {
+  for await (const field of issueFieldsOf(git, revisions, branch, ["Closes", "Fixes", "Resolves"], false)) {
+    if (field.trailer === undefined) {
+      throw new Error(`cannot identify the closing trailer in ${branch} at ${field.commit}`)
+    }
+    yield { value: field.issue, commit: field.commit, trailer: field.trailer }
+  }
+}
+
+/** One Git field extractor serves strict closing intent and the existing submission binding projection. */
+async function* issueFieldsOf(
+  git: Git,
+  revisions: readonly string[],
+  branch: string,
+  keywords: readonly string[],
+  bindingFallback: boolean,
+): AsyncGenerator<Readonly<{ issue: string; commit: string; trailer?: string }>, void> {
   // NUL separates each commit, Git trailer values, body and keyed trailers.
   // The body fallback accepts colonless Refs/Resolves while excluding subjects.
+  const keys = keywords.map((keyword) => `key=${keyword}`).join(",")
   let history: string
   try {
     history = await git([
@@ -1581,7 +1608,7 @@ export async function* issueBindingsOf(
       "--reverse",
       "--topo-order",
       "-z",
-      "--format=%H%x00%(trailers:key=Resolves,key=Refs,valueonly,separator=%x1e)%x00%B%x00%(trailers:key=Resolves,key=Refs,separator=%x1e)",
+      `--format=%H%x00%(trailers:${keys},valueonly,separator=%x1e)%x00%B%x00%(trailers:${keys},separator=%x1e)`,
       ...revisions,
       "--",
     ])
@@ -1622,18 +1649,20 @@ export async function* issueBindingsOf(
     // Also parse trailer-shaped lines like "Refs <issue>" or "Refs: <issue>" or "Resolves <issue>"
     // from commit body to accept trailers without colon (27041).
     // Never inspect the subject line, and require a single-token issue value to avoid binding prose lines.
-    const nonSubjectLines = body.split(/\r?\n/).slice(1)
-    const trailerRegex = /^[ \t]*(refs|resolves)[ \t]*:?[ \t]+(\S+)[ \t]*$/i
-    for (const line of nonSubjectLines) {
-      const match = trailerRegex.exec(line)
-      if (match !== null) {
-        const keyword = match[1]?.toLowerCase() ?? ""
-        consider(match[2]?.trim() ?? "", keyword === "refs" ? "Refs" : "Resolves")
+    if (bindingFallback) {
+      const nonSubjectLines = body.split(/\r?\n/).slice(1)
+      const trailerRegex = /^[ \t]*(refs|resolves)[ \t]*:?[ \t]+(\S+)[ \t]*$/i
+      for (const line of nonSubjectLines) {
+        const match = trailerRegex.exec(line)
+        if (match !== null) {
+          const keyword = match[1]?.toLowerCase() ?? ""
+          consider(match[2]?.trim() ?? "", keyword === "refs" ? "Refs" : "Resolves")
+        }
       }
     }
     for (const candidate of candidates) {
       const issue = candidate.issue
-      if (/[\u0000-\u001f\u007f]/u.test(issue)) {
+      if (bindingFallback && /[\u0000-\u001f\u007f]/u.test(issue)) {
         throw new Error(
           `invalid issue binding in ${branch} at ${commit}: expected a single-line value without control characters`,
         )
