@@ -4977,8 +4977,12 @@ export async function coreQueueCommand(
         // The read is the issues interface's `view` at --project-root; issuesProvider.read is no longer consulted,
         // and a declaration in force that still holds it is told out loud (@cto 6a06588f).
         if (config.issuesProvider?.read !== undefined) {
+          const issueInspection =
+            request.branch !== undefined && options.projectRoot !== undefined
+              ? `Inspect issue display: ${formatQueueCommand(io, formatStoredQueueAddress(name), ["queue", "show", request.branch, "--project-root", options.projectRoot])}`
+              : "command syntax: yrd queue show <branch> --project-root <root>; choose the branch and the issues.yml project root"
           io.stderr(
-            "yrd: .yrd.yml issuesProvider.read: retired (29644 Y1) and ignored; the issue display is issues.yml's view, read by yrd queue show --project-root <root>; delete this key\n",
+            `yrd: .yrd.yml issuesProvider.read: retired and ignored; delete this key. The issue display reads issues.yml's view. ${issueInspection}\n`,
           )
         }
         const scope =
@@ -5108,7 +5112,7 @@ export async function coreQueueCommand(
         if (projectRoot === undefined) return 0
         if (request.all === true) {
           io.stderr(
-            `yrd: issue display: skipped for --all; use yrd queue show <branch> --project-root <root> for at most ${ISSUE_DISPLAY_READ_CAP} issue reads\n`,
+            `yrd: issue display: skipped for --all; command syntax: yrd queue show <branch> --project-root <root>; choose one branch and its issues.yml project root for at most ${ISSUE_DISPLAY_READ_CAP} issue reads\n`,
           )
           return 0
         }
