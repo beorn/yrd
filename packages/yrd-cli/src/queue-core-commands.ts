@@ -2147,9 +2147,11 @@ export async function coreQueueCommand(
         // the ambiguity, so the operator reads the standing state before retrying.
         const exhausted = transientPush5xxOf(error)
         if (exhausted !== undefined) {
+          const queue = formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))
+          const inspect = formatQueueCommand(io, queue, ["queue", "list", "--json"])
           io.stderr(
             `yrd: GitHub returned ${exhausted.line} on the ${request.command} of ${targetLabel}; ` +
-              "it may or may not have been recorded. Read the standing pause state (yrd pause) before retrying.\n",
+              `it may or may not have been recorded. Read the standing pause state (${inspect}) before retrying.\n`,
           )
           return 1
         }

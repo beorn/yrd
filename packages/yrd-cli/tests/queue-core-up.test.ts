@@ -3006,7 +3006,20 @@ describe("yrd queue up, the service", () => {
     }) as typeof process.stderr.write
     try {
       const w = await world()
-      const ref = queueRef("main")
+      const queue = "release"
+      const target = (await w.git(["rev-parse", "HEAD"])).trim()
+      const config = await readConfig(w.git, target, { branch: queue, remote: "origin" })
+      if (config === undefined) throw new Error("pause fixture declaration is absent")
+      await w.git(["push", "--quiet", "origin", `${target}:refs/heads/${queue}`])
+      await createEventQueue(
+        createEventStore(w.work, "origin", gitIn(w.work).selection),
+        queue,
+        target,
+        config,
+        new Date(),
+      )
+      const ref = queueRef(queue)
+      const mainBefore = (await w.git(["ls-remote", "--refs", "origin", queueRef("main")])).trim()
       const github5xx = [
         "remote: Internal Server Error",
         "fatal: unable to access 'https://github.com/beorn/hh.git/': The requested URL returned error: 500",
@@ -3041,20 +3054,47 @@ describe("yrd queue up, the service", () => {
         }
       })
       const run = capture(w.work)
+      const viewer = join(w.work, "inspection's cwd")
+      mkdirSync(viewer)
+      run.io.cwd = viewer
+      const commands: { argv: readonly string[]; cwd: string; recipe: string }[] = []
+      run.io.formatYrdCommand = (argv, cwd) => {
+        const recipe = `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`
+        commands.push({ argv, cwd, recipe })
+        return recipe
+      }
       expect(
         await coreQueueCommand(
           w.work,
           run.io,
           { by: "@chief", command: "pause", reason: "repair" },
           {
+            queue,
             workdir: w.workdir,
           },
         ),
       ).toBe(1)
       expect(run.stderr()).toContain("GitHub returned Internal Server Error on the pause of")
       expect(run.stderr()).toContain("it may or may not have been recorded")
-      expect(run.stderr()).toContain("Read the standing pause state (yrd pause) before retrying")
       // The probe failed, so the push was never re-run: exactly one attempt.
+      expect(uploads).toBe(1)
+      expect((await w.git(["ls-remote", "--refs", "origin", queueRef("main")])).trim()).toBe(mainBefore)
+      const remote = (await w.git(["remote", "get-url", "origin"])).trim()
+      expect(commands).toHaveLength(1)
+      expect(commands[0]).toMatchObject({
+        argv: ["queue", "list", "--json", "--queue", `${remote}#${queue}`],
+        cwd: viewer,
+      })
+      const recipe = commands[0]?.recipe
+      if (recipe === undefined) throw new Error("pause inspection recipe is absent")
+      expect(run.stderr()).toContain(`Read the standing pause state (${recipe}) before retrying`)
+      _backend.mockRestore()
+      const inspected = execFileSync("bash", ["-c", recipe], {
+        cwd: dirname(w.work),
+        encoding: "utf8",
+        env: { ...process.env, XDG_STATE_HOME: join(viewer, "inspection-state") },
+      })
+      expect(JSON.parse(inspected)).toMatchObject({ pause: { kind: "paused", reason: "repair" } })
       expect(uploads).toBe(1)
     } finally {
       process.stderr.write = write
