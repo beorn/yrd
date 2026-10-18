@@ -11,7 +11,8 @@
 
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
+import { shellQuote } from "git-super/shell-command"
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import * as removely from "removely"
 import { createEventQueue, createEventStore, readConfig, type Git } from "@yrd/queue-core"
@@ -21,7 +22,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { formatYrdRuntimeVersion } from "../src/version.ts"
 import type { YrdCliIO } from "../src/types.ts"
-import { sharedIdentityMoved } from "../src/env-commands.ts"
+import { ENV_CLOSE_QUEUED_EXIT, sharedIdentityMoved } from "../src/env-commands.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
 process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
@@ -815,22 +816,53 @@ describe("yrd env open prepares the retained environment", () => {
       await w.git(["commit", "--quiet", "--allow-empty", "-m", "advance requested base"])
       await w.git(["push", "--quiet", "origin", "main"])
       const second = capture(w.work)
-      expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", name], second.io)).toBe(2)
+      const commands: { argv: readonly string[]; cwd: string; recipe: string }[] = []
+      second.io.formatYrdCommand = (argv, cwd) => {
+        const recipe = `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`
+        commands.push({ argv, cwd, recipe })
+        return recipe
+      }
+      const reopenArgs = ["env", "open", "--bay", name, "--issue", name, "--hold", "hold's reason", "--keep", "--json"]
+      expect(await runYrdProcess(["bun", "yrd", ...reopenArgs], second.io)).toBe(2)
       expect(second.stderr()).toContain(bay)
       if (merged) {
-        const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
-        expect(second.stderr()).toContain(`yrd env close ${quote(bay)} && yrd env open --issue ${quote(name)}`)
-        const close = capture(w.work)
-        expect(await runYrdProcess(["bun", "yrd", "env", "close", bay], close.io), close.stderr()).toBe(0)
-        const reopened = capture(w.work)
-        expect(
-          await runYrdProcess(["bun", "yrd", "env", "open", "--issue", name], reopened.io),
-          reopened.stderr(),
-        ).toBe(0)
-        expect(reopened.stderr()).toContain("reused local")
+        // Prior assertions used handwritten dispatches, so a stale executable or cwd in the printed recipe escaped them.
+        expect(commands.map(({ argv, cwd }) => ({ argv, cwd }))).toEqual([
+          { argv: ["env", "close", bay], cwd: w.work },
+          { argv: reopenArgs, cwd: w.work },
+        ])
+        const recipe = `${commands[0]!.recipe} && ${commands[1]!.recipe}`
+        expect(second.stderr()).toContain(recipe)
+        expect(second.stderr()).toContain("exit 4 means accepted, not closed")
+        const remote = gitIn(join(dirname(w.work), "remote.git"))
+        const refs = await remote(["for-each-ref", "--format=%(refname) %(objectname)"])
+        const continued = await command(dirname(w.work), ["/bin/sh", "-c", recipe])
+        expect([0, ENV_CLOSE_QUEUED_EXIT], continued.stderr).toContain(continued.exit)
+        if (continued.exit === ENV_CLOSE_QUEUED_EXIT) {
+          expect(continued.stderr).toContain("queued request")
+          expect(continued.stderr).not.toContain("reused local")
+          expect((await tree(["rev-parse", "HEAD"])).trim()).toBe(head)
+          const close = capture(w.work)
+          expect(await runYrdProcess(["bun", "yrd", "env", "close", bay], close.io), close.stderr()).toBe(0)
+          const reopened = capture(w.work)
+          expect(await runYrdProcess(["bun", "yrd", ...reopenArgs], reopened.io), reopened.stderr()).toBe(0)
+          expect(reopened.stderr()).toContain("reused local")
+        } else {
+          expect(continued.stderr).toContain("reused local")
+          expect(
+            JSON.parse(
+              continued.stdout
+                .split("\n")
+                .filter((line) => line.startsWith("{"))
+                .at(-1) ?? "null",
+            ),
+          ).toMatchObject({ path: bay })
+        }
+        expect(await remote(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(refs)
       } else {
         expect(second.stderr()).toContain("unmerged")
         expect(second.stderr()).toContain("named existing work")
+        expect(commands).toEqual([])
         expect(second.stderr()).not.toContain("yrd env close")
         expect((await tree(["rev-parse", "HEAD"])).trim()).toBe(head)
       }
