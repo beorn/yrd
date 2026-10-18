@@ -2299,11 +2299,12 @@ describe("the queue-format boundary", () => {
       expect(moved, kind).toBe(true)
       expect(String(refusal)).toContain("moved during retirement")
       expect((await git(["ls-remote", "origin", branchRef])).trim()).toBe("")
-      const recovery = String(refusal).split("from that custody: ")[1]
+      const recovery = /(git -C .+)$/u.exec(String(refusal))?.[1]
       if (recovery === undefined) throw new Error(`${kind} retirement supplied no recovery recipe`)
       const before = await git(["ls-remote", "origin"])
       const restored = spawnSync("/bin/sh", ["-c", recovery], { cwd: outside, encoding: "utf8" })
       expect.soft(restored.status, `${kind}: ${restored.stderr}`).toBe(0)
+      expect(restored.stdout.trim()).toBe(`${kept} ${branchRef}`)
       expect((await git(["rev-parse", branchRef])).trim()).toBe(kept)
       expect(await git(["ls-remote", "origin"])).toBe(before)
     }
