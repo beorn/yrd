@@ -377,15 +377,38 @@ it.each([
       await git(["add", "."])
       await git(["commit", "--quiet", "-m", message])
       if (
-        (mode === "observed-legacy" || mode === "reuse-legacy" || mode === "reuse-predeclaration") &&
+        (mode === "observed-legacy" ||
+          mode === "reuse-legacy" ||
+          mode === "reuse-predeclaration" ||
+          mode === "observed-ff" ||
+          mode === "observed-after-target" ||
+          mode === "observed-stacked" ||
+          mode === "observed-stacked-merge") &&
         branch === "task/first"
       ) {
         const head = (await git(["rev-parse", "HEAD"])).trim()
         await git(["push", "--quiet", "origin", branch])
-        // A real pre-Base record, rather than a current submit with its field hidden.
+        // These are historical opened records: preserve the source range as it existed before the
+        // one-binding submit reader, rather than asking current submit to admit multiple Closes keys.
+        const hasRecordedBase =
+          mode === "observed-ff" ||
+          mode === "observed-after-target" ||
+          mode === "observed-stacked" ||
+          mode === "observed-stacked-merge"
         await (
           await openEvents({ ...store, ref: changesRef("main", branch) })
-        ).append([changeInput("opened", { queueTip, at: new Date(), commit: head, by: "fixture" })], { expect: null })
+        ).append(
+          [
+            changeInput("opened", {
+              queueTip,
+              at: new Date(),
+              commit: head,
+              by: "fixture",
+              ...(hasRecordedBase ? { base: queueTip } : {}),
+            }),
+          ],
+          { expect: null },
+        )
         await git(["checkout", "--quiet", "main"])
         return
       }
@@ -405,11 +428,22 @@ it.each([
       writeFileSync(join(repo, "stacked.txt"), "upper source")
       await git(["add", "stacked.txt"])
       await git(["commit", "--quiet", "-m", "upper\n\nCloses: issue-stacked"])
-      await submit(git, "origin", {
-        branch: "task/aa-stacked",
-        submitter: "fixture",
-        target: { remote: "origin", branch: "main" },
-      })
+      const stackedHead = (await git(["rev-parse", "HEAD"])).trim()
+      await git(["push", "--quiet", "origin", "task/aa-stacked"])
+      await (
+        await openEvents({ ...store, ref: changesRef("main", "task/aa-stacked") })
+      ).append(
+        [
+          changeInput("opened", {
+            queueTip,
+            at: new Date(),
+            commit: stackedHead,
+            by: "fixture",
+            base: firstSubmittedHead,
+          }),
+        ],
+        { expect: null },
+      )
       await git(["checkout", "--quiet", "main"])
       if (mode === "observed-stacked-merge") {
         await git([
