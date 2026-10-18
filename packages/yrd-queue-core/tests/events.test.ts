@@ -2336,8 +2336,9 @@ describe("the queue-format boundary", () => {
     )
     const archivedStartTip = archivedStart.head
     const archivedEndTip = archivedEnd.head
-    if (archivedStartTip === null || archivedEndTip === null)
+    if (archivedStartTip === null || archivedEndTip === null) {
       throw new Error("archive-only fixture lacks its event tips")
+    }
     const archive = archiveRefFor(archivedBranch, "fixture", "2000-01-01")
     const archiveBackend: GitomicBackend = {
       ...git.backend,
