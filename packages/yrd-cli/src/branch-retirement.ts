@@ -408,7 +408,7 @@ export async function retireIssueBranches(
           const archive = [...archives].find(
             ([ref, tip]) => tip === head && /^refs\/archive\/[^/]+\/[^/]+\/(.+)$/u.exec(ref)?.[1] === branch,
           )
-          let disposition: LocalBranchRetirement["disposition"]
+          let disposition: LocalBranchRetirement["disposition"] | undefined
           if (landing !== undefined) {
             const ending = landing.state.ending
             if (ending === undefined) {
@@ -426,7 +426,7 @@ export async function retireIssueBranches(
             }
           } else if (archive !== undefined) {
             disposition = { kind: "archived", target: head, ref: archive[0] }
-          } else {
+          } else if (!(await isAncestor(candidate.git, head, custody.target))) {
             kept.push({
               ...row,
               reason: "unreached",
@@ -434,34 +434,37 @@ export async function retireIssueBranches(
             })
             continue
           }
-          const result = await retireLocalBranch({
-            repo,
-            git: candidate.git,
-            branch,
-            tip: head,
-            actor: request.by,
-            owner: change?.submitter,
-            issue,
-            reason: request.reason ?? disposition.kind,
-            date: new Date().toISOString().slice(0, 10),
-            dryRun: !request.apply,
-            log,
-            protections: async () => (await readBranchProtections(io, { repo, branch, tip: head, issue })).protections,
-            disposition,
-          })
-          const output = {
-            ...row,
-            reason: result.outcome === "removed" || result.outcome === "eligible" ? disposition.kind : result.reason,
-            ...(result.detail === undefined ? {} : { detail: result.detail }),
-            ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
+          if (disposition !== undefined) {
+            const result = await retireLocalBranch({
+              repo,
+              git: candidate.git,
+              branch,
+              tip: head,
+              actor: request.by,
+              owner: change?.submitter,
+              issue,
+              reason: request.reason ?? disposition.kind,
+              date: new Date().toISOString().slice(0, 10),
+              dryRun: !request.apply,
+              log,
+              protections: async () =>
+                (await readBranchProtections(io, { repo, branch, tip: head, issue })).protections,
+              disposition,
+            })
+            const output = {
+              ...row,
+              reason: result.outcome === "removed" || result.outcome === "eligible" ? disposition.kind : result.reason,
+              ...(result.detail === undefined ? {} : { detail: result.detail }),
+              ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
+            }
+            if (result.outcome === "eligible") eligible.push(output)
+            else if (result.outcome === "removed") removed.push(output)
+            else if (result.outcome === "failed") {
+              retirementFailure = { ...output, reason: "failed", detail: result.reason }
+              failed.push(retirementFailure)
+            } else kept.push(output)
+            continue
           }
-          if (result.outcome === "eligible") eligible.push(output)
-          else if (result.outcome === "removed") removed.push(output)
-          else if (result.outcome === "failed") {
-            retirementFailure = { ...output, reason: "failed", detail: result.reason }
-            failed.push(retirementFailure)
-          } else kept.push(output)
-          continue
         }
         const retire = createLandedBranchRetirement({
           repo,
