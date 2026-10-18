@@ -530,6 +530,7 @@ describe("the flow page: four bands, one row per change", () => {
       stdout() {},
       stderr() {},
       localBranchProtections: null,
+      cwd: "/viewer/worktree",
       formatYrdCommand: (argv: readonly string[], cwd: string) => `viewer ${cwd} yrd ${argv.join(" ")}`,
     }
     const paused = { ...snap(120), queue: "example.test/selected#release" }

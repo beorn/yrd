@@ -4940,6 +4940,26 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     const head = await oneChange(w, "task/stuck")
 
     const run = capture(w.work)
+    const stdout = run.io.stdout
+    run.io.stdout = (text) => {
+      stdout(text)
+      const outcome = JSON.parse(text) as { stuck?: unknown; log?: unknown }
+      if (!Array.isArray(outcome.stuck) || outcome.stuck.length === 0 || typeof outcome.log !== "string") return
+      // Corrupt the completed run's diagnostic before the CLI reads it back;
+      // a valid writer fixture alone cannot exercise the malformed-record cure.
+      const lines = readFileSync(outcome.log, "utf8").trimEnd().split("\n")
+      writeFileSync(
+        outcome.log,
+        lines
+          .map((line) => {
+            const record = JSON.parse(line) as Record<string, unknown>
+            return record.kind === "change" && record.decision === "stuck"
+              ? JSON.stringify({ ...record, code: 7 })
+              : line
+          })
+          .join("\n") + "\n",
+      )
+    }
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
     const exit = await coreQueueCommand(
@@ -4962,6 +4982,9 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     expect(exit, run.stderr()).toBe(0)
     // ONE judgement: the candidate's setup and its settled base's, and nothing after.
     expect(fault.runs()).toBe(2)
+    expect(run.stderr()).toContain("stuck task/stuck: not a string: code in this run's log (")
+    expect(run.stderr()).toContain("inspect:")
+    expect(run.stderr()).toContain("retry after repair:")
     const rounds = records(run)
     expect(rounds).toHaveLength(3)
     expect(rounds[0]).toMatchObject({ exitCode: 2, merged: [], stuck: ["task/stuck"] })

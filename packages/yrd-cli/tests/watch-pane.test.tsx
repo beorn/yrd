@@ -1373,7 +1373,7 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
       label: "recovering queue",
       error: "initial queue read failed",
       get formatCommand() {
-        return readable ? (argv) => `recovered-host ${argv.join(" ")}` : undefined
+        return readable ? (argv: readonly string[]) => `recovered-host ${argv.join(" ")}` : undefined
       },
       async load() {
         const next = await load()

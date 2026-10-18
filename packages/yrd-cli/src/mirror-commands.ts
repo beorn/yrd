@@ -21,7 +21,7 @@ export const MIRROR_STORE_SETTING = "yrd.mirror"
 export type MirrorRefreshOptions = Readonly<{ commit?: string; json?: boolean }>
 
 export async function refreshMirrors(options: MirrorRefreshOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
-  const cwd = io.cwd ?? process.cwd()
+  const cwd = io.cwd
   const repo = repositoryHere(cwd)
   if (repo === undefined) {
     io.stderr(

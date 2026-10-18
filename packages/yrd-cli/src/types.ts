@@ -43,7 +43,7 @@ export type YrdCliIO = {
   /** The directory the command stands in. The declaration found there, or at
    * the nearest directory above it in the same repository, is the repository:
    * no command takes a repository operand and none resolves an alias. */
-  cwd?: string
+  cwd: string
   /** Render Yrd argv in an absolute repository cwd as a POSIX shell command.
    * Pure display only: hosts preserve their entrypoint and authority readers.
    * Absent, the CLI prints standalone Yrd with an explicit cwd. */

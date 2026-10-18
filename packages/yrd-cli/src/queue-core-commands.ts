@@ -713,7 +713,7 @@ export async function coreQueueCommand(
     let cleanup = ""
     if (request.command === "drop-local" || request.command === "drop-issue") {
       cleanup = "For retained-checkout cleanup, run from the superproject that vendors it.\n"
-      const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd())
+      const authorRepo = repositoryHere(io.cwd)
       if (authorRepo !== undefined) {
         let owner: string | undefined
         try {
@@ -891,7 +891,7 @@ export async function coreQueueCommand(
         ? ""
         : formatDeclarationSkewCure(targetLabel, NAMED[request.command])
       throw new Error(
-        `the declaration at ${targetLabel} cannot be read: ${detail}${skew} Repository: ${repo}; caller: ${io.cwd ?? repo}.`,
+        `the declaration at ${targetLabel} cannot be read: ${detail}${skew} Repository: ${repo}; caller: ${io.cwd}.`,
         {
           cause: error,
         },
@@ -908,7 +908,7 @@ export async function coreQueueCommand(
     ) {
       const tip = request.command === "drop-local" ? request.tip : request.retire?.tip
       if (tip === undefined) return await noQueueOnTarget(targetLabel)
-      const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd())
+      const authorRepo = repositoryHere(io.cwd)
       if (authorRepo === undefined) throw new Error("drop --local requires the authoring repository as cwd")
       const report = await retireComponentBranch({
         repo: authorRepo,
@@ -1040,7 +1040,7 @@ export async function coreQueueCommand(
     render: (record: LogRecord) => void,
   ): Promise<void> => {
     const config = declared.config
-    const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
+    const authorRepo = repositoryHere(io.cwd) ?? repo
     // A merged bay must close before its branch is judged for retirement.
     // The round is already durable and its flock released.
     const retirementLog: Parameters<typeof retireLocalBranch>[0]["log"] = {
@@ -1336,7 +1336,7 @@ export async function coreQueueCommand(
     if (outcome.stuck.length > 0) {
       const queue = formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))
       const command = (argv: readonly string[]): string =>
-        formatYrdCommand(io, [...argv, "--queue", queue], io.cwd ?? globalThis.process.cwd())
+        formatQueueCommand(io, queue, argv)
       for (const line of stuckCureLines(outcome, command)) io.stderr(`yrd: ${line}\n`)
     }
     // A round that HOLDS a stuck stop judged nothing, so it has no stuck line
@@ -1353,17 +1353,8 @@ export async function coreQueueCommand(
   const stopGuidance = async (stop: PauseRecord): Promise<string> => {
     const queue = formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))
     const command = (argv: readonly string[]): string =>
-      formatYrdCommand(io, [...argv, "--queue", queue], io.cwd ?? globalThis.process.cwd())
-    const actions = [
-      `resume: ${command(["queue", "resume", "--reason", "<why>"])}`,
-      ...(stop.change === undefined
-        ? []
-        : [
-            `withdraw: ${command(["queue", "withdraw", stop.change.branch])}`,
-            `retry after repair: ${command(["merge", stop.change.branch])}`,
-          ]),
-    ]
-    return `${liftLine(stop, config.target.remote, config.target.branch)}; ${actions.join("; ")}`
+      formatQueueCommand(io, queue, argv)
+    return `${liftLine(stop, config.target.remote, config.target.branch)}; ${stopActions(stop, false, command)}`
   }
   const echoStop = async (stop: PauseRecord | undefined): Promise<void> => {
     if (stop === undefined) return
@@ -1707,7 +1698,7 @@ export async function coreQueueCommand(
     case "drop-local":
     case "drop-issue": {
       const local = request.command === "drop-local"
-      const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd())
+      const authorRepo = repositoryHere(io.cwd)
       if (authorRepo === undefined) {
         throw new Error(`${NAMED[request.command]} requires the authoring repository as cwd`)
       }
@@ -2281,7 +2272,7 @@ export async function coreQueueCommand(
             log = openLog(join(workdir, "logs"))
             log.write({ kind: "run", command: "withdraw", config: config.blob, target: targetLabel })
             log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
-            const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
+            const authorRepo = repositoryHere(io.cwd) ?? repo
             const authorGit = gitIn(authorRepo, undefined, selection, { env })
             const target = await readRemoteCommit(authorGit, config.target.remote, `refs/heads/${config.target.branch}`)
             if (target === undefined) throw new Error(`${targetLabel}: published main custody is missing`)
@@ -2346,7 +2337,7 @@ export async function coreQueueCommand(
         if (error instanceof NothingToWithdraw) {
           const remedy =
             error.ended === true
-              ? `; retire it with: ${formatYrdCommand(io, ["drop", request.branch, "--retire", "--tip", "<observed-full-oid>", "--reason", "<why>", "--queue", formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))], io.cwd ?? globalThis.process.cwd())}`
+              ? `; retire it with: ${formatQueueCommand(io, formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote))), ["drop", request.branch, "--retire", "--tip", "<observed-full-oid>", "--reason", "<why>"])}`
               : ""
           io.stderr(`yrd: ${error.message}${remedy}\n`)
           return 1
@@ -2750,7 +2741,7 @@ export async function coreQueueCommand(
       // retry, naming why and the command that tries again.
       io.stderr(
         `yrd: ${changeName(change)} is still in line, ${state}: ${notMerged(merging.outcome, change)}; ` +
-          `it keeps its place and the queue merges it in turn, or run ${formatYrdCommand(io, ["merge", branch, "--queue", formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))], io.cwd ?? globalThis.process.cwd())} again\n`,
+          `it keeps its place and the queue merges it in turn, or run ${formatQueueCommand(io, formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote))), ["merge", branch])} again\n`,
       )
       return 2
     }
@@ -3782,7 +3773,7 @@ export async function coreQueueCommand(
                 io.stderr(`yrd: ${branch === undefined ? targetLabel : branch}: ${reason}\n`)
               }
               try {
-                const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
+                const authorRepo = repositoryHere(io.cwd) ?? repo
                 const authorGit = gitIn(authorRepo, undefined, selection, { env })
                 const inventory = await environmentInventory(authorRepo, authorGit, workdir)
                 const branches = new Set(
@@ -4310,11 +4301,7 @@ export async function coreQueueCommand(
         const snapshot = snapshotOf(one)
         const listing = await printListing(snapshot, {
           formatCommand: (argv) =>
-            formatYrdCommand(
-              io,
-              [...argv, "--queue", formatStoredQueueAddress(snapshot.queue)],
-              io.cwd ?? globalThis.process.cwd(),
-            ),
+            formatQueueCommand(io, formatStoredQueueAddress(snapshot.queue), argv),
           color: io.color === true,
           columns: io.columns ?? 120,
           ...(one.scope === undefined ? {} : { scope: one.scope }),
@@ -4372,11 +4359,7 @@ export async function coreQueueCommand(
           id: first.queue,
           label: formatStoredQueueAddress(first.queue),
           formatCommand: (argv) =>
-            formatYrdCommand(
-              io,
-              [...argv, "--queue", formatStoredQueueAddress(first.queue)],
-              io.cwd ?? globalThis.process.cwd(),
-            ),
+            formatQueueCommand(io, formatStoredQueueAddress(first.queue), argv),
           resolveRunAddress: async (operand) => {
             const selected = parseQueueAddress(first.queue)
             if (selected.kind !== "remote") {
@@ -5776,6 +5759,28 @@ export function describeRun(
  * in the same call (event-run.ts), so this is that run's own record of why, never a
  * second, possibly-later reading of the change ref.
  */
+function formatQueueCommand(io: YrdCliIO, queue: string, argv: readonly string[]): string {
+  return formatYrdCommand(io, [...argv, "--queue", queue], io.cwd)
+}
+
+function stopActions(
+  stop: Readonly<{ change?: Readonly<{ branch: string }> }>,
+  includeInspect: boolean,
+  command: (argv: readonly string[]) => string,
+): string {
+  const branch = stop.change?.branch
+  return [
+    ...(includeInspect && branch !== undefined ? [`inspect: ${command(["queue", "show", branch])}`] : []),
+    `resume: ${command(["queue", "resume", "--reason", "<why>"])}`,
+    ...(branch === undefined
+      ? []
+      : [
+          `withdraw: ${command(["queue", "withdraw", branch])}`,
+          `retry after repair: ${command(["merge", branch])}`,
+        ]),
+  ].join("; ")
+}
+
 function stuckCureLines(outcome: QueueRunOutcome, command: (argv: readonly string[]) => string): readonly string[] {
   if (outcome.stuck.length === 0) return []
   const rows = readFileSync(outcome.log, "utf8")
@@ -5787,7 +5792,7 @@ function stuckCureLines(outcome: QueueRunOutcome, command: (argv: readonly strin
       (record) => record.kind === "change" && record.decision === "stuck" && record.branch === branch,
     )
     const reading = incidentIn(row ?? {})
-    const actions = `inspect: ${command(["queue", "show", branch])}; retry after repair: ${command(["merge", branch])}; withdraw: ${command(["queue", "withdraw", branch])}; resume: ${command(["queue", "resume", "--reason", "<why>"])}`
+    const actions = stopActions({ change: { branch } }, true, command)
     if (reading.kind === "incident") return `stuck ${branch}: ${incidentLine(reading.incident)}; ${actions}`
     const reason = reading.kind === "malformed" ? reading.reason : "no incident"
     return `stuck ${branch}: ${reason} in this run's log (${outcome.log}); ${actions}`

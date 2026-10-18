@@ -43,6 +43,7 @@ function capture(): Readonly<{ io: YrdCliIO; stdout: () => string }> {
   return {
     io: {
       localBranchProtections: null,
+      cwd: process.cwd(),
       color: false,
       stdout(text) {
         stdout += text

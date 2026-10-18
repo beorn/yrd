@@ -772,7 +772,7 @@ async function cleanupEnvironments(
   // repository it runs in, and the fleet's are registered in /hh/dev). The
   // service stands in its landing, whose common dir is /hh/dev/.git, so the
   // same registry is read without naming any path.
-  const registry = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
+  const registry = repositoryHere(io.cwd) ?? repo
   const registryGit = registry === repo ? git : gitIn(registry, undefined, input.selection, { env: input.env })
   const inventory = await environmentInventory(registry, registryGit, workdir)
   if (inventory.rows.length === 0) {
