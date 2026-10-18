@@ -212,7 +212,7 @@ function buildProgram(
   setExit: (code: YrdCliExitCode) => void,
   log: () => ReturnType<typeof createYrdLogger> | undefined,
 ): CliCommand {
-  const cwd = (): string => io.cwd ?? process.cwd()
+  const cwd = (): string => io.cwd
   const program = new CliCommand(name)
     .description("yrd (shipyard) — agentic software delivery")
     .showSuggestionAfterError()
@@ -313,7 +313,7 @@ function buildProgram(
       if (options.json) argv.push("--json")
       throw new Error(
         "drop --local has no preview; it archives at origin, then deletes the local branch.\n" +
-          `To apply: ${formatYrdCommand(io, argv, io.cwd ?? process.cwd())}`,
+          `To apply: ${formatYrdCommand(io, argv, io.cwd)}`,
       )
     }
     if (
@@ -1114,6 +1114,9 @@ function buildProgram(
             label: id,
             snapshot,
             error,
+            get formatCommand() {
+              return reader?.formatCommand
+            },
             load: async (request) => {
               if (reader === undefined) return initialize()
               if (reader.load === undefined) throw new Error(`${id} has no refresh reader`)

@@ -721,7 +721,7 @@ export async function coreQueueCommand(
     let cleanup = ""
     if (request.command === "drop-local" || request.command === "drop-issue") {
       cleanup = "For retained-checkout cleanup, run from the superproject that vendors it.\n"
-      const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd())
+      const authorRepo = repositoryHere(io.cwd)
       if (authorRepo !== undefined) {
         let owner: string | undefined
         try {
@@ -899,7 +899,7 @@ export async function coreQueueCommand(
         ? ""
         : formatDeclarationSkewCure(targetLabel, NAMED[request.command])
       throw new Error(
-        `the declaration at ${targetLabel} cannot be read: ${detail}${skew} Repository: ${repo}; caller: ${io.cwd ?? repo}.`,
+        `the declaration at ${targetLabel} cannot be read: ${detail}${skew} Repository: ${repo}; caller: ${io.cwd}.`,
         {
           cause: error,
         },
@@ -916,7 +916,7 @@ export async function coreQueueCommand(
     ) {
       const tip = request.command === "drop-local" ? request.tip : request.retire?.tip
       if (tip === undefined) return await noQueueOnTarget(targetLabel)
-      const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd())
+      const authorRepo = repositoryHere(io.cwd)
       if (authorRepo === undefined) throw new Error("drop --local requires the authoring repository as cwd")
       const report = await retireComponentBranch({
         repo: authorRepo,
@@ -1048,7 +1048,7 @@ export async function coreQueueCommand(
     render: (record: LogRecord) => void,
   ): Promise<void> => {
     const config = declared.config
-    const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
+    const authorRepo = repositoryHere(io.cwd) ?? repo
     // A merged bay must close before its branch is judged for retirement.
     // The round is already durable and its flock released.
     const retirementLog: Parameters<typeof retireLocalBranch>[0]["log"] = {
@@ -1346,23 +1346,32 @@ export async function coreQueueCommand(
     // incident with `incidentLine`; a stuck round names it the same way on
     // stderr, so "stuck task/one" is never the whole story a person gets
     // (@i/10-yrd/24141 AC2).
-    for (const line of stuckCureLines(outcome)) io.stderr(`yrd: ${line}\n`)
+    if (outcome.stuck.length > 0) {
+      const queue = formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))
+      const command = (argv: readonly string[]): string => formatQueueCommand(io, queue, argv)
+      for (const line of stuckCureLines(outcome, command)) io.stderr(`yrd: ${line}\n`)
+    }
     // A round that HOLDS a stuck stop judged nothing, so it has no stuck line
     // of its own; it names the stop it held and the cures, so a service log
     // read at any round says what the line waits on and what lifts it.
     const held = outcome.stopped?.ring === "pause" ? (outcome.stopped.what as PauseRecord) : undefined
     if (outcome.stuck.length === 0 && held?.change !== undefined) {
-      io.stderr(`yrd: ${liftLine(held, config.target.remote, config.target.branch)}\n`)
+      io.stderr(`yrd: ${await stopGuidance(held)}\n`)
     }
     return outcome
   }
 
   /** The stop a submit is accepted under, said where the submitter reads it: who, why, and what lifts it. */
-  const echoStop = (stop: PauseRecord | undefined): void => {
+  const stopGuidance = async (stop: PauseRecord): Promise<string> => {
+    const queue = formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))
+    const command = (argv: readonly string[]): string => formatQueueCommand(io, queue, argv)
+    return `${liftLine(stop, config.target.remote, config.target.branch)}; ${stopActions(stop, false, command)}`
+  }
+  const echoStop = async (stop: PauseRecord | undefined): Promise<void> => {
     if (stop === undefined) return
     io.stderr(
       `yrd: accepted while the line is stopped — ${pauseLine(stop)}; ` +
-        `the change waits in line and is judged once the stop lifts; ${liftLine(stop, config.target.remote, config.target.branch)}\n`,
+        `the change waits in line and is judged once the stop lifts; ${await stopGuidance(stop)}\n`,
     )
   }
   const echoAdmission = (outcome: AdmissionOutcome, dryRun = false): void => {
@@ -1702,7 +1711,7 @@ export async function coreQueueCommand(
     case "drop-local":
     case "drop-issue": {
       const local = request.command === "drop-local"
-      const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd())
+      const authorRepo = repositoryHere(io.cwd)
       if (authorRepo === undefined) {
         throw new Error(`${NAMED[request.command]} requires the authoring repository as cwd`)
       }
@@ -2126,7 +2135,9 @@ export async function coreQueueCommand(
         return 0
       } catch (error) {
         if (error instanceof QueuePaused || error instanceof QueueNotPaused) {
-          io.stderr(`yrd: ${error.message}\n`)
+          io.stderr(
+            `yrd: ${error instanceof QueuePaused ? `${pauseLine(error.pause)}; ${await stopGuidance(error.pause)}` : error.message}\n`,
+          )
           return 1
         }
         // Exhaustion is this caller's decision (28805): a persistent GitHub 5xx on
@@ -2274,7 +2285,7 @@ export async function coreQueueCommand(
             log = openLog(join(workdir, "logs"))
             log.write({ kind: "run", command: "withdraw", config: config.blob, target: targetLabel })
             log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
-            const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
+            const authorRepo = repositoryHere(io.cwd) ?? repo
             const authorGit = gitIn(authorRepo, undefined, selection, { env })
             const target = await readRemoteCommit(authorGit, config.target.remote, `refs/heads/${config.target.branch}`)
             if (target === undefined) throw new Error(`${targetLabel}: published main custody is missing`)
@@ -2339,7 +2350,7 @@ export async function coreQueueCommand(
         if (error instanceof NothingToWithdraw) {
           const remedy =
             error.ended === true
-              ? `; retire it with: ${formatYrdCommand(io, ["drop", request.branch, "--retire", "--tip", "<observed-full-oid>", "--reason", "<why>", "--queue", formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))], io.cwd ?? globalThis.process.cwd())}`
+              ? `; retire it with: ${formatQueueCommand(io, formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote))), ["drop", request.branch, "--retire", "--tip", "<observed-full-oid>", "--reason", "<why>"])}`
               : ""
           io.stderr(`yrd: ${error.message}${remedy}\n`)
           return 1
@@ -2460,7 +2471,7 @@ export async function coreQueueCommand(
               ) +
               formatDryRunExcluded(inspected.verifying.state === "verified" ? inspected.verifying : undefined),
           )
-          echoStop(inspected.stop)
+          await echoStop(inspected.stop)
           echoAdmission(inspected.admission, true)
           return 0
         }
@@ -2507,7 +2518,7 @@ export async function coreQueueCommand(
               .map((row) => `\n${row.state} ${row.path}@${row.sha.slice(0, 12)} at ${row.remote} ${row.ref}`)
               .join(""),
         )
-        echoStop(acceptedUnder)
+        await echoStop(acceptedUnder)
         echoAdmission(submitted.admission)
         echoRevertWarning(submitted)
         echoComponentAuthors(submitted.published)
@@ -2544,7 +2555,7 @@ export async function coreQueueCommand(
           `prepared ${branch} at ${head}; inspected base ${base} against ${targetHead}; ${published.length} child retention receipts` +
             published.map((row) => `\n${row.state} ${row.path}@${row.sha} at ${row.remote} ${row.ref}`).join(""),
         )
-        echoStop(stop)
+        await echoStop(stop)
         echoComponentAuthors(published)
         if (admission.kind === "warn" || admission.kind === "cannot-judge") {
           io.stderr(`preparation admission ${admission.kind}: ${admission.reason}\n`)
@@ -2575,7 +2586,7 @@ export async function coreQueueCommand(
             formatDryRunGitlinks(verifying.state === "verified" ? verifying.gitlinks : undefined) +
             formatDryRunExcluded(verifying.state === "verified" ? verifying : undefined),
         )
-        echoStop(inspected.stop)
+        await echoStop(inspected.stop)
         echoAdmission(inspected.admission, true)
         return 0
       }
@@ -2592,7 +2603,7 @@ export async function coreQueueCommand(
             .map((row) => `\n${row.state} ${row.path}@${row.sha.slice(0, 12)} at ${row.remote} ${row.ref}`)
             .join(""),
       )
-      echoStop(acceptedUnder)
+      await echoStop(acceptedUnder)
       echoAdmission(submitted.admission)
       echoRevertWarning(submitted)
       echoComponentAuthors(submitted.published)
@@ -2679,7 +2690,7 @@ export async function coreQueueCommand(
         if (author === undefined || request.author === undefined) {
           io.stderr(
             `yrd: merge needs ${branch} submitted, and no change of it is in line on ${targetName(config.target)}; ` +
-              `submitting needs a clone that has ${branch}: run yrd merge ${branch} inside one\n`,
+              `submit from a clone that contains ${branch}, then merge its queued change\n`,
           )
           return 2
         }
@@ -2719,12 +2730,7 @@ export async function coreQueueCommand(
       // A stop that still stands is said, with the command that merges what it
       // waits on: the named change's exit never hides a stopped line.
       if (after.stop !== undefined) {
-        const stuckOn = after.stop.cause === "stuck" ? after.stop.change : undefined
-        io.stderr(
-          `yrd: the line is still stopped — ${pauseLine(after.stop)}; ` +
-            (stuckOn === undefined ? "" : `once it is repaired, merge it with yrd merge ${stuckOn.branch}; `) +
-            `${liftLine(after.stop, config.target.remote, config.target.branch)}\n`,
-        )
+        io.stderr(`yrd: the line is still stopped — ${pauseLine(after.stop)}; ` + `${await stopGuidance(after.stop)}\n`)
       }
       const state = after.entry.reading.state
       const ending = endingCode([state])
@@ -2748,7 +2754,7 @@ export async function coreQueueCommand(
       // retry, naming why and the command that tries again.
       io.stderr(
         `yrd: ${changeName(change)} is still in line, ${state}: ${notMerged(merging.outcome, change)}; ` +
-          `it keeps its place and the queue merges it in turn, or run yrd merge ${branch} again\n`,
+          `it keeps its place and the queue merges it in turn, or run ${formatQueueCommand(io, formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote))), ["merge", branch])} again\n`,
       )
       return 2
     }
@@ -3780,7 +3786,7 @@ export async function coreQueueCommand(
                 io.stderr(`yrd: ${branch === undefined ? targetLabel : branch}: ${reason}\n`)
               }
               try {
-                const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
+                const authorRepo = repositoryHere(io.cwd) ?? repo
                 const authorGit = gitIn(authorRepo, undefined, selection, { env })
                 const inventory = await environmentInventory(authorRepo, authorGit, workdir)
                 const branches = new Set(
@@ -4309,6 +4315,7 @@ export async function coreQueueCommand(
         const single = one.rows.length === 1 ? one.rows[0] : undefined
         const snapshot = snapshotOf(one)
         const listing = await printListing(snapshot, {
+          formatCommand: (argv) => formatQueueCommand(io, formatStoredQueueAddress(snapshot.queue), argv),
           color: io.color === true,
           columns: io.columns ?? 120,
           ...(one.scope === undefined ? {} : { scope: one.scope }),
@@ -4365,6 +4372,7 @@ export async function coreQueueCommand(
         const source: WatchSource = {
           id: first.queue,
           label: formatStoredQueueAddress(first.queue),
+          formatCommand: (argv) => formatQueueCommand(io, formatStoredQueueAddress(first.queue), argv),
           resolveRunAddress: async (operand) => {
             const selected = parseQueueAddress(first.queue)
             if (selected.kind !== "remote") {
@@ -5776,6 +5784,25 @@ export function describeRun(
   return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")} (log ${outcome.log})`
 }
 
+function formatQueueCommand(io: YrdCliIO, queue: string, argv: readonly string[]): string {
+  return formatYrdCommand(io, [...argv, "--queue", queue], io.cwd)
+}
+
+function stopActions(
+  stop: Readonly<{ change?: Readonly<{ branch: string }> }>,
+  includeInspect: boolean,
+  command: (argv: readonly string[]) => string,
+): string {
+  const branch = stop.change?.branch
+  return [
+    ...(includeInspect && branch !== undefined ? [`inspect: ${command(["queue", "show", branch])}`] : []),
+    `resume: ${command(["queue", "resume", "--reason", "<why>"])}`,
+    ...(branch === undefined
+      ? []
+      : [`withdraw: ${command(["queue", "withdraw", branch])}`, `retry after repair: ${command(["merge", branch])}`]),
+  ].join("; ")
+}
+
 /**
  * One line per change this round ended stuck, naming the cure the way
  * `queue list`/`queue show` already render a stuck row's incident
@@ -5787,7 +5814,7 @@ export function describeRun(
  * in the same call (event-run.ts), so this is that run's own record of why, never a
  * second, possibly-later reading of the change ref.
  */
-function stuckCureLines(outcome: QueueRunOutcome): readonly string[] {
+function stuckCureLines(outcome: QueueRunOutcome, command: (argv: readonly string[]) => string): readonly string[] {
   if (outcome.stuck.length === 0) return []
   const rows = readFileSync(outcome.log, "utf8")
     .split("\n")
@@ -5798,9 +5825,10 @@ function stuckCureLines(outcome: QueueRunOutcome): readonly string[] {
       (record) => record.kind === "change" && record.decision === "stuck" && record.branch === branch,
     )
     const reading = incidentIn(row ?? {})
-    if (reading.kind === "incident") return `stuck ${branch}: ${incidentLine(reading.incident)}`
+    const actions = stopActions({ change: { branch } }, true, command)
+    if (reading.kind === "incident") return `stuck ${branch}: ${incidentLine(reading.incident)}; ${actions}`
     const reason = reading.kind === "malformed" ? reading.reason : "no incident"
-    return `stuck ${branch}: ${reason} in this run's log (${outcome.log}); see yrd queue show ${branch}`
+    return `stuck ${branch}: ${reason} in this run's log (${outcome.log}); ${actions}`
   })
 }
 

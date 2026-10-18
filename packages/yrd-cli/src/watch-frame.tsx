@@ -359,15 +359,17 @@ export function BandBreakRows({
   snapshot,
   layout,
   includeRunner = true,
+  formatCommand,
 }: {
   brk: BandBreak | undefined
   snapshot: WatchSnapshot
   layout: ListLayout
   includeRunner?: boolean
+  formatCommand?: (argv: readonly string[]) => string
 }) {
   const now = useNow()
   if (brk === undefined) return null
-  const runner = runnerOf(snapshot, now)
+  const runner = runnerOf(snapshot, now, formatCommand)
   return (
     <Box flexDirection="column" flexShrink={0} minWidth={0}>
       {brk.runner && includeRunner ? <RunnerTitledBox line={runner} snapshot={snapshot} layout={layout} /> : null}

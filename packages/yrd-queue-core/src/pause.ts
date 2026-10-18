@@ -1,5 +1,4 @@
 /** Operator-facing facts from the event queue pause. */
-import { shellQuote } from "git-super/shell-command"
 import { changeName, type Change } from "./refs.ts"
 
 export type PauseKind = "paused" | "resumed"
@@ -73,20 +72,19 @@ export function pauseLine(record: PauseRecord): string {
 /**
  * What lifts a stop, as one sentence for a refusal or an echo.
  *
- * A stuck stop leads with its own record's cures, which already name all four
- * acts; the resume command is spelled out for the queue this reader selected,
- * because that one act needs the selector.
+ * Recorded guidance stays portable. A CLI displaying this sentence renders
+ * executable actions separately using its own repository and queue context.
  */
 export function liftLine(pause: PauseRecord, remote: string, queue: string): string {
   const selector = remote === "origin" ? queue : `${remote}#${queue}`
-  const resume = `yrd queue resume --queue ${shellQuote(selector)} --reason ${shellQuote("<text>")}`
+  const resume = `resume queue ${selector} with a reason`
   if (pause.cause === "maintenance") {
-    return `submit after resume; the person who set this maintenance stop lifts it with ${resume}`
+    return `submit after resume; the person who set this maintenance stop must ${resume}`
   }
-  if (pause.cause === "operator" || pause.change === undefined) return `run ${resume} to check and merge work again`
+  if (pause.cause === "operator" || pause.change === undefined) return `${resume} to check and merge work again`
   return (
-    `the line waits on ${changeName(pause.change)}: ${pause.next ?? stuckCures(pause.change.branch)}. ` +
-    `Resuming this queue, once it is repaired, is: ${resume}`
+    `the line waits on ${changeName(pause.change)}; recorded guidance: ${pause.next ?? stuckCures(pause.change.branch)}. ` +
+    `Once it is repaired, ${resume}`
   )
 }
 
@@ -97,9 +95,9 @@ export function liftLine(pause: PauseRecord, remote: string, queue: string): str
  */
 export function stuckCures(branch: string): string {
   return (
-    `four ways out of the line: yrd queue withdraw ${branch} (an operator ends the change), ` +
+    `four ways out of the line: withdraw ${branch} (end the change), ` +
     `submit a replacement head for ${branch} that clears this reason (the same content sticks on the same ground), ` +
-    `merge a queued fix with yrd merge <its branch> (it runs alone on the stopped line, then ${branch} is judged once more), ` +
-    "or yrd queue resume once the queue itself is repaired; until one of them, the line stays stopped"
+    `merge a queued fix (it runs alone on the stopped line, then ${branch} is judged once more), ` +
+    "or resume the queue once it is repaired; until one of them, the line stays stopped"
   )
 }

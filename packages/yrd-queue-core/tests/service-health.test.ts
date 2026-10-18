@@ -93,7 +93,10 @@ describe("the health document", () => {
     expect(doc.error?.resolution[0]).toBe(stuckStop.next)
     const body = doc.error?.resolution.join(" ") ?? ""
     expect(body).toMatch(/No restart is needed/u)
-    expect(body).toContain("yrd queue show task/one")
+    // Recorded Next remains verbatim; newly composed resolution is portable guidance, not a host recipe.
+    expect(doc.error?.resolution.slice(1).join(" ")).not.toMatch(
+      /\byrd\s+(?:queue|merge)\b|\bcd\s|(?:^|[\s"'`(])\/\S+/u,
+    )
     expect(body).not.toMatch(/clears on its own|next round|resets the spacing|Consecutive rounds/u)
     expect(doc.facts).toMatchObject({
       nextRoundInMs: INTERVAL,
@@ -122,12 +125,13 @@ describe("the health document", () => {
   /** @failure 25041: a pre-cutover stuck event has no legacy stuck pause; both facts may also stand together.
    * @level l1 @consumer Hab's yrd health page
    */
-  test("a stuck event pages with its resume action beside a standing operator pause", () => {
+  test("a stuck event pages with portable repair guidance beside a standing operator pause", () => {
     const doc = roundHealthDocument("yrd", operatorStop, INTERVAL, NOW, undefined, undefined, ["task/one"])
     expect(doc.state).toBe("unhealthy")
     expect(doc.error?.cause).toContain("stuck change task/one")
     expect(doc.error?.cause).toContain("operator pause also stands")
-    expect(doc.error?.resolution.join(" ")).toContain("yrd queue resume")
+    expect(doc.error?.resolution.join(" ")).toContain("resume the queue")
+    expect(doc.error?.resolution.join(" ")).not.toMatch(/\byrd\s+(queue|merge)\b/u)
     expect(doc.facts).toMatchObject({
       stopped: { by: "@chief", cause: "operator" },
       stuckChanges: ["task/one"],

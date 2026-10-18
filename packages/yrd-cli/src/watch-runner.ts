@@ -973,7 +973,7 @@ export type RunnerLine = Readonly<{
   /** When this round started; absent when no journal was read on this machine. */
   at?: Date
   /** What it holds, or why it holds nothing. */
-  holds: string
+  holds: string | Readonly<{ kind: "missing-formatter"; argv: readonly (readonly string[])[] }>
   /** The held change's submitter. */
   by?: string
   /** The duration cell: the word and how long it has been true. */
@@ -986,6 +986,14 @@ export type RunnerLine = Readonly<{
   step?: string
 }>
 
+/** Render the hold only where its commands are shown, never during metadata reads. */
+export function renderRunnerHolds(holds: RunnerLine["holds"]): string {
+  if (typeof holds === "string") return holds
+  throw new Error(
+    `runnerLine: rendering holds requires formatCommand; caller omitted the formatter for ${JSON.stringify(holds.argv)}`,
+  )
+}
+
 /**
  * Everything the runner's row says, derived once. Pure: every input was read by
  * the round that drew the page, and nothing here opens a file or a ref.
@@ -994,8 +1002,9 @@ export function runnerLine(
   facts: RunnerFacts | undefined,
   now: Date,
   options: Readonly<{ held?: HeldChange; waiting?: number; stopped?: StopFact | null; queue?: string }> = {},
+  formatCommand?: (argv: readonly string[]) => string,
 ): RunnerLine {
-  const line = runnerLineOf(facts, now, options)
+  const line = runnerLineOf(facts, now, options, formatCommand)
   const note = flowNote(facts?.service)
   const oldest = facts?.service.kind === "beating" ? facts.service.flow?.oldestWaiting : undefined
   const age = oldest === undefined ? undefined : now.getTime() - Date.parse(oldest.openedAt)
@@ -1006,7 +1015,9 @@ export function runnerLine(
         ? `oldest waiting ${oldest.branch} opened ${oldest.openedAt} (reader clock earlier)`
         : `oldest waiting ${oldest.branch} for ${mediaDuration(age)}`
   const notes = [oldestNote, note].filter((item): item is string => item !== undefined)
-  return notes.length === 0 ? line : { ...line, holds: `${line.holds} · ${notes.join(" · ")}` }
+  return notes.length === 0 || typeof line.holds !== "string"
+    ? line
+    : { ...line, holds: `${line.holds} · ${notes.join(" · ")}` }
 }
 
 /**
@@ -1043,6 +1054,7 @@ function runnerLineOf(
   facts: RunnerFacts | undefined,
   now: Date,
   options: Readonly<{ held?: HeldChange; waiting?: number; stopped?: StopFact | null; queue?: string }>,
+  formatCommand?: (argv: readonly string[]) => string,
 ): RunnerLine {
   const { held, waiting = 0, stopped, queue = "main" } = options
   const state = runnerWord(facts, held !== undefined, stopped)
@@ -1204,12 +1216,24 @@ function runnerLineOf(
         holds:
           stop === undefined
             ? `${word} since ${clock(stoppedAt)}${publishedClaim?.Holding === undefined ? "" : ` on ${publishedClaim.Holding}`}`
-            : change === undefined
-              ? `paused: by ${stop.by === "" ? "an operator" : stop.by} since ${clock(stoppedAt)} · resume: yrd queue resume`
-              : // The spec's cure text, with ONE correction: the verb is
-                // `yrd queue withdraw` (cli.ts). There is no `yrd cancel`, and a
-                // cure a reader cannot run is worse than no cure at all.
-                `line stopped at ${change} since ${clock(stoppedAt)} — fix and yrd merge <fix>, or yrd queue withdraw ${change}, or yrd queue resume`,
+            : formatCommand === undefined
+              ? {
+                  kind: "missing-formatter",
+                  argv:
+                    change === undefined
+                      ? [["queue", "resume"]]
+                      : [
+                          ["merge", "<fix>"],
+                          ["queue", "withdraw", change],
+                          ["queue", "resume"],
+                        ],
+                }
+              : change === undefined
+                ? `paused: by ${stop.by === "" ? "an operator" : stop.by} since ${clock(stoppedAt)} · resume: ${formatCommand(["queue", "resume"])}`
+                : // The spec's cure text, with ONE correction: the verb is
+                  // `yrd queue withdraw` (cli.ts). There is no `yrd cancel`, and a
+                  // cure a reader cannot run is worse than no cure at all.
+                  `line stopped at ${change} since ${clock(stoppedAt)} — fix and ${formatCommand(["merge", "<fix>"])}, or ${formatCommand(["queue", "withdraw", change])}, or ${formatCommand(["queue", "resume"])}`,
         state,
       }
     }
@@ -1222,7 +1246,10 @@ function runnerLineOf(
         ...at,
         detail: gone === undefined ? detail : `${gone.cause} · ${detail}`,
         ...(gone?.since === undefined ? {} : { duration: `${word} ${since(gone.since)}` }),
-        holds: `${gone?.kind === "stopped" ? (gone.stopReason ?? "") : ""} · start: yrd queue up`,
+        holds:
+          formatCommand === undefined
+            ? { kind: "missing-formatter", argv: [["queue", "up"]] }
+            : `${gone?.kind === "stopped" ? (gone.stopReason ?? "") : ""} · start: ${formatCommand(["queue", "up"])}`,
         state,
       }
     }

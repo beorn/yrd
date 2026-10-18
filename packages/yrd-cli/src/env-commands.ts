@@ -140,7 +140,7 @@ export type EnvRow = Readonly<{ name: string; path: string; branch?: string; hea
  * this whole design refuses.
  */
 function requireRepository(io: YrdCliIO): string {
-  const cwd = io.cwd ?? process.cwd()
+  const cwd = io.cwd
   const root = findRepository(cwd)
   if (root === undefined) {
     throw new Error(`yrd env needs a repository: no Git clone contains ${cwd}; run it inside a clone`)
@@ -981,7 +981,7 @@ export async function closeEnvironment(
       `--retain ${options.retain} is not an absolute directory, so it would resolve against the caller's cwd and write a retention tree there; pass an absolute path (e.g. ${join(workdir, "retained-modules")})`,
     )
   }
-  const requested = resolve(io.cwd ?? globalThis.process.cwd(), operand)
+  const requested = resolve(io.cwd, operand)
   let path: string
   try {
     path = realpathSync(requested)
@@ -1165,10 +1165,7 @@ export async function closeEnvironment(
   // unchanged: a clean no-submodule close never reaches git-super.
   let removalProof: WorktreeRemovalProof | undefined
   if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true || options.preserve === true) {
-    const retain =
-      options.retain === undefined
-        ? join(workdir, "retained-modules")
-        : resolve(io.cwd ?? globalThis.process.cwd(), options.retain)
+    const retain = options.retain === undefined ? join(workdir, "retained-modules") : resolve(io.cwd, options.retain)
     let removed: unknown
     try {
       removed = JSON.parse(

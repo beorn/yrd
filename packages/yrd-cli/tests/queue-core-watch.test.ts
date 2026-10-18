@@ -49,6 +49,7 @@ import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { openLog } from "../../yrd-queue-core/src/log.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { formatStoredQueueAddress } from "../src/address.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { stageInfo, type ChangeDetail } from "../src/watch-detail.tsx"
@@ -2410,6 +2411,15 @@ describe("bare watch declared queues", () => {
     await first.git(["clone", "--quiet", otherRemote, otherWork])
     const otherGit = gitIn(otherWork)
     const second = { git: otherGit, work: otherWork, workdir: join(root, "other-queue") }
+    const secondQueue = "release#queue"
+    await otherGit(["branch", secondQueue, "main"])
+    await otherGit(["push", "--quiet", "origin", secondQueue])
+    await otherGit(["branch", "task/shared", "origin/task/shared"])
+    await submit(otherGit, "origin", {
+      branch: "task/shared",
+      submitter: "test-submitter",
+      target: { branch: secondQueue, remote: "origin" },
+    })
     const withdrawn = capture(second.work)
     expect(
       await coreQueueCommand(
@@ -2421,7 +2431,7 @@ describe("bare watch declared queues", () => {
           by: "@dev/5",
           reason: "fixture second queue only",
         },
-        { workdir: second.workdir },
+        { workdir: second.workdir, queue: secondQueue },
       ),
       withdrawn.stderr(),
     ).toBe(0)
@@ -2435,7 +2445,7 @@ describe("bare watch declared queues", () => {
       {
         serviceName: "second",
         repository: { name: "second", path: second.work },
-        queue: { base: "main" },
+        queue: { base: secondQueue },
         owner: "@chief",
       },
       {
@@ -2453,11 +2463,29 @@ describe("bare watch declared queues", () => {
     rendered.onWait = undefined
     try {
       const watched = capture(first.work)
-      expect(await runYrdProcess([process.execPath, "yrd", "watch"], watched.io), watched.stderr()).toBe(0)
+      const viewerCwd = join(root, "viewer")
+      mkdirSync(viewerCwd)
+      expect(
+        await runYrdProcess([process.execPath, "yrd", "watch"], {
+          ...watched.io,
+          cwd: viewerCwd,
+          formatYrdCommand: (argv, cwd) => JSON.stringify({ argv, cwd }),
+        }),
+        watched.stderr(),
+      ).toBe(0)
       const sources = rendered.sources
-      expect(sources?.map((source) => source.id)).toEqual(["first#main", "second#main", "missing#main"])
+      expect(sources?.map((source) => source.id)).toEqual(["first#main", `second#${secondQueue}`, "missing#main"])
       const a = sources?.[0]
       const b = sources?.[1]
+      if (b?.snapshot === undefined) throw new Error(`versioned queue was unreadable: ${b?.error}`)
+      expect(b.snapshot.queue).toMatch(/^v2#/u)
+      for (const source of [a, b]) {
+        if (source?.snapshot === undefined) throw new Error("both declared queues must be readable")
+        expect(JSON.parse(source.formatCommand?.(["queue", "resume"]) ?? "null")).toEqual({
+          argv: ["queue", "resume", "--queue", formatStoredQueueAddress(source.snapshot.queue)],
+          cwd: viewerCwd,
+        })
+      }
       expect(sources?.[2]?.error).toContain("absent")
       const aRow = a?.snapshot?.rows.find((item) => item.row.branch === "task/shared")
       const bRow = b?.snapshot?.rows.find((item) => item.row.branch === "task/shared")
@@ -2471,11 +2499,17 @@ describe("bare watch declared queues", () => {
       expect((await b?.open?.(bRow))?.row.state).toBe("cancelled")
       expect((await a?.load?.())?.rows.find((item) => item.row.branch === "task/shared")?.row.state).toBe("queued")
       expect((await b?.load?.())?.rows.find((item) => item.row.branch === "task/shared")?.row.state).toBe("cancelled")
+      expect(JSON.parse(b.formatCommand?.(["queue", "resume"]) ?? "null")).toEqual({
+        argv: ["queue", "resume", "--queue", `${otherRemote}@release%23queue`],
+        cwd: viewerCwd,
+      })
       await expect(sources?.[2]?.load?.()).rejects.toThrow("absent")
       await first.git(["clone", "--quiet", join(root, "remote.git"), join(root, "absent")])
       expect((await sources?.[2]?.load?.())?.rows.find((item) => item.row.branch === "task/shared")?.row.state).toBe(
         "queued",
       )
+      const recovered = sources?.[2]
+      expect(JSON.parse(recovered?.formatCommand?.(["queue", "resume"]) ?? "null")).toMatchObject({ cwd: viewerCwd })
       declaredQueues.length = 0
       const fallback = capture(first.work)
       expect(await runYrdProcess([process.execPath, "yrd", "watch"], fallback.io), fallback.stderr()).toBe(0)
