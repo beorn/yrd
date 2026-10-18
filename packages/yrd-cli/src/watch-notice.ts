@@ -50,7 +50,7 @@ export function watchNotice(row: Row, joinedRun = false): Notice {
       : stateWord({ state: row.state, format: row.format, unknownKinds: row.unknownKinds })
   const state = joinedRun ? `change ${word}` : word
   const next =
-    row.incident !== undefined
+    row.incident?.next !== undefined
       ? row.incident.next
       : row.next === undefined
         ? undefined

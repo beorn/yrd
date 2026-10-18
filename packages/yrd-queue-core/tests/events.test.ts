@@ -3,6 +3,7 @@
 // @level l1
 // @consumer yrd list, submit and the queue runner on ADR-0016 event queues
 
+import { createHash } from "node:crypto"
 import { describe, expect, it, vi } from "vitest"
 import type { Event, EventInput } from "gitomic/events"
 import { listRefs, openEvents } from "gitomic/events"
@@ -15,7 +16,7 @@ import { transientPush5xxOf, transientPushRetry } from "../src/transient-push.ts
 import { EventRefsAcquireExhausted, readEventChain, readEventChains } from "../src/event-read.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
 import { classifyQueueRef, pauseRef, runIndexRef } from "../src/refs.ts"
-import { activateRunIndex, lookupRunIndex } from "../src/run-index.ts"
+import { activateRunIndex, lookupRunIndex, queueReadWithRunIndex } from "../src/run-index.ts"
 import { encodeOps, type OpsState } from "../src/ops-state.ts"
 import { queueResumedAfter } from "../src/index.ts"
 import {
@@ -24,6 +25,7 @@ import {
   adoptedChange,
   archiveQueue,
   appendChangeEvent,
+  appendNumberedChangeEvent,
   changeInput,
   changesRef,
   decide,
@@ -37,11 +39,13 @@ import {
   mergedHistoryCommits,
   queueFormat,
   queueRef,
+  project,
   readChangeEvents,
   readBranchHistory,
   readEventOps,
   readEventOpsWithRefs,
   readEventQueue,
+  readEventQueueWithChain,
   readEventQueueWithChanges,
   readStatus,
   setBranchIgnored,
@@ -51,6 +55,36 @@ import {
 
 const A = "a".repeat(40)
 const B = "b".repeat(40)
+const MERGED_EVENT = "c".repeat(40)
+const EFFECT_EVENT = "d".repeat(40)
+const ISSUE_EFFECT = {
+  kind: "issue-effect-v1",
+  mergedEvent: MERGED_EVENT,
+  mergeSha: A,
+  mergeCommitterTime: "2026-09-22T13:59:00.000Z",
+  verb: "close",
+  semanticEnding: "completed",
+  issueKey: "wk/issue/314",
+  providerId: "yrd1-93f1c4a38c9fddde33e2db50dd48bb4b93a883296ea4a1302871f51ad5b149fa",
+  declaration: { path: "issues.yml", blob: B },
+} as const
+
+function changeChain(...events: Event[]): Event[] {
+  return events.map((item, index): Event => {
+    const previous = events[index - 1]
+    return {
+      ...item,
+      parent: previous?.id ?? null,
+      props: item.props.map(([key, value]): [string, string] =>
+        key === "Queue" && previous !== undefined ? [key, previous.id] : [key, value],
+      ),
+    }
+  })
+}
+
+function issueEffectEvent(effect: Readonly<Record<string, unknown>>, id = EFFECT_EVENT): Event {
+  return { ...event("notified", id, [["Issue-Effect", JSON.stringify(effect)]], [A]), writer: QUEUE_RUN_WRITER }
+}
 
 function remoteMemStore(repo: string) {
   const backend = createMemBackend()
@@ -881,6 +915,265 @@ describe("ADR-0016 event fold", () => {
       lastNotifiable: { id: B, kind: "merged" },
       notices: { [`${B}:@dev/2`]: { result: "delivered" } },
     })
+  })
+
+  it("keeps a typed issue effect neutral across a later branch reuse", () => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    const effect = issueEffectEvent(ISSUE_EFFECT)
+    const laterEffect = {
+      ...effect,
+      props: effect.props.map(([key, value]) =>
+        key === "Time" ? ([key, "2026-09-22T14:01:00.000Z"] as [string, string]) : ([key, value] as [string, string]),
+      ),
+    }
+    const original = changeChain(opened, merged)
+    const withEffect = changeChain(opened, merged, laterEffect)
+    const beforeEffect = project(original, "refs/yrd/q/changes/task/reused", "fixture")
+    const afterEffect = project(withEffect, "refs/yrd/q/changes/task/reused", "fixture")
+
+    expect(afterEffect).toMatchObject({
+      status: beforeEffect.status,
+      at: beforeEffect.at,
+      endedAt: beforeEffect.endedAt,
+      lastNotifiable: beforeEffect.lastNotifiable,
+      ending: beforeEffect.ending,
+      tip: EFFECT_EVENT,
+    })
+    expect(afterEffect.notices).toEqual(beforeEffect.notices)
+
+    const reopened = event("opened", "e".repeat(40), [["Commit", B]], [B])
+    const reused = project(
+      changeChain(opened, merged, laterEffect, reopened),
+      "refs/yrd/q/changes/task/reused",
+      "fixture",
+    )
+    expect(reused).toMatchObject({ status: "queued", commit: B, tip: reopened.id })
+  })
+
+  it("allows an older validated effect while the reused branch is in merging", () => {
+    const oldOpened = event("opened", A, [["Commit", A]], [A])
+    const oldMerged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    const reopened = event("opened", "f".repeat(40), [["Commit", B]], [B])
+    const verifying = event("verifying", "1".repeat(40), [["Commit", B]], [B])
+    const checking = event("checking", "2".repeat(40))
+    const merging = event("merging", "3".repeat(40), [["Commit", B]], [B])
+    const effect = issueEffectEvent(ISSUE_EFFECT, "4".repeat(40))
+    const laterEffect = {
+      ...effect,
+      props: effect.props.map(([key, value]) =>
+        key === "Time" ? ([key, "2026-09-22T14:01:00.000Z"] as [string, string]) : ([key, value] as [string, string]),
+      ),
+    }
+    const prefix = changeChain(oldOpened, oldMerged, reopened, verifying, checking, merging)
+    const atMerging = project(prefix, "refs/yrd/q/changes/task/reused", "fixture")
+
+    expect(atMerging.status).toBe("merging")
+    expect(atMerging.at).toEqual(new Date("2026-09-22T14:00:00.000Z"))
+    expect(atMerging.endedAt).toBeUndefined()
+    expect(atMerging.lastNotifiable).toBeUndefined()
+    const afterEffect = project(
+      changeChain(oldOpened, oldMerged, reopened, verifying, checking, merging, laterEffect),
+      "refs/yrd/q/changes/task/reused",
+      "fixture",
+    )
+    expect(afterEffect.status).toBe(atMerging.status)
+    expect(afterEffect.at).toEqual(atMerging.at)
+    expect(afterEffect.endedAt).toEqual(atMerging.endedAt)
+    expect(afterEffect.lastNotifiable).toEqual(atMerging.lastNotifiable)
+    expect(afterEffect.candidate).toBe(atMerging.candidate)
+    expect(afterEffect.tip).toBe(laterEffect.id)
+  })
+
+  it.each([
+    ["missing", { mergedEvent: "f".repeat(40) }, "earlier merged event"],
+    ["wrong kind", { mergedEvent: A }, "does not name an earlier merged event"],
+    [
+      "wrong sha",
+      {
+        mergeSha: B,
+        providerId: "yrd1-ad2873d572ef06b4ec828dc845a0897912b5b47eb936cef79981e088f0529002",
+      },
+      "does not match merged event",
+    ],
+  ])("refuses an issue effect with a %s merge reference", (_name, override, message) => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    const effect = issueEffectEvent({ ...ISSUE_EFFECT, ...override })
+    expect(() => project(changeChain(opened, merged, effect), "refs/yrd/q/changes/task/bad-ref", "fixture")).toThrow(
+      message,
+    )
+  })
+
+  it("refuses a forward issue-effect merge reference", () => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const effect = issueEffectEvent(ISSUE_EFFECT, "e".repeat(40))
+    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    expect(() =>
+      project(changeChain(opened, effect, merged), "refs/yrd/q/changes/task/forward-ref", "fixture"),
+    ).toThrow(/earlier merged event/u)
+  })
+
+  type ReaderRefusal = Readonly<{
+    name: string
+    legacyTrailer?: readonly [string, string]
+    alter?: (raw: Record<string, unknown>) => Record<string, unknown>
+    serialized?: string
+    eventType?: string
+    writer?: string
+    expected: RegExp
+  }>
+  const readerRefusals: readonly ReaderRefusal[] = [
+    { name: "Reason", legacyTrailer: ["Reason", "audit"], expected: /cannot carry Reason/u },
+    { name: "For", legacyTrailer: ["For", A], expected: /cannot carry For/u },
+    { name: "To", legacyTrailer: ["To", "recipient@example.invalid"], expected: /cannot carry To/u },
+    { name: "Key", legacyTrailer: ["Key", "issue"], expected: /cannot carry Key/u },
+    { name: "Result", legacyTrailer: ["Result", "delivered"], expected: /cannot carry Result/u },
+    {
+      name: "providerId mismatch",
+      alter: (raw) => ({ ...raw, providerId: "yrd1-wrong" }),
+      expected: /providerId must be/u,
+    },
+    { name: "non-object JSON value", serialized: "null", expected: /expected an object/u },
+    {
+      name: "unknown kind",
+      alter: (raw) => ({ ...raw, kind: "issue-effect-v2" }),
+      expected: /unknown kind/u,
+    },
+    {
+      name: "malformed merged event id",
+      alter: (raw) => ({ ...raw, mergedEvent: "not-an-oid" }),
+      expected: /mergedEvent and mergeSha must be commit ids/u,
+    },
+    {
+      name: "malformed merge SHA",
+      alter: (raw) => ({ ...raw, mergeSha: "not-an-oid" }),
+      expected: /mergedEvent and mergeSha must be commit ids/u,
+    },
+    {
+      name: "unknown verb",
+      alter: (raw) => ({ ...raw, verb: "resolve" }),
+      expected: /verb must be close or comment/u,
+    },
+    {
+      name: "non-string providerId",
+      alter: (raw) => ({ ...raw, providerId: 12 }),
+      expected: /providerId must be a string/u,
+    },
+    {
+      name: "effect on wrong event type",
+      eventType: "future-effect",
+      expected: /belongs on notified/u,
+    },
+    { name: "malformed serialized JSON", serialized: "{", expected: /malformed Issue-Effect/u },
+    {
+      name: "non-canonical JSON",
+      alter: (raw) => Object.fromEntries(Object.entries(raw).reverse()),
+      expected: /must use canonical JSON/u,
+    },
+    { name: "extra field", alter: (raw) => ({ ...raw, extra: true }), expected: /unexpected fields/u },
+    {
+      name: "missing field",
+      alter: (raw) => {
+        const { declaration: _declaration, ...rest } = raw
+        return rest
+      },
+      expected: /declaration must name its committed source/u,
+    },
+    {
+      name: "wrong verb-ending pairing",
+      alter: (raw) => ({ ...raw, verb: "comment" }),
+      expected: /comment cannot carry semanticEnding/u,
+    },
+    {
+      name: "close without semantic ending",
+      alter: (raw) => {
+        const { semanticEnding: _semanticEnding, ...rest } = raw
+        return rest
+      },
+      expected: /close needs semanticEnding/u,
+    },
+    { name: "empty key", alter: (raw) => ({ ...raw, issueKey: " " }), expected: /issueKey must be nonempty/u },
+    {
+      name: "non-ISO time",
+      alter: (raw) => ({ ...raw, mergeCommitterTime: "yesterday" }),
+      expected: /mergeCommitterTime must be an ISO instant/u,
+    },
+    {
+      name: "parseable but non-canonical ISO time",
+      alter: (raw) => ({ ...raw, mergeCommitterTime: "2026-09-22T13:59:00Z" }),
+      expected: /mergeCommitterTime must be an ISO instant/u,
+    },
+    { name: "wrong writer", writer: "yrd", expected: /needs writer/u },
+  ]
+
+  it.each(readerRefusals)(
+    "reader refuses $name",
+    ({ legacyTrailer, alter, serialized, eventType, writer, expected }) => {
+      const opened = event("opened", A, [["Commit", A]], [A])
+      const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+      const effectValue = alter === undefined ? ISSUE_EFFECT : alter(ISSUE_EFFECT as unknown as Record<string, unknown>)
+      const base = issueEffectEvent(effectValue)
+      const effect = {
+        ...base,
+        ...(eventType === undefined ? {} : { type: eventType }),
+        ...(writer === undefined ? {} : { writer }),
+        props: [
+          ...base.props.map(([key, value]): [string, string] =>
+            key === "Issue-Effect" && serialized !== undefined ? [key, serialized] : [key, value],
+          ),
+          ...(legacyTrailer === undefined ? [] : [legacyTrailer]),
+        ],
+      }
+      expect(() => project(changeChain(opened, merged, effect), "refs/yrd/q/changes/task/refusal", "fixture")).toThrow(
+        expected,
+      )
+    },
+  )
+
+  it("validates issue-effect merge references when enumerating public change segments", () => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    const effect = issueEffectEvent({ ...ISSUE_EFFECT, mergedEvent: "f".repeat(40) })
+
+    expect(() =>
+      enumerateChangeSegments(
+        changeChain(opened, merged, effect),
+        "refs/yrd/q/changes/task/segments-bad-ref",
+        "fixture",
+      ),
+    ).toThrow(/earlier merged event/u)
+  })
+
+  it("refuses a duplicate issue-effect identity on one branch chain", () => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const merged = event("merged", MERGED_EVENT, [["Commit", A]], [A])
+    const first = issueEffectEvent(ISSUE_EFFECT)
+    const second = issueEffectEvent(ISSUE_EFFECT, "e".repeat(40))
+    expect(() =>
+      project(changeChain(opened, merged, first, second), "refs/yrd/q/changes/task/duplicate-effect", "fixture"),
+    ).toThrow(/duplicate issue effect/u)
+  })
+
+  it("serializes the typed issue effect on the existing notified event", () => {
+    const written = changeInput("notified", {
+      queueTip: A,
+      at: new Date("2026-09-22T14:01:00.000Z"),
+      issueEffect: ISSUE_EFFECT,
+    })
+    expect(written.props).toContainEqual(["Issue-Effect", JSON.stringify(ISSUE_EFFECT)])
+    expect(written.props?.some(([key]) => ["For", "To", "Key", "Result"].includes(key))).toBe(false)
+  })
+
+  it("rejects a reason on an issue-effect notification", () => {
+    expect(() =>
+      changeInput("notified", {
+        queueTip: A,
+        at: new Date("2026-09-22T14:01:00.000Z"),
+        issueEffect: ISSUE_EFFECT,
+        reason: "audit",
+      }),
+    ).toThrow(/issue effect cannot carry Reason/u)
   })
 
   it("settles multiple recipients for a stuck event while keeping the stop in place", () => {
@@ -1996,6 +2289,126 @@ describe("the queue-format boundary", () => {
     expect(await target.head()).toBe(composed)
   })
 
+  it("refuses branch effect authoring and reads historical facts across branch reuse", async () => {
+    const { store, location } = remoteMemStore("yrd-event-run-issue-effect")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const mergeSha = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const reusedBranch = await open({ ...store, ref: "refs/heads/task/issue-effect" })
+    const reusedSha = (await reusedBranch.transact(async (map) => map.set("work", "reused"), "reuse")).oid
+    const queueTip = await seedEventQueue(location, "lab", mergeSha, new Date("2026-09-22T14:00:00.000Z"))
+    const ref = changesRef("lab", "task/issue-effect")
+    const chain = await openEvents({ ...store, ref })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: mergeSha, by: "author" })],
+      { expect: null },
+    )
+    const merged = await chain.append(
+      [changeInput("merged", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), commit: mergeSha })],
+      { expect: opened.head },
+    )
+    if (merged.head === null) throw new Error("fixture merged event has no tip")
+    const reopened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:03:00.000Z"), commit: reusedSha, by: "author" })],
+      { expect: merged.head },
+    )
+    const verifying = await chain.append(
+      [changeInput("verifying", { queueTip, at: new Date("2026-09-22T14:04:00.000Z"), commit: reusedSha })],
+      { expect: reopened.head },
+    )
+    const checking = await chain.append(
+      [changeInput("checking", { queueTip, at: new Date("2026-09-22T14:05:00.000Z") })],
+      { expect: verifying.head },
+    )
+    const merging = await chain.append(
+      [changeInput("merging", { queueTip, at: new Date("2026-09-22T14:06:00.000Z"), commit: reusedSha })],
+      { expect: checking.head },
+    )
+    const selectedTip = merging.head
+    if (selectedTip === null) throw new Error("fixture reused branch has no tip")
+    const before = await readStatus(location, "lab", "task/issue-effect")
+    const issueKey = "wk/issue/314"
+    const providerIdentity = JSON.stringify([mergeSha, "close", "completed", issueKey])
+    const effect = {
+      ...ISSUE_EFFECT,
+      mergedEvent: merged.head,
+      mergeSha,
+      issueKey,
+      providerId: `yrd1-${createHash("sha256").update(providerIdentity).digest("hex")}`,
+      declaration: { path: "issues.yml" as const, blob: B },
+    }
+    // A stale runner must be directed to the common authority before it writes an invisible branch-only fact.
+    await expect(
+      appendChangeEvent(location, "lab", "task/issue-effect", selectedTip, {
+        type: "notified",
+        at: new Date("2026-09-22T14:07:00.000Z"),
+        issueEffect: effect as never,
+        writer: QUEUE_RUN_WRITER,
+      }),
+    ).rejects.toThrow(/writeQueueEvent/u)
+    await expect(
+      appendNumberedChangeEvent(
+        location,
+        "lab",
+        "task/issue-effect",
+        selectedTip,
+        {
+          type: "notified",
+          at: new Date("2026-09-22T14:07:00.000Z"),
+          issueEffect: effect as never,
+          writer: QUEUE_RUN_WRITER,
+        },
+        { id: "retired-writer", startedAt: "2026-09-22T14:07:00.000Z", host: "fixture", actor: "yrd" },
+      ),
+    ).rejects.toThrow(/writeQueueEvent/u)
+    expect(await readStatus(location, "lab", "task/issue-effect")).toEqual(before)
+    // Historical facts are fixture data, written through the existing raw event primitive, never the retired API.
+    const historical = await openEvents({ ...store, ref, writer: QUEUE_RUN_WRITER })
+    const written = (
+      await historical.append(
+        [
+          changeInput("notified", {
+            queueTip,
+            at: new Date("2026-09-22T14:07:00.000Z"),
+            issueEffect: effect,
+          }),
+        ],
+        { expect: selectedTip },
+      )
+    ).head
+    const after = await readStatus(location, "lab", "task/issue-effect")
+    expect(after).toEqual({ ...before, tip: written })
+    const stored = (await chain.events()).at(-1)
+    expect(stored?.props.find(([key]) => key === "Issue-Effect")?.[1]).toBe(JSON.stringify(effect))
+
+    const remoteTip = await chain.head()
+    if (remoteTip === null) throw new Error("fixture effect chain lost its tip")
+    const historicalEvents = await chain.events()
+    expect(() =>
+      project(
+        changeChain(...historicalEvents, issueEffectEvent({ ...effect, mergedEvent: B }, "d".repeat(40))),
+        ref,
+        store.repo,
+      ),
+    ).toThrow(/earlier merged event/u)
+    expect(await chain.head()).toBe(remoteTip)
+    await expect(
+      appendChangeEvent(location, "lab", "task/issue-effect", remoteTip, {
+        type: "stuck",
+        at: new Date("2026-09-22T14:10:00.000Z"),
+        reason: "ordinary runner event",
+        writer: QUEUE_RUN_WRITER,
+      }),
+    ).rejects.toThrow(/reserved for an atomic published merge/u)
+    await expect(
+      appendChangeEvent(location, "lab", "task/issue-effect", remoteTip, {
+        type: "notified",
+        at: new Date("2026-09-22T14:11:00.000Z"),
+        issueEffect: effect as never,
+      }),
+    ).rejects.toThrow(/writeQueueEvent/u)
+    expect(await chain.head()).toBe(remoteTip)
+  })
+
   it("appends a reverted-paths admission warning and keeps its Warning-Kind through appendChangeEvent (27363)", async () => {
     const { store, location } = remoteMemStore("yrd-event-reverted-paths")
     const target = await open({ ...store, ref: "refs/heads/lab" })
@@ -2810,6 +3223,164 @@ describe("the queue-format boundary", () => {
     expect(events[1]?.links).toEqual([commit])
   })
 
+  // @failure Per-round fetch refs leaked into the immutable local anchor reader and stopped the live queue.
+  // @level l2 @consumer Queue service read policy @testonly none
+  it("reads an empty completion map with per-round remote fetch refs", async () => {
+    const { store, location } = remoteMemStore("yrd-queue-anchor-fetch-policy")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set("work", "one"), "work")).oid
+    const tip = await seedEventQueue(location, "lab", commit, new Date())
+    await activateRunIndex(location, "lab", new Date())
+    const acquired = queueReadWithRunIndex(location, "lab").store
+    expect(await readEventQueue(acquired, "lab")).toMatchObject({ tip, issueEffects: {} })
+  })
+
+  // A queue completion must be readable from any branch replay without walking other
+  // branches. These cases exercise the retained immutable anchor and its queue authority.
+  it.each([
+    "valid",
+    "unkept",
+    "wrong merge",
+    "not merged",
+    "foreign queue",
+    "wrong writer",
+    "duplicate",
+    "reuse same",
+    "reuse descendant",
+    "reuse rewrite",
+  ])("reads retained issue effects on the queue chain: %s", async (variant) => {
+    const { store, location: remoteLocation } = remoteMemStore(`yrd-queue-issue-effect-${variant}`)
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const queueTip = await seedEventQueue(remoteLocation, "lab", commit, at)
+    await activateRunIndex(remoteLocation, "lab", at)
+    const location = queueReadWithRunIndex(remoteLocation, "lab").store
+    const branch = await openEvents({ ...store, ref: changesRef("lab", "task/retained"), writer: QUEUE_RUN_WRITER })
+    const opened = await branch.append([changeInput("opened", { queueTip, at, commit, by: "author" })], {
+      expect: null,
+    })
+    const merged = await branch.append(
+      [changeInput("merged", { queueTip: variant === "foreign queue" ? B : queueTip, at, commit })],
+      { expect: opened.head },
+    )
+    const anchor = variant === "not merged" ? opened.head : merged.head
+    if (anchor === null) throw new Error("fixture lacks its retained event")
+    const mergeSha = variant === "wrong merge" ? A : commit
+    const effect = {
+      ...ISSUE_EFFECT,
+      mergedEvent: anchor,
+      mergeSha,
+      providerId: `yrd1-${createHash("sha256")
+        .update(JSON.stringify([mergeSha, "close", "completed", ISSUE_EFFECT.issueKey]))
+        .digest("hex")}`,
+    }
+    const queue = await openEvents({
+      ...store,
+      ref: queueRef("lab"),
+      writer: variant === "wrong writer" ? "intruder" : QUEUE_RUN_WRITER,
+    })
+    const input: EventInput = {
+      type: "notified",
+      props: [
+        ["Queue", queueTip],
+        ["Time", at.toISOString()],
+        ["Issue-Effect", JSON.stringify(effect)],
+      ],
+      keeps: variant === "unkept" ? [] : [anchor],
+    }
+    const written = await queue.append([input], { expect: queueTip })
+    const duplicatePrefix = variant === "duplicate" ? await readEventQueue(location, "lab") : undefined
+    if (variant === "duplicate") {
+      await queue.append(
+        [
+          {
+            ...input,
+            props: input.props?.map(([key, value]) => [key, key === "Queue" ? (written.head as string) : value]),
+          },
+        ],
+        { expect: written.head },
+      )
+    }
+    if (variant !== "valid" && !variant.startsWith("reuse ")) {
+      const failures: Record<string, RegExp> = {
+        unkept: /keep.*merged event/u,
+        "wrong merge": /mergeSha.*merged event/u,
+        "not merged": /actual merged event/u,
+        "foreign queue": /queue cause/u,
+        "wrong writer": /writer yrd-run/u,
+        duplicate: /duplicate issue effect/u,
+      }
+      await expect(readEventQueue(location, "lab", { knownQueue: duplicatePrefix })).rejects.toThrow(failures[variant])
+      return
+    }
+    const reading = await readEventQueue(location, "lab")
+    expect(reading.issueEffects[effect.providerId]).toEqual({ id: written.head, effect })
+    expect(reading.notices).toEqual({})
+    if (variant.startsWith("reuse ")) {
+      // Reuse saves immutable anchor reads, while rewrites must validate every surviving fact again.
+      let knownQueue = reading
+      if (variant === "reuse descendant") {
+        const later = await branch.append([changeInput("merged", { queueTip: written.head!, at, commit })], {
+          expect: anchor,
+        })
+        const issueKey = "wk/issue/new-anchor"
+        await writeQueueEvent(location, "lab", {
+          type: "notified",
+          by: QUEUE_RUN_WRITER,
+          at,
+          issueEffect: {
+            ...effect,
+            mergedEvent: later.head!,
+            issueKey,
+            providerId: `yrd1-${createHash("sha256")
+              .update(JSON.stringify([mergeSha, "close", "completed", issueKey]))
+              .digest("hex")}`,
+          },
+        })
+      } else if (variant === "reuse rewrite") {
+        const extra = await writeQueueEvent(location, "lab", { type: "observed", by: QUEUE_RUN_WRITER, at, commit })
+        knownQueue = await readEventQueue(location, "lab")
+        if (store.backend.publish === undefined) throw new Error("fixture lacks queue rewrite publisher")
+        await store.backend.publish(store.repo, [{ ref: queueRef("lab"), expect: extra, oid: written.head! }], "origin")
+      }
+      const histories = vi.spyOn(location.backend, "readHistory")
+      try {
+        const current = await readEventQueue(location, "lab", { knownQueue })
+        expect(Object.keys(current.issueEffects)).toHaveLength(variant === "reuse descendant" ? 2 : 1)
+        // One first-parent queue read, plus zero old anchors / one new anchor / one rewritten anchor.
+        expect(histories).toHaveBeenCalledTimes(variant === "reuse same" ? 1 : 2)
+      } finally {
+        histories.mockRestore()
+      }
+      return
+    }
+    expect((await queue.events()).map((event) => event.type)).toEqual(["created", "notified"])
+    // The sole completion writer must dedupe an existing fact and retain a new anchor through its queue CAS.
+    expect(
+      await writeQueueEvent(location, "lab", { type: "notified", by: QUEUE_RUN_WRITER, at, issueEffect: effect }),
+    ).toBe(written.head)
+    const issueKey = "wk/issue/another"
+    const next = {
+      ...effect,
+      issueKey,
+      providerId: `yrd1-${createHash("sha256")
+        .update(JSON.stringify([mergeSha, "close", "completed", issueKey]))
+        .digest("hex")}`,
+    }
+    const applied = await writeQueueEvent(location, "lab", {
+      type: "notified",
+      by: QUEUE_RUN_WRITER,
+      at,
+      issueEffect: next,
+    })
+    expect((await readEventQueue(location, "lab")).issueEffects[next.providerId]).toEqual({
+      id: applied,
+      effect: next,
+    })
+    expect((await queue.events()).at(-1)?.links).toEqual([anchor])
+  })
+
   const GITHUB_5XX = [
     "remote: Internal Server Error",
     "fatal: unable to access 'https://github.com/beorn/hh.git/': The requested URL returned error: 500",
@@ -3203,6 +3774,10 @@ describe("the queue-format boundary", () => {
       [first.location, "lab", { ...queue }],
     ] as const) {
       await expect(readEventOps(location, gitIn(first.store.repo), name, commit, { knownQueue })).rejects.toThrow(
+        /validated queue.*same location/,
+      )
+      await expect(readEventQueue(location, name, { knownQueue })).rejects.toThrow(/validated queue.*same location/)
+      await expect(readEventQueueWithChain(location, name, { knownQueue })).rejects.toThrow(
         /validated queue.*same location/,
       )
     }

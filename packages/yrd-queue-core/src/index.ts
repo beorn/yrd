@@ -74,6 +74,7 @@ export {
   appendNumberedChangeEvent,
   archiveQueue,
   appendNumberedPublishedMerge,
+  acceptsMergedLocalRetirement,
   changeInput,
   createEventQueue,
   createLocalEventStore,
@@ -91,6 +92,8 @@ export {
   queueRef,
   queueResumedAfter,
   readChangeEvents,
+  readIssueEffect,
+  issueProviderId,
   readEventQueue,
   readEventOps,
   readEventQueueWithChanges,
@@ -100,8 +103,10 @@ export {
   writeQueueEvent,
   writeQueueOverride,
 } from "./events.ts"
+export { Conflict } from "./git.ts"
 export type { Event } from "./git.ts"
 export type {
+  AppliedIssueEffect,
   CancellationReason,
   ChangeEventType,
   ChangeStatus,
@@ -118,8 +123,8 @@ export { eventListRows, eventRows } from "./event-table.ts"
 export { transientPush5xxOf } from "./transient-push.ts"
 export { assertPlainEventQueueConfig } from "./event-config.ts"
 export { DIRECT_MERGE, mergedBy, mergedByRun, trailer, trailers } from "./git.ts"
-export { EventRefsAcquireExhausted } from "./event-read.ts"
-export { incidentLine, incidentLines, incidentTrailers } from "./incident.ts"
+export { EventRefsAcquireExhausted, EventRefsMoved } from "./event-read.ts"
+export { incidentIn, incidentLine, incidentLines, incidentTrailers } from "./incident.ts"
 export type { Incident } from "./incident.ts"
 export {
   configValue,
@@ -223,6 +228,7 @@ export {
   issueOf,
   issueCandidatesOf,
   issueBindingsOf,
+  closingReferencesOf,
 } from "./submit.ts"
 export { pinCarrierName, preparePinCarrier } from "./pin-carrier.ts"
 export type { PinCarrierPin, PreparedPinCarrier } from "./pin-carrier.ts"

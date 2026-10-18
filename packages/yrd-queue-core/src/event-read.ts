@@ -27,8 +27,11 @@ export const EVENT_READ_LIMIT = 1024
  * caller names them from the field, never by parsing the message.
  */
 export class EventRefsMoved extends Conflict {
-  constructor(readonly movedRefs: readonly string[]) {
-    super(`event refs moved after the selected inventory; retry the reading: ${movedRefs.join(", ")}`, {
+  constructor(
+    readonly movedRefs: readonly string[],
+    message = `event refs moved after the selected inventory; retry the reading: ${movedRefs.join(", ")}`,
+  ) {
+    super(message, {
       refs: movedRefs,
     })
   }
@@ -171,6 +174,13 @@ export async function readEventChain(chain: Chain, acquiredTip?: Oid): Promise<E
     throw new Error(`event chain at ${tip}: tip was not readable`)
   }
   return events
+}
+
+/** Decode one already-retained immutable parent without walking its branch chain. */
+export async function readRetainedEvent(chain: Chain, id: Oid): Promise<Event> {
+  const [event] = await chain.events({ at: id, limit: 1 })
+  if (event?.id !== id) throw new Error(`retained event ${id}: exact event was not readable`)
+  return event
 }
 
 /**

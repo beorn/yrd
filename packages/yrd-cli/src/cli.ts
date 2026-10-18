@@ -68,6 +68,7 @@ import {
   ISSUES_WRITE_VERBS,
 } from "./issues/declaration.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
+import { formatYrdCommand } from "./command-format.ts"
 
 /** The seat a submit names. Never the git author: the fleet's git identity
  * names nobody (ruling @i/10-yrd/24028). */
@@ -101,6 +102,7 @@ type MergeOptions = Readonly<{
   queue?: string
   noCheck?: boolean
   check?: boolean
+  projectRoot?: string
 }>
 
 // Only queue actions load the runtime identity fence. Help and --version must
@@ -289,6 +291,30 @@ function buildProgram(
     }
     if (options.tip !== undefined && options.local !== true && options.retire !== true) {
       throw new Error("--tip requires drop --local or --retire")
+    }
+    if (
+      command === "drop" &&
+      options.local &&
+      !options.releaseCheckout &&
+      options.dryRun &&
+      branch !== undefined &&
+      options.tip !== undefined
+    ) {
+      const argv = ["drop", branch, "--local", "--tip", options.tip]
+      for (const [flag, value] of [
+        ["--issue", options.issue],
+        ["--queue", options.queue],
+        ["--submitter", options.submitter],
+        ["--reason", options.reason],
+        ["--notify", options.notify],
+      ] as const) {
+        if (value !== undefined) argv.push(flag, value)
+      }
+      if (options.json) argv.push("--json")
+      throw new Error(
+        "drop --local has no preview; it archives at origin, then deletes the local branch.\n" +
+          `To apply: ${formatYrdCommand(io, argv, io.cwd ?? process.cwd())}`,
+      )
     }
     if (
       (options.submodules || options.dryRun || options.apply) &&
@@ -843,6 +869,7 @@ function buildProgram(
     .option("--tier <value>", "which check tier to run: normal (default) or long")
     .option("--stop-at <value>", "stop starting new checks after ISO timestamp or HH:MM time")
     .option("--stop-after <value>", "stop starting new checks after duration, e.g. 2h, 30m, 90s")
+    .option("--project-root <path>", "enable automatic issue closing using this repository's committed issues.yml")
     .action(async (options) => {
       const {
         json,
@@ -850,12 +877,14 @@ function buildProgram(
         tier: tierOpt,
         stopAt: stopAtOpt,
         stopAfter: stopAfterOpt,
+        projectRoot,
       } = options as {
         json?: boolean
         queue?: string
         tier?: string
         stopAt?: string
         stopAfter?: string
+        projectRoot?: string
       }
       let tier: "normal" | "long" | undefined
       if (tierOpt !== undefined) {
@@ -890,6 +919,7 @@ function buildProgram(
         io,
         { command: "run", ...(tier === undefined ? {} : { tier }), ...(stopAtMs === undefined ? {} : { stopAtMs }) },
         {
+          ...(projectRoot === undefined ? {} : { projectRoot }),
           json,
           env,
           log: log(),
@@ -910,16 +940,23 @@ function buildProgram(
         "no round can run at all",
     )
     .option("--interval <seconds>", "seconds between rounds (default 15)", int)
+    .option("--project-root <path>", "enable automatic issue closing using this repository's committed issues.yml")
     .option("--json", "emit stable JSON")
     .option("--queue <value>", QUEUE_HELP)
     .action(async (options) => {
-      const { interval, json, queue } = options as { interval?: number; json?: boolean; queue?: string }
+      const { interval, json, queue, projectRoot } = options as {
+        interval?: number
+        json?: boolean
+        queue?: string
+        projectRoot?: string
+      }
       const location = await resolveQueueLocation(cwd(), queue, env)
       const taken = await coreQueueCommand(
         location.repo,
         io,
         { command: "up", ...(interval === undefined ? {} : { intervalSeconds: interval }) },
         {
+          ...(projectRoot === undefined ? {} : { projectRoot }),
           json,
           env,
           log: log(),
@@ -1350,6 +1387,7 @@ function buildProgram(
               }),
         },
         {
+          ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
           json: options.json,
           env,
           log: log(),
@@ -1372,6 +1410,7 @@ function buildProgram(
     .option("--notify <seat>", NOTIFY_HELP)
     .option("--issue <id>", ISSUE_HELP)
     .option("--no-check", "merge with git machinery only (compose, merge, push), skipping all declared checks")
+    .option("--project-root <path>", "enable automatic issue closing using this repository's committed issues.yml")
     .option("--queue <value>", QUEUE_HELP)
     .addHelpSection("On merge:", MERGE_HELP)
     .action(async (branch, options) => queueMerge(branch as string, options as MergeOptions))
@@ -1421,7 +1460,14 @@ function buildProgram(
       )
       .option("--dry-run", "preview issue cleanup without archiving or deleting branches")
       .option("--apply", "apply issue cleanup after rechecking exact tips and protections"),
-  ).action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
+  )
+    .addHelpText(
+      "after",
+      "\nFor a component branch, run from its component author checkout:\n" +
+        "  yrd drop <branch> --local --tip <full-oid>\n" +
+        "Plain --local has no preview: it archives at origin, then deletes the local branch.\n",
+    )
+    .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
 
   program
     .command("ignore <branch>")

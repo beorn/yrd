@@ -1,4 +1,5 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
+import { createHash } from "node:crypto"
 import { shellQuote } from "git-super/shell-command"
 import { Conflict, RetriesExhausted } from "./git.ts"
 import { ARCHIVE_REF_PREFIX, archiveRefFor } from "git-super/archive-ref"
@@ -6,7 +7,7 @@ import { prepareRetirementArchive, retireOriginBranch } from "./origin-branch-re
 import { readCommitSubmodules, type CommitGitlink } from "git-super/commit-graph"
 import { listRefs, openEvents } from "./git.ts"
 import { publishWithTransientRetry } from "./transient-push.ts"
-import { readEventChain, readEventChains, type RecentEventReadOptions } from "./event-read.ts"
+import { readEventChain, readEventChains, readRetainedEvent, type RecentEventReadOptions } from "./event-read.ts"
 import type { AlsoRef, Appended, Decide, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
 import {
@@ -85,6 +86,7 @@ export const EVENT_TRAILERS = {
   floors: "Floors",
   gitlinks: "Gitlinks",
   componentAuthors: "Component-Authors",
+  issueEffect: "Issue-Effect",
 } as const
 const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 /** Only the run path that atomically publishes the target may write merged with this producer. */
@@ -239,6 +241,35 @@ export type NoticeWrite = Readonly<{
   reason?: string
 }>
 
+/**
+ * A completed provider write, retained as neutral history on an existing event chain.
+ * Queue facts share completion across branches; branch facts remain readable history.
+ * mergeCommitterTime is syntax-checked here; the writer must bind it to the named merge commit.
+ */
+export type AppliedIssueEffect = Readonly<{
+  kind: "issue-effect-v1"
+  mergedEvent: Oid
+  mergeSha: Oid
+  mergeCommitterTime: string
+  verb: "close" | "comment"
+  semanticEnding?: "completed" | "not_planned"
+  issueKey: string
+  providerId: string
+  declaration: Readonly<{ path: "issues.yml"; blob: Oid }>
+}>
+
+/** Stable provider replay identity, shared by the effect writer and stored-effect reader. */
+export function issueProviderId(
+  mergeSha: string,
+  verb: AppliedIssueEffect["verb"] | "resolve",
+  semanticEnding: AppliedIssueEffect["semanticEnding"],
+  issueKey: string,
+): string {
+  return `yrd1-${createHash("sha256")
+    .update(JSON.stringify([mergeSha, verb, semanticEnding ?? null, issueKey]))
+    .digest("hex")}`
+}
+
 type ChangeInputDetails = Readonly<{
   queueTip: string
   at: Date
@@ -256,6 +287,7 @@ type ChangeInputDetails = Readonly<{
   retry?: Readonly<{ retried: 1; reason?: string }>
   deferred?: DeferredWrite
   notice?: NoticeWrite
+  issueEffect?: AppliedIssueEffect
   run?: string
   landedGitlinks?: readonly CommitGitlink[]
   componentAuthors?: readonly ComponentAuthor[]
@@ -360,7 +392,9 @@ function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [str
   if (type === "deferred" && details.deferred === undefined) {
     throw new TypeError("deferred needs check and window detail")
   }
-  if (type === "notified" && details.notice === undefined) throw new TypeError("notified needs notice detail")
+  if (type === "notified" && details.notice === undefined && details.issueEffect === undefined) {
+    throw new TypeError("notified needs notice or issue-effect detail")
+  }
   if (details.deferred !== undefined) {
     if (type !== "deferred" || details.commit === undefined) throw new TypeError("deferred needs kept Commit:")
     if (details.reason !== details.deferred.reason) throw new TypeError("deferred Reason: must match its detail")
@@ -372,13 +406,22 @@ function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [str
     }
   }
   if (details.notice !== undefined) {
-    if (type !== "notified") throw new TypeError("notice detail belongs on notified")
+    if (type !== "notified" || details.issueEffect !== undefined) {
+      throw new TypeError("notice detail belongs on notified and cannot share an issue effect")
+    }
     if (details.notice.key !== `${details.notice.for}:${details.notice.to}`) {
       throw new TypeError("notified has invalid Key:")
     }
     if (details.notice.result !== "delivered" && details.reason !== details.notice.reason) {
       throw new TypeError("refused or failed notice needs matching Reason:")
     }
+  }
+  if (details.issueEffect !== undefined) {
+    if (type !== "notified" || details.notice !== undefined) {
+      throw new TypeError("issue effect belongs on notified and cannot share a notice")
+    }
+    if (details.reason !== undefined) throw new TypeError("issue effect cannot carry Reason:")
+    checkedIssueEffect(details.issueEffect, "changeInput")
   }
   if (details.retry !== undefined && type !== "stuck") throw new TypeError("Retried: belongs on stuck")
   if (
@@ -415,6 +458,9 @@ function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [str
     const notice = details.notice
     props.push([EVENT_TRAILERS.for, notice.for], [EVENT_TRAILERS.to, notice.to])
     props.push([EVENT_TRAILERS.result, notice.result], [EVENT_TRAILERS.key, notice.key])
+  }
+  if (details.issueEffect !== undefined) {
+    props.push([EVENT_TRAILERS.issueEffect, JSON.stringify(checkedIssueEffect(details.issueEffect, "changeInput"))])
   }
   return props
 }
@@ -500,6 +546,110 @@ function requiredProp(event: EventShape, key: string): string {
   const value = prop(event, key)
   if (value === undefined || value.trim() === "") throw new Error(`event ${event.id} (${event.type}) needs ${key}:`)
   return value
+}
+
+function checkedIssueEffect(value: unknown, where: string): AppliedIssueEffect {
+  const refuse = (detail: string): never => {
+    throw new Error(`${where} has invalid ${EVENT_TRAILERS.issueEffect}: ${detail}`)
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) refuse("expected an object")
+  const raw = value as Record<string, unknown>
+  if (raw.kind !== "issue-effect-v1") refuse("unknown kind")
+  if (
+    typeof raw.mergedEvent !== "string" ||
+    !COMMIT_OID.test(raw.mergedEvent) ||
+    typeof raw.mergeSha !== "string" ||
+    !COMMIT_OID.test(raw.mergeSha)
+  ) {
+    refuse("mergedEvent and mergeSha must be commit ids")
+  }
+  if (
+    typeof raw.mergeCommitterTime !== "string" ||
+    Number.isNaN(Date.parse(raw.mergeCommitterTime)) ||
+    new Date(raw.mergeCommitterTime).toISOString() !== raw.mergeCommitterTime
+  ) {
+    refuse("mergeCommitterTime must be an ISO instant")
+  }
+  if (raw.verb !== "close" && raw.verb !== "comment") refuse("verb must be close or comment")
+  if (raw.verb === "close") {
+    if (raw.semanticEnding !== "completed" && raw.semanticEnding !== "not_planned") {
+      refuse("close needs semanticEnding completed or not_planned")
+    }
+  } else if (raw.semanticEnding !== undefined) {
+    refuse("comment cannot carry semanticEnding")
+  }
+  if (typeof raw.issueKey !== "string" || raw.issueKey.trim() === "") refuse("issueKey must be nonempty")
+  if (typeof raw.providerId !== "string") refuse("providerId must be a string")
+  if (typeof raw.declaration !== "object" || raw.declaration === null || Array.isArray(raw.declaration)) {
+    refuse("declaration must name its committed source")
+  }
+  const declaration = raw.declaration as Record<string, unknown>
+  if (declaration.path !== "issues.yml" || typeof declaration.blob !== "string" || !COMMIT_OID.test(declaration.blob)) {
+    refuse("declaration needs issues.yml and a blob id")
+  }
+  const expectedId = issueProviderId(
+    raw.mergeSha as string,
+    raw.verb as AppliedIssueEffect["verb"],
+    raw.semanticEnding as AppliedIssueEffect["semanticEnding"],
+    raw.issueKey as string,
+  )
+  if (raw.providerId !== expectedId) refuse(`providerId must be ${expectedId}`)
+  const expectedKeys = [
+    "kind",
+    "mergedEvent",
+    "mergeSha",
+    "mergeCommitterTime",
+    "verb",
+    ...(raw.semanticEnding === undefined ? [] : ["semanticEnding"]),
+    "issueKey",
+    "providerId",
+    "declaration",
+  ].sort()
+  if (JSON.stringify(Object.keys(raw).sort()) !== JSON.stringify(expectedKeys)) refuse("unexpected fields")
+  if (JSON.stringify(Object.keys(declaration).sort()) !== JSON.stringify(["blob", "path"])) {
+    refuse("unexpected declaration fields")
+  }
+  return {
+    kind: "issue-effect-v1",
+    mergedEvent: raw.mergedEvent as Oid,
+    mergeSha: raw.mergeSha as Oid,
+    mergeCommitterTime: raw.mergeCommitterTime as string,
+    verb: raw.verb as AppliedIssueEffect["verb"],
+    ...(raw.semanticEnding === undefined
+      ? {}
+      : { semanticEnding: raw.semanticEnding as AppliedIssueEffect["semanticEnding"] }),
+    issueKey: raw.issueKey as string,
+    providerId: raw.providerId as string,
+    declaration: { path: "issues.yml", blob: declaration.blob as Oid },
+  }
+}
+
+export function readIssueEffect(event: EventShape): AppliedIssueEffect | undefined {
+  const serialized = prop(event, EVENT_TRAILERS.issueEffect)
+  if (serialized === undefined) return undefined
+  if (event.type !== "notified") {
+    throw new Error(`event ${event.id}: ${EVENT_TRAILERS.issueEffect}: belongs on notified`)
+  }
+  for (const field of [
+    EVENT_TRAILERS.for,
+    EVENT_TRAILERS.to,
+    EVENT_TRAILERS.key,
+    EVENT_TRAILERS.result,
+    EVENT_TRAILERS.reason,
+  ]) {
+    if (prop(event, field) !== undefined) throw new Error(`event ${event.id}: issue effect cannot carry ${field}:`)
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(serialized)
+  } catch (cause) {
+    throw new Error(`event ${event.id}: malformed ${EVENT_TRAILERS.issueEffect}: ${String(cause)}`, { cause })
+  }
+  const effect = checkedIssueEffect(parsed, `event ${event.id}`)
+  if (JSON.stringify(effect) !== serialized) {
+    throw new Error(`event ${event.id}: ${EVENT_TRAILERS.issueEffect}: must use canonical JSON`)
+  }
+  return effect
 }
 
 function positiveMs(event: EventShape, key: string): number {
@@ -722,6 +872,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
   const at = requireCause(event)
   const landedGitlinks = readLandedGitlinks(event)
   const componentAuthors = readComponentAuthors(event)
+  const issueEffect = event.type === "notified" ? readIssueEffect(event) : undefined
   checkedRows(event)
   const recipients = event.props.filter(([key]) => key === EVENT_TRAILERS.recipient)
   if (recipients.length > 1) throw new Error(`event ${event.id} repeats ${EVENT_TRAILERS.recipient}:`)
@@ -736,7 +887,8 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
     event.type !== "merged" &&
     event.type !== "failed" &&
     event.type !== "stuck" &&
-    event.type !== "verifying"
+    event.type !== "verifying" &&
+    issueEffect === undefined
   ) {
     throw new Error(`event ${event.id}: ${LANDING_IN_PROGRESS}`)
   }
@@ -810,7 +962,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
     case "deferred":
       return deferChange(state, event, next, at)
     case "notified":
-      return settleNotice(state, event)
+      return issueEffect === undefined ? settleNotice(state, event) : { ...state, tip: event.id }
     case "archived": {
       if ((state.status !== "merged" && state.status !== "cancelled") || state.endedAt === undefined) {
         throw new Error(`event ${event.id} cannot archive ${state.status}`)
@@ -1075,6 +1227,8 @@ type EventQueueProjection = Readonly<{
   ops?: OpsState
   pause?: Readonly<{ id: string; at: Date; reason: string; by: string; cause: "operator" | "maintenance" }>
   observed: Readonly<Record<string, Readonly<{ id: string; branch?: string }>>>
+  /** Completed provider actions shared by every branch replay in this queue. */
+  issueEffects: Readonly<Record<string, Readonly<{ id: string; effect: AppliedIssueEffect }>>>
   notices: Readonly<
     Record<string, Readonly<{ id: string; for: string; to: string; result: NoticeWrite["result"]; reason?: string }>>
   >
@@ -1170,8 +1324,12 @@ export async function createEventQueue(
 }
 
 /** Read and validate the queue declaration and its current operator stop. */
-export async function readEventQueue(store: QueueReadStore, queue: string): Promise<EventQueue> {
-  return (await readEventQueueWithChain(store, queue)).queue
+export async function readEventQueue(
+  store: QueueReadStore,
+  queue: string,
+  options: Readonly<{ knownQueue?: EventQueue }> = {},
+): Promise<EventQueue> {
+  return (await readEventQueueWithChain(store, queue, options)).queue
 }
 
 /**
@@ -1182,22 +1340,76 @@ export async function readEventQueue(store: QueueReadStore, queue: string): Prom
 export async function readEventQueueWithChain(
   store: QueueReadStore,
   queue: string,
+  options: Readonly<{ knownQueue?: EventQueue }> = {},
 ): Promise<Readonly<{ queue: EventQueue; events: readonly Event[] }>> {
+  if (options.knownQueue !== undefined) assertQueueLocation(store, queue, options.knownQueue)
   const ref = queueRef(queue)
-  const events = await readEventChain(await openEvents({ ...store, ref }))
-  return { queue: eventQueueFromHistory(store, queue, events), events }
+  const chain = await openEvents({ ...store, ref })
+  const events = await readEventChain(chain)
+  return { queue: await eventQueueFromHistory(store, queue, events, chain, options.knownQueue), events }
 }
 
-/** One projection and validation policy, independent of how its exact tip was acquired. */
-function eventQueueFromHistory(store: QueueReadStore, queue: string, events: readonly Event[]): EventQueue {
+/** One validation/reuse policy for an already-read chain or an already-acquired immutable tip. */
+async function eventQueueFromHistory(
+  store: QueueReadStore,
+  queue: string,
+  eventsOrTip: readonly Event[] | Oid,
+  chain: Awaited<ReturnType<typeof openEvents>>,
+  knownQueue?: EventQueue,
+): Promise<EventQueue> {
+  if (knownQueue !== undefined) assertQueueLocation(store, queue, knownQueue)
+  if (typeof eventsOrTip === "string" && knownQueue?.tip === eventsOrTip) return knownQueue
+  const events = typeof eventsOrTip === "string" ? await readEventChain(chain, eventsOrTip) : eventsOrTip
   const ref = queueRef(queue)
   const projected = projectEventQueue(events, ref, store.repo)
+  const positions = new Map(events.map((event, index) => [event.id, index]))
+  const knownPosition = knownQueue === undefined ? undefined : positions.get(knownQueue.tip)
+  // The acquired queue ref retains these exact objects through extra parents.
+  // Decode only each immutable anchor; never discover or fetch other branch refs.
+  const readAnchors = new Map<string, Event>()
+  for (const { id, effect } of Object.values(projected.issueEffects)) {
+    const effectPosition = positions.get(id)
+    // A retained snapshot tip proves an identical immutable prefix. The full fold above still checks duplicates.
+    if (
+      knownPosition !== undefined &&
+      effectPosition !== undefined &&
+      effectPosition <= knownPosition &&
+      knownQueue?.issueEffects[effect.providerId]?.id === id
+    ) {
+      continue
+    }
+    const anchor = readAnchors.get(effect.mergedEvent) ?? (await readRetainedEvent(chain, effect.mergedEvent))
+    assertIssueEffectAnchor(ref, id, effect, anchor, positions, effectPosition)
+    readAnchors.set(anchor.id, anchor)
+  }
   const result: EventQueue = {
     ...projected,
     [validatedQueue]: true,
   }
   queueLocations.set(result, { repo: store.repo, remote: store.remote, queue, backend: store.backend })
   return result
+}
+
+/** The reader and sole queue writer share the same immutable retained-anchor proof. */
+function assertIssueEffectAnchor(
+  ref: string,
+  id: string,
+  effect: AppliedIssueEffect,
+  anchor: Event,
+  positions: ReadonlyMap<string, number>,
+  effectPosition: number | undefined,
+): void {
+  if (anchor.type !== "merged") {
+    throw new Error(`${ref}: issue effect ${id} does not retain an actual merged event ${effect.mergedEvent}`)
+  }
+  if (keptCommit(anchor) !== effect.mergeSha) {
+    throw new Error(`${ref}: issue effect ${id} mergeSha does not match merged event ${effect.mergedEvent}`)
+  }
+  const cause = prop(anchor, EVENT_TRAILERS.queue)
+  const causePosition = cause === undefined ? undefined : positions.get(cause)
+  if (causePosition === undefined || effectPosition === undefined || causePosition >= effectPosition) {
+    throw new Error(`${ref}: issue effect ${id} merged event ${effect.mergedEvent} has no earlier queue cause`)
+  }
 }
 
 type EventOps = Readonly<{
@@ -1248,13 +1460,11 @@ export async function readEventOpsWithRefs(
     if (tip === undefined) {
       throw new Error(`${where}: required queue ref ${ref} is missing; admission refused. Check the queue declaration`)
     }
-    projected =
-      knownQueue?.tip === tip
-        ? knownQueue
-        : eventQueueFromHistory(store, queue, await readEventChain(await openEvents({ ...store, ref }), tip))
+    const chain = await openEvents({ ...store, ref })
+    projected = await eventQueueFromHistory(store, queue, tip, chain, knownQueue)
   } else if (knownQueue !== undefined && store.remote === undefined) {
     const chain = await openEvents({ ...store, ref: queueRef(queue) })
-    projected = (await chain.head()) === knownQueue.tip ? knownQueue : await readEventQueue(store, queue)
+    projected = await eventQueueFromHistory(store, queue, (await chain.head()) ?? [], chain, knownQueue)
     acquiredRefs = await listRefs(queueRefPrefix(queue), store)
   } else {
     projected = await readEventQueue(store, queue)
@@ -1374,7 +1584,14 @@ export type WriteQueueEvent =
     }>
   | Readonly<{ type: "resumed"; reason: string; by: string; at: Date }>
   | Readonly<{ type: "observed"; commit: string; branch?: string; by: string; at: Date }>
-  | Readonly<{ type: "notified"; notice: NoticeWrite; by: string; at: Date }>
+  | Readonly<{ type: "notified"; notice: NoticeWrite; issueEffect?: never; by: string; at: Date }>
+  | Readonly<{
+      type: "notified"
+      issueEffect: AppliedIssueEffect
+      notice?: never
+      by: typeof QUEUE_RUN_WRITER
+      at: Date
+    }>
   | Readonly<{ type: "notify-floors"; floors: NotifyFloorsSnapshot; by: string; at: Date }>
 
 const STUCK_RELEASE_PREFIX = "yrd-stuck-release:"
@@ -1393,6 +1610,11 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
     throw new TypeError(`${write.type} needs Reason:`)
   }
   if (Number.isNaN(write.at.getTime())) throw new TypeError("Time: needs a valid instant")
+  if (write.type === "notified" && write.issueEffect !== undefined) {
+    if (write.notice !== undefined) throw new TypeError("issue effect cannot carry ordinary notice detail")
+    if (write.by !== QUEUE_RUN_WRITER) throw new TypeError("issue effect requires yrd-run writer")
+    checkedIssueEffect(write.issueEffect, ref)
+  }
   const chain = await openEvents({ ...store, ref, writer: write.by })
   let existing: string | undefined
   const decide: Decide = async (events) => {
@@ -1401,7 +1623,12 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
       throw new Error(`${ref}: ${write.type} needs ops-cutover; pre-cutover pause and release authoring is retired`)
     }
     if (write.type === "observed") existing = current.observed[write.commit]?.id
-    if (write.type === "notified") existing = current.notices[write.notice.key]?.id
+    if (write.type === "notified") {
+      existing =
+        write.issueEffect === undefined
+          ? current.notices[write.notice.key]?.id
+          : current.issueEffects[write.issueEffect.providerId]?.id
+    }
     if (write.type === "notify-floors") {
       // A CAS retry folds the chain again; a snapshot already at this exact tip is the same write, not a second one.
       const encoded = encodeNotifyFloors(write.floors)
@@ -1416,6 +1643,18 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
       details.push([EVENT_TRAILERS.commit, write.commit], [EVENT_TRAILERS.reason, "direct"])
       if (write.branch !== undefined) details.push([EVENT_TRAILERS.branch, write.branch])
       keeps = [write.commit]
+    } else if (write.type === "notified" && write.issueEffect !== undefined) {
+      const anchor = await readRetainedEvent(chain, write.issueEffect.mergedEvent)
+      assertIssueEffectAnchor(
+        ref,
+        "pending",
+        write.issueEffect,
+        anchor,
+        new Map(events.map((event, index) => [event.id, index])),
+        events.length,
+      )
+      details.push([EVENT_TRAILERS.issueEffect, JSON.stringify(checkedIssueEffect(write.issueEffect, ref))])
+      keeps = [write.issueEffect.mergedEvent]
     } else if (write.type === "notified") {
       details.push(
         [EVENT_TRAILERS.for, write.notice.for],
@@ -1659,6 +1898,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   let ops: OpsState | undefined
   let notifyFloors: EventQueueProjection["notifyFloors"]
   const observed: Record<string, { id: string; branch?: string }> = {}
+  const issueEffects: Record<string, { id: string; effect: AppliedIssueEffect }> = {}
   const notices: Record<
     string,
     { id: string; for: string; to: string; result: NoticeWrite["result"]; reason?: string }
@@ -1680,6 +1920,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
       throw new Error(`${ref}: event ${event.id} (${event.type}) needs Time: as an ISO instant`)
     }
     if (event.props.some(([key]) => key === "Status")) throw new Error(`${ref}: event ${event.id} stores Status:`)
+    const issueEffect = readIssueEffect(event)
     switch (event.type) {
       case "created":
         if (index !== 0) throw new Error(`${ref}: event ${event.id} declares a second queue`)
@@ -1852,6 +2093,16 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
         if (event.writer !== QUEUE_RUN_WRITER) {
           throw new Error(`${ref}: notified event ${event.id} needs writer ${QUEUE_RUN_WRITER}`)
         }
+        if (issueEffect !== undefined) {
+          if (event.links.length !== 1 || event.links[0] !== issueEffect.mergedEvent) {
+            throw new Error(`${ref}: issue effect ${event.id} must keep its merged event ${issueEffect.mergedEvent}`)
+          }
+          if (issueEffects[issueEffect.providerId] !== undefined) {
+            throw new Error(`${ref}: duplicate issue effect ${issueEffect.providerId}`)
+          }
+          issueEffects[issueEffect.providerId] = { id: event.id, effect: issueEffect }
+          break
+        }
         const forEvent = requiredProp(event, EVENT_TRAILERS.for)
         const to = requiredProp(event, EVENT_TRAILERS.to)
         const key = requiredProp(event, EVENT_TRAILERS.key)
@@ -1887,6 +2138,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
     declaration,
     tip: previous,
     observed,
+    issueEffects,
     notices,
     ...(pause === undefined ? {} : { pause }),
     ...(opsCutover === undefined ? {} : { opsCutover }),
@@ -2166,6 +2418,7 @@ type ChangeWrite = Readonly<{
   retry?: Readonly<{ retried: 1; reason?: string }>
   deferred?: DeferredWrite
   notice?: NoticeWrite
+  issueEffect?: never
   run?: string
   writer?: string
   landedGitlinks?: readonly CommitGitlink[]
@@ -2185,10 +2438,19 @@ export async function appendChangeEvent(
   write: ChangeWrite,
   onPrepared?: (oid: Oid, runNumber?: number) => void,
 ): Promise<string> {
+  assertChangeWriter(queue, write)
+  return (await appendDecision(store, queue, branch, selectedTip, write, onPrepared)).event
+}
+
+function assertChangeWriter(queue: string, write: ChangeWrite): void {
+  if (write.issueEffect !== undefined) {
+    throw new TypeError(
+      `branch issue-effect authoring is retired; use writeQueueEvent on ${queueRef(queue)} with writer yrd-run`,
+    )
+  }
   if (write.writer === QUEUE_RUN_WRITER) {
     throw new TypeError(`${QUEUE_RUN_WRITER} writer is reserved for an atomic published merge`)
   }
-  return (await appendDecision(store, queue, branch, selectedTip, write, onPrepared)).event
 }
 
 /** Allocate a run number in the same leased push as this round's first change event. */
@@ -2201,9 +2463,7 @@ export async function appendNumberedChangeEvent(
   identity: RunIndexIdentity,
   onPrepared?: (oid: Oid, runNumber?: number) => void,
 ): Promise<Readonly<{ event: string; number: number }>> {
-  if (write.writer === QUEUE_RUN_WRITER) {
-    throw new TypeError(`${QUEUE_RUN_WRITER} writer is reserved for an atomic published merge`)
-  }
+  assertChangeWriter(queue, write)
   const result = await appendDecision(store, queue, branch, selectedTip, write, onPrepared, identity)
   if (result.number === undefined) throw new Error(`${runIndexRef(queue)}: numbered publication returned no run number`)
   return { event: result.event, number: result.number }
@@ -2431,6 +2691,23 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   }
 }
 
+/** Explicit local abandonment may retain a merged descendant without changing its ended history.
+ * Requested-tip checks belong to the retirement callers; this checks only the merged-local exception.
+ */
+export async function acceptsMergedLocalRetirement(
+  git: Git,
+  input: Readonly<{
+    local: boolean
+    head: string
+    change: Pick<EventChange, "status" | "commit"> | undefined
+  }>,
+): Promise<boolean> {
+  if (!input.local || input.change?.status !== "merged" || input.change.commit === undefined) {
+    return false
+  }
+  return isAncestor(git, input.change.commit, input.head)
+}
+
 async function dropBranch(store: QueueLocation, request: DropRequest): Promise<Dropped> {
   const { queue, branch } = request
   const format = await queueFormat(store, queue)
@@ -2532,7 +2809,14 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
   }
   if (state.ending !== undefined && head !== undefined) {
     const kept = history.flatMap((event) => event.links)
-    if (!kept.includes(head)) {
+    if (
+      !kept.includes(head) &&
+      !(await acceptsMergedLocalRetirement(gitIn(store.repo, undefined, store.selection), {
+        local: archive !== undefined,
+        head,
+        change: state,
+      }))
+    ) {
       const lastKept = kept.at(-1)
       throw new Error(
         `${branchRef} at ${head} has already ended ${state.ending.kind}; its last kept link is ${lastKept ?? "none"}. ` +
@@ -3114,7 +3398,7 @@ export function adoptedChange(event: EventShape): ChangeSegment {
 
 /** Read every opened segment while leaving the normal list's current fold unchanged. */
 export function enumerateChangeSegments(events: readonly Event[], ref: string, repo: string): readonly ChangeSegment[] {
-  assertCompleteChangeChain(events, ref, repo)
+  project(events, ref, repo)
   const segments: ChangeSegment[] = []
   let state = initial
   let opened: Oid | undefined
@@ -3173,6 +3457,27 @@ export function enumerateChangeSegments(events: readonly Event[], ref: string, r
 export function project(events: readonly Event[], ref: string, repo: string): EventChange {
   assertCompleteChangeChain(events, ref, repo)
   const state = events.reduce(evolve, initial)
+  const earlierMerges = new Map<string, string>()
+  const issueEffectIds = new Set<string>()
+  for (const event of events) {
+    if (event.type === "merged") earlierMerges.set(event.id, keptCommit(event))
+    const effect = readIssueEffect(event)
+    if (effect === undefined) continue
+    if (event.writer !== QUEUE_RUN_WRITER) {
+      throw new Error(`${ref}: issue effect ${event.id} needs writer ${QUEUE_RUN_WRITER}`)
+    }
+    const mergeSha = earlierMerges.get(effect.mergedEvent)
+    if (mergeSha === undefined) {
+      throw new Error(`${ref}: issue effect ${event.id} does not name an earlier merged event ${effect.mergedEvent}`)
+    }
+    if (mergeSha !== effect.mergeSha) {
+      throw new Error(`${ref}: issue effect ${event.id} mergeSha does not match merged event ${effect.mergedEvent}`)
+    }
+    if (issueEffectIds.has(effect.providerId)) {
+      throw new Error(`${ref}: duplicate issue effect ${effect.providerId}`)
+    }
+    issueEffectIds.add(effect.providerId)
+  }
   return events.some((event) => event.type === "opened")
     ? state
     : diagnose(state, `${ref}: malformed history has no opened event`)

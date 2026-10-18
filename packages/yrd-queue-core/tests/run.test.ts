@@ -89,7 +89,6 @@ const RIVAL_STUCK_TRAILERS = [
     via: "a rival writer in this test",
     evidence: "/dev/null",
     next: "nothing: a test fixture",
-    owner: "the test",
   }),
   ["Reason", "crash"],
 ] as const
@@ -374,7 +373,7 @@ it("local retirement keeps protected tips and preserves custody before removing 
   const merged = await retireLocalBranch(input)
   expect(merged.outcome).toBe("removed")
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
-  expect(await refAt(w.git, merged.archiveRef)).toBe(w.target)
+  expect(await refAt(w.git, merged.archiveRef!)).toBe(w.target)
 
   // Native release and queue cleanup can observe the same completed retirement.
   expect(await retireLocalBranch({ ...input, actor: "@dev/9", date: "2026-10-15" })).toMatchObject({
@@ -382,7 +381,7 @@ it("local retirement keeps protected tips and preserves custody before removing 
     archiveRef: merged.archiveRef,
     detail: `already retired: ${merged.archiveRef} holds ${w.target}; this run deleted no ref`,
   })
-  expect(await refAt(w.git, merged.archiveRef)).toBe(w.target)
+  expect(await refAt(w.git, merged.archiveRef!)).toBe(w.target)
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
   expect(await retireLocalBranch({ ...input, branch: "task/absent-without-custody" })).toMatchObject({
     outcome: "kept",
@@ -412,7 +411,7 @@ it("local retirement keeps protected tips and preserves custody before removing 
   })
   expect(unavailableOrigin).toMatchObject({ outcome: "failed", reason: expect.stringContaining("missing-origin") })
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(head)
-  expect(await refAt(w.git, unavailableOrigin.archiveRef)).toBe(head)
+  expect(await refAt(w.git, unavailableOrigin.archiveRef!)).toBe(head)
   const closed = await retireLocalBranch({
     ...input,
     tip: head,
@@ -428,7 +427,7 @@ it("local retirement keeps protected tips and preserves custody before removing 
   expect(closed.outcome).toBe("removed")
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
   const origin = gitIn(w.remote)
-  expect(await refAt(origin, closed.archiveRef)).toBe(head)
+  expect(await refAt(origin, closed.archiveRef!)).toBe(head)
   expect(await refAt(origin, `refs/heads/${branch}`)).toBe(head)
   const mergedBranch = "task/closed-but-merged"
   await w.git(["branch", mergedBranch, w.target])
@@ -443,8 +442,8 @@ it("local retirement keeps protected tips and preserves custody before removing 
     disposition: { kind: "closed", target: w.target, queue: "main", store: queueStore },
   })
   expect(localOnly.outcome).toBe("removed")
-  expect(await refAt(w.git, localOnly.archiveRef)).toBe(w.target)
-  expect(await refAt(origin, localOnly.archiveRef)).toBeUndefined()
+  expect(await refAt(w.git, localOnly.archiveRef!)).toBe(w.target)
+  expect(await refAt(origin, localOnly.archiveRef!)).toBeUndefined()
   expect(await refAt(origin, queueRef("main"))).toBe(queueBefore)
   const rows = readRunLog(dirname(log.path), log.id)
   expect(rows.find((row) => row.kind === "local-branch-retirement" && row.actor === "@dev/9")).toMatchObject({
@@ -1334,7 +1333,7 @@ it("refuses a bounded-only revert-guard proof under refuse instead of merging it
         reverted: {
           base: { base: w.target, state: "single" },
           count: 0,
-          coverage: "complete",
+          coverage: "incomplete",
           gaps: [{ depth: 0, kind: "bounded", path: ".", reason: "target history window W=50 exhausted" }],
           paths: [],
           swallowed: [],
@@ -3353,6 +3352,9 @@ it("ends a queue-owned configured event check stuck and holds the next change", 
   const outcome = await queueRun({ ...(await w.options({ exit: 2 })), notify: undefined })
 
   expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/a"] })
+  const diagnostic = logRecords(outcome).find((record) => record.kind === "change" && record.decision === "stuck")
+  expect(diagnostic).toMatchObject({ code: expect.any(String), subject: expect.any(String) })
+  expect(diagnostic).not.toHaveProperty("owner")
   expect(await remoteTarget(w)).toBe(w.target)
   expect((await readStatus(store, "main", "task/a")).status).toBe("stuck")
   expect((await readStatus(store, "main", "task/b")).status).toBe("queued")
@@ -4270,6 +4272,50 @@ it("accounts for its earlier merged event when scanning a later round", async ()
   expect((await readStatus(store, "main", "task/second")).status).toBe("merged")
 })
 
+/** @failure A rival lower-stack merge was omitted from the upper delivery's base, repeating its issue intents.
+ * @level l3 @consumer queue operator
+ */
+it("bounds an observed upper stack after a rival records its lower merge", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const lowerBranch = "task/z-lower"
+  const upperBranch = "task/a-upper"
+  const lower = await submitCommit(w, lowerBranch, "one.txt")
+  await w.git(["checkout", "--quiet", "-b", upperBranch, lowerBranch])
+  writeFileSync(join(w.work, "upper.txt"), "upper")
+  await w.git(["add", "upper.txt"])
+  await w.git(["commit", "--quiet", "-m", "upper"])
+  await submit(w.git, "origin", {
+    branch: upperBranch,
+    submitter: "fixture",
+    target: { remote: "origin", branch: "main" },
+  })
+  await w.git(["checkout", "--quiet", "main"])
+  await w.git(["merge", "--quiet", "--ff-only", upperBranch])
+  await w.git(["push", "--quiet", "origin", "main"])
+  let injected = false
+  using _publish = beforeGitomicPublish(async (_repo, updates) => {
+    if (injected) return
+    const selected = updates.find((update) => update.ref === changesRef("main", lowerBranch))
+    if (selected?.expect === undefined) return
+    injected = true
+    await appendChangeEvent(store, "main", lowerBranch, selected.expect, {
+      type: "merged",
+      at: new Date(),
+      commit: lower,
+      base: w.target,
+      reason: `observed on target at ${lower}`,
+    })
+  })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
+  expect(injected).toBe(true)
+  expect(outcome.exitCode).toBe(0)
+  expect(outcome.merged).toEqual(expect.arrayContaining([lowerBranch, upperBranch]))
+  const events = await (await openEvents({ ...store, ref: changesRef("main", upperBranch) })).events()
+  expect(trailer(events.findLast((event) => event.type === "merged")!, "Base")).toBe(lower)
+})
+
 /** @failure A prior observed merged event did not account for the direct commit it kept.
  * @level l3 @consumer queue operator
  */
@@ -4339,7 +4385,7 @@ it("observes a submitted head on the target, then uses its merged event as the d
 /** @failure Cleanup loses exact component pins when the published root differs from the submitted root.
  * @level l3 @consumer yrd local component branch retirement
  */
-it.each(["published", "observed"] as const)(
+it.each(["published", "observed", "observed-ff"] as const)(
   "retains actual %s root gitlinks on its landing event",
   async (producer) => {
     const w = await world()
@@ -4356,7 +4402,7 @@ it.each(["published", "observed"] as const)(
     await w.git(["add", ".gitmodules"])
     await w.git(["update-index", "--add", "--cacheinfo", `160000,${pins[0]!.target},${pins[0]!.path}`])
     await w.git(["commit", "--quiet", "-m", "actual root landing with component"])
-    const landed = (await w.git(["rev-parse", "HEAD"])).trim()
+    let landed = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["checkout", "--quiet", "main"])
     let endingId: string | undefined
     if (producer === "published") {
@@ -4372,18 +4418,29 @@ it.each(["published", "observed"] as const)(
         opsFences: [],
       })
     } else {
-      await w.git(["merge", "--ff-only", landed])
+      if (producer === "observed-ff") {
+        await w.git(["merge", "--ff-only", landed])
+      } else {
+        await w.git(["merge", "--no-ff", landed, "-m", "observed root merge with component"])
+        landed = (await w.git(["rev-parse", "HEAD"])).trim()
+      }
       await w.git(["push", "--quiet", "origin", "main"])
       const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
       expect(outcome.merged).toEqual([branch])
     }
     const state = await readStatus(store, "main", branch)
-    expect(state).toMatchObject({ status: "merged", commit: head, merge: landed, landedGitlinks: pins })
+    const deliveredPins = producer === "observed-ff" ? [] : pins
+    expect(state).toMatchObject({
+      status: "merged",
+      commit: head,
+      merge: producer === "observed-ff" ? head : landed,
+      landedGitlinks: deliveredPins,
+    })
     if (endingId !== undefined) expect(state.ending?.id).toBe(endingId)
     const ending = (await (await openEvents({ ...store, ref: changesRef("main", branch) })).events()).find(
       (event) => event.id === state.ending?.id,
     )
-    expect(ending?.props).toContainEqual(["Gitlinks", JSON.stringify(pins)])
+    expect(ending?.props).toContainEqual(["Gitlinks", JSON.stringify(deliveredPins)])
     expect(await remoteTarget(w)).toBe(landed)
   },
 )

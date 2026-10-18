@@ -33,7 +33,7 @@ import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
 import { readIssueDisplay } from "./issue-resolver.ts"
 import { formatYrdCommand } from "./command-format.ts"
-import { createPostMerge } from "./post-merge.ts"
+import { createPostMerge, readPostMergeIssueDiagnostics } from "./post-merge.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup, type ClosedEnvironment } from "./env-cleanup.ts"
 import { environmentInventory } from "./env-commands.ts"
@@ -61,6 +61,7 @@ import {
   claimWorktrees,
   directMergeLine,
   drop,
+  acceptsMergedLocalRetirement,
   retireLocalBranch,
   pauseLine,
   eventDirectMergeCommits,
@@ -68,6 +69,7 @@ import {
   eventRows,
   enumerateChangeSegments,
   EventRefsAcquireExhausted,
+  EventRefsMoved,
   isOpen,
   createEventStore,
   createLocalEventStore,
@@ -93,6 +95,7 @@ import {
   programRootCheck,
   openLog,
   gitIn,
+  incidentIn,
   incidentLine,
   isAncestor,
   journalKey,
@@ -181,7 +184,6 @@ import {
   type GitObservation,
   type GitSelection,
   type HealthWriter,
-  type Incident,
   type LogRecord,
   type QueueConfig,
   type QueueHealthDocument,
@@ -685,8 +687,8 @@ export async function coreQueueCommand(
     /** One-shot list/show opt-in: an existing queue-owned clone, never a writer's authority. */
     localStatusStore?: Readonly<{ path: string; transport: string }>
     /**
-     * `show`'s project root: whose `issues.yml` `view` decorates each change's issue (29644 Y1). Absent, `show`
-     * makes no display read at all — no issue line and no per-issue unavailable notice.
+     * Explicit project root: `show` uses its committed issues.yml for display; writer commands opt in
+     * to automatic issue closing. Absent, neither display reads nor automatic closes run.
      */
     projectRoot?: string
     /**
@@ -1217,6 +1219,8 @@ export async function coreQueueCommand(
           cwd: repo,
           env,
           stop: postMergeSignal,
+          git,
+          store: eventStore,
           report: (message) => io.stderr("yrd: " + message + "\n"),
           cleanup: async (context: {
             code: string
@@ -1228,6 +1232,8 @@ export async function coreQueueCommand(
             merged: readonly string[]
             update?: readonly string[]
             updateDue?: boolean
+            projectRoot?: string
+            queueBranch: string
             cleanup: (merged: readonly string[]) => Promise<void>
           }) => context.cleanup(context.merged),
         })
@@ -1580,6 +1586,8 @@ export async function coreQueueCommand(
             merged: outcome.merged,
             update: declared.config.issuesProvider?.update,
             updateDue: outcome.merged.length > 0 || startupCatchup,
+            ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
+            queueBranch: config.target.branch,
             cleanup,
           })
         }
@@ -1596,6 +1604,7 @@ export async function coreQueueCommand(
     const target = await readRemoteCommit(git, config.target.remote, `refs/heads/${config.target.branch}`)
     if (target === undefined) throw new Error(`the target ${targetLabel} is not at ${config.target.remote}`)
     const reading = await readEventListing(git, config, repo, workdir, target, eventStore, {
+      onIssueDiagnosticsUnavailable: (message) => io.stderr("yrd: " + message + "\n"),
       all: true,
       forceFresh: true,
     })
@@ -1869,18 +1878,27 @@ export async function coreQueueCommand(
               kept.push({
                 ...row,
                 reason: "mismatch",
-                detail: `recorded issue ${bound} differs from reviewed ${request.issue}`,
+                detail: `recorded issue ${bound} differs from requested ${request.issue}`,
               })
             } else if (bound === undefined) unnumbered.push({ branch, head })
             else excludedUnrelated++
             continue
           }
           if (local && issue !== undefined && bound !== undefined && issueIdentity(bound) !== issueIdentity(issue)) {
-            kept.push({ ...row, reason: "mismatch", detail: `recorded issue ${bound} differs from reviewed ${issue}` })
+            kept.push({ ...row, reason: "mismatch", detail: `recorded issue ${bound} differs from requested ${issue}` })
             continue
           }
           matched++
-          if ((local && head !== request.tip) || (change?.commit !== undefined && change.commit !== head)) {
+          if (
+            (local && head !== request.tip) ||
+            (change?.commit !== undefined &&
+              change.commit !== head &&
+              !(await acceptsMergedLocalRetirement(authorGit, {
+                local,
+                head,
+                change,
+              })))
+          ) {
             kept.push({
               ...row,
               reason: "advanced",
@@ -1959,11 +1977,14 @@ export async function coreQueueCommand(
               !local && (result.outcome === "removed" || result.outcome === "eligible")
                 ? disposition.kind
                 : result.reason,
-            detail: result.detail,
-            archiveRef: result.archiveRef,
-            ...(result.outcome === "removed" && disposition.kind === "closed"
+            ...(result.detail === undefined ? {} : { detail: result.detail }),
+            ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
+            ...(result.outcome === "removed" && disposition.kind === "closed" && result.archiveRef !== undefined
               ? {
-                  recovery: `git -C ${authorRepo} fetch ${eventStore.remote} ${result.archiveRef}:refs/heads/${branch}`,
+                  recovery:
+                    result.archiveLocation === "origin"
+                      ? `git -C ${authorRepo} fetch ${eventStore.remote} ${result.archiveRef}:refs/heads/${branch}`
+                      : `git -C ${authorRepo} branch ${branch} ${result.archiveRef}`,
                 }
               : {}),
           }
@@ -2622,7 +2643,10 @@ export async function coreQueueCommand(
           : gitIn(request.author.repo, undefined, request.author.selection, { env: options.env })
       const local = author === undefined ? undefined : await refAt(author, `refs/heads/${branch}`)
       let standing: { change: Change; reading: { state: Row["state"] }; landing?: string } | undefined
-      const reading = await readEventListing(git, config, repo, workdir, captured.oid, eventStore, { all: true })
+      const reading = await readEventListing(git, config, repo, workdir, captured.oid, eventStore, {
+        all: true,
+        onIssueDiagnosticsUnavailable: (message) => io.stderr("yrd: " + message + "\n"),
+      })
       const selected = reading.changes.get(branch)
       const row = reading.all.find((candidate) => candidate.branch === branch)
       const head = selected?.commit ?? row?.head
@@ -3783,6 +3807,8 @@ export async function coreQueueCommand(
                 base: declared.oid,
                 merged,
                 update: declared.config.issuesProvider?.update,
+                ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
+                queueBranch: declared.config.target.branch,
                 cleanup: async (merged) => {
                   try {
                     await cleanupAfterRound(
@@ -4079,6 +4105,7 @@ export async function coreQueueCommand(
           await refuseMissingEventMarker(declared.config.target.remote, declared.config.target.branch)
         }
         const reading = await readEventListing(git, declared.config, repo, workdir, declared.oid, selectedStore, {
+          onIssueDiagnosticsUnavailable: (message) => io.stderr("yrd: " + message + "\n"),
           all: request.all,
           ...(request.all === true || request.drafts === true ? {} : { recent: { env } }),
           drafts: request.drafts,
@@ -4489,7 +4516,7 @@ export async function coreQueueCommand(
         try {
           return await round(declared, undefined, "omit")
         } catch (error) {
-          if (!(error instanceof EventRefsAcquireExhausted)) throw error
+          if (!(error instanceof EventRefsAcquireExhausted || error instanceof EventRefsMoved)) throw error
           io.stderr(`yrd: ${error.message}\n`)
           return undefined
         }
@@ -4731,6 +4758,7 @@ export async function coreQueueCommand(
       }
       // Stats applies its own --since window to the drafts below, so it reads every draft (26014).
       const reading = await readEventListing(git, config, repo, workdir, captured.oid, eventStore, {
+        onIssueDiagnosticsUnavailable: (message) => io.stderr("yrd: " + message + "\n"),
         all: true,
         draftWindow: "all",
       })
@@ -4775,6 +4803,7 @@ export async function coreQueueCommand(
         await refuseMissingEventMarker(config.target.remote, config.target.branch)
       }
       const reading = await readEventListing(git, config, repo, workdir, captured.oid, selectedStore, {
+        onIssueDiagnosticsUnavailable: (message) => io.stderr("yrd: " + message + "\n"),
         all: true,
         drafts: true,
         draftWindow: "all",
@@ -4834,6 +4863,7 @@ export async function coreQueueCommand(
           await refuseMissingEventMarker(config.target.remote, config.target.branch)
         }
         const reading = await readEventListing(git, config, repo, workdir, captured.oid, selectedStore, {
+          onIssueDiagnosticsUnavailable: (message) => io.stderr("yrd: " + message + "\n"),
           all: true,
           directHistory: request.all === true,
           ...(request.all === true ? {} : { branch: request.branch }),
@@ -5720,7 +5750,7 @@ export function describeRun(
 /**
  * One line per change this round ended stuck, naming the cure the way
  * `queue list`/`queue show` already render a stuck row's incident
- * (`incidentLine`, ADR-0007's compact form) — `queue run`'s own summary line
+ * (the shared `incidentLine` formatter) — `queue run`'s own summary line
  * names only the branch (@i/10-yrd/24141 AC2).
  *
  * Read from this round's own log rather than the remote: the `end()` step
@@ -5734,34 +5764,14 @@ function stuckCureLines(outcome: QueueRunOutcome): readonly string[] {
     .split("\n")
     .filter((line) => line !== "")
     .map((line) => JSON.parse(line) as Record<string, unknown>)
-  const filled = (value: unknown): value is string => typeof value === "string" && value.trim() !== ""
   return outcome.stuck.map((branch) => {
     const row = rows.find(
       (record) => record.kind === "change" && record.decision === "stuck" && record.branch === branch,
     )
-    const complete =
-      row !== undefined &&
-      filled(row.code) &&
-      filled(row.subject) &&
-      filled(row.via) &&
-      filled(row.evidence) &&
-      filled(row.next) &&
-      filled(row.owner)
-    if (!complete) {
-      // Every stuck ending writes a complete incident (event-run.ts `writeStuck`);
-      // this is the guard against a future ending that stops doing so, not an
-      // expected path — it still names the branch rather than saying nothing.
-      return `stuck ${branch}: no complete incident in this run's log (${outcome.log}); see \`yrd queue show ${branch}\``
-    }
-    const incident: Incident = {
-      code: row.code as string,
-      subject: row.subject as string,
-      via: row.via as string,
-      evidence: row.evidence as string,
-      next: row.next as string,
-      owner: row.owner as string,
-    }
-    return `stuck ${branch}: ${incidentLine(incident)}`
+    const reading = incidentIn(row ?? {})
+    if (reading.kind === "incident") return `stuck ${branch}: ${incidentLine(reading.incident)}`
+    const reason = reading.kind === "malformed" ? reading.reason : "no incident"
+    return `stuck ${branch}: ${reason} in this run's log (${outcome.log}); see yrd queue show ${branch}`
   })
 }
 
@@ -5948,11 +5958,13 @@ export async function openEventDetail(
   const values = (key: string): readonly string[] =>
     segment.flatMap((event) => event.props.filter(([name]) => name === key).map(([, value]) => value))
   const packed = values("Check")
+  const judgment = segment.findLast((event) => event.props.some(([name]) => name === "Check"))
+  const judgmentBase = judgment?.props.find(([name]) => name === "Base")?.[1]
   const source = values("Migrated-From").at(-1)
   const noMigratedChecks = source !== undefined && packed.length === 0
   const declared = noMigratedChecks
     ? undefined
-    : await declarationFor(git, config, values("Base").at(-1) ?? selected.adoptedBase ?? row.base)
+    : await declarationFor(git, config, judgmentBase ?? (packed.length > 0 ? selected.adoptedBase : undefined))
   const decided = row.state === "merged" || row.state === "failed" || row.state === "stuck" || row.state === "cancelled"
   const views =
     declared === undefined
@@ -6574,6 +6586,8 @@ type EventListingOptions = Readonly<{
   forceFresh?: boolean
   draftWindow?: DraftWindow
   onRetry?: (message: string) => void
+  /** Derived attempt failures are loud but cannot cancel authoritative queue work. */
+  onIssueDiagnosticsUnavailable?: (message: string) => void
   /** Acquire only this change's hot/cold history and its event-linked journals. */
   branch?: string
   /** One-shot list omits command detail; watch and show keep eager detail. */
@@ -6780,12 +6794,16 @@ export async function readEventListing(
     !undatedDraftsFetched &&
     !draftWindowChanged
   ) {
-    return {
-      ...cache.reading,
-      ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
-      observation: await observe(cache.queueRefs, cache.branchRefs),
-      journals: await journalsFor(cache.reading.history, cache.reading.all),
-    }
+    return withPostMergeIssueDiagnostics(
+      {
+        ...cache.reading,
+        ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
+        observation: await observe(cache.queueRefs, cache.branchRefs),
+        journals: await journalsFor(cache.reading.history, cache.reading.all),
+      },
+      workdir,
+      options?.onIssueDiagnosticsUnavailable,
+    )
   }
 
   // 3. Head listing: runs at most once a minute, or when event-ref fetch reports a change
@@ -6816,12 +6834,16 @@ export async function readEventListing(
     !draftWindowChanged
   ) {
     cache.lastHeadListingAt = headListingAt
-    return {
-      ...cache.reading,
-      ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
-      observation: await observe(cache.queueRefs, branchRefs),
-      journals: await journalsFor(cache.reading.history, cache.reading.all),
-    }
+    return withPostMergeIssueDiagnostics(
+      {
+        ...cache.reading,
+        ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
+        observation: await observe(cache.queueRefs, branchRefs),
+        journals: await journalsFor(cache.reading.history, cache.reading.all),
+      },
+      workdir,
+      options?.onIssueDiagnosticsUnavailable,
+    )
   }
 
   // 4. Full read
@@ -7067,7 +7089,8 @@ export async function readEventListing(
   const observation = await observe(queueRefs, branchRefs)
   const operational = await readEventOps(store, git, config.target.branch, targetOid, { knownQueue: queue })
   if (operational.queue.tip !== queue.tip) {
-    throw new Error(
+    throw new EventRefsMoved(
+      [queueRef(config.target.branch)],
       `${queueRef(config.target.branch)} moved from ${queue.tip} to ${operational.queue.tip} during listing; retry the read`,
     )
   }
@@ -7105,7 +7128,55 @@ export async function readEventListing(
     draftWindow,
   })
 
-  return reading
+  return withPostMergeIssueDiagnostics(reading, workdir, options?.onIssueDiagnosticsUnavailable)
+}
+
+function withPostMergeIssueDiagnostics<Run extends JournalSummary>(
+  reading: EventListingResult<Run>,
+  workdir: string,
+  reportUnavailable?: (message: string) => void,
+): EventListingResult<Run> {
+  const failures = readPostMergeIssueDiagnostics(workdir, reportUnavailable)
+  if (failures.length === 0) return reading
+  const byBranch = new Map<string, typeof failures>()
+  for (const failure of failures) byBranch.set(failure.branch, [...(byBranch.get(failure.branch) ?? []), failure])
+  const history = new Map(
+    [...reading.history].map(([branch, entries]) => {
+      const branchFailures = byBranch.get(branch) ?? []
+      return [
+        branch,
+        entries.map(({ row, events }) => {
+          const matched = branchFailures.filter(
+            (failure) => row.merge === failure.mergeSha && events.some((event) => event.id === failure.mergedEvent),
+          )
+          if (matched.length === 0) return { row, events }
+          const added = matched.map(
+            (failure) =>
+              `issuesProvider close failed for merged event ${failure.mergedEvent} at ${failure.mergeSha} (${failure.providerId}): ${failure.diagnostic}`,
+          )
+          return { row: { ...row, diagnostic: [row.diagnostic, ...added].filter(Boolean).join("; ") }, events }
+        }),
+      ] as const
+    }),
+  )
+  const decorate = (rows: readonly Row[]): readonly Row[] =>
+    rows.map((row) => {
+      const matched = (byBranch.get(row.branch) ?? []).filter((failure) =>
+        history
+          .get(row.branch)
+          ?.some(
+            (entry) =>
+              entry.row.merge === failure.mergeSha && entry.events.some((event) => event.id === failure.mergedEvent),
+          ),
+      )
+      if (matched.length === 0) return row
+      const added = matched.map(
+        (failure) =>
+          `issuesProvider close failed for historical merged event ${failure.mergedEvent} at ${failure.mergeSha} (${failure.providerId}): ${failure.diagnostic}`,
+      )
+      return { ...row, diagnostic: [row.diagnostic, ...added].filter(Boolean).join("; ") }
+    })
+  return { ...reading, history, all: decorate(reading.all), document: decorate(reading.document) }
 }
 
 /** A history read and its final observation must name the same event tips. */

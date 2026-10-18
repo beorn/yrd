@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { dirname, join } from "node:path"
 import { readCommitSubmodules } from "git-super/commit-graph"
-import { Conflict, PublicationRejected, RetriesExhausted, openEvents } from "./git.ts"
+import { Conflict, PublicationRejected, RetriesExhausted, openEvents, trailer } from "./git.ts"
 import {
   isTransientPushHold,
   matchTransientPush5xx,
@@ -21,6 +21,7 @@ import {
   appendNumberedPublishedMerge,
   appendPublishedMerge,
   changesRef,
+  enumerateChangeSegments,
   expireQueueOverrides,
   EVENT_TRAILERS,
   listChangeHistories,
@@ -50,7 +51,14 @@ import {
   type CheckResult,
 } from "./check.ts"
 import { InvalidQueueConfig, UnknownConfigKey, queueName, readConfig } from "./config.ts"
-import { offTheTarget, readRemoteCommit, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
+import {
+  isAncestor,
+  offTheTarget,
+  readRemoteCommit,
+  type Git,
+  type GitInvocationOptions,
+  type GitRunner,
+} from "./git.ts"
 import {
   recentCasRefusalStreak,
   recentCasRefusals,
@@ -444,7 +452,6 @@ export async function eventQueueRun(
       via: `${cause.via} in yrd queue ${queue} [${log.id}]`,
       evidence: log.path,
       next: `${cause.next}; ${stuckCures(branch)}`,
-      owner: "the queue operator",
     }
     incidentTrailers(incident)
     log.write({
@@ -1278,24 +1285,77 @@ export async function eventQueueRun(
       entry[1].status !== "merged" && entry[1].commit !== undefined && entry[1].tip !== undefined,
   )
   const offTarget = await offTheTarget(git, [...new Set(observable.map(([, change]) => change.commit))], target)
-  for (const [branch, change] of observable) {
-    if (offTarget.has(change.commit)) continue
-    const row = (
-      await git([
-        "rev-list",
-        "--reverse",
-        "--first-parent",
-        "--ancestry-path",
-        "--parents",
-        `${change.commit}..${target}`,
-      ])
-    )
+  const onTarget = observable.filter(([, change]) => !offTarget.has(change.commit))
+  // An ancestor excludes fewer target commits than its descendant. Record lower
+  // stacked changes first, independent of branch names or commit timestamps.
+  const ordered = await Promise.all(
+    onTarget.map(async (entry) => {
+      const count =
+        onTarget.length < 2 ? "0" : (await git(["rev-list", "--count", `${entry[1].commit}..${target}`])).trim()
+      const distance = Number(count)
+      if (count === "" || !Number.isSafeInteger(distance) || distance < 0) {
+        throw new Error(
+          `${entry[0]}@${entry[1].commit}: invalid target distance to ${target}: ${JSON.stringify(count)}`,
+        )
+      }
+      return { entry, distance }
+    }),
+  )
+  ordered.sort((left, right) => right.distance - left.distance)
+  const deliveredCommits = new Set<string>()
+  for (const [branch, history] of ordered.length === 0 ? [] : histories) {
+    for (const segment of enumerateChangeSegments(history.events, changesRef(queue, branch), store.repo)) {
+      for (const event of segment.events) {
+        if (event.type !== "merged") continue
+        const point = trailer(event, "Commit")
+        if (point === undefined) throw new Error(`validated merged event ${event.id} has no Commit`)
+        deliveredCommits.add(point)
+        deliveredCommits.add(segment.head)
+      }
+    }
+  }
+  for (const {
+    entry: [branch, change],
+  } of ordered) {
+    const range = `${change.commit}..${target}`
+    const [ancestryRows, firstParentRows] = await Promise.all([
+      git(["rev-list", "--reverse", "--topo-order", "--ancestry-path", "--parents", range]),
+      git(["rev-list", "--first-parent", range]),
+    ])
+    const ancestry = ancestryRows
       .trim()
-      .split("\n")[0]
-      ?.trim()
-      .split(/\s+/u)
-      .filter((sha) => sha !== "")
-    const merge = row?.[0] ?? change.commit
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => line.trim().split(/\s+/u))
+    const firstParents = new Set(
+      firstParentRows
+        .trim()
+        .split("\n")
+        .filter((line) => line !== ""),
+    )
+    const row = ancestry.find(([commit]) => commit !== undefined && firstParents.has(commit))
+    if (change.commit !== target && row === undefined) {
+      throw new Error(
+        `${branch}: observed source ${change.commit} is on target ${target} but has no delivery intersection (${ancestry.length} ancestry rows, ${firstParents.size} first-parent rows)`,
+      )
+    }
+    const merge = row?.[1] === change.commit ? change.commit : (row?.[0] ?? change.commit)
+    const opened = histories
+      .get(branch)
+      ?.events.findLast((event) => event.type === "opened" && trailer(event, "Commit") === change.commit)
+    let sourceBase = opened === undefined ? undefined : trailer(opened, "Base")
+    if (sourceBase !== undefined) {
+      const introduced = (await git(["rev-list", "--topo-order", `${sourceBase}..${change.commit}`])).trim().split("\n")
+      const deliveredBase = introduced.find((point) => deliveredCommits.has(point))
+      if (deliveredBase !== undefined) {
+        if (!(await isAncestor(git, deliveredBase, change.commit))) {
+          throw new Error(
+            `${branch}: recorded delivered source ${deliveredBase} is not an ancestor of submitted head ${change.commit}`,
+          )
+        }
+        sourceBase = deliveredBase
+      }
+    }
     const selectedTip = change.tip
     try {
       const landedGitlinks = (await readCommitSubmodules(seamProcess(git, options.repo), options.repo, merge)).map(
@@ -1305,6 +1365,7 @@ export async function eventQueueRun(
         type: "merged",
         at: new Date(),
         commit: merge,
+        ...(sourceBase === undefined ? {} : { base: sourceBase }),
         landedGitlinks,
         reason: `observed on target at ${merge}`,
         title: `merged ${branch}`,
@@ -1317,6 +1378,8 @@ export async function eventQueueRun(
         )
       }
       changes.set(branch, ended)
+      deliveredCommits.add(merge)
+      deliveredCommits.add(change.commit)
       observedMerged.push(branch)
       await tell(branch, "merged", written)
       log.write({
@@ -1345,7 +1408,13 @@ export async function eventQueueRun(
         head: change.commit,
         reason: `change advanced to ${current.status} at ${current.tip ?? "no tip"} while this round recorded its target merge: ${error instanceof Error ? error.message : String(error)}`,
       })
-      if (current.status === "merged") observedMerged.push(branch)
+      if (current.status === "merged") {
+        if (current.merge === undefined) throw new Error(`validated merged change ${branch} has no merge commit`)
+        if (current.commit === undefined) throw new Error(`validated merged change ${branch} has no submitted head`)
+        deliveredCommits.add(current.merge)
+        deliveredCommits.add(current.commit)
+        observedMerged.push(branch)
+      }
     }
   }
   const open: {

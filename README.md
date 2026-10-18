@@ -112,7 +112,7 @@ With `--issue`, an initial `Refs:` commit records the binding before setup and p
 
 Conflicting bindings refuse and name the preserved environment. Setup and output use the resulting head; setup failure preserves that environment.
 
-Submission scans branch history back to its merge-base with the captured target, excluding target history. The first explicit `Refs:` or `Resolves:` binding wins.
+Submission scans branch history back to its merge-base with the captured target, excluding target history. The first explicit `Closes:`, `Fixes:`, `Resolves:`, or `Refs:` binding wins.
 
 Later commits and branch renames retain the binding. Conflicts name both issues and commits; `--issue` must match an existing binding.
 
@@ -151,7 +151,7 @@ Close reads teardown from the environment's current commit and refuses dirty, lo
 
 For an already-ended change, use `yrd drop fix-login --retire --tip <observed-full-oid> --reason <why>`. This preserves its ending and retains the exact origin head before deleting its name. The same guarded command also accepts a never-submitted draft when its tip is an ancestor of fresh origin main, or Git's conflict-free merge of that exact tip into main produces main's own tree. The draft ends as dropped and its ending event keeps the commit; the receipt names the observed main ref and tip. A concurrent opening fails the event lease. Open changes, moved heads, archive collisions and host protections keep the branch.
 
-Explicit `yrd drop fix-login --local --tip <full-oid> --reason <why>` can abandon unmerged local work: it publishes and reads back archive custody before removing the local name. Checkout release uses its separate `--release-checkout` preview and preserves private files, index, lease bytes and Git lock. This is explicit abandonment; automatic cleanup still requires exact ancestry. Restore an archived local name with `git branch fix-login <full-oid>`.
+Explicit `yrd drop fix-login --local --tip <full-oid> --reason <why>` can abandon unmerged local work: it publishes and reads back archive custody before removing the local name. Plain `--local` has no preview; a refused `--dry-run` prints the direct command and names its archive and local deletion effects. Run a component branch's local command from its component author checkout. A merged branch may have advanced beyond its recorded merged commit: explicit local retirement accepts its requested exact tip only when that tip descends from the recorded commit, preserving the merged ending. Archiving a root commit does not archive its component refs. Checkout release uses its separate `--release-checkout` preview and preserves private files, index, lease bytes and Git lock. This is explicit abandonment; automatic cleanup still requires exact ancestry. Restore an archived local name with `git branch fix-login <full-oid>`.
 
 In a superproject, `git super status`, `git super diff` and `git super push` work across submodule boundaries.
 

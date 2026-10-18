@@ -19,6 +19,9 @@ import {
   checksOf,
   clocks,
   journalKey,
+  incidentLine,
+  incidentLines,
+  incidentTrailers,
   readJournals,
   runStartedAt,
   skippedChecks,
@@ -1178,6 +1181,55 @@ describe("a run's journal, read back", () => {
   // incident that is not a race diagnostic is still a defect, and it is still
   // named — on the change it was about, where the reader is looking, instead
   // of as a throw that takes the other changes down with it.
+  it("reads mixed legacy and ownerless diagnostics without rewriting the journal", () => {
+    // Optional context and an old routing owner must not invalidate a real fault.
+    // Existing malformed-row cases cannot catch rejection of the new writer.
+    const { dir, run } = journalDir([
+      {
+        kind: "change",
+        branch: "task/old",
+        head: "old",
+        code: "blocked",
+        subject: "old fault",
+        via: "queue",
+        evidence: "/proof/log",
+        next: "inspect",
+        owner: "legacy actor",
+      },
+      { kind: "change", branch: "task/new", head: "new", code: "blocked", subject: "new fault" },
+      { kind: "change", branch: "task/owner", head: "owner", owner: "legacy actor", decision: "merged" },
+      { kind: "change", branch: "task/partial", head: "partial", via: "queue" },
+    ])
+    const path = join(dir, `${run}.jsonl`)
+    const before = fs.readFileSync(path, "utf8")
+    const journals = readJournals(dir)
+    expect(journals.runs.get(journalKey("task/new", "new"))?.[0]?.incident).toEqual({
+      code: "blocked",
+      subject: "new fault",
+    })
+    expect(journals.runs.get(journalKey("task/old", "old"))?.[0]?.incident).toEqual({
+      code: "blocked",
+      subject: "old fault",
+      via: "queue",
+      evidence: "/proof/log",
+      next: "inspect",
+    })
+    const owner = journals.runs.get(journalKey("task/owner", "owner"))?.[0]
+    expect(owner).toMatchObject({ decision: "merged" })
+    expect(owner?.incident).toBeUndefined()
+    expect(owner?.malformed).toBeUndefined()
+    expect(journals.malformed).toHaveLength(1)
+    expect(journals.malformed[0]?.message).toContain("missing code, subject")
+    const fresh = { code: "blocked", subject: "new fault" }
+    expect(incidentLine(fresh)).toBe("new fault [blocked]")
+    expect(incidentLines(fresh)).toEqual(["subject: new fault", "code: blocked"])
+    expect(incidentTrailers(fresh)).toEqual([
+      ["Code", "blocked"],
+      ["Subject", "new fault"],
+    ])
+    expect(fs.readFileSync(path, "utf8")).toBe(before)
+  })
+
   it("names a partial incident outside a change-ref race diagnostic without refusing the read", () => {
     const { dir, run } = journalDir([
       {
@@ -1196,8 +1248,8 @@ describe("a run's journal, read back", () => {
     expect(defect).toContain("incomplete incident")
     expect(defect).toContain(run)
     expect(defect).toContain(journalKey("task/one", "abc123"))
-    // Only `next` was written, so the other five are the ones to name.
-    expect(defect).toContain("missing code, subject, via, evidence, owner")
+    // Context without a named fact still identifies the missing required fields.
+    expect(defect).toContain("missing code, subject")
     expect(journals.runs.get(journalKey("task/two", "def456"))?.[0]?.decision).toBe("merged")
   })
 
@@ -1207,12 +1259,12 @@ describe("a run's journal, read back", () => {
   // cannot catch a reader that labels every defect "missing".
   it("tells a field that was never written apart from one that is not a string", () => {
     const { dir } = journalDir([
-      { branch: "task/one", code: "check-failed", head: "abc123", kind: "change", owner: 7, subject: "task/one" },
+      { branch: "task/one", code: "check-failed", head: "abc123", kind: "change", via: 7, subject: "task/one" },
     ])
 
     const defect = readJournals(dir).runs.get(journalKey("task/one", "abc123"))?.[0]?.malformed?.[0]
-    expect(defect).toContain("missing via, evidence, next")
-    expect(defect).toContain("not a string: owner")
+    expect(defect).toContain("incomplete incident")
+    expect(defect).toContain("not a string: via")
   })
 
   // 24408: one short row from `waiting()` took every read verb down for the
@@ -1236,13 +1288,12 @@ describe("a run's journal, read back", () => {
     expect(defect).toContain("incomplete incident")
     expect(defect).toContain(run)
     expect(defect).toContain(journalKey("task/a", "abc123"))
-    // The exact 24408 writer bug: a code and none of its five siblings. Naming
-    // WHICH five is what saves the reader the trip to the JSONL with jq.
-    expect(defect).toContain("missing subject, via, evidence, next, owner")
+    // The old writer omitted the required subject; optional context is not filler.
+    expect(defect).toContain("missing subject")
     // The defect is aggregated for the caller that prints it, never skipped in
     // silence, and the aggregate carries the same field names.
     expect(journals.malformed).toEqual([{ key: journalKey("task/a", "abc123"), message: defect, run }])
-    expect(journals.malformed[0]?.message).toContain("missing subject, via, evidence, next, owner")
+    expect(journals.malformed[0]?.message).toContain("missing subject")
     const b = journals.runs.get(journalKey("task/b", "def456"))?.[0]
     expect(b).toMatchObject({ decision: "merged", merge: "landed" })
     expect(b?.malformed).toBeUndefined()
@@ -1302,6 +1353,7 @@ describe("a run's journal, read back", () => {
       text: "ref write failed: remote advanced",
       intended: "intended",
       remote: "remote",
+      owner: "legacy actor",
     }
     log.write(diagnostic)
     const only = readJournals(dir, { now: at }).runs.get(journalKey(change.branch, change.head))?.[0]
@@ -1336,34 +1388,31 @@ describe("a run's journal, read back", () => {
   // "does not hide it" MEANS — the defect is reported on the change instead of
   // thrown — so the assertion moves from the throw to `malformed`. The rule
   // itself is untouched: a race reason still buys no exemption.
-  it.each(["code", "subject", "via", "evidence", "owner"])(
-    "does not let a race reason hide partial incident %s",
-    (field) => {
-      const { dir, run } = journalDir([
-        {
-          branch: "task/one",
-          head: "abc123",
-          kind: "change",
-          decision: "stuck",
-          reason: "change-ref-taken",
-          next: "inspect the failure",
-          [field]: "present",
-        },
-      ])
-      const decided = readJournals(dir)
-      expect(decided.runs.get(journalKey("task/one", "abc123"))?.[0]?.malformed?.[0]).toContain("incomplete incident")
-      expect(decided.malformed).toEqual([
-        { key: journalKey("task/one", "abc123"), message: expect.stringContaining("incomplete incident"), run },
-      ])
-      // The authority-field rule must hold even when no decision string was recorded.
-      const undecided = journalDir([
-        { branch: "task/one", head: "abc123", kind: "change", reason: "change-ref-taken", [field]: "present" },
-      ])
-      expect(readJournals(undecided.dir).runs.get(journalKey("task/one", "abc123"))?.[0]?.malformed?.[0]).toContain(
-        "incomplete incident",
-      )
-    },
-  )
+  it.each(["code", "subject", "via", "evidence"])("does not let a race reason hide partial incident %s", (field) => {
+    const { dir, run } = journalDir([
+      {
+        branch: "task/one",
+        head: "abc123",
+        kind: "change",
+        decision: "stuck",
+        reason: "change-ref-taken",
+        next: "inspect the failure",
+        [field]: "present",
+      },
+    ])
+    const decided = readJournals(dir)
+    expect(decided.runs.get(journalKey("task/one", "abc123"))?.[0]?.malformed?.[0]).toContain("incomplete incident")
+    expect(decided.malformed).toEqual([
+      { key: journalKey("task/one", "abc123"), message: expect.stringContaining("incomplete incident"), run },
+    ])
+    // The authority-field rule must hold even when no decision string was recorded.
+    const undecided = journalDir([
+      { branch: "task/one", head: "abc123", kind: "change", reason: "change-ref-taken", [field]: "present" },
+    ])
+    expect(readJournals(undecided.dir).runs.get(journalKey("task/one", "abc123"))?.[0]?.malformed?.[0]).toContain(
+      "incomplete incident",
+    )
+  })
 
   it("validates a complete incident even when its reason is reserved for ref-write diagnostics", () => {
     const incident = {
@@ -1372,7 +1421,6 @@ describe("a run's journal, read back", () => {
       via: "test",
       evidence: "/checks/test.log",
       next: "inspect the log",
-      owner: "operator",
     }
     const record = {
       ...incident,
