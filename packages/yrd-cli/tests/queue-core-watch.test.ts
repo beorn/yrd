@@ -920,7 +920,7 @@ process.exit(result.exitCode)
     expect(moved).toBe(true)
     expect(JSON.parse(run.stdout())).toMatchObject({
       removed: [],
-      kept: [{ branch, head: tip, detail: `branch moved: expected ${tip}, found ${next}` }],
+      kept: [{ branch, head: tip, detail: `branch moved: expected ${tip}, found ${next}; not archived` }],
       failed: [],
     })
     expect((await w.git(["rev-parse", branch])).trim()).toBe(next)
