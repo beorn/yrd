@@ -1589,6 +1589,7 @@ export async function coreQueueCommand(
     const target = await readRemoteCommit(git, config.target.remote, `refs/heads/${config.target.branch}`)
     if (target === undefined) throw new Error(`the target ${targetLabel} is not at ${config.target.remote}`)
     const reading = await readEventListing(git, config, repo, workdir, target, eventStore, {
+      onIssueDiagnosticsUnavailable: (message) => io.stderr("yrd: " + message + "\n"),
       all: true,
       forceFresh: true,
     })
@@ -2624,7 +2625,10 @@ export async function coreQueueCommand(
           : gitIn(request.author.repo, undefined, request.author.selection, { env: options.env })
       const local = author === undefined ? undefined : await refAt(author, `refs/heads/${branch}`)
       let standing: { change: Change; reading: { state: Row["state"] }; landing?: string } | undefined
-      const reading = await readEventListing(git, config, repo, workdir, captured.oid, eventStore, { all: true })
+      const reading = await readEventListing(git, config, repo, workdir, captured.oid, eventStore, {
+        all: true,
+        onIssueDiagnosticsUnavailable: (message) => io.stderr("yrd: " + message + "\n"),
+      })
       const selected = reading.changes.get(branch)
       const row = reading.all.find((candidate) => candidate.branch === branch)
       const head = selected?.commit ?? row?.head
@@ -4088,6 +4092,7 @@ export async function coreQueueCommand(
           await refuseMissingEventMarker(declared.config.target.remote, declared.config.target.branch)
         }
         const reading = await readEventListing(git, declared.config, repo, workdir, declared.oid, selectedStore, {
+          onIssueDiagnosticsUnavailable: (message) => io.stderr("yrd: " + message + "\n"),
           all: request.all,
           ...(request.all === true || request.drafts === true ? {} : { recent: { env } }),
           drafts: request.drafts,
@@ -4739,6 +4744,7 @@ export async function coreQueueCommand(
       }
       // Stats applies its own --since window to the drafts below, so it reads every draft (26014).
       const reading = await readEventListing(git, config, repo, workdir, captured.oid, eventStore, {
+        onIssueDiagnosticsUnavailable: (message) => io.stderr("yrd: " + message + "\n"),
         all: true,
         draftWindow: "all",
       })
@@ -4783,6 +4789,7 @@ export async function coreQueueCommand(
         await refuseMissingEventMarker(config.target.remote, config.target.branch)
       }
       const reading = await readEventListing(git, config, repo, workdir, captured.oid, selectedStore, {
+        onIssueDiagnosticsUnavailable: (message) => io.stderr("yrd: " + message + "\n"),
         all: true,
         drafts: true,
         draftWindow: "all",
@@ -4842,6 +4849,7 @@ export async function coreQueueCommand(
           await refuseMissingEventMarker(config.target.remote, config.target.branch)
         }
         const reading = await readEventListing(git, config, repo, workdir, captured.oid, selectedStore, {
+          onIssueDiagnosticsUnavailable: (message) => io.stderr("yrd: " + message + "\n"),
           all: true,
           directHistory: request.all === true,
           ...(request.all === true ? {} : { branch: request.branch }),
@@ -6584,6 +6592,8 @@ type EventListingOptions = Readonly<{
   forceFresh?: boolean
   draftWindow?: DraftWindow
   onRetry?: (message: string) => void
+  /** Derived attempt failures are loud but cannot cancel authoritative queue work. */
+  onIssueDiagnosticsUnavailable?: (message: string) => void
   /** Acquire only this change's hot/cold history and its event-linked journals. */
   branch?: string
   /** One-shot list omits command detail; watch and show keep eager detail. */
@@ -6798,6 +6808,7 @@ export async function readEventListing(
         journals: await journalsFor(cache.reading.history, cache.reading.all),
       },
       workdir,
+      options?.onIssueDiagnosticsUnavailable,
     )
   }
 
@@ -6837,6 +6848,7 @@ export async function readEventListing(
         journals: await journalsFor(cache.reading.history, cache.reading.all),
       },
       workdir,
+      options?.onIssueDiagnosticsUnavailable,
     )
   }
 
@@ -7122,14 +7134,15 @@ export async function readEventListing(
     draftWindow,
   })
 
-  return withPostMergeIssueDiagnostics(reading, workdir)
+  return withPostMergeIssueDiagnostics(reading, workdir, options?.onIssueDiagnosticsUnavailable)
 }
 
 function withPostMergeIssueDiagnostics<Run extends JournalSummary>(
   reading: EventListingResult<Run>,
   workdir: string,
+  reportUnavailable?: (message: string) => void,
 ): EventListingResult<Run> {
-  const failures = readPostMergeIssueDiagnostics(workdir)
+  const failures = readPostMergeIssueDiagnostics(workdir, reportUnavailable)
   if (failures.length === 0) return reading
   const byBranch = new Map<string, typeof failures>()
   for (const failure of failures) byBranch.set(failure.branch, [...(byBranch.get(failure.branch) ?? []), failure])

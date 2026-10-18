@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, write
 import { join } from "node:path"
 import { randomUUID } from "node:crypto"
 import { createProcess } from "@yrd/process"
+import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   closingReferencesOf,
   enumerateChangeSegments,
@@ -47,54 +48,91 @@ type IssueDiagnostic = Readonly<{
   diagnostic: string
 }>
 
-/** Read-only queue-status projection. These records never grant replay authority. */
-export function readPostMergeIssueDiagnostics(workdir: string): readonly IssueDiagnostic[] {
+type IssueAction = Omit<IssueDiagnostic, "diagnostic"> &
+  (
+    | { status: "fulfilled" }
+    | { status: "skipped" }
+    | { status: "failed" | "unavailable" | "record-failed"; diagnostic: string }
+  )
+
+/** The same attempt decoder serves recovery and the read-only diagnostic projection. */
+function readPostMergeAttempt(
+  path: string,
+): Readonly<{ value: Record<string, unknown>; actions: readonly IssueAction[] }> {
+  let raw: unknown
+  try {
+    raw = JSON.parse(readFileSync(path, "utf8"))
+  } catch (error) {
+    throw new Error(`post-merge attempt evidence unreadable at ${path}: ${String(error)}`)
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`post-merge attempt evidence malformed at ${path}: attempt is not an object`)
+  }
+  const attempt = raw as Record<string, unknown>
+  const actions = attempt.issueActions === undefined ? [] : attempt.issueActions // legacy attempts predate issue actions
+  if (!Array.isArray(actions)) {
+    throw new Error(`post-merge attempt evidence malformed at ${path}: issueActions is not an array`)
+  }
+  for (const action of actions) {
+    if (typeof action !== "object" || action === null || Array.isArray(action)) {
+      throw new Error(`post-merge attempt evidence malformed at ${path}: issue action is not an object`)
+    }
+    const item = action as Record<string, unknown>
+    if (
+      typeof item.status !== "string" ||
+      typeof item.branch !== "string" ||
+      typeof item.mergedEvent !== "string" ||
+      typeof item.mergeSha !== "string" ||
+      typeof item.providerId !== "string"
+    ) {
+      throw new Error(
+        `post-merge attempt evidence malformed at ${path}: issue action lacks status, branch, mergedEvent, mergeSha or providerId`,
+      )
+    }
+    if (item.status === "skipped" || item.status === "fulfilled") continue
+    if (item.status !== "failed" && item.status !== "unavailable" && item.status !== "record-failed") {
+      throw new Error(`post-merge attempt evidence malformed at ${path}: unknown issue action status ${item.status}`)
+    }
+    if (typeof item.diagnostic !== "string") {
+      throw new Error(`post-merge attempt evidence malformed at ${path}: failed issue action lacks diagnostic`)
+    }
+  }
+  return { value: attempt, actions: actions as IssueAction[] }
+}
+
+/** Read-only projection; unread derived attempts are reported, never replay authority. */
+export function readPostMergeIssueDiagnostics(
+  workdir: string,
+  reportUnavailable?: (message: string) => void,
+): readonly IssueDiagnostic[] {
   const directory = join(workdir, "post-merge")
   if (!existsSync(directory)) return []
   const found = new Map<string, IssueDiagnostic>()
-  for (const name of readdirSync(directory).sort()) {
+  let names: string[]
+  try {
+    names = readdirSync(directory).sort()
+  } catch (error) {
+    const diagnostic = `post-merge attempt evidence unreadable at ${directory}: ${String(error)}`
+    if (reportUnavailable === undefined) throw new Error(diagnostic)
+    reportUnavailable(diagnostic)
+    return []
+  }
+  for (const name of names) {
     if (!name.endsWith(".json")) continue
     const path = join(directory, name)
-    let raw: unknown
+    let attempt: ReturnType<typeof readPostMergeAttempt>
     try {
-      raw = JSON.parse(readFileSync(path, "utf8"))
+      attempt = readPostMergeAttempt(path)
     } catch (error) {
-      throw new Error(`post-merge attempt evidence unreadable at ${path}: ${String(error)}`)
+      if (reportUnavailable === undefined) throw error
+      reportUnavailable(String(error))
+      continue
     }
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-      throw new Error(`post-merge attempt evidence malformed at ${path}: attempt is not an object`)
-    }
-    const attempt = raw as Record<string, unknown>
-    if (attempt.issueActions === undefined) continue // legacy attempts predate issue actions
-    if (!Array.isArray(attempt.issueActions)) {
-      throw new Error(`post-merge attempt evidence malformed at ${path}: issueActions is not an array`)
-    }
-    for (const action of attempt.issueActions) {
-      if (typeof action !== "object" || action === null || Array.isArray(action)) {
-        throw new Error(`post-merge attempt evidence malformed at ${path}: issue action is not an object`)
-      }
-      const item = action as Record<string, unknown>
-      if (
-        typeof item.status !== "string" ||
-        typeof item.branch !== "string" ||
-        typeof item.mergedEvent !== "string" ||
-        typeof item.mergeSha !== "string" ||
-        typeof item.providerId !== "string"
-      ) {
-        throw new Error(
-          `post-merge attempt evidence malformed at ${path}: issue action lacks status, branch, mergedEvent, mergeSha or providerId`,
-        )
-      }
+    for (const item of attempt.actions) {
       const identity = JSON.stringify([item.branch, item.mergedEvent, item.mergeSha, item.providerId])
-      if (item.status === "fulfilled") {
-        found.delete(identity)
+      if (item.status === "skipped" || item.status === "fulfilled") {
+        if (item.status === "fulfilled") found.delete(identity)
         continue
-      }
-      if (item.status !== "failed" && item.status !== "unavailable" && item.status !== "record-failed") {
-        throw new Error(`post-merge attempt evidence malformed at ${path}: unknown issue action status ${item.status}`)
-      }
-      if (typeof item.diagnostic !== "string") {
-        throw new Error(`post-merge attempt evidence malformed at ${path}: failed issue action lacks diagnostic`)
       }
       found.set(identity, {
         branch: item.branch,
@@ -129,161 +167,238 @@ async function closeMergedIssues(
 
   for (const branch of new Set(input.branches)) {
     if (input.stop?.aborted) return { outcomes, queue: completed }
-    const reading = await readBranchHistory(input.store, input.queue, branch)
-    const history = reading.history
-    if (history === undefined) throw new Error(`post-merge named branch ${branch} has no event history`)
-    const segments = enumerateChangeSegments(history.events, reading.ref, input.store.repo)
-    for (const segment of segments) {
-      if (segment.state.status !== "merged" || segment.state.ending?.kind !== "merged") continue
-      const mergedEvent = segment.events.findLast((event) => event.type === "merged")
-      const mergeSha = segment.state.merge
-      if (mergedEvent === undefined || mergeSha === undefined) {
-        throw new Error(`${branch}: merged segment ${segment.opened} has no actual merged event or merge SHA`)
-      }
-      const observed = trailer(mergedEvent, "Reason") === `observed on target at ${mergeSha}`
-      if (observed && !(await isAncestor(input.git, segment.head, mergeSha))) {
-        throw new Error(
-          `${branch}@${mergeSha}: submitted head ${segment.head} is not an ancestor of its observed delivery`,
-        )
-      }
-      const phase = segment.events.findLast((event) => event.type === "merging" && trailer(event, "Base") !== undefined)
-      const base = observed ? trailer(mergedEvent, "Base") : phase === undefined ? undefined : trailer(phase, "Base")
-      if (base === undefined || base === "") {
-        throw new Error(`${branch}@${mergeSha}: actual merged commit has no provable historical base`)
-      }
-      const rawCommitterTime = (await input.git(["show", "-s", "--format=%cI", mergeSha])).trim()
-      if (rawCommitterTime === "" || Number.isNaN(Date.parse(rawCommitterTime))) {
-        throw new Error(`${branch}@${mergeSha}: actual merge committer time is unreadable`)
-      }
-      const committerTime = new Date(rawCommitterTime).toISOString()
-      const pinnedBlob = (await input.git(["rev-parse", `${mergeSha}:issues.yml`])).trim()
-      for (const event of history.events) {
-        const applied = readIssueEffect(event)
-        if (
-          applied?.mergedEvent === mergedEvent.id &&
-          applied.mergeSha === mergeSha &&
-          applied.declaration.blob !== pinnedBlob
-        ) {
-          throw new Error(
-            `${branch}@${mergeSha}: applied declaration blob ${applied.declaration.blob} differs from pinned ${pinnedBlob}`,
+    try {
+      const reading = await readBranchHistory(input.store, input.queue, branch)
+      const history = reading.history
+      if (history === undefined) throw new Error(`post-merge named branch ${branch} has no event history`)
+      const segments = enumerateChangeSegments(history.events, reading.ref, input.store.repo)
+      for (const segment of segments) {
+        if (segment.state.status !== "merged" || segment.state.ending?.kind !== "merged") continue
+        const mergedEvent = segment.events.findLast((event) => event.type === "merged")
+        const mergeSha = segment.state.merge
+        if (mergedEvent === undefined || mergeSha === undefined) {
+          throw new Error(`${branch}: merged segment ${segment.opened} has no actual merged event or merge SHA`)
+        }
+        try {
+          const observed = trailer(mergedEvent, "Reason") === `observed on target at ${mergeSha}`
+          if (observed && !(await isAncestor(input.git, segment.head, mergeSha))) {
+            throw new Error(
+              `${branch}@${mergeSha}: submitted head ${segment.head} is not an ancestor of its observed delivery`,
+            )
+          }
+          const phase = segment.events.findLast(
+            (event) => event.type === "merging" && trailer(event, "Base") !== undefined,
           )
-        }
-      }
-      const references = async function* () {
-        yield* closingReferencesOf(input.git, [`${base}..${observed ? segment.head : mergeSha}`], branch)
-        if (observed && mergeSha !== segment.head) yield* closingReferencesOf(input.git, ["-1", mergeSha], branch)
-      }
-      const refs = references()
-      for await (const reference of refs) {
-        if (input.stop?.aborted) return { outcomes, queue: completed }
-        const resolved = await runIssuesVerb({
-          verb: "resolve",
-          args: [reference.value],
-          projectRoot: input.projectRoot,
-          declarationCommit: mergeSha,
-          cwd: input.cwd,
-          env: input.env,
-          timeoutMs: UPDATE_TIMEOUT_MS,
-          signal: input.stop,
-          noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
-        })
-        if (!resolved.ok) {
-          const providerId = issueProviderId(mergeSha, "resolve", undefined, reference.value)
-          const diagnostic = resolved.message
-          outcomes.push({
-            branch,
-            mergedEvent: mergedEvent.id,
-            mergeSha,
-            providerId,
-            status: "failed",
-            diagnostic,
-            raw: reference.value,
-          })
-          input.report(`issuesProvider.resolve failed for ${branch}@${mergeSha}: ${diagnostic}`)
-          continue
-        }
-        const keys = (resolved.envelope.result as { keys: string[] }).keys
-        for (const key of keys) {
-          const providerId = issueProviderId(mergeSha, "close", "completed", key)
-          if (seen.has(providerId)) continue
-          seen.add(providerId)
-          completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
-          const fulfilled = completed.issueEffects[providerId]
-          if (fulfilled !== undefined) {
-            if (fulfilled.effect.declaration.blob !== pinnedBlob) {
-              throw new Error(
-                `${branch}@${mergeSha}: applied declaration blob ${fulfilled.effect.declaration.blob} differs from pinned ${pinnedBlob}`,
-              )
-            }
-            outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
-            continue
-          }
-          const closed = await runIssuesVerb({
-            verb: "close",
-            args: [key, "completed"],
-            id: providerId,
-            projectRoot: input.projectRoot,
-            declarationCommit: mergeSha,
-            cwd: input.cwd,
-            env: input.env,
-            signal: input.stop,
-            timeoutMs: UPDATE_TIMEOUT_MS,
-            noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
-          })
-          if (!closed.ok) {
-            const diagnostic = closed.message
-            outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "failed", diagnostic })
-            input.report(`issuesProvider.close ${JSON.stringify(key)} failed for ${branch}@${mergeSha}: ${diagnostic}`)
-            continue
-          }
-          try {
-            const declarationBlob = (
-              await input.git.at(closed.envelope.declaration.repository)([
-                "rev-parse",
-                `${closed.envelope.declaration.commit}:issues.yml`,
-              ])
-            ).trim()
-            if (declarationBlob === "") {
-              throw new Error(`issues.yml blob is unreadable at ${closed.envelope.declaration.commit}`)
-            }
-            const issueEffect: AppliedIssueEffect = {
-              kind: "issue-effect-v1",
-              mergedEvent: mergedEvent.id,
-              mergeSha,
-              mergeCommitterTime: committerTime,
-              verb: "close",
-              semanticEnding: "completed",
-              issueKey: key,
-              providerId,
-              declaration: { path: "issues.yml", blob: declarationBlob },
-            }
-            try {
-              await writeQueueEvent(input.store, input.queue, {
-                type: "notified",
-                at: new Date(),
-                by: "yrd-run",
-                issueEffect,
-              })
-            } catch (error) {
-              // A rival append or lost publication reply can already have fulfilled this identity.
-              completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
-              if (completed.issueEffects[providerId] === undefined) throw error
-            }
-            outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
-          } catch (error) {
-            const diagnostic = `provider succeeded but applied effect could not be recorded: ${String(error)}`
+          const base = observed
+            ? trailer(mergedEvent, "Base")
+            : phase === undefined
+              ? undefined
+              : trailer(phase, "Base")
+          const pinnedBlob = (
+            await input.git(["ls-tree", "--format=%(objectname)", mergeSha, "--", "issues.yml"])
+          ).trim()
+          if (pinnedBlob === "") {
             outcomes.push({
               branch,
               mergedEvent: mergedEvent.id,
               mergeSha,
-              providerId,
-              status: "record-failed",
-              diagnostic,
+              providerId: "",
+              status: "skipped",
+              reason: "issues.yml absent at the delivered merge",
             })
-            input.report(`${branch}@${mergeSha}: ${diagnostic}`)
+            continue
           }
+          if (base === undefined || base === "") {
+            const diagnostic = `${branch}@${mergeSha}: actual merged commit has no provable historical base; only the known submitted commit was inspected, no introduced range was invented`
+            let references = 0
+            for await (const reference of closingReferencesOf(input.git, ["-1", segment.head], branch)) {
+              references++
+              outcomes.push({
+                branch,
+                mergedEvent: mergedEvent.id,
+                mergeSha,
+                providerId: issueProviderId(mergeSha, "resolve", undefined, reference.value),
+                status: "failed",
+                reason: "missing-base",
+                raw: reference.value,
+                diagnostic,
+              })
+            }
+            if (references === 0) {
+              outcomes.push({
+                branch,
+                mergedEvent: mergedEvent.id,
+                mergeSha,
+                providerId: "",
+                status: "unavailable",
+                reason: "missing-base",
+                diagnostic,
+              })
+            }
+            input.report(diagnostic)
+            continue
+          }
+          const rawCommitterTime = (await input.git(["show", "-s", "--format=%cI", mergeSha])).trim()
+          if (rawCommitterTime === "" || Number.isNaN(Date.parse(rawCommitterTime))) {
+            throw new Error(`${branch}@${mergeSha}: actual merge committer time is unreadable`)
+          }
+          const committerTime = new Date(rawCommitterTime).toISOString()
+          for (const event of history.events) {
+            const applied = readIssueEffect(event)
+            if (
+              applied?.mergedEvent === mergedEvent.id &&
+              applied.mergeSha === mergeSha &&
+              applied.declaration.blob !== pinnedBlob
+            ) {
+              throw new Error(
+                `${branch}@${mergeSha}: applied declaration blob ${applied.declaration.blob} differs from pinned ${pinnedBlob}`,
+              )
+            }
+          }
+          const references = async function* () {
+            yield* closingReferencesOf(input.git, [`${base}..${observed ? segment.head : mergeSha}`], branch)
+            if (observed && mergeSha !== segment.head) yield* closingReferencesOf(input.git, ["-1", mergeSha], branch)
+          }
+          const refs = references()
+          for await (const reference of refs) {
+            if (input.stop?.aborted) return { outcomes, queue: completed }
+            const resolved = await runIssuesVerb({
+              verb: "resolve",
+              args: [reference.value],
+              projectRoot: input.projectRoot,
+              declarationCommit: mergeSha,
+              cwd: input.cwd,
+              env: input.env,
+              timeoutMs: UPDATE_TIMEOUT_MS,
+              signal: input.stop,
+              noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
+            })
+            if (!resolved.ok) {
+              const providerId = issueProviderId(mergeSha, "resolve", undefined, reference.value)
+              const diagnostic = resolved.message
+              outcomes.push({
+                branch,
+                mergedEvent: mergedEvent.id,
+                mergeSha,
+                providerId,
+                status: "failed",
+                diagnostic,
+                raw: reference.value,
+              })
+              input.report(`issuesProvider.resolve failed for ${branch}@${mergeSha}: ${diagnostic}`)
+              continue
+            }
+            const keys = (resolved.envelope.result as { keys: string[] }).keys
+            // Resolving this same raw reference again clears its earlier derived failure,
+            // independently of the opaque keys it now names. No applied effect is granted.
+            outcomes.push({
+              branch,
+              mergedEvent: mergedEvent.id,
+              mergeSha,
+              providerId: issueProviderId(mergeSha, "resolve", undefined, reference.value),
+              raw: reference.value,
+              status: "fulfilled",
+            })
+            for (const key of keys) {
+              const providerId = issueProviderId(mergeSha, "close", "completed", key)
+              if (seen.has(providerId)) continue
+              seen.add(providerId)
+              completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
+              const fulfilled = completed.issueEffects[providerId]
+              if (fulfilled !== undefined) {
+                if (fulfilled.effect.declaration.blob !== pinnedBlob) {
+                  throw new Error(
+                    `${branch}@${mergeSha}: applied declaration blob ${fulfilled.effect.declaration.blob} differs from pinned ${pinnedBlob}`,
+                  )
+                }
+                outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
+                continue
+              }
+              const closed = await runIssuesVerb({
+                verb: "close",
+                args: [key, "completed"],
+                id: providerId,
+                projectRoot: input.projectRoot,
+                declarationCommit: mergeSha,
+                cwd: input.cwd,
+                env: input.env,
+                signal: input.stop,
+                timeoutMs: UPDATE_TIMEOUT_MS,
+                noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
+              })
+              if (!closed.ok) {
+                const diagnostic = closed.message
+                outcomes.push({
+                  branch,
+                  mergedEvent: mergedEvent.id,
+                  mergeSha,
+                  providerId,
+                  status: "failed",
+                  diagnostic,
+                })
+                input.report(
+                  `issuesProvider.close ${JSON.stringify(key)} failed for ${branch}@${mergeSha}: ${diagnostic}`,
+                )
+                continue
+              }
+              try {
+                const declarationBlob = (
+                  await input.git.at(closed.envelope.declaration.repository)([
+                    "rev-parse",
+                    `${closed.envelope.declaration.commit}:issues.yml`,
+                  ])
+                ).trim()
+                if (declarationBlob === "") {
+                  throw new Error(`issues.yml blob is unreadable at ${closed.envelope.declaration.commit}`)
+                }
+                const issueEffect: AppliedIssueEffect = {
+                  kind: "issue-effect-v1",
+                  mergedEvent: mergedEvent.id,
+                  mergeSha,
+                  mergeCommitterTime: committerTime,
+                  verb: "close",
+                  semanticEnding: "completed",
+                  issueKey: key,
+                  providerId,
+                  declaration: { path: "issues.yml", blob: declarationBlob },
+                }
+                try {
+                  await writeQueueEvent(input.store, input.queue, {
+                    type: "notified",
+                    at: new Date(),
+                    by: "yrd-run",
+                    issueEffect,
+                  })
+                } catch (error) {
+                  // A rival append or lost publication reply can already have fulfilled this identity.
+                  completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
+                  if (completed.issueEffects[providerId] === undefined) throw error
+                }
+                outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
+              } catch (error) {
+                const diagnostic = `provider succeeded but applied effect could not be recorded: ${String(error)}`
+                outcomes.push({
+                  branch,
+                  mergedEvent: mergedEvent.id,
+                  mergeSha,
+                  providerId,
+                  status: "record-failed",
+                  diagnostic,
+                })
+                input.report(`${branch}@${mergeSha}: ${diagnostic}`)
+              }
+            }
+          }
+        } catch (error) {
+          const diagnostic = String(error)
+          outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId: "", status: "failed", diagnostic })
+          input.report(`${branch}@${mergeSha}: issue close failed: ${diagnostic}`)
         }
       }
+    } catch (error) {
+      const diagnostic = String(error)
+      outcomes.push({ branch, mergedEvent: "", mergeSha: "", providerId: "", status: "unavailable", diagnostic })
+      input.report(`${branch}: issue close history unavailable: ${diagnostic}`)
     }
   }
   return { outcomes, queue: completed }
@@ -328,12 +443,9 @@ export function createPostMerge<C extends Context>(
       if (!name.endsWith(".json")) continue
       const path = join(directory, name)
       try {
-        const previous: unknown = JSON.parse(readFileSync(path, "utf8"))
-        if (typeof previous !== "object" || previous === null || Array.isArray(previous)) {
-          throw new Error("attempt evidence is not an object")
-        }
-        if ((previous as Record<string, unknown>).status === "running") {
-          writeFileSync(
+        const previous = readPostMergeAttempt(path).value
+        if (previous.status === "running") {
+          atomicWriteFileSync(
             path,
             JSON.stringify({ ...previous, status: "interrupted", interruptedAt: new Date().toISOString() }) + "\n",
           )
@@ -371,7 +483,7 @@ export function createPostMerge<C extends Context>(
       writeFileSync(stderr, "")
     })
     evidence(path, () => {
-      writeFileSync(path, JSON.stringify({ ...provenance, status: "running" }) + "\n")
+      atomicWriteFileSync(path, JSON.stringify({ ...provenance, status: "running" }) + "\n")
     })
     let issueActions: Array<Record<string, unknown>> = []
     let settled: Record<string, unknown> = {
@@ -452,6 +564,13 @@ export function createPostMerge<C extends Context>(
           knownQueue: completedQueue?.branch === context.queueBranch ? completedQueue.value : undefined,
         })
         issueActions = closed.outcomes
+        if (
+          issueActions.some(
+            ({ status }) => status === "failed" || status === "unavailable" || status === "record-failed",
+          )
+        ) {
+          settled = { ...settled, status: "failed" }
+        }
         if (closed.queue !== undefined) completedQueue = { branch: context.queueBranch, value: closed.queue }
       } else if (context.merged.length > 0 && context.projectRoot === undefined) {
         options.report(
@@ -473,7 +592,7 @@ export function createPostMerge<C extends Context>(
       options.report(reason)
     } finally {
       evidence(path, () => {
-        writeFileSync(
+        atomicWriteFileSync(
           path,
           JSON.stringify({ ...provenance, ...settled, issueActions, endedAt: new Date().toISOString() }) + "\n",
         )

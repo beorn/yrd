@@ -5,7 +5,7 @@
  * @consumer Yrd post-merge provider and cleanup lifecycle
  * @testonly none
  */
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, unlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
@@ -222,6 +222,9 @@ it("attempts the provider and cleanup even when its derived artifact directory i
   expect(existsSync(marker)).toBe(true)
   expect(cleaned).toEqual(["merge-oid"])
   expect(reports.join(" ")).toContain("post-merge evidence unavailable")
+  const unread: string[] = []
+  expect(readPostMergeIssueDiagnostics(root, (message) => unread.push(message))).toEqual([])
+  expect(unread.join(" ")).toContain(join(root, "post-merge"))
 })
 
 it.each([
@@ -236,6 +239,8 @@ it.each([
   { mode: "declaration-edit" },
   { mode: "delivered-declaration" },
   { mode: "reuse-pending" },
+  { mode: "reuse-legacy" },
+  { mode: "reuse-predeclaration" },
   { mode: "blob-mismatch" },
   { mode: "observed-ff" },
   { mode: "observed-after-target" },
@@ -244,14 +249,18 @@ it.each([
   { mode: "observed-merge" },
   { mode: "observed-legacy" },
   { mode: "provider-lost-reply" },
+  { mode: "resolve-retry" },
 ] as const)(
   "preserves the real merge queue while exercising post-merge $mode behavior",
   async ({ mode }) => {
     const reconcileAfterQueue =
       mode.startsWith("append-") ||
       mode === "reuse-pending" ||
+      mode === "reuse-legacy" ||
+      mode === "reuse-predeclaration" ||
       mode === "concurrent" ||
       mode === "provider-lost-reply" ||
+      mode === "resolve-retry" ||
       mode === "observed-legacy"
     const expectedCloses = mode === "observed-stacked-merge" ? 4 : mode.startsWith("observed-") ? 3 : 2
     const root = world(),
@@ -300,20 +309,31 @@ it.each([
       join(repo, "issues.yml"),
       JSON.stringify({
         resolve:
-          mode === "blob-mismatch" || mode === "observed-legacy"
+          mode === "resolve-retry"
             ? [
                 "sh",
                 "-c",
-                'printf "%s\\n" "$1" >> "$2"; printf \'{"keys":["%s"]}\\n\' "$1"',
+                'if ! test -f "$2"; then touch "$2"; exit 7; fi; printf \'{"keys":["resolved-%s"]}\\n\' "$1"',
                 "resolve",
                 "<raw>",
-                resolveCalls,
+                join(root, "resolve-failed"),
               ]
-            : [process.execPath, fakeProvider, "resolve", "<raw>"],
+            : mode === "blob-mismatch" || mode === "observed-legacy"
+              ? [
+                  "sh",
+                  "-c",
+                  'printf "%s\\n" "$1" >> "$2"; printf \'{"keys":["%s"]}\\n\' "$1"',
+                  "resolve",
+                  "<raw>",
+                  resolveCalls,
+                ]
+              : [process.execPath, fakeProvider, "resolve", "<raw>"],
         close: ["sh", "-c", closeScript, "close", "<key>", "<reason>", "<id>", closeCalls, closeReady, closeRelease],
       }),
     )
-    await git(["add", ".yrd.yml", "issues.yml"])
+    const issueDeclaration = readFileSync(join(repo, "issues.yml"), "utf8")
+    if (mode === "reuse-predeclaration") unlinkSync(join(repo, "issues.yml"))
+    await git(["add", ".yrd.yml", ...(mode === "reuse-predeclaration" ? [] : ["issues.yml"])])
     await git(["commit", "--quiet", "-m", "queue"])
     await git(["push", "--quiet", "origin", "main"])
     const target = (await git(["rev-parse", "HEAD"])).trim(),
@@ -323,6 +343,9 @@ it.each([
     const queueTip = await createEventQueue(store, "main", target, config, new Date())
     const queue = async (branch: string, message: string) => {
       await git(["checkout", "--quiet", "-b", branch, "origin/main"])
+      if (mode === "reuse-predeclaration" && branch === "task/second") {
+        writeFileSync(join(repo, "issues.yml"), issueDeclaration)
+      }
       writeFileSync(join(repo, branch.replaceAll("/", "-") + ".txt"), branch)
       if ((mode === "observed-ff" || mode === "observed-after-target") && branch === "task/first") {
         writeFileSync(join(repo, "older.txt"), "older closing intent")
@@ -351,7 +374,10 @@ it.each([
       }
       await git(["add", "."])
       await git(["commit", "--quiet", "-m", message])
-      if (mode === "observed-legacy" && branch === "task/first") {
+      if (
+        (mode === "observed-legacy" || mode === "reuse-legacy" || mode === "reuse-predeclaration") &&
+        branch === "task/first"
+      ) {
         const head = (await git(["rev-parse", "HEAD"])).trim()
         await git(["push", "--quiet", "origin", branch])
         // A real pre-Base record, rather than a current submit with its field hidden.
@@ -407,7 +433,7 @@ it.each([
       await git(["add", "later.txt"])
       await git(["commit", "--quiet", "-m", "later work\n\nCloses: issue-later-unrelated"])
       await git(["push", "--quiet", "origin", "main"])
-    } else if (mode.startsWith("observed-")) {
+    } else if (mode.startsWith("observed-") || mode === "reuse-legacy" || mode === "reuse-predeclaration") {
       await git(["push", "--quiet", "origin", "task/first:refs/heads/main"])
       if (mode === "observed-after-target") {
         await git(["merge", "--quiet", "--ff-only", "origin/main"])
@@ -600,6 +626,46 @@ it.each([
       expect(existsSync(finished)).toBe(false)
       return
     }
+    if (mode === "resolve-retry") {
+      const history = (await readBranchHistory(store, "main", "task/first")).history!
+      for (let retry = 0; retry < 2; retry++) {
+        await using runner = createPostMerge({
+          workdir,
+          cwd: repo,
+          git,
+          store,
+          cleanup: async () => {},
+          report: (message) => diagnostics.push(message),
+        })
+        runner.nudge({
+          ...context,
+          target: history.state.merge!,
+          merged: ["task/first"],
+          projectRoot: repo,
+          queueBranch: "main",
+        })
+        await runner[Symbol.asyncDispose]()
+        if (retry === 0) {
+          expect(readPostMergeIssueDiagnostics(workdir)).toContainEqual(
+            expect.objectContaining({ branch: "task/first", diagnostic: expect.stringContaining("exit 7") }),
+          )
+        }
+      }
+      expect(readFileSync(closeCalls, "utf8").trim().split("\n")).toHaveLength(1)
+      expect(readFileSync(closeCalls, "utf8")).toContain("resolved-issue-first\tcompleted")
+      expect(readPostMergeIssueDiagnostics(workdir)).toEqual([])
+      const listing = await readEventListing(
+        git,
+        config,
+        repo,
+        workdir,
+        (await git(["rev-parse", "origin/main"])).trim(),
+        store,
+        { all: true },
+      )
+      expect(listing.all.find((row) => row.branch === "task/first")?.diagnostic ?? "").not.toContain("exit 7")
+      return
+    }
     if (mode === "provider-lost-reply") {
       const mergedReading = await readBranchHistory(store, "main", "task/first")
       const action = {
@@ -635,7 +701,7 @@ it.each([
       expect(readPostMergeIssueDiagnostics(workdir)).toEqual([])
       return
     }
-    if (mode === "reuse-pending") {
+    if (mode === "reuse-pending" || mode === "reuse-legacy" || mode === "reuse-predeclaration") {
       const old = await readBranchHistory(store, "main", "task/first")
       const mergeSha = old.history!.state.merge!
       const mergedEvent = old.history!.state.ending!.id
@@ -661,6 +727,7 @@ it.each([
       await git(["checkout", "--quiet", "main"])
       const before = (await readBranchHistory(store, "main", "task/first")).history!.state
       expect(before.status).toBe("queued")
+      const previousAttempts = new Set(readdirSync(join(workdir, "post-merge")))
       await using runner = createPostMerge({
         workdir,
         cwd: repo,
@@ -681,6 +748,60 @@ it.each([
       const after = (await readBranchHistory(store, "main", "task/first")).history!
       expect(after.state).toEqual(before)
       const applied = Object.values((await readEventQueue(store, "main")).issueEffects).map(({ effect }) => effect)
+      if (mode !== "reuse-pending") {
+        const attempts = readdirSync(join(workdir, "post-merge"))
+          .filter((name) => name.endsWith(".json") && !previousAttempts.has(name))
+          .map(
+            (name) =>
+              JSON.parse(readFileSync(join(workdir, "post-merge", name), "utf8")) as {
+                status: string
+                issueActions: Record<string, unknown>[]
+              },
+          )
+        expect(attempts).toHaveLength(1)
+        const legacy = attempts[0]!.issueActions.find((action) => action.mergedEvent === mergedEvent)
+        expect(legacy).toMatchObject({
+          branch: "task/first",
+          mergedEvent,
+          mergeSha,
+          status: mode === "reuse-predeclaration" ? "skipped" : "failed",
+        })
+        expect(applied.some((effect) => effect.mergedEvent === mergedEvent)).toBe(false)
+        const second = (await readBranchHistory(store, "main", "task/second")).history!
+        expect(applied).toContainEqual(
+          expect.objectContaining({
+            mergedEvent: second.state.ending!.id,
+            mergeSha: second.state.merge,
+            issueKey: "issue-second",
+            mergeCommitterTime: new Date(
+              (await git(["show", "-s", "--format=%cI", second.state.merge!])).trim(),
+            ).toISOString(),
+          }),
+        )
+        expect(
+          readFileSync(closeCalls, "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => line.split("\t")[0]),
+        ).toEqual(["issue-second"])
+        if (mode === "reuse-legacy") {
+          expect(attempts[0]!.status).toBe("failed")
+          expect(legacy).toMatchObject({ raw: "issue-first" })
+          const listing = await readEventListing(
+            git,
+            config,
+            repo,
+            workdir,
+            (await git(["rev-parse", "origin/main"])).trim(),
+            store,
+            { all: true },
+          )
+          expect(listing.all.find((row) => row.branch === "task/first")?.diagnostic).toContain(
+            "no provable historical base",
+          )
+        }
+        return
+      }
       expect(applied).toContainEqual(
         expect.objectContaining({ mergedEvent, mergeSha, issueKey: "issue-first", semanticEnding: "completed" }),
       )
@@ -906,7 +1027,47 @@ it.each([
         for (const malformed of [null, { issueActions: "not an array" }, { issueActions: [{ status: "failed" }] }]) {
           writeFileSync(failedPath, JSON.stringify(malformed))
           expect(() => readPostMergeIssueDiagnostics(workdir)).toThrow(failedPath)
+          const unread: string[] = []
+          expect(
+            await coreQueueCommand(
+              repo,
+              {
+                cwd: repo,
+                stdout: () => {},
+                stderr: (message) => unread.push(message),
+                localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
+              },
+              { command: "list" },
+              { workdir, json: true },
+            ),
+            unread.join(" "),
+          ).toBe(0)
+          expect(unread.join(" ")).toContain(failedPath)
         }
+        // A corrupt derived attempt must not abort the standing read before another real merge.
+        await queue("task/after-corrupt", "another delivery\n\nCloses: issue-after-corrupt")
+        const unread: string[] = []
+        expect(
+          await coreQueueCommand(
+            repo,
+            {
+              cwd: repo,
+              stdout: () => {},
+              stderr: (message) => unread.push(message),
+              localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
+            },
+            { command: "merge", branch: "task/after-corrupt", submitter: "fixture" },
+            { workdir, json: true, projectRoot: repo },
+          ),
+          unread.join(" "),
+        ).toBe(0)
+        expect((await readStatus(store, "main", "task/after-corrupt")).status).toBe("merged")
+        expect(
+          Object.values((await readEventQueue(store, "main")).issueEffects).some(
+            ({ effect }) => effect.issueKey === "issue-after-corrupt",
+          ),
+        ).toBe(true)
+        expect(unread.join(" ")).toContain(failedPath)
       } finally {
         writeFileSync(failedPath, originalEvidence)
       }
