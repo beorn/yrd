@@ -94,7 +94,9 @@ describe("the health document", () => {
     const body = doc.error?.resolution.join(" ") ?? ""
     expect(body).toMatch(/No restart is needed/u)
     // Recorded Next remains verbatim; newly composed resolution is portable guidance, not a host recipe.
-    expect(doc.error?.resolution.slice(1).join(" ")).not.toMatch(/\byrd\s+(queue|merge)\b/u)
+    expect(doc.error?.resolution.slice(1).join(" ")).not.toMatch(
+      /\byrd\s+(?:queue|merge)\b|\bcd\s|(?:^|[\s"'`(])\/\S+/u,
+    )
     expect(body).not.toMatch(/clears on its own|next round|resets the spacing|Consecutive rounds/u)
     expect(doc.facts).toMatchObject({
       nextRoundInMs: INTERVAL,

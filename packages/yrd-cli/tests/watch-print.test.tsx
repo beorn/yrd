@@ -62,10 +62,16 @@ function snapshot(over: Partial<WatchSnapshot> = {}): WatchSnapshot {
 }
 
 async function paint(snapshot: WatchSnapshot, columns = 120): Promise<string> {
-  const app = render(<ListingPage snapshot={snapshot} options={{ columns, color: false }} />, {
-    cols: columns,
-    rows: 40,
-  })
+  const app = render(
+    <ListingPage
+      snapshot={snapshot}
+      options={{ columns, color: false, formatCommand: (argv) => ["yrd", ...argv].join(" ") }}
+    />,
+    {
+      cols: columns,
+      rows: 40,
+    },
+  )
   await app.waitForLayoutStable()
   const text = app.text
   app.unmount()

@@ -22,7 +22,7 @@ describe("what IS an unreachable remote", () => {
     expect(fault?.signature).toBe("http-5xx")
     expect(fault?.line).toContain("504")
     // This becomes shared event guidance; only its viewer can render a command.
-    expect(setupStuckNext(fault)).not.toMatch(/\byrd\s+queue\b/u)
+    expect(setupStuckNext(fault)).not.toMatch(/\byrd\s+(?:queue|merge)\b|\bcd\s|(?:^|[\s"'`(])\/\S+/u)
   })
 
   test.each([
@@ -74,7 +74,7 @@ describe("row 3, the negative control: what is NOT an unreachable remote", () =>
     ["a full disk", "ENOSPC: no space left on device"],
   ])("%s", (_why, line) => {
     expect(transportFaultIn(line)).toBeUndefined()
-    expect(setupStuckNext(undefined)).not.toMatch(/\byrd\s+queue\b/u)
+    expect(setupStuckNext(undefined)).not.toMatch(/\byrd\s+(?:queue|merge)\b|\bcd\s|(?:^|[\s"'`(])\/\S+/u)
   })
 
   // The one yrd already paid for, one layer up: a remote that ANSWERED and does

@@ -40,7 +40,6 @@ describe("portable queue guidance", () => {
         via: "the queue",
         evidence: "/producer/log.jsonl",
         next,
-        owner: "the queue operator",
       }
       expect(incidentLine(incident)).toContain(`recorded guidance: ${next}`)
       expect(incidentTrailers(incident)).toContainEqual(["Next", next])
@@ -55,7 +54,7 @@ describe("portable queue guidance", () => {
     expect(guidance).toContain("task/change")
     expect(guidance).toMatch(/withdraw/u)
     expect(guidance).toMatch(/resume/u)
-    expect(guidance).not.toMatch(/\byrd\s+(queue|merge)\b/u)
+    expect(guidance).not.toMatch(/\byrd\s+(?:queue|merge)\b|\bcd\s|(?:^|[\s"'`(])\/\S+/u)
   })
 })
 
@@ -115,7 +114,11 @@ it("reads historical Next from another clone without changing the Git event byte
   await w.writer(["add", "historical.txt"])
   await w.writer(["commit", "--quiet", "-m", "historical work"])
   const head = (await w.writer(["rev-parse", "HEAD"])).trim()
-  await submit(w.writer, "origin", { branch, submitter: "@dev/1", target: { branch: "main", remote: "origin" } })
+  await submit(w.writer, "origin", {
+    branch,
+    submitter: "test-submitter",
+    target: { branch: "main", remote: "origin" },
+  })
   const writerStore = createEventStore(w.work, "origin", selectionFor(w.writer))
   const opened = await readStatus(writerStore, "main", branch)
   if (opened.tip === undefined) throw new Error("the historical change has no opened event")
@@ -125,7 +128,7 @@ it("reads historical Next from another clone without changing the Git event byte
     reason: "historical setup fault",
     at,
   })
-  const next = "cd '/old producer clone' && yrd queue resume --reason 'repair then retry'"
+  const next = "  cd '/old producer clone' && yrd queue resume --reason 'repair then retry'  "
   const paused = await writeQueueEvent(writerStore, "main", {
     type: "paused",
     cause: "stuck",
