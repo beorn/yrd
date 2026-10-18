@@ -879,12 +879,15 @@ describe("a queue is the selected origin branch carrying config", () => {
   it("reads only the selected branch's journals and keeps bulk show's global diagnostics", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
+    const queueBranch = "release"
+    await git(["checkout", "--quiet", "-b", queueBranch])
+    await git(["push", "--quiet", "origin", queueBranch])
     const store = createEventStore(repo, "origin", git.selection)
     const head = (await git(["rev-parse", "HEAD"])).trim()
     const at = new Date(Date.now() - 60_000)
-    const queueTip = await createQueue(repo, "main", head, at)
+    const queueTip = await createQueue(repo, queueBranch, head, at)
     const logs = join(await workdirOf(git, { cwd: repo }), "logs")
-    const journals = ["task/selected", "task/unrelated"].map((branch, index) => {
+    const journals = ["task/sel'ected", "task/unrelated"].map((branch, index) => {
       const journal = openLog(logs, () => new Date(at.getTime() + index + 1))
       journal.write({ kind: "run", base: head })
       journal.write({ kind: "change", branch, head, decision: "failed" })
@@ -892,7 +895,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     })
     for (const { branch, journal } of journals) {
       await (
-        await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+        await openEvents({ ...store, ref: changesRef(queueBranch, branch), writer: "yrd" })
       ).append(
         [
           changeInput("opened", { queueTip, at, commit: head, by: "yrd" }),
@@ -911,7 +914,7 @@ describe("a queue is the selected origin branch carrying config", () => {
           repo,
           shown.io,
           { command: "show", branch: selected.branch },
-          { json: true, queue: "main" },
+          { json: true, queue: queueBranch },
         ),
         shown.stderr(),
       ).toBe(0)
@@ -934,7 +937,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(scoped.journal.fallbacks).toMatchObject({ count: 1, reasons: [{ count: 1 }] })
     const bulk = capture(repo)
     expect(
-      await coreQueueCommand(repo, bulk.io, { command: "show", all: true }, { json: true, queue: "main" }),
+      await coreQueueCommand(repo, bulk.io, { command: "show", all: true }, { json: true, queue: queueBranch }),
       bulk.stderr(),
     ).toBe(0)
     const global = JSON.parse(bulk.stdout()) as typeof scoped
@@ -947,12 +950,73 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(Buffer.byteLength(shown.stdout())).toBeLessThan(Buffer.byteLength(bulk.stdout()))
     const again = capture(repo)
     expect(
-      await coreQueueCommand(repo, again.io, { command: "show", all: true }, { json: true, queue: "main" }),
+      await coreQueueCommand(repo, again.io, { command: "show", all: true }, { json: true, queue: queueBranch }),
       again.stderr(),
     ).toBe(0)
     const settled = JSON.parse(again.stdout()) as typeof scoped
     expect(settled.changes.map(({ branch }) => branch).sort()).toEqual(journals.map(({ branch }) => branch).sort())
     expect(settled.journal.fallbacks).toBeUndefined()
+    // Prior assertions guard journal I/O scope, not live warning inspection or historical attribution (29721).
+    const guidance = {
+      text: "Recorded checkout: /old path; retain this explanation verbatim.\nThe command below is historical.",
+      next: "git -C '/old path' show old-ref",
+      inspect: "git -C '/other old path' show newer-ref",
+    }
+    selected.journal.write({ kind: "change", branch: selected.branch, head, reason: "change-ref-taken", ...guidance })
+    selected.journal.write({ kind: "change", branch: selected.branch, head, reason: "change-ref-contended", remote: "origin" })
+    const rawJournal = readFileSync(selected.journal.path, "utf8")
+    const remote = join(dirname(repo), "remote.git")
+    const queue = `${remote}#${queueBranch}`
+    const remoteGit = gitIn(remote)
+    const refs = await remoteGit(["for-each-ref", "--format=%(refname) %(objectname)"])
+    for (const command of ["list", "detail"] as const) {
+      const inspections: { argv: readonly string[]; cwd: string; recipe: string }[] = []
+      const human = capture(repo)
+      human.io.formatYrdCommand = (argv, cwd) => {
+        const recipe = `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`
+        inspections.push({ argv, cwd, recipe })
+        return recipe
+      }
+      let text: string
+      if (command === "list") {
+        expect(await coreQueueCommand(repo, human.io, { command: "list", all: true, terms: [selected.branch] }, { queue: queueBranch }), human.stderr()).toBe(0)
+        text = human.stdout()
+      } else {
+        const sources: WatchSource[] = []
+        expect(await coreQueueCommand(repo, human.io, { command: "list", all: true, watch: true }, {
+          queue: queueBranch,
+          watchSource: (source) => sources.push(source),
+        }), human.stderr()).toBe(0)
+        expect(sources).toHaveLength(1)
+        const source = sources[0]!
+        const item = source.snapshot?.rows.find((item) => item.row.branch === selected.branch)
+        expect(item?.row.diagnostics).toHaveLength(2)
+        expect(source.open).toBeDefined()
+        const detail = await source.open!(item!)
+        expect(detail.row.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining(guidance)]))
+        text = detail.note ?? ""
+      }
+      expect(inspections.length, command).toBeGreaterThan(0)
+      for (const inspection of inspections) {
+        expect(inspection).toMatchObject({ argv: ["queue", "list", "--all", "--json", selected.branch, "--queue", queue], cwd: repo })
+        expect(text).toContain(inspection.recipe)
+      }
+      if (command === "list") {
+        expect(text).toContain("recorded guidance:")
+        for (const value of Object.values(guidance)) expect(text).toContain(value)
+        expect(text).toContain("The record has no explanation or inspection command")
+      }
+      const inspected = spawnSync("/bin/sh", ["-c", inspections[0]!.recipe], { cwd: dirname(repo), encoding: "utf8" })
+      expect(inspected.status, inspected.stderr).toBe(0)
+      const changes = (JSON.parse(inspected.stdout) as { changes: { branch: string; diagnostics?: readonly object[] }[] }).changes
+      expect(changes).toHaveLength(1)
+      expect(changes[0]!.branch).toBe(selected.branch)
+      expect(changes[0]!.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining(guidance)]))
+      expect(changes[0]!.diagnostics).toHaveLength(2)
+      expect(await remoteGit(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(refs)
+      expect(readFileSync(selected.journal.path, "utf8")).toBe(rawJournal)
+    }
+
   }, 15_000)
 
   it("keeps an equal-head duplicate inspectable in list, show and watch after contradictory endings", async () => {

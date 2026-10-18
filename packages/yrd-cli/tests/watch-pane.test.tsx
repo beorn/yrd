@@ -1066,6 +1066,7 @@ describe("the pane's keys and the detail's identity", () => {
       await settle(app)
       expect(current(app)).toContain(diagnostic.text)
       expect(current(app)).toContain(diagnostic.next)
+      expect(current(app)).toContain("recorded guidance:")
       expect(current(app)).toContain("✓ Merged")
       // A fresh journal read returns new objects even when its records did not change.
       await waitFor(() => expect(rounds.length).toBeGreaterThan(1))

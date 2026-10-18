@@ -135,6 +135,7 @@ export function diagnosticLines(
       return [
         `${row.branch}@${row.head} run ${record.run}: ⚠ ref-write warning (${String(record.reason)})${usable(record.ref) ? ` — ${record.ref}` : ""}`,
         ...(journal !== undefined && journal.decision === undefined ? ["no run decision recorded"] : []),
+        ...(text === undefined && inspect === undefined && next === undefined ? [] : ["recorded guidance:"]),
         ...(text === undefined ? [] : [text]),
         ...commands.flatMap(([name, command]) =>
           command === undefined
@@ -148,7 +149,7 @@ export function diagnosticLines(
         ...(missing.length === 0
           ? []
           : [
-              `The record has no ${missing.join(" or ")}${usable(record.remote) ? ` (remote: ${record.remote})` : ""}. Inspect the stored fields with \`yrd list --json\`.`,
+              `The record has no ${missing.join(" or ")}${usable(record.remote) ? ` (remote: ${record.remote})` : ""}. Inspect this change's retained fields.`,
             ]),
       ]
     }),

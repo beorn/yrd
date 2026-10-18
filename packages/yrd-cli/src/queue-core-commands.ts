@@ -4346,10 +4346,16 @@ export async function coreQueueCommand(
         const warnedBranches = new Set(
           one.rows.flatMap((item) => (item.row.diagnostic === undefined ? [] : [item.row.branch])),
         )
+        const recordedWarningBranches = new Set(
+          one.rows.flatMap((item) => (item.row.diagnostics?.length ? [item.row.branch] : [])),
+        )
         return [
           listing,
           ...one.rows.flatMap((item) => diagnosticLines(item.row, journalFor(item, one.journals))),
           ...[...warnedBranches].map((branch) => `Raw events: ${formatCommand(["queue", "show", branch, "--json"])}`),
+          ...[...recordedWarningBranches].map(
+            (branch) => `Inspect current fields: ${formatCommand(["queue", "list", "--all", "--json", branch])}`,
+          ),
         ].join("\n")
       }
 
@@ -4493,6 +4499,9 @@ export async function coreQueueCommand(
               ...(item.row.diagnostic === undefined
                 ? []
                 : [`Raw events: ${formatCommand(["queue", "show", item.row.branch, "--json"])}`]),
+              ...(item.row.diagnostics?.length
+                ? [`Inspect current fields: ${formatCommand(["queue", "list", "--all", "--json", item.row.branch])}`]
+                : []),
             ].filter((note) => note !== undefined)
             return notes.length === 0 ? detail : { ...detail, note: notes.join("; ") }
           },
