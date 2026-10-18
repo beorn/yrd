@@ -1441,7 +1441,7 @@ function buildProgram(
     program
       .command("drop [branch]")
       .description(
-        "end a change, or archive and retire local branches; root issue cleanup applies by default using exact origin custody; --submodules previews because it expands to component repositories",
+        "end a change, or archive and retire issue branches across all registered root/component stores by default; can take minutes; --dry-run previews",
       )
       .option(
         "--local",

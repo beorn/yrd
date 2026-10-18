@@ -2095,6 +2095,114 @@ describe("a queue is the selected origin branch carrying config", () => {
     60_000,
   )
 
+  /** @failure Default issue cleanup omits a store-only population or continues after a retirement failure.
+   * @level l3 @consumer Authors retiring root-only, component-only or shared issue branches
+   * Existing journeys always have both populations and fail during discovery, before any retirement succeeds.
+   */
+  it.each(["root-only", "component-only", "both", "later-failure"] as const)(
+    "default issue cleanup handles %s with archive custody and failure-stop",
+    async (population) => {
+      const repo = await world("checks: []\n")
+      const seed = await world()
+      const git = gitIn(repo)
+      await git([
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        join(dirname(seed), "remote.git"),
+        "child",
+      ])
+      await git(["commit", "--quiet", "-am", "register child"])
+      await git(["push", "--quiet", "origin", "main"])
+      const rootTip = (await git(["rev-parse", "HEAD"])).trim()
+      await createQueue(repo, "main", rootTip, new Date())
+      const child = join(repo, "child")
+      const childGit = gitIn(child)
+      const childTip = (await childGit(["rev-parse", "HEAD"])).trim()
+      const rootBranch = "task/1234-root"
+      const childBranches =
+        population === "root-only"
+          ? []
+          : population === "later-failure"
+            ? ["task/1234-a", "task/1234-b", "task/1234-c"]
+            : ["task/1234-child"]
+      const rootBranches = population === "component-only" ? [] : [rootBranch]
+      for (const branch of rootBranches) {
+        await git(["branch", branch, rootTip])
+        await git(["push", "--quiet", "origin", branch])
+      }
+      for (const branch of childBranches) {
+        await childGit(["branch", branch, childTip])
+        await childGit(["push", "--quiet", "origin", branch])
+      }
+      const issue = "@example/1234-retirement"
+      const argv = ["bun", "yrd", "drop", "--issue", issue, "--submitter", "fixture", "--json"]
+      const run = async (preview: boolean) => {
+        const out = capture(repo)
+        out.io.branchIssue = ({ branch, recordedIssue }) =>
+          recordedIssue ?? (branch.startsWith("task/1234-") ? issue : undefined)
+        out.io.localBranchProtections = async ({ branch }) => {
+          if (!preview && population === "later-failure" && branch === "task/1234-b") {
+            throw new Error("fixture retirement read failed for task/1234-b")
+          }
+          return { protections: [], evidence: [] }
+        }
+        const exit = await runYrdProcess([...argv, ...(preview ? ["--dry-run"] : [])], out.io)
+        const report = JSON.parse(out.stdout()) as {
+          inspected: string[]
+          eligible: { repo: string; branch: string }[]
+          removed: { repo: string; branch: string; head: string; archiveRef: string }[]
+          kept: { branch: string; reason: string }[]
+          failed: { repo: string; branch: string; detail: string }[]
+        }
+        return { exit, out, report }
+      }
+      const preview = await run(true)
+      expect(preview.exit, preview.out.stderr()).toBe(0)
+      expect(preview.report.inspected).toEqual(expect.arrayContaining([repo, child]))
+      expect(preview.report.eligible.map(({ repo: store, branch }) => [store, branch])).toEqual([
+        ...childBranches.map((branch) => [child, branch]),
+        ...rootBranches.map((branch) => [repo, branch]),
+      ])
+      expect(preview.report.removed).toEqual([])
+      const applied = await run(false)
+      expect(applied.exit, applied.out.stderr()).toBe(population === "later-failure" ? 1 : 0)
+      const removed = population === "later-failure" ? ["task/1234-a"] : [...childBranches, ...rootBranches]
+      expect(applied.report.removed.map(({ branch }) => branch)).toEqual(removed)
+      for (const row of applied.report.removed) {
+        const owner = row.repo === repo ? git : childGit
+        expect((await owner(["rev-parse", row.archiveRef])).trim()).toBe(row.head)
+        expect((await owner(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
+        expect((await owner(["ls-remote", "origin", `refs/heads/${row.branch}`])).trim()).toBe("")
+      }
+      if (population === "later-failure") {
+        expect(applied.report.failed).toContainEqual(
+          expect.objectContaining({
+            repo: child,
+            branch: "task/1234-b",
+            detail: expect.stringContaining("fixture retirement read failed"),
+          }),
+        )
+        expect(applied.report.kept).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ branch: "task/1234-c", reason: "held" }),
+            expect.objectContaining({ branch: rootBranch, reason: "held" }),
+          ]),
+        )
+        for (const branch of ["task/1234-b", "task/1234-c"]) {
+          expect((await childGit(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(childTip)
+          expect((await childGit(["ls-remote", "origin", `refs/heads/${branch}`])).trim().split(/\s+/u)[0]).toBe(
+            childTip,
+          )
+        }
+        expect((await git(["rev-parse", `refs/heads/${rootBranch}`])).trim()).toBe(rootTip)
+      } else expect(applied.report.failed).toEqual([])
+    },
+    60_000,
+  )
+
   /** @failure A recorded root issue is discarded for same-named components, or key mismatches disappear from the receipt.
    * @level l3 @consumer The root and expanded issue retirement commands with the host's recorded-or-numeric policy
    * The ending-custody fixture above maps every fallback to its canonical key, hiding the lost root record.
