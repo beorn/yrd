@@ -3,12 +3,12 @@ import { join } from "node:path"
 import { createHash, randomUUID } from "node:crypto"
 import { createProcess } from "@yrd/process"
 import {
-  appendChangeEvent,
   closingReferencesOf,
-  Conflict,
   enumerateChangeSegments,
   readBranchHistory,
+  readEventQueue,
   readIssueEffect,
+  writeQueueEvent,
   isAncestor,
   trailer,
   type AppliedIssueEffect,
@@ -122,8 +122,6 @@ async function closeMergedIssues(
 ): Promise<Array<Record<string, unknown>>> {
   const outcomes: Array<Record<string, unknown>> = []
   const seen = new Set<string>()
-  const hasEffect = (events: readonly import("@yrd/queue-core").Event[], providerId: string): boolean =>
-    events.some((event) => readIssueEffect(event)?.providerId === providerId)
 
   for (const branch of new Set(input.branches)) {
     if (input.stop?.aborted) return outcomes
@@ -213,11 +211,12 @@ async function closeMergedIssues(
               .digest("hex")
           if (seen.has(providerId)) continue
           seen.add(providerId)
-          let fresh = await readBranchHistory(input.store, input.queue, branch)
-          if (fresh.history === undefined) {
-            throw new Error(`post-merge branch ${branch} lost its history before recording ${providerId}`)
-          }
-          if (hasEffect(fresh.history.events, providerId)) {
+          const completed = await readEventQueue(input.store, input.queue)
+          const fulfilled = completed.issueEffects[providerId]
+          if (fulfilled !== undefined) {
+            if (fulfilled.effect.declaration.blob !== pinnedBlob) {
+              throw new Error(`${branch}@${mergeSha}: applied declaration blob ${fulfilled.effect.declaration.blob} differs from pinned ${pinnedBlob}`)
+            }
             outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
             continue
           }
@@ -260,37 +259,18 @@ async function closeMergedIssues(
               providerId,
               declaration: { path: "issues.yml", blob: declarationBlob },
             }
-            let recorded = false
-            for (let retry = 0; retry < 4 && !recorded; retry++) {
-              fresh = await readBranchHistory(input.store, input.queue, branch)
-              if (fresh.history === undefined) {
-                throw new Error(`post-merge branch ${branch} lost its history while recording ${providerId}`)
-              }
-              const selectedTip = fresh.history.state.tip
-              if (selectedTip === undefined) {
-                throw new Error(`post-merge branch ${branch} has no event tip while recording ${providerId}`)
-              }
-              if (hasEffect(fresh.history.events, providerId)) {
-                recorded = true
-                break
-              }
-              try {
-                await appendChangeEvent(input.store, input.queue, branch, selectedTip, {
-                  type: "notified",
-                  at: new Date(),
-                  commit: mergeSha,
-                  writer: "yrd-run",
-                  issueEffect,
-                })
-                recorded = true
-              } catch (error) {
-                // A rival append may have fulfilled this identity while the provider ran.
-                const after = await readBranchHistory(input.store, input.queue, branch)
-                if (after.history !== undefined && hasEffect(after.history.events, providerId)) recorded = true
-                else if (!(error instanceof Conflict) || retry === 3) throw error
-              }
+            try {
+              await writeQueueEvent(input.store, input.queue, {
+                type: "notified",
+                at: new Date(),
+                by: "yrd-run",
+                issueEffect,
+              })
+            } catch (error) {
+              // A rival append or lost publication reply can already have fulfilled this identity.
+              const after = await readEventQueue(input.store, input.queue)
+              if (after.issueEffects[providerId] === undefined) throw error
             }
-            if (!recorded) throw new Error(`could not append applied issue effect ${providerId}`)
             outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
           } catch (error) {
             const diagnostic = `provider succeeded but applied effect could not be recorded: ${String(error)}`

@@ -3282,6 +3282,13 @@ describe("the queue-format boundary", () => {
       expect(reading.issueEffects[effect.providerId]).toEqual({ id: written.head, effect })
       expect(reading.notices).toEqual({})
       expect((await queue.events()).map((event) => event.type)).toEqual(["created", "notified"])
+      // The sole completion writer must dedupe an existing fact and retain a new anchor through its queue CAS.
+      expect(await writeQueueEvent(location, "lab", { type: "notified", by: QUEUE_RUN_WRITER, at, issueEffect: effect })).toBe(written.head)
+      const issueKey = "wk/issue/another"
+      const next = { ...effect, issueKey, providerId: `yrd1-${createHash("sha256").update(JSON.stringify([mergeSha, "close", "completed", issueKey])).digest("hex")}` }
+      const applied = await writeQueueEvent(location, "lab", { type: "notified", by: QUEUE_RUN_WRITER, at, issueEffect: next })
+      expect((await readEventQueue(location, "lab")).issueEffects[next.providerId]).toEqual({ id: applied, effect: next })
+      expect((await queue.events()).at(-1)?.links).toEqual([anchor])
     },
   )
 

@@ -1342,18 +1342,7 @@ async function eventQueueFromHistory(
   const readAnchors = new Map<string, Event>()
   for (const { id, effect } of Object.values(projected.issueEffects)) {
     const anchor = readAnchors.get(effect.mergedEvent) ?? (await readRetainedEvent(chain, effect.mergedEvent))
-    if (anchor.type !== "merged") {
-      throw new Error(`${ref}: issue effect ${id} does not retain an actual merged event ${effect.mergedEvent}`)
-    }
-    if (keptCommit(anchor) !== effect.mergeSha) {
-      throw new Error(`${ref}: issue effect ${id} mergeSha does not match merged event ${effect.mergedEvent}`)
-    }
-    const cause = prop(anchor, EVENT_TRAILERS.queue)
-    const causePosition = cause === undefined ? undefined : positions.get(cause)
-    const effectPosition = positions.get(id)
-    if (causePosition === undefined || effectPosition === undefined || causePosition >= effectPosition) {
-      throw new Error(`${ref}: issue effect ${id} merged event ${effect.mergedEvent} has no earlier queue cause`)
-    }
+    assertIssueEffectAnchor(ref, id, effect, anchor, positions, positions.get(id))
     readAnchors.set(anchor.id, anchor)
   }
   const result: EventQueue = {
@@ -1362,6 +1351,28 @@ async function eventQueueFromHistory(
   }
   queueLocations.set(result, { repo: store.repo, remote: store.remote, queue, backend: store.backend })
   return result
+}
+
+/** The reader and sole queue writer share the same immutable retained-anchor proof. */
+function assertIssueEffectAnchor(
+  ref: string,
+  id: string,
+  effect: AppliedIssueEffect,
+  anchor: Event,
+  positions: ReadonlyMap<string, number>,
+  effectPosition: number | undefined,
+): void {
+  if (anchor.type !== "merged") {
+    throw new Error(`${ref}: issue effect ${id} does not retain an actual merged event ${effect.mergedEvent}`)
+  }
+  if (keptCommit(anchor) !== effect.mergeSha) {
+    throw new Error(`${ref}: issue effect ${id} mergeSha does not match merged event ${effect.mergedEvent}`)
+  }
+  const cause = prop(anchor, EVENT_TRAILERS.queue)
+  const causePosition = cause === undefined ? undefined : positions.get(cause)
+  if (causePosition === undefined || effectPosition === undefined || causePosition >= effectPosition) {
+    throw new Error(`${ref}: issue effect ${id} merged event ${effect.mergedEvent} has no earlier queue cause`)
+  }
 }
 
 type EventOps = Readonly<{
@@ -1539,7 +1550,8 @@ export type WriteQueueEvent =
     }>
   | Readonly<{ type: "resumed"; reason: string; by: string; at: Date }>
   | Readonly<{ type: "observed"; commit: string; branch?: string; by: string; at: Date }>
-  | Readonly<{ type: "notified"; notice: NoticeWrite; by: string; at: Date }>
+  | Readonly<{ type: "notified"; notice: NoticeWrite; issueEffect?: never; by: string; at: Date }>
+  | Readonly<{ type: "notified"; issueEffect: AppliedIssueEffect; notice?: never; by: typeof QUEUE_RUN_WRITER; at: Date }>
   | Readonly<{ type: "notify-floors"; floors: NotifyFloorsSnapshot; by: string; at: Date }>
 
 const STUCK_RELEASE_PREFIX = "yrd-stuck-release:"
@@ -1558,6 +1570,11 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
     throw new TypeError(`${write.type} needs Reason:`)
   }
   if (Number.isNaN(write.at.getTime())) throw new TypeError("Time: needs a valid instant")
+  if (write.type === "notified" && write.issueEffect !== undefined) {
+    if (write.notice !== undefined) throw new TypeError("issue effect cannot carry ordinary notice detail")
+    if (write.by !== QUEUE_RUN_WRITER) throw new TypeError("issue effect requires yrd-run writer")
+    checkedIssueEffect(write.issueEffect, ref)
+  }
   const chain = await openEvents({ ...store, ref, writer: write.by })
   let existing: string | undefined
   const decide: Decide = async (events) => {
@@ -1566,7 +1583,11 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
       throw new Error(`${ref}: ${write.type} needs ops-cutover; pre-cutover pause and release authoring is retired`)
     }
     if (write.type === "observed") existing = current.observed[write.commit]?.id
-    if (write.type === "notified") existing = current.notices[write.notice.key]?.id
+    if (write.type === "notified") {
+      existing = write.issueEffect === undefined
+        ? current.notices[write.notice.key]?.id
+        : current.issueEffects[write.issueEffect.providerId]?.id
+    }
     if (write.type === "notify-floors") {
       // A CAS retry folds the chain again; a snapshot already at this exact tip is the same write, not a second one.
       const encoded = encodeNotifyFloors(write.floors)
@@ -1581,6 +1602,11 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
       details.push([EVENT_TRAILERS.commit, write.commit], [EVENT_TRAILERS.reason, "direct"])
       if (write.branch !== undefined) details.push([EVENT_TRAILERS.branch, write.branch])
       keeps = [write.commit]
+    } else if (write.type === "notified" && write.issueEffect !== undefined) {
+      const anchor = await readRetainedEvent(chain, write.issueEffect.mergedEvent)
+      assertIssueEffectAnchor(ref, "pending", write.issueEffect, anchor, new Map(events.map((event, index) => [event.id, index])), events.length)
+      details.push([EVENT_TRAILERS.issueEffect, JSON.stringify(checkedIssueEffect(write.issueEffect, ref))])
+      keeps = [write.issueEffect.mergedEvent]
     } else if (write.type === "notified") {
       details.push(
         [EVENT_TRAILERS.for, write.notice.for],
