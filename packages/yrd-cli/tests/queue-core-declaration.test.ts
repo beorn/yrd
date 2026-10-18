@@ -23,7 +23,7 @@ import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import * as fs from "node:fs"
 import * as removely from "removely"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import {
   CHANGE_STATUSES,
@@ -1191,7 +1191,17 @@ describe("a queue is the selected origin branch carrying config", () => {
       { expect: endings[0]! },
     )
     const remote = join(dirname(repo), "remote.git")
-    const queue = `${remote}#${queueBranch}`
+    const hosted = "https://yrd-protocol.test/org/queue.git"
+    const queue = "yrd-protocol.test/org/queue#release"
+    // Keep the earlier native history checks, then exercise the same printed inspections through
+    // the real declared root-v1 producer. Its observation is asserted after execution from outside.
+    const executable = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin/git-super")
+    const transportConfig = join(dirname(repo), "protocol-transport.gitconfig")
+    await git(["config", "--file", transportConfig, `url.${remote}.insteadOf`, hosted])
+    await git(["config", `url.${remote}.insteadOf`, hosted])
+    await git(["remote", "set-url", "origin", hosted])
+    await git(["config", "yrd.git", JSON.stringify({ executable, contract: "root-v1" })])
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: transportConfig, GIT_CONFIG_NOSYSTEM: "1" }
     const inspections: { argv: readonly string[]; cwd: string; recipe: string }[] = []
     const formatCommand: NonNullable<YrdCliIO["formatYrdCommand"]> = (argv, cwd) => {
       const recipe = `cd ${shellQuote(cwd)} && ${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`
@@ -1215,6 +1225,7 @@ describe("a queue is the selected origin branch carrying config", () => {
             {
               queue: queueBranch,
               workdir,
+              env,
               watchSource: (source) => sources.push(source),
             },
           ),
@@ -1235,9 +1246,9 @@ describe("a queue is the selected origin branch carrying config", () => {
             repo,
             human.io,
             command === "list" ? { command, all: true, terms: [branch] } : { command, branch },
-            { queue: queueBranch, workdir },
+            { queue: queueBranch, workdir, env },
           ),
-          human.stderr(),
+          `${human.stderr()}\n${human.stdout()}`,
         ).toBe(0)
         text = human.stdout()
         expect(text).toContain("contradictory endings")
@@ -1250,9 +1261,20 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect(text).toContain(inspection.recipe)
       }
       // Execute the displayed recipe, rather than reconstructing its argv at the assertion.
-      const inspected = spawnSync("/bin/sh", ["-c", inspections[0]!.recipe], { cwd: dirname(repo), encoding: "utf8" })
+      const inspected = spawnSync("/bin/sh", ["-c", inspections[0]!.recipe], {
+        cwd: dirname(repo),
+        env,
+        encoding: "utf8",
+      })
       expect(inspected.status, inspected.stderr).toBe(0)
-      expect((JSON.parse(inspected.stdout) as { changes: readonly unknown[] }).changes).toHaveLength(3)
+      // The accepted routing contract includes the declared backend, not only a filename or formatter callback.
+      // Native-only fixture reads would miss a printed inspection that loses the selected root-v1 protocol.
+      const inspectedData = JSON.parse(inspected.stdout) as {
+        changes: readonly unknown[]
+        observation: { contract: string; outcome: string }
+      }
+      expect(inspectedData.changes).toHaveLength(3)
+      expect(inspectedData.observation).toMatchObject({ contract: "root-v1", outcome: "observed" })
       expect(inspected.stdout).toContain(merge)
       expect(inspected.stdout).toContain(laterMerge)
       expect(await remoteGit(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(beforeInspection)
