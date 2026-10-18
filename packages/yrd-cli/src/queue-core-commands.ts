@@ -98,7 +98,6 @@ import {
   gitIn,
   incidentIn,
   incidentLine,
-  isAncestor,
   journalKey,
   queueName,
   resolveGitSelection,

@@ -2302,16 +2302,14 @@ describe("a queue is the selected origin branch carrying config", () => {
         const rootOnly = JSON.parse(await run("1234", false)) as Report
         expect(rootOnly).toMatchObject({ eligible: [], removed: [], failed: [] })
         expect(rootOnly.mode).toContain('No branches matched issue key "1234"')
-        expect(rootOnly.kept).toEqual([
-          ...[repo, ...children].map((store) =>
+        expect(rootOnly.kept).toEqual([repo, ...children].map((store) =>
             expect.objectContaining({
               repo: store,
               branch,
               reason: "mismatch",
               detail: expect.stringContaining(recordedIssue),
             }),
-          ),
-        ])
+          ))
         // Receipt-only mismatches cannot become a child hold on another selected root.
         const unrelated = "task/1234-unrecorded"
         await git(["branch", unrelated, rootTip])
