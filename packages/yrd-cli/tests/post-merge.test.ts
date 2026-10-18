@@ -213,6 +213,7 @@ it.each([
   { mode: "observed-ff" },
   { mode: "observed-after-target" },
   { mode: "observed-stacked" },
+  { mode: "observed-stacked-merge" },
   { mode: "observed-merge" },
   { mode: "observed-legacy" },
   { mode: "provider-lost-reply" },
@@ -344,7 +345,7 @@ it.each([
     await queue("task/first", "first\n\nCloses: issue-first")
     const firstSubmittedHead = (await git(["rev-parse", "task/first"])).trim()
     let firstObservedMerge = firstSubmittedHead
-    if (mode === "observed-stacked") {
+    if (mode === "observed-stacked" || mode === "observed-stacked-merge") {
       await git(["checkout", "--quiet", "-b", "task/aa-stacked", "task/first"])
       writeFileSync(join(repo, "stacked.txt"), "upper source")
       await git(["add", "stacked.txt"])
@@ -355,7 +356,13 @@ it.each([
         target: { remote: "origin", branch: "main" },
       })
       await git(["checkout", "--quiet", "main"])
-      await git(["push", "--quiet", "origin", "task/aa-stacked:refs/heads/main"])
+      if (mode === "observed-stacked-merge") {
+        await git(["merge", "--quiet", "--no-ff", "task/aa-stacked", "-m", "deliver the whole stack"])
+        firstObservedMerge = (await git(["rev-parse", "HEAD"])).trim()
+        await git(["push", "--quiet", "origin", "main"])
+      } else {
+        await git(["push", "--quiet", "origin", "task/aa-stacked:refs/heads/main"])
+      }
     } else if (mode === "observed-merge") {
       writeFileSync(join(repo, "unrelated.txt"), "target-only intent")
       await git(["add", "unrelated.txt"])
@@ -480,6 +487,32 @@ it.each([
       ).toBe(0)
     } finally {
       stop.abort()
+    }
+    if (mode === "observed-stacked-merge") {
+      const before = readFileSync(closeCalls, "utf8").trim().split("\n")
+      expect(before).toHaveLength(3)
+      expect((await readStatus(store, "main", "task/aa-stacked")).merge).toBe(firstObservedMerge)
+      await using runner = createPostMerge({
+        workdir,
+        cwd: repo,
+        git,
+        store,
+        cleanup: async () => {},
+        report: (message) => diagnostics.push(message),
+      })
+      runner.nudge({
+        ...context,
+        target: firstObservedMerge,
+        merged: ["task/aa-stacked"],
+        projectRoot: repo,
+        queueBranch: "main",
+      })
+      await runner[Symbol.asyncDispose]()
+      expect(
+        readFileSync(closeCalls, "utf8").trim().split("\n"),
+        "an upper-only rerun must not repeat the lower issue's close",
+      ).toEqual(before)
+      return
     }
     if (mode === "observed-legacy") {
       const before = (await readBranchHistory(store, "main", "task/first")).history!
