@@ -184,6 +184,37 @@ export type RunnerFacts = Readonly<{
   roundLockHolder?: RoundLockHolder
 }>
 
+/**
+ * What a machine reader is told about a run whose projection artifact is
+ * absent. The journal-level reasons are the reader's own; `not-yet-written` is
+ * the runner's, and it is only said when the runner's state proves the run is
+ * still provisioning — its writer has journal facts to fold and has not
+ * written them yet (@yrd/29994).
+ */
+export type ProjectionFallbackReport = Readonly<{
+  run: string
+  reason: JournalProjectionFallback["reason"] | "not-yet-written"
+  detail: string
+  /** The runner state the claim was made from, when the claim is about timing rather than a fault. */
+  runnerState?: RunnerState
+}>
+
+/**
+ * An absent projection is two different facts. While the runner is still
+ * provisioning, the run has not written the artifact yet: calling that
+ * `missing` reads as a broken instrument, and a seat correctly stops the line
+ * to report it (@yrd/29994, twice in 25 minutes). Past provisioning the
+ * absence IS the fault, and stays `missing` and loud.
+ */
+export function projectionFallbackReport(
+  fallback: JournalProjectionFallback | undefined,
+  state: RunnerState,
+): ProjectionFallbackReport | undefined {
+  if (fallback === undefined) return undefined
+  if (fallback.reason !== "missing" || state !== "provisioning") return fallback
+  return { ...fallback, reason: "not-yet-written", runnerState: state }
+}
+
 /** The document's flow fact, when it states one with waiting changes; an older writer states none. */
 function runnerFlow(document: QueueHealthDocument): RunnerFlow | undefined {
   const flow = document.facts?.flow

@@ -358,6 +358,53 @@ describe("event queue observation refusals", () => {
     expect(completedDocument.runner.projectionFallback).toBeUndefined()
   })
 
+  // 29994: a run that is still provisioning has not written its projection yet.
+  // Naming that `missing` reads as a broken instrument, and two seats correctly
+  // stopped the line over it in 25 minutes. The runner's own state decides the
+  // word: `not-yet-written` while provisioning, `missing` past it.
+  it("names a provisioning run's unwritten projection, and keeps missing past provisioning (29994)", async () => {
+    const w = await world()
+    await change(w, "task/provisioning", false)
+    await drain(w)
+    const logs = join(w.workdir, "logs")
+    const run = readdirSync(logs)
+      .filter((name) => name.endsWith(".jsonl"))
+      .sort()
+      .at(-1)!
+      .slice(0, -".jsonl".length)
+    // A run the listing does not read — no change event points at it — and newer
+    // than the round just drained, so the runner's own read falls back to a raw
+    // journal whose projection artifact does not exist yet.
+    const pending = "q-20261018T235959000Z-5eedface"
+    writeFileSync(join(logs, `${pending}.jsonl`), readFileSync(join(logs, `${run}.jsonl`)))
+    writeFileSync(
+      join(w.workdir, "round.lock"),
+      JSON.stringify({ pid: process.pid, command: "yrd", since: new Date().toISOString() }),
+    )
+
+    const provisioning = capture(w.work)
+    expect(
+      await coreQueueCommand(w.work, provisioning.io, { command: "list" }, { json: true, workdir: w.workdir }),
+    ).toBe(0)
+    const whileProvisioning = JSON.parse(provisioning.stdout()) as {
+      runner: { state: string; projectionFallback?: { run: string; reason: string; runnerState?: string } }
+    }
+    expect(whileProvisioning.runner.state).toBe("provisioning")
+    expect(whileProvisioning.runner.projectionFallback).toMatchObject({
+      run: pending,
+      reason: "not-yet-written",
+      runnerState: "provisioning",
+    })
+
+    // The lock is gone, so nothing claims provisioning: the same absent
+    // artifact is a real fault and must stay `missing`, loudly.
+    rmSync(join(w.workdir, "round.lock"))
+    const past = capture(w.work)
+    expect(await coreQueueCommand(w.work, past.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    const afterProvisioning = JSON.parse(past.stdout()) as typeof whileProvisioning
+    expect(afterProvisioning.runner.projectionFallback).toMatchObject({ run: pending, reason: "missing" })
+  })
+
   // AC (28918): a source-changed artifact is repaired ONLY once its round's
   // writer is proven gone, and the proof is made by the CLI and injected into
   // the reader. The journal header's pid is edited to name no process — the
