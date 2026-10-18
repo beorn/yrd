@@ -68,14 +68,14 @@ export async function readBranchProtections(
 function linkedWorktreeAdmin(
   commonDirectory: string,
   checkoutPath: string,
-): { adminDirectory: string | null; adminDirectoryExists: boolean } {
+): { adminDirectory: string | null; adminDirectoryExists: boolean; adminParent: string } {
   const parent = join(commonDirectory, "worktrees")
   let names: string[]
   try {
     names = readdirSync(parent)
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
-      return { adminDirectory: null, adminDirectoryExists: false }
+      return { adminDirectory: null, adminDirectoryExists: false, adminParent: parent }
     }
     throw cause
   }
@@ -89,12 +89,17 @@ function linkedWorktreeAdmin(
       if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue
       throw cause
     }
-    if (pointed === needle) return { adminDirectory, adminDirectoryExists: true }
+    if (pointed === needle) return { adminDirectory, adminDirectoryExists: true, adminParent: parent }
   }
-  return { adminDirectory: null, adminDirectoryExists: false }
+  return { adminDirectory: null, adminDirectoryExists: false, adminParent: parent }
 }
 
-type GoneCheckout = { path: string; adminDirectory: string | null; adminDirectoryExists: boolean }
+type GoneCheckout = {
+  path: string
+  adminDirectory: string | null
+  adminDirectoryExists: boolean
+  adminParent: string
+}
 
 type CheckoutDiscovery = {
   selection: GitSelection

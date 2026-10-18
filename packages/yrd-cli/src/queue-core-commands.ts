@@ -1795,9 +1795,10 @@ export async function coreQueueCommand(
               .map((row) => `\nSkipped ${row.repo}: not materialized (checkout Git pointer and private store absent)`)
               .join("") +
             report.gone
-              .map(
-                (row) =>
-                  `\n${row.path}: gone (worktree admin directory ${row.adminDirectory ?? "not found"} ${row.adminDirectoryExists ? "still exists" : "is absent"}; module stores were not inspected)`,
+              .map((row) =>
+                row.adminDirectoryExists
+                  ? `\n${row.path}: gone (worktree admin directory ${row.adminDirectory} still exists; module stores were not inspected)`
+                  : `\n${row.path}: gone (no admin directory under ${row.adminParent} points at it; module stores were not inspected)`,
               )
               .join("") +
             report.excluded
