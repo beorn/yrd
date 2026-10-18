@@ -46,6 +46,7 @@ import type { LocalBranchProtectionResult, YrdCliIO } from "./types.ts"
 import { originHead } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
 import { admitEnvironmentClose } from "./env-close-holders.ts"
+import { formatYrdCommand } from "./command-format.ts"
 
 /** Ordinary cleanup permits an explicitly standalone host; missing wiring is not that declaration. */
 export async function readBranchProtections(
@@ -686,7 +687,38 @@ export async function releaseRetainedCheckouts(
   }
   const protect = async ({ row, checkout }: Candidate): Promise<readonly string[]> => {
     const admission = await admitEnvironmentClose(checkout, io)
-    if (admission.kind !== "admitted") return [`needs-delegation: ${admission.refusal}`]
+    if (admission.kind !== "admitted") {
+      // The drop path has no delegation target of its own, so the hold must
+      // name the cure that exists: the same command re-run from a context
+      // whose census can read every same-UID pid (e.g. outside a sandbox
+      // restricting /proc reads). The census receipt rides along so the
+      // capable context can compare coverage; the uncleared pids stay named
+      // in the refusal — an unreadable pid is never treated as absent.
+      const census = admission.census
+      const rerun = formatYrdCommand(
+        io,
+        [
+          "drop",
+          request.branch,
+          "--local",
+          "--tip",
+          request.tip,
+          "--issue",
+          request.issue,
+          "--reason",
+          request.reason,
+          "--release-checkout",
+          ...(request.submodules === true ? ["--submodules"] : []),
+          ...(request.apply === true ? ["--apply"] : []),
+        ],
+        input.repo,
+      )
+      return [
+        `needs-delegation: ${admission.refusal}; census ${census.mechanism}: ${census.rows} readable, ${census.unreadable} unreadable, ${census.uncleared} uncleared. ` +
+          `This caller cannot certify the release; re-run from a context that can read every same-UID pid (outside any sandbox restricting /proc reads): ${rerun}. ` +
+          `The admission there is unchanged: a process holding the checkout still refuses`,
+      ]
+    }
     if (io.liveEnvironmentUse === undefined) {
       throw new Error("release-checkout requires the liveEnvironmentUse authority reader")
     }

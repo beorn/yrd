@@ -5136,6 +5136,61 @@ describe("drop --local --release-checkout", () => {
     expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
     expect(await fixture.git(["for-each-ref", "refs/archive/"])).toBe("")
   })
+  /** @failure A sandboxed caller's incomplete census holds a clean merged
+   * branch forever with no named cure (29772): the held receipt must carry
+   * the uncleared pids, the census receipt, and the capable-context re-run
+   * command — while still retiring nothing.
+   * @level l2 @consumer releaseRetainedCheckouts callers, including the CLI
+   */
+  it("29772: an uncleared unreadable pid holds the release and the receipt names the capable-context cure", async () => {
+    const fixture = await releaseWorld()
+    const actual = await vi.importActual<typeof import("removely")>("removely")
+    const observed = await actual.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2000 })
+    const uncleared = {
+      pid: 424242,
+      uid: typeof process.getuid === "function" ? process.getuid() : 0,
+      comm: "session-host",
+      denied: ["cwd"] as const,
+      issues: [{ source: "cwd" as const, resource: "cwd", reason: "denied" as const, code: "EACCES" }],
+    }
+    const spy = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue({
+      ...observed,
+      rows: [],
+      coverage: { ...observed.coverage, complete: false, unreadable: [uncleared] },
+    } as never)
+    try {
+      const output = releaseCapture(fixture.repo)
+      const report = await releaseRetainedCheckouts({
+        repo: fixture.repo,
+        git: fixture.git,
+        selection: fixture.git.selection,
+        io: output.io,
+        log: { write: vi.fn() },
+        queue: "main",
+        remote: "origin",
+        issueIdentity: (value) => value,
+        request: { branch: fixture.branch, tip: fixture.tip, issue: "29600", reason: "retain checkout", by: "fixture" },
+      })
+      expect(report.removed).toHaveLength(0)
+      expect(report.eligible).toHaveLength(0)
+      expect(report.kept).toHaveLength(1)
+      const detail = report.kept[0]?.detail ?? ""
+      // The pid and its denial stay named (never treated as absent)…
+      expect(detail).toContain("needs-delegation")
+      expect(detail).toContain("pid 424242 session-host (EACCES)")
+      // …the census receipt rides along…
+      expect(detail).toContain("census proc: 0 readable, 1 unreadable, 1 uncleared")
+      // …and the cure is the exact re-run from a capable context.
+      expect(detail).toContain(`yrd 'drop' 'task/29600-retained' '--local' '--tip' '${fixture.tip}'`)
+      expect(detail).toContain("--release-checkout")
+      expect(detail).toContain("can read every same-UID pid")
+      // Nothing was archived or deleted under an uncertified census.
+      expect(await fixture.git(["for-each-ref", "refs/archive/"])).toBe("")
+      expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
   // Accepted recovery contract: a real partial ref-deletion failure must remain
   // resumable through the same CLI, with exactly one final custody event.
   // The earlier golden path and single-checkout refusals never partially retire.
