@@ -325,6 +325,11 @@ type WatchPaneProps = {
   onEnding?: (code: 0 | 1 | 2) => void
 }
 
+/** Source-specific queue authority wins; the pane supplies context only when the source has none. */
+function viewerFormatCommand(source: WatchSource | undefined, fallback: WatchPaneProps["formatCommand"]) {
+  return source?.formatCommand ?? fallback
+}
+
 export function WatchPane(props: WatchPaneProps) {
   const source = props.sources?.length === 1 ? props.sources[0] : undefined
   if (source !== undefined) {
@@ -333,7 +338,7 @@ export function WatchPane(props: WatchPaneProps) {
         <SingleWatchPane
           {...props}
           snapshot={source.snapshot ?? props.snapshot}
-          formatCommand={source.formatCommand ?? props.formatCommand}
+          source={source}
           initialFailure={
             props.initialFailure ?? (source.error === undefined ? undefined : { at: new Date(), message: source.error })
           }
@@ -545,7 +550,7 @@ function QueuesWatchPane({
         snapshot: reading,
         digit: source.digit,
         kind: "runner",
-        line: runnerOf(reading, at, source.formatCommand),
+        line: runnerOf(reading, at, viewerFormatCommand(source, props.formatCommand)),
         key: `${source.id}:runner`,
       } as WatchPaneItem,
     ]
@@ -659,7 +664,7 @@ function QueuesWatchPane({
           key={selectedSource.id}
           {...props}
           snapshot={focusedSnapshot}
-          formatCommand={selectedSource.formatCommand}
+          source={selectedSource}
           readFailure={selectedError === undefined ? undefined : { at: new Date(), message: selectedError }}
           initialKey={focus?.rowKey}
           navigationSerial={focus?.serial}
@@ -688,7 +693,7 @@ function QueuesWatchPane({
                   queueDigit={multiple ? source.digit : undefined}
                   queueFirst
                   status={{
-                    ...queueLineStatus(source.snapshot, at, source.formatCommand),
+                    ...queueLineStatus(source.snapshot, at, viewerFormatCommand(source, props.formatCommand)),
                     timer: (
                       <LiveStatusTimer
                         snapshot={source.snapshot}
@@ -737,7 +742,10 @@ function QueuesWatchPane({
                 rows={rows}
                 columns={columns - 2}
                 snapshot={snapshot}
-                formatCommand={sources.find((source) => source.snapshot?.queue === snapshot.queue)?.formatCommand}
+                formatCommand={viewerFormatCommand(
+                  sources.find((source) => source.snapshot?.queue === snapshot.queue),
+                  props.formatCommand,
+                )}
                 multipleQueues={multiple}
                 empty={visible.length === 0 ? "no queues visible — press a to show all" : "nothing in line"}
                 cursor={cursor}
@@ -774,7 +782,7 @@ function QueuesWatchPane({
 function SingleWatchPane({
   snapshot,
   formatCommand: suppliedFormatCommand,
-  sources,
+  source,
   initialKey,
   navigationSerial,
   queueShortcuts = true,
@@ -792,9 +800,9 @@ function SingleWatchPane({
   now: nowProp,
   live = true,
   onEnding,
-}: WatchPaneProps) {
+}: WatchPaneProps & { source?: WatchSource }) {
   // A declared source can acquire its viewer context after its first read recovers.
-  const formatCommand = (sources?.length === 1 ? sources[0]?.formatCommand : undefined) ?? suppliedFormatCommand
+  const formatCommand = viewerFormatCommand(source, suppliedFormatCommand)
   const liveNow = useNow()
   const now = nowProp ?? liveNow
   const { columns, rows: terminalRows } = useWindowSize()
@@ -1264,7 +1272,7 @@ function SingleWatchPane({
       outputs={outputs}
     />
   ) : draft !== undefined ? (
-    <DraftDetail row={draft} />
+    <DraftDetail row={draft} localHead={selected?.localHead} formatCommand={formatCommand} />
   ) : (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       {detailFailure === undefined || detailFailure.key !== selectedKey ? null : (
@@ -1624,7 +1632,15 @@ function readFailureLine(what: string, failure: ReadFailure, still = ""): string
  * A draft, opened: what its row knows and what would make it a change. Drawn
  * from the row alone; a draft has no records, checks or diff to read.
  */
-function DraftDetail({ row }: { row: Row }) {
+function DraftDetail({
+  row,
+  localHead,
+  formatCommand,
+}: {
+  row: Row
+  localHead?: string
+  formatCommand: WatchPaneProps["formatCommand"]
+}) {
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}>
       <Text bold wrap="truncate">
@@ -1644,7 +1660,15 @@ function DraftDetail({ row }: { row: Row }) {
           {row.author === undefined ? "" : ` by ${row.author}`}
         </Text>
       )}
-      <Text wrap="wrap">run yrd submit {row.branch} to queue this head</Text>
+      <Text wrap="wrap">
+        {formatCommand === undefined
+          ? `Submit command unavailable in this view; select a checkout containing ${row.branch}.`
+          : localHead === undefined
+            ? `first fetch ${row.branch} into a local branch in the selected checkout before submitting this head`
+            : localHead !== row.head
+              ? `${row.branch} points to ${localHead.slice(0, 12)} locally; select a checkout with the displayed head before submitting`
+              : `run ${formatCommand(["submit", row.branch])} to queue this head`}
+      </Text>
     </Box>
   )
 }

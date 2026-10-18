@@ -1,15 +1,18 @@
 /**
  * @reach fs-walk <fixture-only: submit refusal runs against a temporary local repository>
- * @failure yrd submit meets an unreadable queue event shape and fails with internal errors instead of naming version skew and the @in main command
- * @level   l1
+ * @failure An unreadable queue produces a host-specific retry or invents a current executable without host authority.
+ * @level   l2
  * @consumer seats running yrd submit when the worktree's yrd is older than the queue's writer
  * @testonly none
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { fileURLToPath } from "node:url"
+import { afterAll, describe, expect, it, vi } from "vitest"
+import { shellQuote } from "git-super/shell-command"
 import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
@@ -29,7 +32,8 @@ type World = Readonly<{
 
 async function yrd(
   work: string,
-  ...args: string[]
+  args: readonly string[],
+  formatYrdCommand?: YrdCliIO["formatYrdCommand"],
 ): Promise<
   Readonly<{
     exitCode: YrdCliExitCode
@@ -44,6 +48,7 @@ async function yrd(
     localBranchProtections: null,
     color: false,
     cwd: work,
+    ...(formatYrdCommand === undefined ? {} : { formatYrdCommand }),
     stdout: (text) => {
       stdout += text
     },
@@ -59,7 +64,7 @@ async function world(): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-submit-skew-"))
   roots.push(root)
   const remote = join(root, "remote.git")
-  const work = join(root, "work")
+  const work = join(root, "work's checkout")
   const seed = gitIn(root)
   await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
   await seed(["clone", "--quiet", remote, work])
@@ -79,7 +84,7 @@ async function world(): Promise<World> {
 }
 
 describe("yrd submit refusal when queue carries an unreadable event shape (#26814)", () => {
-  it("diagnoses version skew and names the command to run from main when queue event type is unknown", async () => {
+  it("diagnoses version skew and uses the selected host retry when queue event type is unknown", async () => {
     const w = await world()
     const git = gitIn(w.work)
     await git(["fetch", "--quiet", "origin", "refs/yrd/main/queue:refs/yrd/main/queue"])
@@ -109,13 +114,29 @@ describe("yrd submit refusal when queue carries an unreadable event shape (#2681
     await git(["add", "change.txt"])
     await git(["commit", "--quiet", "-m", "task/future-skew: change"])
 
-    const res = await yrd(w.work, "submit", "task/future-skew", "--submitter", "@dev/13")
+    const executable = join(w.root, "root-v1")
+    symlinkSync(process.execPath, executable)
+    const entry = fileURLToPath(new URL("../../../bin/yrd.ts", import.meta.url))
+    const format = vi.fn(
+      (args: readonly string[], cwd: string) =>
+        `cd ${shellQuote(cwd)} && ${[executable, entry, ...args].map(shellQuote).join(" ")}`,
+    )
+    const args = ["submit", "task/future-skew", "--submitter", "fixture"]
+    const res = await yrd(w.work, args, format)
     expect(res.exitCode, res.report).toBe(2)
     expect(res.stderr, res.report).toContain("this CLI is older than the queue's writer")
-    expect(res.stderr, res.report).toContain("@in main -- bun yrd 'submit' 'task/future-skew' '--submitter' '@dev/13'")
+    expect(res.stderr, res.report).toContain("current build of Yrd")
+    expect(res.stderr, res.report).not.toContain("@in")
+    expect(format).toHaveBeenCalledExactlyOnceWith(args, w.work)
+    const printed = res.stderr.split("After selecting a current build, retry:\n  ")[1]?.split("\n")[0]
+    expect(printed, res.report).toBeDefined()
+    const retried = spawnSync("bash", ["-c", printed!], { cwd: w.root, encoding: "utf8" })
+    // The fixture deliberately retains the future writer: the printed retry must reach that queue from outside it.
+    expect(retried.status, retried.stderr).toBe(2)
+    expect(retried.stderr).toContain("this CLI is older than the queue's writer")
   })
 
-  it("diagnoses version skew and names the command to run from main when merge-fenced writer fails validation", async () => {
+  it("diagnoses version skew without inventing a retry executable when merge-fenced writer fails validation", async () => {
     const w = await world()
     const git = gitIn(w.work)
     await git(["fetch", "--quiet", "origin", "refs/yrd/main/queue:refs/yrd/main/queue"])
@@ -146,11 +167,11 @@ describe("yrd submit refusal when queue carries an unreadable event shape (#2681
     await git(["add", "change.txt"])
     await git(["commit", "--quiet", "-m", "task/fence-skew: change"])
 
-    const res = await yrd(w.work, "submit", "task/fence-skew", "--submitter", "@dev/13", "--dry-run")
+    const res = await yrd(w.work, ["submit", "task/fence-skew", "--submitter", "fixture", "--dry-run"])
     expect(res.exitCode, res.report).toBe(2)
     expect(res.stderr, res.report).toContain("this CLI is older than the queue's writer")
-    expect(res.stderr, res.report).toContain(
-      "@in main -- bun yrd 'submit' 'task/fence-skew' '--submitter' '@dev/13' '--dry-run'",
-    )
+    expect(res.stderr, res.report).toContain("repeat this invocation with a current build of Yrd")
+    expect(res.stderr, res.report).not.toContain("@in")
+    expect(res.stderr, res.report).not.toContain("\n  ")
   })
 })

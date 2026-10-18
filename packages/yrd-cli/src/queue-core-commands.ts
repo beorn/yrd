@@ -13,6 +13,7 @@
  * add a line it does not need. The incumbent went at M6; the switch goes here.
  */
 
+import { shellQuote } from "git-super/shell-command"
 import {
   existsSync,
   appendFileSync,
@@ -123,6 +124,7 @@ import {
   prepareSubmit,
   inspectSubmitAtHead,
   preparePinCarrier,
+  PinCarrierConflict,
   freshnessLine,
   readRemoteCommit,
   readRemoteCommits,
@@ -149,6 +151,7 @@ import {
   type QueueReadStore,
   type OverrideTable,
   type PinCarrierPin,
+  type PreparedPinCarrier,
   notifyOutsideRound,
   notifyRetiredRoot,
   notifyEnvRetired,
@@ -1374,6 +1377,23 @@ export async function coreQueueCommand(
         `the change waits in line and is judged once the stop lifts; ${await stopGuidance(stop)}\n`,
     )
   }
+  const submitWithInspection = async (
+    author: Parameters<typeof submit>[0],
+    remote: string,
+    submission: Parameters<typeof submit>[2],
+  ): Promise<Submitted> => {
+    try {
+      return await submit(author, remote, submission)
+    } catch (error) {
+      if (transientPush5xxOf(error) !== undefined) {
+        const queue = formatStoredQueueAddress(queueName(submission.target, await remoteUrl(author, remote)))
+        io.stderr(
+          `Inspect the submission before retrying: ${formatQueueCommand(io, queue, ["queue", "show", submission.branch, "--json"])}\n`,
+        )
+      }
+      throw error
+    }
+  }
   const echoAdmission = (outcome: AdmissionOutcome, dryRun = false): void => {
     if (outcome.kind === "warn") {
       io.stderr(
@@ -2062,9 +2082,11 @@ export async function coreQueueCommand(
         // the ambiguity, so the operator reads the standing state before retrying.
         const exhausted = transientPush5xxOf(error)
         if (exhausted !== undefined) {
+          const queue = formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))
+          const inspect = formatQueueCommand(io, queue, ["queue", "list", "--json"])
           io.stderr(
             `yrd: GitHub returned ${exhausted.line} on the ${request.command} of ${targetLabel}; ` +
-              "it may or may not have been recorded. Read the standing pause state (yrd pause) before retrying.\n",
+              `it may or may not have been recorded. Read the standing pause state (${inspect}) before retrying.\n`,
           )
           return 1
         }
@@ -2348,14 +2370,33 @@ export async function coreQueueCommand(
         if (request.issue === undefined) throw new Error("--gitlink needs --issue <id>")
         if (options.populateReference !== true) throw new Error("--gitlink needs the queue-owned clone")
         const canonicalIssue = request.issue
-        const prepared = await preparePinCarrier({
-          git,
-          repo,
-          target: config.target,
-          issue: canonicalIssue,
-          pins: request.pins,
-          env: env ?? process.env,
-        })
+        let prepared: PreparedPinCarrier
+        try {
+          prepared = await preparePinCarrier({
+            git,
+            repo,
+            target: config.target,
+            issue: canonicalIssue,
+            pins: request.pins,
+            env: env ?? process.env,
+          })
+        } catch (error) {
+          if (!(error instanceof PinCarrierConflict)) throw error
+          const queue = formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))
+          const inspection = (() => {
+            const holderKind = error.holderKind
+            switch (holderKind) {
+              case "change":
+                return formatQueueCommand(io, queue, ["queue", "show", error.branch])
+              case "branch":
+                return `git -C ${shellQuote(repo)} ls-remote ${shellQuote(config.target.remote)} ${shellQuote(`refs/heads/${error.branch}`)}`
+            }
+            const unreachable: never = holderKind
+            throw new Error(`pin carrier ${error.branch}: unknown holder kind ${String(unreachable)}`)
+          })()
+          io.stderr(`yrd: ${error.message}; inspect: ${inspection}\n`)
+          return 2
+        }
         const submission = {
           branch: prepared.branch,
           submitter: request.submitter,
@@ -2403,7 +2444,7 @@ export async function coreQueueCommand(
         }
         let submitted
         try {
-          submitted = await submit(git, config.target.remote, submission)
+          submitted = await submitWithInspection(git, config.target.remote, submission)
         } catch (cause) {
           try {
             await removeCarrierRef()
@@ -2507,7 +2548,7 @@ export async function coreQueueCommand(
         echoAdmission(inspected.admission, true)
         return 0
       }
-      const submitted = await submit(git, config.target.remote, submission)
+      const submitted = await submitWithInspection(git, config.target.remote, submission)
       await notifyAdmissionWarning(submitted, request.submitter)
       const { stop: acceptedUnder, ...accepted } = submitted
       emit(
@@ -2612,7 +2653,7 @@ export async function coreQueueCommand(
           return 2
         }
         const remote = request.author.remote ?? "origin"
-        const submitted = await submit(author, remote, {
+        const submitted = await submitWithInspection(author, remote, {
           branch,
           submitter: request.submitter,
           target: { branch: config.target.branch, remote },
@@ -3618,8 +3659,8 @@ export async function coreQueueCommand(
           const conflict = runnerConflictExit()
           if (conflict !== undefined) return conflict
           // A carrier that needs a remote ref owns its own startup condition.
-          // Keep the process and heartbeat alive while @chief activates an old
-          // queue's run index; no round may allocate a number before it exists.
+          // Keep the process and heartbeat alive while an existing
+          // queue awaits run-index activation; no round may allocate a number before it exists.
           if (!runIndexReady) {
             const precondition = await readRunIndexPrecondition(eventStore, config.target.branch)
             if (precondition.kind === "ready") {
@@ -3630,15 +3671,24 @@ export async function coreQueueCommand(
               if (precondition.kind === "corrupt") return stuck(precondition.message)
               if (precondition.kind === "missing") {
                 readFailure = undefined
-                const cure = `yrd runs activate <repo>@${config.target.branch}`
-                const why = `${requiredRunIndex} at ${config.target.remote} is absent for the existing queue; no round will run until @chief runs ${cure}`
+                const why = `${requiredRunIndex} at ${config.target.remote} is absent for the existing queue; no round will run until its run index is activated after the code carrier lands`
                 if (!runIndexWaitAnnounced) {
                   log?.warn?.(why, { ref: requiredRunIndex, remote: config.target.remote })
+                  let human = why
+                  if (options.json !== true) {
+                    const selected = parseQueueAddress(
+                      queueName(config.target, await remoteUrl(git, config.target.remote)),
+                    )
+                    human +=
+                      selected.kind === "remote"
+                        ? `\nActivate this queue: ${formatYrdCommand(io, ["runs", "activate", formatQueueAddress(selected)], io.cwd)}`
+                        : "\nThe selected repository has no portable remote address for activation; use its portable repository and queue identity after the carrier lands."
+                  }
                   emit(
                     io,
                     options.json,
                     { reason: "remote-precondition-missing", ref: requiredRunIndex, message: why },
-                    why,
+                    human,
                   )
                   runIndexWaitAnnounced = true
                 }
@@ -3650,7 +3700,7 @@ export async function coreQueueCommand(
                     code: "queue-remote-precondition-missing",
                     cause: why,
                     resolution: [
-                      `@chief: run ${cure} for this queue after its carrier lands.`,
+                      "Activate the run index for this queue after its code carrier lands.",
                       "No restart is needed. This service re-reads the remote ref and starts rounds when it appears.",
                     ],
                   },
@@ -3803,7 +3853,7 @@ export async function coreQueueCommand(
               const why = `${ref} at ${oid} remains on ${config.target.remote}; no queue round will run while it exists`
               if (legacyOverrideHeld !== `${ref}@${oid}`) {
                 log?.warn?.(why, { ref, oid, remote: config.target.remote })
-                io.stderr(`yrd: ${why}; @chief must verify, fold or delete the ref\n`)
+                io.stderr(`yrd: ${why}; verify, fold or delete the ref\n`)
                 legacyOverrideHeld = `${ref}@${oid}`
               }
               const alive = lineDocument(lastStop, 0)
@@ -3814,7 +3864,7 @@ export async function coreQueueCommand(
                   code: "legacy-override-present",
                   cause: why,
                   resolution: [
-                    `@chief: verify, fold or delete ${ref} at ${oid} before this queue judges another round.`,
+                    `Verify, fold or delete ${ref} at ${oid} before this queue judges another round.`,
                     "No restart is needed. This service re-reads the remote ref and resumes when it is absent.",
                   ],
                 },
@@ -4230,9 +4280,11 @@ export async function coreQueueCommand(
       const page = async (one: Awaited<ReturnType<typeof round>>): Promise<string> => {
         const { printListing } = await import("./watch-print.tsx")
         const single = one.rows.length === 1 ? one.rows[0] : undefined
-        const snapshot = snapshotOf(one)
+        const snapshot = await snapshotOf(one, repositoryHere(io.cwd), selection)
+        const formatCommand = (argv: readonly string[]) =>
+          formatQueueCommand(io, formatStoredQueueAddress(snapshot.queue), argv)
         const listing = await printListing(snapshot, {
-          formatCommand: (argv) => formatQueueCommand(io, formatStoredQueueAddress(snapshot.queue), argv),
+          formatCommand,
           color: io.color === true,
           columns: io.columns ?? 120,
           ...(one.scope === undefined ? {} : { scope: one.scope }),
@@ -4246,9 +4298,22 @@ export async function coreQueueCommand(
               }),
         })
         // Append after the bounded terminal render: recorded warnings must never be clipped by its height.
-        return [listing, ...one.rows.flatMap((item) => diagnosticLines(item.row, journalFor(item, one.journals)))].join(
-          "\n",
+        const warnedBranches = new Set(
+          one.rows.flatMap((item) => (item.row.diagnostic === undefined ? [] : [item.row.branch])),
         )
+        const recordedWarningBranches = new Set(
+          one.rows.flatMap((item) =>
+            (item.row.diagnostics ?? journalFor(item, one.journals)?.diagnostics)?.length ? [item.row.branch] : [],
+          ),
+        )
+        return [
+          listing,
+          ...one.rows.flatMap((item) => diagnosticLines(item.row, journalFor(item, one.journals))),
+          ...[...warnedBranches].map((branch) => `Raw events: ${formatCommand(["queue", "show", branch, "--json"])}`),
+          ...[...recordedWarningBranches].map(
+            (branch) => `Inspect matching rows: ${formatCommand(["queue", "list", "--all", "--json", branch])}`,
+          ),
+        ].join("\n")
       }
 
       if (request.watch !== true) {
@@ -4286,10 +4351,13 @@ export async function coreQueueCommand(
         let eventInvalid = first.eventInvalid
         let journals = first.journals
         let seen: Readonly<{ drafts?: Readonly<{ unread: readonly string[] }> }> = first
+        const formatCommand = (argv: readonly string[]) =>
+          formatQueueCommand(io, formatStoredQueueAddress(first.queue), argv)
+        const initialSnapshot = await snapshotOf(first, repositoryHere(io.cwd), selection)
         const source: WatchSource = {
           id: first.queue,
           label: formatStoredQueueAddress(first.queue),
-          formatCommand: (argv) => formatQueueCommand(io, formatStoredQueueAddress(first.queue), argv),
+          formatCommand,
           resolveRunAddress: async (operand) => {
             const selected = parseQueueAddress(first.queue)
             if (selected.kind !== "remote") {
@@ -4332,7 +4400,7 @@ export async function coreQueueCommand(
             eventChanges = next.eventChanges
             eventInvalid = next.eventInvalid
             journals = next.journals
-            return snapshotOf(next)
+            return snapshotOf(next, repositoryHere(io.cwd), selection)
           },
           loadDiff: (item) => readDiff(git, config, item),
           loadCommandOutput: (command) => Promise.resolve(readCommandOutput(command)),
@@ -4369,7 +4437,7 @@ export async function coreQueueCommand(
                 row: item.row,
                 run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run, item.run?.number),
                 checks: [],
-                note: `Raw events: yrd queue show ${item.row.branch} --json`,
+                note: `Raw events: ${formatCommand(["queue", "show", item.row.branch, "--json"])}`,
               })
             }
             if (selected === undefined) throw new Error(`event change ${item.row.branch} left the selected listing`)
@@ -4383,11 +4451,26 @@ export async function coreQueueCommand(
               journal,
               workdir,
             )
-            return journalNote === undefined
+            const diagnostics = item.row.diagnostics ?? journal?.diagnostics
+            const notes = [
+              detail.note,
+              journalNote,
+              ...(item.row.diagnostic === undefined
+                ? []
+                : [`Raw events: ${formatCommand(["queue", "show", item.row.branch, "--json"])}`]),
+              ...(diagnostics?.length
+                ? [`Inspect matching rows: ${formatCommand(["queue", "list", "--all", "--json", item.row.branch])}`]
+                : []),
+            ].filter((note) => note !== undefined)
+            return notes.length === 0
               ? detail
-              : { ...detail, note: [detail.note, journalNote].filter((note) => note !== undefined).join("; ") }
+              : {
+                  ...detail,
+                  ...(diagnostics === undefined ? {} : { row: { ...detail.row, diagnostics } }),
+                  note: notes.join("; "),
+                }
           },
-          snapshot: snapshotOf(first),
+          snapshot: initialSnapshot,
         }
         if (options.watchSource !== undefined) {
           options.watchSource(source)
@@ -4400,7 +4483,7 @@ export async function coreQueueCommand(
         const app = await run(
           createElement(WatchPane, {
             ...source,
-            snapshot: snapshotOf(first),
+            snapshot: initialSnapshot,
             intervalMs: Math.max(1, request.intervalSeconds ?? 5) * 1000,
             onEnding:
               request.terms === undefined || request.terms.length === 0
@@ -4850,8 +4933,12 @@ export async function coreQueueCommand(
         // The read is the issues interface's `view` at --project-root; issuesProvider.read is no longer consulted,
         // and a declaration in force that still holds it is told out loud (@cto 6a06588f).
         if (config.issuesProvider?.read !== undefined) {
+          const issueInspection =
+            request.branch !== undefined && options.projectRoot !== undefined
+              ? `Inspect issue display: ${formatQueueCommand(io, formatStoredQueueAddress(name), ["queue", "show", request.branch, "--project-root", options.projectRoot])}`
+              : "Choose one branch and its issues.yml project root to read the issue display."
           io.stderr(
-            "yrd: .yrd.yml issuesProvider.read: retired (29644 Y1) and ignored; the issue display is issues.yml's view, read by yrd queue show --project-root <root>; delete this key\n",
+            `yrd: .yrd.yml issuesProvider.read: retired and ignored; delete this key. The issue display reads issues.yml's view. ${issueInspection}\n`,
           )
         }
         const scope =
@@ -4874,6 +4961,28 @@ export async function coreQueueCommand(
             ...(declared.note === undefined ? {} : { note: declared.note }),
           })
         }
+        const selectedBranches = new Set(branches)
+        const historicalDiagnostics = new Set(
+          histories.flatMap((row) => (row.diagnostic === undefined ? [] : [row.diagnostic])),
+        )
+        const projectedWarnings =
+          options.json === true
+            ? []
+            : reading.all.flatMap((row) =>
+                row.diagnostic === undefined || !selectedBranches.has(row.branch)
+                  ? []
+                  : [{ branch: row.branch, diagnostic: row.diagnostic }],
+              )
+        const extraDiagnostics = [...new Set(projectedWarnings.map((row) => row.diagnostic))]
+          .filter((diagnostic) => !historicalDiagnostics.has(diagnostic))
+          .map((diagnostic) => `  diagnostic: ${diagnostic}`)
+        const inspectionLines =
+          options.json === true
+            ? []
+            : [...new Set(projectedWarnings.map((row) => row.branch))].map(
+                (branch) =>
+                  `Raw events: ${formatQueueCommand(io, formatStoredQueueAddress(name), ["queue", "show", branch, "--json"])}`,
+              )
         emit(
           io,
           options.json,
@@ -4894,66 +5003,72 @@ export async function coreQueueCommand(
           },
           histories.length === 0
             ? `no change for ${request.branch} on ${name}. ${scope}`
-            : histories
-                .map(({ events, ...row }, index) => {
-                  const view = views.get(`${row.branch}@${row.head}`)
-                  // #28195: the row’s stored diagnostic is its reverted-paths reason, and `show` renders
-                  // that reason in FULL exactly once, from the event that carries it. The raw event line
-                  // below states the same finding as the one-line summary, so the report is neither
-                  // dropped nor printed twice; `list` shows that one line and never the full reason.
-                  const reverted = events.flatMap((event) => {
-                    if (event.type !== "admission-warning") return []
-                    if (event.props.find(([key]) => key === "Warning-Kind")?.[1] !== "reverted-paths") return []
-                    const reason = event.props.find(([key]) => key === "Reason")?.[1]
-                    return reason === undefined ? [] : [reason]
-                  })
-                  return [
-                    rowLine({ row }),
-                    ...(view?.note === undefined ? [] : [`  (${view.note})`]),
-                    ...(view?.checks ?? []).flatMap(checkLines),
-                    ...(row.diagnostic === undefined ? [] : [`  diagnostic: ${row.diagnostic}`]),
-                    ...(reverted.length === 0 ? [] : [`  diagnostic: ${reverted.join("; ")}`]),
-                    `  queue: ${config.target.branch}`,
-                    ...events.map((event) => {
-                      const at = event.props.find(([key]) => key === "Time")?.[1]
+            : [
+                histories
+                  .map(({ events, ...row }, index) => {
+                    const view = views.get(`${row.branch}@${row.head}`)
+                    // #28195: the row’s stored diagnostic is its reverted-paths reason, and `show` renders
+                    // that reason in FULL exactly once, from the event that carries it. The raw event line
+                    // below states the same finding as the one-line summary, so the report is neither
+                    // dropped nor printed twice; `list` shows that one line and never the full reason.
+                    const reverted = events.flatMap((event) => {
+                      if (event.type !== "admission-warning") return []
+                      if (event.props.find(([key]) => key === "Warning-Kind")?.[1] !== "reverted-paths") return []
                       const reason = event.props.find(([key]) => key === "Reason")?.[1]
-                      const summarised =
-                        event.type === "admission-warning" &&
-                        event.props.find(([key]) => key === "Warning-Kind")?.[1] === "reverted-paths"
-                      // A warning the row’s own `diagnostic:` line already states is not repeated here: a
-                      // reverted-paths reason is printed there in full, and a policy or could-not-judge
-                      // sentence is folded into it. The raw JSON keeps every stored Reason verbatim.
-                      // The folded sentence is matched as a WHOLE `; `-separated segment that names the
-                      // admission and ends at the reason, never a bare substring: a short event reason
-                      // that merely occurs inside a longer, unrelated diagnostic must still print.
-                      const stated =
-                        reason !== undefined &&
-                        (reverted.includes(reason) ||
-                          (row.diagnostic !== undefined &&
-                            row.diagnostic
-                              .split("; ")
-                              .some((part) => part.startsWith("admission ") && part.endsWith(`: ${reason}`))))
-                      const detail = summarised
-                        ? row.revertWarning === undefined
-                          ? "the stored reason is the diagnostic above"
-                          : revertWarningLine(row)
-                        : stated
-                          ? "the stored reason is the diagnostic above"
-                          : reason
-                      return `  ${at ?? "Time absent"} ${event.type}${event.writer == null ? "" : ` by ${event.writer}`}${detail === undefined ? "" : ` — ${detail}`}`
-                    }),
-                    ...(index !== 0 || request.branch === undefined || reading.changes.get(request.branch) === undefined
-                      ? []
-                      : eventNoticeLines(reading.changes.get(request.branch) as EventChange)),
-                  ].join("\n")
-                })
-                .join("\n"),
+                      return reason === undefined ? [] : [reason]
+                    })
+                    return [
+                      rowLine({ row }),
+                      ...(view?.note === undefined ? [] : [`  (${view.note})`]),
+                      ...(view?.checks ?? []).flatMap(checkLines),
+                      ...(row.diagnostic === undefined ? [] : [`  diagnostic: ${row.diagnostic}`]),
+                      ...(reverted.length === 0 ? [] : [`  diagnostic: ${reverted.join("; ")}`]),
+                      `  queue: ${config.target.branch}`,
+                      ...events.map((event) => {
+                        const at = event.props.find(([key]) => key === "Time")?.[1]
+                        const reason = event.props.find(([key]) => key === "Reason")?.[1]
+                        const summarised =
+                          event.type === "admission-warning" &&
+                          event.props.find(([key]) => key === "Warning-Kind")?.[1] === "reverted-paths"
+                        // A warning the row’s own `diagnostic:` line already states is not repeated here: a
+                        // reverted-paths reason is printed there in full, and a policy or could-not-judge
+                        // sentence is folded into it. The raw JSON keeps every stored Reason verbatim.
+                        // The folded sentence is matched as a WHOLE `; `-separated segment that names the
+                        // admission and ends at the reason, never a bare substring: a short event reason
+                        // that merely occurs inside a longer, unrelated diagnostic must still print.
+                        const stated =
+                          reason !== undefined &&
+                          (reverted.includes(reason) ||
+                            (row.diagnostic !== undefined &&
+                              row.diagnostic
+                                .split("; ")
+                                .some((part) => part.startsWith("admission ") && part.endsWith(`: ${reason}`))))
+                        const detail = summarised
+                          ? row.revertWarning === undefined
+                            ? "the stored reason is the diagnostic above"
+                            : revertWarningLine(row)
+                          : stated
+                            ? "the stored reason is the diagnostic above"
+                            : reason
+                        return `  ${at ?? "Time absent"} ${event.type}${event.writer == null ? "" : ` by ${event.writer}`}${detail === undefined ? "" : ` — ${detail}`}`
+                      }),
+                      ...(index !== 0 ||
+                      request.branch === undefined ||
+                      reading.changes.get(request.branch) === undefined
+                        ? []
+                        : eventNoticeLines(reading.changes.get(request.branch) as EventChange)),
+                    ].join("\n")
+                  })
+                  .join("\n"),
+                ...extraDiagnostics,
+                ...inspectionLines,
+              ].join("\n"),
         )
         const projectRoot = options.projectRoot
         if (projectRoot === undefined) return 0
         if (request.all === true) {
           io.stderr(
-            `yrd: issue display: skipped for --all; use yrd queue show <branch> --project-root <root> for at most ${ISSUE_DISPLAY_READ_CAP} issue reads\n`,
+            `yrd: issue display: skipped for --all; choose one branch and its issues.yml project root for at most ${ISSUE_DISPLAY_READ_CAP} issue reads\n`,
           )
           return 0
         }
@@ -6032,7 +6147,7 @@ async function readDiff(git: Git, config: QueueConfig, item: WatchRow): Promise<
   }
 }
 
-function snapshotOf(
+async function snapshotOf(
   round: Readonly<{
     rows: readonly WatchRow[]
     unfiltered: readonly WatchRow[]
@@ -6047,15 +6162,27 @@ function snapshotOf(
     overrides?: readonly OverrideFact[]
     drafts?: Readonly<{ window: DraftWindow; unread: readonly string[]; older: number }>
   }>,
-): WatchSnapshot {
+  authorRepo: string | undefined,
+  selection: Parameters<typeof createLocalEventStore>[1],
+): Promise<WatchSnapshot> {
+  // Fetched objects make a remote draft readable, but submit selects an actual
+  // local branch in the invoking formatter's repository, not the queue reader.
+  const heads =
+    authorRepo !== undefined && round.unfiltered.some((item) => item.row.state === "draft")
+      ? await listRefs("refs/heads/", createLocalEventStore(authorRepo, selection))
+      : new Map<string, string>()
+  const localDraft = (item: WatchRow): WatchRow => {
+    const localHead = item.row.state === "draft" ? heads.get(`refs/heads/${item.row.branch}`) : undefined
+    return localHead === undefined ? item : { ...item, localHead }
+  }
   return {
     at: new Date(),
     observation: round.observation,
     decisions: round.decisions,
     queue: round.queue,
     queues: round.queues,
-    rows: round.rows,
-    unfiltered: round.unfiltered,
+    rows: round.rows.map(localDraft),
+    unfiltered: round.unfiltered.map(localDraft),
     runner: round.runner,
     stopped: round.stopped,
     ...(round.overrides === undefined ? {} : { overrides: round.overrides }),

@@ -20,6 +20,17 @@ import { remoteUrl } from "./remote.ts"
 export type PinCarrierPin = Readonly<{ path: string; sha: string }>
 export type PreparedPinCarrier = Readonly<{ branch: string; head: string; targetHead: string }>
 
+/** The existing pin or carrier name is held; viewers need its branch without parsing the diagnostic. */
+export class PinCarrierConflict extends Error {
+  constructor(
+    message: string,
+    readonly branch: string,
+    readonly holderKind: "change" | "branch",
+  ) {
+    super(message)
+  }
+}
+
 const FULL_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu
 
 function orderedPins(pins: readonly PinCarrierPin[]): readonly PinCarrierPin[] {
@@ -147,7 +158,7 @@ export async function preparePinCarrier(
       .filter((row) => row.newMode === "160000")
       .map((row) => ({ path: row.path, sha: row.sha }))
     if (moved.length > 0 && pinIdentity(orderedPins(moved)) === identity) {
-      throw new Error(`pin set already has open change ${change.branch}; inspect yrd queue show ${change.branch}`)
+      throw new PinCarrierConflict(`pin set already has open change ${change.branch}`, change.branch, "change")
     }
   }
 
@@ -158,8 +169,10 @@ export async function preparePinCarrier(
     const remoteHead = await readRemoteCommit(git, target.remote, `refs/heads/${branch}`)
     if (held === undefined && remoteHead === undefined) break
     if (held === undefined || held.open) {
-      throw new Error(
-        `${branch} is already held${held === undefined ? " as a draft" : " by an open change"}; inspect yrd queue show ${branch}`,
+      throw new PinCarrierConflict(
+        `${branch} is already held${held === undefined ? " as a draft" : " by an open change"}`,
+        branch,
+        held === undefined ? "branch" : "change",
       )
     }
     branch = `${baseName}-r${revision + 1}`

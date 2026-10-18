@@ -24,7 +24,11 @@ import type {
 import { stateGlyph, stateWord } from "./watch-format.ts"
 export { watchRows, watchRowKey } from "@yrd/queue-core"
 /** List rendering consumes row facts; detail remains on the eager journal reader. */
-export type WatchRow = CoreWatchRow<JournalSummary>
+export type WatchRow = CoreWatchRow<JournalSummary> &
+  Readonly<{
+    /** Local branch tip in the formatter's authoring repository, observed by the loader. */
+    localHead?: string
+  }>
 export type WatchRowOptions = CoreWatchRowOptions<JournalSummary>
 
 /**

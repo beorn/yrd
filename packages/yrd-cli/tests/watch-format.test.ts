@@ -117,6 +117,7 @@ describe("ref-write diagnostic lines", () => {
     }
     const row = { branch: "task/one", head: "abcd", diagnostics: [diagnostic] }
     const lines = diagnosticLines(row).join("\n")
+    expect(lines).toContain("recorded guidance:")
     expect(lines).toContain(diagnostic.ref)
     expect(lines).toContain(diagnostic.text)
     expect(lines).toContain("next: git show old-ref")
@@ -141,9 +142,8 @@ describe("ref-write diagnostic lines", () => {
       expect(degraded).toHaveLength(2)
       expect(degraded[0]).toContain("task/one@abcd run q-old")
       expect(degraded[0]).toContain("ref-write warning (change-ref-taken)")
-      expect(degraded[1]).toBe(
-        "The record has no explanation or inspection command (remote: origin). Inspect the stored fields with `yrd list --json`.",
-      )
+      expect(degraded[1]).toContain("The record has no explanation or inspection command (remote: origin)")
+      expect(degraded[1]).not.toContain("yrd list --json")
       expect(degraded.join("\n")).not.toContain(JSON.stringify(legacy))
     }
     const withoutCommand = diagnosticLines({

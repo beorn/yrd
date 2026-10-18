@@ -292,7 +292,7 @@ async function queueRunWithLog(options: QueueRunOptions, log: QueueRunLog): Prom
   const hooks = readdirSync(hooksPath).sort()
   if (hooks.length > 0) {
     throw new Error(
-      `queue-owned hooks path ${hooksPath} is not empty (${hooks.join(", ")}); remove the named entries, then run yrd queue run`,
+      `queue-owned hooks path ${hooksPath} is not empty (${hooks.join(", ")}); remove the named entries before starting another queue round`,
     )
   }
   const url = await remoteUrl(git, options.target.remote)

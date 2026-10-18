@@ -1066,6 +1066,7 @@ describe("the pane's keys and the detail's identity", () => {
       await settle(app)
       expect(current(app)).toContain(diagnostic.text)
       expect(current(app)).toContain(diagnostic.next)
+      expect(current(app)).toContain("recorded guidance:")
       expect(current(app)).toContain("✓ Merged")
       // A fresh journal read returns new objects even when its records did not change.
       await waitFor(() => expect(rounds.length).toBeGreaterThan(1))
@@ -1240,25 +1241,38 @@ describe("the running step and the check-less declaration", () => {
   })
 
   it("says when no check-step detail was recorded, instead of a bare tab strip", async () => {
-    const detail = detailOf({ row: row() }, [])
-    const text = await paint(at(<WatchDetail detail={detail} />))
+    const inspection = "Raw events: yrd 'queue' 'show' 'task/x' '--json' '--queue' 'release'"
+    for (const note of [undefined, `Check detail unavailable; ${inspection}`]) {
+      const detail = detailOf({ row: row({ branch: "task/x" }) }, [], { note })
+      const text = await paint(at(<WatchDetail detail={detail} />))
 
-    expect(text).toContain("no check-step detail is recorded")
-    expect(text).toContain("Timeline")
+      expect(text).toContain("no check-step detail is recorded")
+      expect(text).toContain("Timeline")
+      if (note !== undefined) expect(text).toContain(inspection)
+    }
   })
 
   it("puts a migrated change's retained evidence in the Checking stage", async () => {
     const source = "refs/yrd/main/task/old@head@record"
-    const detail = detailOf({ row: row() }, [], {
-      note: `Migrated change has no check-step detail. Retained legacy record: ${source}. Old check logs: /tmp/checks/task/old@head.`,
-    })
-    const timeline = await paint(at(<WatchDetail detail={detail} selected={CHANGES_TAB} />))
-    const checking = await paint(at(<WatchDetail detail={detail} selected="checking" />))
+    const inspection = "Raw events: yrd 'queue' 'show' 'task/old' '--json' '--queue' 'release'"
+    for (const currentInspection of [undefined, inspection]) {
+      const detail = detailOf({ row: row({ branch: "task/old" }) }, [], {
+        note: `Migrated change has no check-step detail. Retained legacy record: ${source}. Old check logs: /tmp/checks/task/old@head.${currentInspection === undefined ? "" : `; ${currentInspection}`}`,
+      })
+      const timeline = await paint(at(<WatchDetail detail={detail} selected={CHANGES_TAB} />))
+      const checking = await paint(at(<WatchDetail detail={detail} selected="checking" />))
 
-    expect(timeline).toContain("Migrated change has no check-step detail")
-    expect(timeline).not.toContain(source)
-    expect(checking).toContain(source)
-    expect(checking).toContain("/tmp/checks/task/old@head.")
+      expect(timeline).toContain("Migrated change has no check-step detail")
+      expect(timeline).not.toContain(source)
+      expect(checking).toContain(source)
+      expect(checking).toContain("/tmp/checks/task/old@head.")
+      if (currentInspection !== undefined) {
+        expect(timeline).not.toContain("Raw events:")
+        expect(checking).toMatch(/Raw\s+events:/u)
+        expect(checking).toContain("'task/old'")
+        expect(checking).toContain("'release'")
+      }
+    }
   })
 
   it("gives a direct row's box its one line about the commit where a subject would stand", async () => {
@@ -1363,6 +1377,50 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
     })
     expect(current(app)).not.toContain("⚠︎ the queue read failed")
     app.unmount()
+  })
+
+  // Slice A: the same source-first, pane-fallback rule must own every live queue reader.
+  // Existing recovery coverage supplies no pane fallback and exercises only one source.
+  it.each([
+    { count: 1, own: true },
+    { count: 1, own: false },
+    { count: 2, own: true },
+    { count: 2, own: false },
+  ])("uses source context or pane fallback for $count queue(s), source formatter $own", async ({ count, own }) => {
+    const paused = snapshot({
+      rows: [],
+      pause: "maintenance",
+      stopped: { by: "operator", cause: "operator", change: null, since: NOW.toISOString() },
+    })
+    const sources: WatchSource[] = Array.from({ length: count }, (_, index) => ({
+      id: `example.test/repo${String(index)}#main`,
+      label: `queue ${String(index)}`,
+      snapshot: { ...paused, queue: `example.test/repo${String(index)}#main` },
+      formatCommand: own ? (argv) => `source-host-${String(index)} ${argv.join(" ")}` : undefined,
+    }))
+    const app = render(
+      <WatchPane
+        snapshot={paused}
+        sources={sources}
+        formatCommand={(argv) => `pane-host ${argv.join(" ")}`}
+        live={false}
+      />,
+      { cols: 240, rows: 40 },
+    )
+    try {
+      await settle(app)
+      for (let index = 0; index < count; index++) {
+        expect(current(app)).toContain(`${own ? `source-host-${String(index)}` : "pane-host"} queue resume`)
+      }
+      if (own) expect(current(app)).not.toContain("pane-host queue resume")
+      if (count === 2) {
+        app.press("Enter")
+        await settle(app)
+        expect(current(app)).toContain(`${own ? "source-host-0" : "pane-host"} queue resume`)
+      }
+    } finally {
+      app.unmount()
+    }
   })
 
   it("a single unreadable declared queue recovers its paused runner and viewer remedies", async () => {
@@ -2302,6 +2360,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
 
   it("draws draft rows and a draft's detail from the snapshot alone: redrawing, moving over drafts and opening one reads nothing (A2-set-v3)", async () => {
     const moved: WatchRow = {
+      localHead: "f".repeat(40),
       row: {
         at: ago(30 * MINUTE),
         author: "grace",
@@ -2312,34 +2371,74 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       } as unknown as Row,
     }
     const unread: WatchRow = { row: { branch: "task/unread", head: "c".repeat(40), state: "draft" } as unknown as Row }
+    const mismatch: WatchRow = {
+      ...draft("task/mismatch", "d".repeat(40), ago(20 * MINUTE), "ada"),
+      localHead: "e".repeat(40),
+    }
     const snap = snapshot({
       drafts: { unread: 1, window: "all" },
-      rows: [moved, draft("task/d1", "a".repeat(40), ago(2 * 60 * MINUTE), "ada"), unread],
+      rows: [moved, draft("task/d1", "a".repeat(40), ago(2 * 60 * MINUTE), "ada"), unread, mismatch],
       runner: RUNNER,
     } as Partial<WatchSnapshot>)
     const load = vi.fn(async () => snap)
     const open = vi.fn(async (item: WatchRow) => detailOf(item, CHECKS))
     const loadDiff = vi.fn(async () => ({ text: "" }))
-    const app = render(<WatchPane snapshot={snap} load={load} open={open} loadDiff={loadDiff} live={false} />, {
-      cols: 220,
-      rows: 50,
-    })
+    const app = render(
+      <WatchPane
+        snapshot={snap}
+        load={load}
+        open={open}
+        loadDiff={loadDiff}
+        formatCommand={(argv) => `draft-host ${argv.join(" ")}`}
+        live={false}
+      />,
+      { cols: 220, rows: 50 },
+    )
     await settle(app)
     app.press("Home")
     await settle(app)
     const shown: string[] = []
-    for (const key of ["Enter", "j", "j", "v"]) {
+    for (const key of ["Enter", "j", "j", "j", "v"]) {
       app.press(key)
       await settle(app)
       shown.push(app.text)
     }
     app.unmount()
 
-    expect({
-      moved: (shown[0] ?? "").includes("moved since its last submit") && (shown[0] ?? "").includes("run yrd submit"),
-      read: { load: load.mock.calls.length, loadDiff: loadDiff.mock.calls.length, open: open.mock.calls.length },
-      unread: (shown[2] ?? "").includes("not yet read") && (shown[2] ?? "").includes("run yrd submit"),
-    }).toEqual({ moved: true, read: { load: 0, loadDiff: 0, open: 0 }, unread: true })
+    expect(
+      {
+        moved:
+          (shown[0] ?? "").includes("moved since its last submit") &&
+          (shown[0] ?? "").includes("run draft-host submit task/moved"),
+        read: { load: load.mock.calls.length, loadDiff: loadDiff.mock.calls.length, open: open.mock.calls.length },
+        unread:
+          (shown[2] ?? "").includes("not yet read") &&
+          (shown[2] ?? "").includes("fetch") &&
+          !(shown[2] ?? "").includes("run draft-host submit task/unread"),
+        mismatchedLocalHead:
+          (shown[3] ?? "").includes("points to") &&
+          (shown[3] ?? "").includes("eeeeeeeeeeee") &&
+          (shown[3] ?? "").includes("displayed head") &&
+          !(shown[3] ?? "").includes("run draft-host submit task/mismatch"),
+        remoteOnlyDated:
+          (shown[1] ?? "").includes("fetch") && !(shown[1] ?? "").includes("run draft-host submit task/d1"),
+      },
+      shown[3],
+    ).toEqual({
+      moved: true,
+      read: { load: 0, loadDiff: 0, open: 0 },
+      unread: true,
+      remoteOnlyDated: true,
+      mismatchedLocalHead: true,
+    })
+    // A host that supplied no formatter must not gain a standalone submit recipe.
+    const unavailable = render(<WatchPane snapshot={snap} live={false} />, { cols: 220, rows: 50 })
+    await settle(unavailable)
+    unavailable.press("Home")
+    unavailable.press("Enter")
+    await settle(unavailable)
+    expect(unavailable.text).toContain("Submit command unavailable in this view")
+    unavailable.unmount()
   })
 
   it("each row shows AGE / RUN: AGE from since, RUN is attempt runtime when measured (item 5, 24196)", async () => {
