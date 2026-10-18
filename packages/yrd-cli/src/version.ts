@@ -110,7 +110,7 @@ export function formatUnknownTopLevelKeyWarning(at: string, command: string, key
     `yrd: the declaration at ${at} has ${one ? "a key" : "keys"} this environment's Yrd does not know: ` +
     `${keys.map((key) => `${key}:`).join(", ")} (${formatYrdRuntimeVersion()}). ` +
     `The queue runs ${one ? "it" : "them"}; ${command} does not, so it proceeds without ${one ? "it" : "them"}. ` +
-    `Run with main's yrd to apply it.\n`
+    `Run with a current build of Yrd to apply it.\n`
   )
 }
 
@@ -132,7 +132,7 @@ export function formatUnknownNotifyEventWarning(
     `yrd: the declaration at ${at} has ${one ? "a notify event" : "notify events"} this environment's Yrd does not know: ` +
     `${named} (${formatYrdRuntimeVersion()}). ` +
     `The queue runs ${one ? "it" : "them"}; ${command} does not, so it fires each entry for the events it knows ` +
-    `and skips an entry whose events are all unknown. Run with main's yrd to apply ${one ? "it" : "them"}.\n`
+    `and skips an entry whose events are all unknown. Run with a current build of Yrd to apply ${one ? "it" : "them"}.\n`
   )
 }
 
@@ -144,12 +144,12 @@ export function formatUnknownNotifyEventWarning(
  * command means. The SAME refusal fires for a declaration that is simply
  * malformed, so this names the MECHANISM, never a guessed cause: the reader's own
  * identity, the skew cure to try first, and how to tell skew from a bad
- * declaration (main's yrd refuses it too, 28510).
+ * declaration (a current build refuses it too).
  */
 export function formatDeclarationSkewCure(at: string, command: string): string {
   return (
     ` This environment's Yrd (${formatYrdRuntimeVersion()}) cannot read it. If ${at}'s declaration is newer than ` +
-    `this Yrd, run main's yrd: @in main -- bun yrd ${command} …; if main's yrd refuses it too, the declaration ` +
+    `this Yrd, use a current build of Yrd for ${command}; if that build refuses it too, the declaration ` +
     `itself is malformed.`
   )
 }

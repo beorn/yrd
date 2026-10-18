@@ -2723,7 +2723,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
   const format = await queueFormat(store, queue)
   if (format === "legacy") {
     throw new Error(
-      `${store.remote}#${queue} uses a legacy Record ref; expected ${queueRef(queue)}; use yrd withdraw for legacy changes`,
+      `${store.remote}#${queue} uses a legacy Record ref; expected ${queueRef(queue)}; this event reader cannot drop legacy changes`,
     )
   }
   if (format !== "event") {
@@ -2812,7 +2812,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
     const git = gitIn(store.repo, undefined, store.selection)
     if (!(await isAncestor(git, head, target)) && !(await mergeChangesNothing(git, target, head))) {
       throw new Error(
-        `${branch}@${head}: merging into fresh ${mainRef}@${target} changes main; keep this draft or use explicit unmerged abandonment with yrd drop ${branch} --reason <why>`,
+        `${branch}@${head}: merging into fresh ${mainRef}@${target} changes main; keep this draft or explicitly abandon its unmerged work with a reason`,
       )
     }
     main = { ref: mainRef, tip: target }

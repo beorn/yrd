@@ -358,6 +358,9 @@ describe("event submit", () => {
         target: { branch: "main", remote: "origin" },
       }),
     ).rejects.toThrow(/legacy Record ref refs\/yrd\/main\/task\/old@/)
+    await expect(events.drop(store(w), { queue: "main", branch: "task/legacy-remote", by: "author" })).rejects.toThrow(
+      "this event reader cannot drop legacy changes",
+    )
     expect(head).toHaveLength(40)
     resetQueueFormatCache()
     expect(await queueFormat(store(w), "main")).toBe("legacy")
@@ -1421,7 +1424,7 @@ describe("event submit", () => {
         return fetchRefs(...args)
       })
       await expect(submit(w.git, "origin", request)).rejects.toThrow(
-        /GitHub returned Internal Server Error on the submit of task\/submit-5xx-exhausted; it may or may not have been recorded\. Run `yrd status task\/submit-5xx-exhausted` before submitting again\./,
+        /GitHub returned Internal Server Error on the submit of task\/submit-5xx-exhausted; it may or may not have been recorded\. Inspect the change's current queue state before submitting again\./,
       )
       // The probe failed, so work was never re-run: exactly one push was attempted.
       expect(uploads).toBe(1)
