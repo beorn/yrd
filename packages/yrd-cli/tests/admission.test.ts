@@ -20,10 +20,11 @@ afterAll(() => {
 
 describe("target-owned admission command", () => {
   it("distinguishes a refusal from a timeout and preserves the stdout cure", () => {
+    const cure = "\n  target policy: keep 'literal' bytes\t\n\n"
     const result = {
       exitCode: 1,
       signal: null,
-      stdout: "Start 3: tick with evidence\n",
+      stdout: cure,
       stderr: "",
       timedOut: false,
       stalled: false,
@@ -31,11 +32,11 @@ describe("target-owned admission command", () => {
     } as ProcessResult
     expect(admissionVerdict(result, "bun policy.ts", 100)).toEqual({
       kind: "refuse",
-      reason: "Start 3: tick with evidence",
+      reason: cure,
     })
     expect(admissionVerdict({ ...result, exitCode: 3 } as ProcessResult, "bun policy.ts", 100)).toEqual({
       kind: "warn",
-      reason: "Start 3: tick with evidence",
+      reason: cure,
     })
     expect(
       admissionVerdict({ ...result, exitCode: 3, signal: "SIGTERM" } as ProcessResult, "bun policy.ts", 100),

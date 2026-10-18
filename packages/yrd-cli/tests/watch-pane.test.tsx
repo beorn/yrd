@@ -1965,6 +1965,10 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(W.pending).toMatchObject({ word: "pending", color: "$fg-warning" })
     expect(W.verifying).toMatchObject({ word: "verifying", color: "$fg-info" })
     const said = ({ color: _color, ...entry }: Entry) => entry
+    expect({ stopped: W.stopped.next, paused: W.paused.next }).toEqual({
+      stopped: "start the runner for this queue",
+      paused: "resume this queue after resolving the pause",
+    })
     expect({
       ...Object.fromEntries(STATES.map((key) => [key, said(W[key])])),
       direct: W.direct.word,
@@ -1978,7 +1982,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       },
       checking: { means: "the runner is testing it now", next: "pending, stuck or failed", word: "checking" },
       direct: "direct",
-      draft: { means: "pushed to the remote, not submitted", next: "yrd submit", word: "draft" },
+      draft: { means: "pushed to the remote, not submitted", next: "submit this branch to the queue", word: "draft" },
       failed: { means: "a check failed; ended", next: "a new head is a new change", word: "failed" },
       merged: { means: "on the queue branch; ended", next: "nothing; a revert is a new change", word: "merged" },
       merging: { means: "the runner is writing main for it now", next: "merged or failed", word: "merging" },
