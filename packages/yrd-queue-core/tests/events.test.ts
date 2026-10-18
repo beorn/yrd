@@ -4,6 +4,7 @@
 // @consumer yrd list, submit and the queue runner on ADR-0016 event queues
 
 import { createHash } from "node:crypto"
+import { spawnSync } from "node:child_process"
 import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -15,6 +16,8 @@ import { Conflict, open, PublicationRejected } from "gitomic"
 import { archiveRefFor } from "git-super/archive-ref"
 import type { GitomicBackend, RefUpdate } from "gitomic"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
+import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
+import { retireOriginBranch } from "../src/origin-branch-retirement.ts"
 import { transientPush5xxOf, transientPushRetry } from "../src/transient-push.ts"
 import { EventRefsAcquireExhausted, readEventChain, readEventChains } from "../src/event-read.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
@@ -2245,6 +2248,65 @@ describe("the queue-format boundary", () => {
     ).rejects.toThrow(new RegExp(`task/advanced.*${advanced}.*${kept}`))
     expect((await git(["rev-parse", "refs/heads/task/advanced"])).trim()).toBe(advanced)
     expect(await chain.head()).toBe(failed.head)
+
+    // A remote deletion leaves a real local branch behind. The memory-store
+    // race row above could not prove that its printed recovery actually runs.
+    const publish = git.backend.publish
+    if (publish === undefined) throw new Error("native fixture lacks publication")
+    const outside = outsideRepositoryRoot()
+    for (const kind of ["event", "published-main"] as const) {
+      const branch = `task/race'${kind}`
+      const branchRef = `refs/heads/${branch}`
+      await git(["branch", branch, kept])
+      await git(["push", "--quiet", "origin", branchRef])
+      const eventRef = changesRef("lab", branch)
+      const raceChain = await openEvents({ ...location, ref: eventRef })
+      const start = await raceChain.append(
+        [changeInput("opened", { queueTip, at: new Date(), commit: kept, by: "fixture" })],
+        { expect: null },
+      )
+      const end = await raceChain.append(
+        [changeInput("failed", { queueTip, at: new Date(), reason: "fixture ending" })],
+        { expect: start.head },
+      )
+      const authority =
+        kind === "event" ? { kind, ref: eventRef, tip: end.head } : { kind, ref: "refs/heads/lab", tip: kept }
+      const movedTip = kind === "event" ? start.head : advanced
+      let moved = false
+      const backend: GitomicBackend = {
+        ...git.backend,
+        publish: async (repo, updates, remote) => {
+          await publish(repo, updates, remote)
+          if (updates.some((update) => update.ref === branchRef && update.oid === null)) {
+            moved = true
+            await publish(repo, [{ ref: authority.ref, expect: authority.tip, oid: movedTip }], remote)
+          }
+        },
+      }
+      const archive = kind === "event" ? archiveRefFor(branch, "fixture", "2000-01-01") : undefined
+      const refusal = await retireOriginBranch(
+        { ...location, backend },
+        {
+          branch,
+          head: kept,
+          authority,
+          ...(archive === undefined ? {} : { archive }),
+        },
+      ).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      expect(moved, kind).toBe(true)
+      expect(String(refusal)).toContain("moved during retirement")
+      expect((await git(["ls-remote", "origin", branchRef])).trim()).toBe("")
+      const recovery = String(refusal).split("from that custody: ")[1]
+      if (recovery === undefined) throw new Error(`${kind} retirement supplied no recovery recipe`)
+      const before = await git(["ls-remote", "origin"])
+      const restored = spawnSync("/bin/sh", ["-c", recovery], { cwd: outside, encoding: "utf8" })
+      expect.soft(restored.status, `${kind}: ${restored.stderr}`).toBe(0)
+      expect((await git(["rev-parse", branchRef])).trim()).toBe(kept)
+      expect(await git(["ls-remote", "origin"])).toBe(before)
+    }
   })
 
   // @failure an ended retire tip behind its own kept link is refused, so a shipped head cannot be deleted (25671).
