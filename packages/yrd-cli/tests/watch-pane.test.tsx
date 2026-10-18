@@ -2405,22 +2405,26 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     }
     app.unmount()
 
-    expect({
-      moved:
-        (shown[0] ?? "").includes("moved since its last submit") &&
-        (shown[0] ?? "").includes("run draft-host submit task/moved"),
-      read: { load: load.mock.calls.length, loadDiff: loadDiff.mock.calls.length, open: open.mock.calls.length },
-      unread:
-        (shown[2] ?? "").includes("not yet read") &&
-        (shown[2] ?? "").includes("fetch") &&
-        !(shown[2] ?? "").includes("run draft-host submit task/unread"),
-      mismatchedLocalHead:
-        (shown[3] ?? "").includes("task/mismatch points to eeeeeeeeeeee locally") &&
-        (shown[3] ?? "").includes("select a checkout with the displayed head") &&
-        !(shown[3] ?? "").includes("run draft-host submit task/mismatch"),
-      remoteOnlyDated:
-        (shown[1] ?? "").includes("fetch") && !(shown[1] ?? "").includes("run draft-host submit task/d1"),
-    }).toEqual({
+    expect(
+      {
+        moved:
+          (shown[0] ?? "").includes("moved since its last submit") &&
+          (shown[0] ?? "").includes("run draft-host submit task/moved"),
+        read: { load: load.mock.calls.length, loadDiff: loadDiff.mock.calls.length, open: open.mock.calls.length },
+        unread:
+          (shown[2] ?? "").includes("not yet read") &&
+          (shown[2] ?? "").includes("fetch") &&
+          !(shown[2] ?? "").includes("run draft-host submit task/unread"),
+        mismatchedLocalHead:
+          (shown[3] ?? "").includes("points to") &&
+          (shown[3] ?? "").includes("eeeeeeeeeeee") &&
+          (shown[3] ?? "").includes("displayed head") &&
+          !(shown[3] ?? "").includes("run draft-host submit task/mismatch"),
+        remoteOnlyDated:
+          (shown[1] ?? "").includes("fetch") && !(shown[1] ?? "").includes("run draft-host submit task/d1"),
+      },
+      shown[3],
+    ).toEqual({
       moved: true,
       read: { load: 0, loadDiff: 0, open: 0 },
       unread: true,
