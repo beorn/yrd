@@ -41,7 +41,10 @@ export function writeEnvOpenRecord(gitDir: string, record: EnvOpenRecord): void 
   atomicWriteFileSync(envOpenRecordPath(gitDir), `${JSON.stringify(record)}\n`)
 }
 
-/** MERGED-close: job continues the Slice 3 filer; standing and unreadable keep, while unrecorded defers to the general sweep. */
+/**
+ * MERGED-close: job returns undefined; standing, unrecorded, and unreadable return their keep reason
+ * (`fileTerminalCloseRequests` skips recording `unrecorded` before calling this so the general sweep owns it).
+ */
 export function mergedCloseKeepReason(opening: EnvOpenRecordRead): string | undefined {
   if (opening.status === "unrecorded" || opening.status === "unreadable") return opening.why
   if (opening.record.lifetime === "standing") return "opening lifetime standing"

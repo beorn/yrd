@@ -1189,7 +1189,9 @@ async function cleanupEnvironments(
         if (current === undefined || current.hold !== null || current.head !== head) {
           throw new Error("registration, hold or HEAD changed before close")
         }
-        const finalProtection = automaticKeep(row.path, readEnvOpenRecord(openingDir))
+        const finalOpening = readEnvOpenRecord(openingDir)
+        throwIfStandingLifetime(finalOpening)
+        const finalProtection = automaticKeep(row.path, finalOpening)
         if (finalProtection !== undefined) throw new Error(finalProtection)
         let output = ""
         let closedProof: WorktreeRemovalProof | undefined

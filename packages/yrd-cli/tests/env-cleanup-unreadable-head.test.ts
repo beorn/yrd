@@ -549,3 +549,54 @@ it("keeps an environment with a corrupt opening record by name and never treats 
   const kept = rows.find((row) => row.result === "kept" && row.path === w.env)
   expect(String(kept?.why)).toContain(`opening record unreadable at ${recordPath}: `)
 })
+
+it("keeps an environment whose opening record becomes unreadable or standing before the final pre-close re-read", async () => {
+  const w = await world()
+  await w.git(["remote", "add", "origin", w.repo])
+  await w.git(["fetch", "--quiet", "origin", "main"])
+  const envGit = testGitIn(w.env)
+  const gitDir = (await envGit(["rev-parse", "--absolute-git-dir"])).trim()
+  const recordPath = join(gitDir, "yrd-open.json")
+  // On the first census read (round start), yrd-open.json is absent; on the second census read
+  // (freshHolder at line 1185, right before the final pre-close re-read), write a corrupt yrd-open.json.
+  let censusCalls = 0
+  const census = vi.spyOn(removely, "inspectProcessCwds").mockImplementation(async () => {
+    censusCalls++
+    if (censusCalls === 2) {
+      writeFileSync(recordPath, "{corrupt json before close\n")
+    }
+    return { complete: true, unreadable: [], mechanism: "proc", rows: [] }
+  })
+  const config: QueueConfig = {
+    target: { remote: "origin", branch: "main" },
+    archiveAfter: "never",
+    revertGuard: "observe",
+    ignore: [],
+    checks: [],
+    notify: [],
+    health: { stallAfterMs: 0, declared: false },
+    blob: w.head,
+  }
+  try {
+    await createEnvironmentCleanup()({
+      repo: w.repo,
+      git: w.git,
+      config,
+      workdir: w.workdir,
+      io: {
+        localBranchProtections: null,
+        cwd: w.repo,
+        stdout: () => {},
+        stderr: () => {},
+      },
+      selection: w.git.selection,
+      outcome: { run: "corrupt-on-reread", log: join(w.workdir, "journal.jsonl"), merged: [], target: w.head } as never,
+    })
+  } finally {
+    census.mockRestore()
+  }
+  const rows = cleanupRows(w.workdir).filter((row) => row.run === "corrupt-on-reread")
+  expect(rows.filter((row) => row.result === "closed")).toEqual([])
+  const kept = rows.find((row) => row.result === "kept" && row.path === w.env)
+  expect(String(kept?.why)).toContain(`opening record unreadable at ${recordPath}: `)
+})
