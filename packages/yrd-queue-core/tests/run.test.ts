@@ -1334,7 +1334,7 @@ it("refuses a bounded-only revert-guard proof under refuse instead of merging it
         reverted: {
           base: { base: w.target, state: "single" },
           count: 0,
-          coverage: "complete",
+          coverage: "incomplete",
           gaps: [{ depth: 0, kind: "bounded", path: ".", reason: "target history window W=50 exhausted" }],
           paths: [],
           swallowed: [],

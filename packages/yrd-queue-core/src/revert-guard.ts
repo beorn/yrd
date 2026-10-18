@@ -26,11 +26,11 @@
  *    S3 discriminates by ancestry (isAncestor), so it is not ancestry-blind.
  *
  * A deliberate revert of a target change is indistinguishable from the incident, so
- * observation is always on and refusal is opt-in (`revert-guard: refuse`). Bounds
- * that make the guard SKIP work (path cap, depth) and a merge base that is not exactly
- * one make the proof INCOMPLETE, named, and never silently clean. A search that ran to
- * its declared history window `W` is complete relative to that declaration: it is
- * recorded, and it neither makes coverage incomplete nor warns by itself (#28000).
+ * observation is always on and refusal is opt-in (`revert-guard: refuse`). Any named
+ * gap (`unjudged` or `bounded`) makes `coverage` `incomplete` (#29963); a search whose
+ * only gaps are `bounded` states what the bounded reading proves (no revert within the
+ * latest `W` first-parent target commits touching that path; older target history was
+ * not read) and does not warn by itself in `observe` mode (#28000).
  */
 import { join } from "node:path"
 import { GitExit, isAncestor, mergeBases, runnerFor, type Git } from "./git.ts"
@@ -60,18 +60,15 @@ export type SwallowedComposition = Readonly<{
 }>
 
 /**
- * A named limit on the guard's proof, typed by WHAT IT COSTS (#28000).
+ * A named limit on the guard's proof, typed by WHAT IT COSTS (#28000, #29963).
  *
  * `unjudged` — the guard could not run its proof at all (unreadable history or trees, a base it could not pick,
- * or a declared cap that made it skip work). This is the only kind that makes `coverage` `incomplete` and the
- * only one that raises a warning on its own, because it is the only one where nobody judged the change.
+ * or a declared cap that made it skip work). This kind raises a warning on its own, because nobody judged the change.
  *
  * `bounded` — the guard RAN its proof and its declared search depth (`bounds.window`) ended the walk with
- * nothing found. That is the proof the guard defines, run to its own declared bound: complete relative to that
- * declaration, not a failure to judge. It is still recorded (naming the bound reached), but it never makes
- * coverage incomplete and never warns by itself — a warning that fires on every change touching an established
- * path carries no signal, and the fact it was carrying ("the search is bounded at W") is a constant of the
- * guard, not a fact about the change.
+ * nothing found. It proves no revert within the latest `W` first-parent target commits touching that path while
+ * leaving older target history unread, so `coverage` is `incomplete` (#29963), while `observe` mode does not
+ * warn on a `bounded`-only clean search (#28000).
  */
 export type RevertGuardGap = Readonly<{
   kind: "unjudged" | "bounded"
@@ -197,7 +194,7 @@ export async function detectReverted(options: RevertGuardOptions): Promise<Rever
   return {
     base,
     count: judged ? report.paths.length : 0,
-    coverage: report.gaps.some((gap) => gap.kind === "unjudged") ? "incomplete" : "complete",
+    coverage: report.gaps.length > 0 ? "incomplete" : "complete",
     gaps: report.gaps,
     paths: judged ? report.paths : [],
     swallowed: judged ? report.swallowed : [],
@@ -377,18 +374,39 @@ async function touchedPaths(
 }
 
 /**
- * The level's divergence base, or undefined when the whole window must be judged (#28557).
+ * The level's divergence base, or undefined when the whole window must be judged (#28557, #29963).
  *
  * `mergeBases(target, candidate)`: a single base BELOW the target pin means the candidate pin
  * diverged and never carried the target's later advance, so only advances after the base count.
- * A base that IS the target pin means the candidate pin contains the target pin — the 27363
- * fast-forward pin move — and the full window stays. An unreadable base is a named `unjudged`
+ * When the candidate is a merge commit whose first parent is `target` (the root compose merge or a
+ * component merge of `target` with the author branch), `mergeBases(target, candidate)` is `target`
+ * itself; resolve the divergence base against `incoming` or the merge's non-target parent. A linear
+ * fast-forward pin move keeps the full window (#27363). An unreadable base is a named `unjudged`
  * gap, never a silent widening or narrowing of the proof.
  */
 async function advanceBase(level: Level): Promise<string | undefined> {
   try {
     const bases = await mergeBases(level.git, level.target, level.candidate)
-    return bases.length === 1 && bases[0] !== level.target ? bases[0] : undefined
+    if (bases.length === 1 && bases[0] !== level.target) return bases[0]
+    if (bases.length === 1 && bases[0] === level.target) {
+      if (level.incoming !== level.candidate && level.incoming !== level.target) {
+        const incomingBases = await mergeBases(level.git, level.target, level.incoming)
+        if (incomingBases.length === 1 && incomingBases[0] !== level.target) return incomingBases[0]
+      }
+      const parents = ((await level.git(["cat-file", "commit", level.candidate])).split("\n\n")[0] ?? "")
+        .split("\n")
+        .filter((line) => line.startsWith("parent "))
+        .map((line) => line.slice("parent ".length).trim())
+      if (parents.length >= 2 && parents.includes(level.target)) {
+        const nonTargetParents = parents.filter((parent) => parent !== level.target)
+        const [otherParent] = nonTargetParents
+        if (nonTargetParents.length === 1 && otherParent !== undefined) {
+          const parentBases = await mergeBases(level.git, level.target, otherParent)
+          if (parentBases.length === 1 && parentBases[0] !== level.target) return parentBases[0]
+        }
+      }
+    }
+    return undefined
   } catch (error) {
     level.report.gaps.push({
       kind: "unjudged",
@@ -460,13 +478,18 @@ async function assessPath(
       return
     }
   }
-  // A capped NEGATIVE proof is not a clean one: name it so refusal fails closed.
+  // A capped NEGATIVE proof is not a clean one: name it and state what the bounded reading proves (#29963).
   if (capped) {
     level.report.gaps.push({
       kind: "bounded",
       depth: level.depth,
       path: full,
-      reason: "target history window W=" + String(level.bounds.window) + " exhausted",
+      reason:
+        "target history window W=" +
+        String(level.bounds.window) +
+        " exhausted: proves no revert within the latest " +
+        String(level.bounds.window) +
+        " first-parent target commit(s) touching this path; older target history was not read",
     })
   }
 }
@@ -570,11 +593,10 @@ export function revertedPathsCounts(report: RevertGuardReport): RevertedPathsCou
 
 /**
  * The durable-warning finding for a report, or undefined when there is nothing to say.
- * A `complete` report with no hit is the ONLY silent case, and a report is `complete` when
- * every gap is `bounded` (#28000) — so a search that reached its declared window `W` warns
- * nobody, which is what makes the warning mean "nobody could judge this change". A hit, or
- * any `unjudged` gap (unreadable tree/history, an unpicked base, a cap that skipped work),
- * always names itself.
+ * Any gap makes `report.coverage` `incomplete` (#29963), while a search whose only gaps are
+ * `bounded` warns nobody in `observe` mode (#28000), which keeps the warning meaning "nobody
+ * could judge this change". A hit, or any `unjudged` gap (unreadable tree/history, an unpicked
+ * base, a cap that skipped work), always names itself.
  */
 export function revertedPathsFinding(report: RevertGuardReport | undefined):
   | Readonly<{
@@ -586,7 +608,8 @@ export function revertedPathsFinding(report: RevertGuardReport | undefined):
   | undefined {
   if (report === undefined) return undefined
   const hit = report.paths.length > 0 || report.swallowed.length > 0
-  if (!hit && report.coverage === "complete") return undefined
+  const unjudged = report.gaps.some((gap) => gap.kind === "unjudged") || report.base.state !== "single"
+  if (!hit && !unjudged) return undefined
   return {
     coverage: report.coverage,
     count: report.paths.length,
