@@ -3214,10 +3214,10 @@ describe("a queue is the selected origin branch carrying config", () => {
     // the printed recovery command must name the local archive ref and resolve when executed.
     const curedArchive = curedReport.removed[0]!.archiveRef
     expect((await git(["ls-remote", "origin", curedArchive])).trim()).toBe("")
-    expect(curedReport.removed[0]!.recovery).toBe(`git -C ${repo} branch task/28791-advanced ${curedArchive}`)
-    const recoveryArgs = curedReport.removed[0]!.recovery!.split(" ")
-    expect(recoveryArgs.slice(0, 3)).toEqual(["git", "-C", repo])
-    await git(recoveryArgs.slice(3))
+    const localRecovery = curedReport.removed[0]!.recovery
+    expect(localRecovery).toBeDefined()
+    const localRestored = spawnSync("/bin/sh", ["-c", localRecovery!], { cwd: outside, encoding: "utf8" })
+    expect(localRestored.status, localRestored.stderr).toBe(0)
     expect((await git(["rev-parse", `refs/heads/${advancedBranch}`])).trim()).toBe(saved.get(advancedBranch))
     await git(["update-ref", "-d", `refs/heads/${advancedBranch}`, saved.get(advancedBranch)!])
     // AC5: the command's journal must remain readable by the existing projection reader.

@@ -1899,20 +1899,25 @@ export async function coreQueueCommand(
             kept.push({ ...row, reason: "mismatch", detail: `recorded issue ${bound} differs from requested ${issue}` })
             continue
           }
+          if (head !== request.tip) {
+            kept.push({
+              ...row,
+              reason: "advanced",
+              detail: `current tip ${head} differs from requested tip ${request.tip}; if ${head} is the tip to retire, rerun with --tip ${head}, otherwise the branch gained commits after you read it`,
+            })
+            continue
+          }
           if (
-            head !== request.tip ||
-            (change?.commit !== undefined &&
-              change.commit !== head &&
-              !(await acceptsMergedLocalRetirement(authorGit, { local: true, head, change })))
+            change?.commit !== undefined &&
+            change.commit !== head &&
+            !(await acceptsMergedLocalRetirement(authorGit, { local: true, head, change }))
           ) {
             kept.push({
               ...row,
               reason: "advanced",
               detail:
-                head !== request.tip
-                  ? `current tip ${head} differs from requested tip ${request.tip}; if ${head} is the tip to retire, rerun with --tip ${head}, otherwise the branch gained commits after you read it`
-                  : `current tip ${head} differs from recorded change tip ${change?.commit}` +
-                    (await advancedCure(authorGit, branch, head, change?.commit, target, targetLabel, true)),
+                `current tip ${head} differs from recorded change tip ${change.commit}` +
+                (await advancedCure(authorGit, authorRepo, branch, head, change.commit, target, targetLabel, true)),
             })
             continue
           }
