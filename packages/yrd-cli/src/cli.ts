@@ -68,6 +68,7 @@ import {
   ISSUES_WRITE_VERBS,
 } from "./issues/declaration.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
+import { formatYrdCommand } from "./command-format.ts"
 
 /** The seat a submit names. Never the git author: the fleet's git identity
  * names nobody (ruling @i/10-yrd/24028). */
@@ -289,6 +290,30 @@ function buildProgram(
     }
     if (options.tip !== undefined && options.local !== true && options.retire !== true) {
       throw new Error("--tip requires drop --local or --retire")
+    }
+    if (
+      command === "drop" &&
+      options.local &&
+      !options.releaseCheckout &&
+      options.dryRun &&
+      branch !== undefined &&
+      options.tip !== undefined
+    ) {
+      const argv = ["drop", branch, "--local", "--tip", options.tip]
+      for (const [flag, value] of [
+        ["--issue", options.issue],
+        ["--queue", options.queue],
+        ["--submitter", options.submitter],
+        ["--reason", options.reason],
+        ["--notify", options.notify],
+      ] as const) {
+        if (value !== undefined) argv.push(flag, value)
+      }
+      if (options.json) argv.push("--json")
+      throw new Error(
+        "drop --local has no preview; it archives at origin, then deletes the local branch.\n" +
+          `To apply: ${formatYrdCommand(io, argv, io.cwd ?? process.cwd())}`,
+      )
     }
     if (
       (options.submodules || options.dryRun || options.apply) &&
@@ -1421,7 +1446,14 @@ function buildProgram(
       )
       .option("--dry-run", "preview issue cleanup without archiving or deleting branches")
       .option("--apply", "apply issue cleanup after rechecking exact tips and protections"),
-  ).action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
+  )
+    .addHelpText(
+      "after",
+      "\nFor a component branch, run from its component author checkout:\n" +
+        "  yrd drop <branch> --local --tip <full-oid>\n" +
+        "Plain --local has no preview: it archives at origin, then deletes the local branch.\n",
+    )
+    .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
 
   program
     .command("ignore <branch>")
