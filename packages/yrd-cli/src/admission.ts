@@ -35,14 +35,14 @@ export function admissionVerdict(result: ProcessResult, run: string, timeoutMs: 
   }
   if (result.exitCode === 0) return { kind: "admit" }
   if (result.exitCode === 1) {
-    const reason = result.stdout.trim()
+    const reason = result.stdout
     return {
       kind: "refuse",
       reason: reason === "" ? `target .yrd.yml admission ${JSON.stringify(run)} refused without a stdout cure` : reason,
     }
   }
   if (result.exitCode === 3) {
-    const reason = result.stdout.trim()
+    const reason = result.stdout
     return {
       kind: "warn",
       reason:
