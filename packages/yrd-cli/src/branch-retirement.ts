@@ -45,7 +45,7 @@ import {
   type QueueConfig,
 } from "@yrd/queue-core"
 import type { LocalBranchProtectionResult, YrdCliIO } from "./types.ts"
-import { originHead } from "./queue-location.ts"
+import { originHead, retainedComponentStoreHere } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
 import { admitEnvironmentClose } from "./env-close-holders.ts"
 import { formatYrdCommand } from "./command-format.ts"
@@ -721,7 +721,22 @@ async function componentRetirementOwner(input: ComponentRetirementInput) {
       owner = (await ownerGit(["rev-parse", "--show-superproject-working-tree"])).trim()
       continue
     }
-    return { owner, ownerGit, queue, config }
+    return { owner, ownerGit, queue, config, logDirectory: undefined as string | undefined }
+  }
+  // A cold retained component store is bare, so it has no superproject to walk to.
+  // It is its own owner: the branch lives here and archives at this store's origin.
+  if (retainedComponentStoreHere(repo) !== undefined) {
+    const remotes = (await git(["remote"])).split("\n").filter((name) => name.trim() !== "")
+    if (!remotes.includes("origin")) {
+      throw new Error(
+        `${repo}: cold component store has no origin remote, so its branches cannot be archived; nothing was removed`,
+      )
+    }
+    const queue = await remoteHead(git, "origin")
+    const target = await readRemoteCommit(git, "origin", `refs/heads/${queue}`)
+    if (target === undefined) throw new Error(`${repo}: owning queue target origin/${queue} is absent`)
+    const config = await readConfig(git, target, { remote: "origin", branch: queue })
+    return { owner: repo, ownerGit: git, queue, config, logDirectory: join(repo, "logs") }
   }
   return undefined
 }
@@ -742,13 +757,13 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
   if ((await readConfig(git, target, { remote, branch: targetBranch })) !== undefined) {
     throw new Error(`${repo}: own origin target declares .yrd.yml; run retirement against that queue`)
   }
-  const log = openLog(join(await workdirOf(ownerGit, { cwd: owner, env }), "logs"))
+  const log = openLog(parent.logDirectory ?? join(await workdirOf(ownerGit, { cwd: owner, env }), "logs"))
   log.write({
     kind: "run",
     command: destination === "local" ? "drop --local" : "drop --retire",
     pid: process.pid,
     target: `origin/${queue}`,
-    config: config.blob,
+    ...(config === undefined ? {} : { config: config.blob }),
   })
   const date = new Date().toISOString().slice(0, 10)
   let attemptedArchive: string | undefined

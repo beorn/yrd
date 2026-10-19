@@ -34,9 +34,11 @@ import { drainOutput } from "loggily"
 import {
   activateRunIndex,
   createEventStore,
+  gitIn,
   isQueueEventShapeUnreadable,
   lookupRunIndex,
   parseDuration,
+  resolveGitSelection,
   readRunLog,
   runIndexPath,
   runIndexRef,
@@ -53,6 +55,7 @@ import {
   hostWorkdirHere,
   resolveDeclaredQueueLocations,
   resolveQueueLocation,
+  retainedComponentStoreHere,
   type QueueLocation,
 } from "./queue-location.ts"
 import { retireRetiredRoot } from "./retire-root.ts"
@@ -374,10 +377,25 @@ function buildProgram(
         dryRun: options.dryRun,
       }
     } else throw new Error("withdraw needs a branch")
-    const location = await resolveQueueLocation(cwd(), options.queue, env)
+    // A cold retained component store is a bare Git directory, so a queue cannot be
+    // resolved from it; the drop is aimed at the store itself (30094).
+    const retainedStore =
+      options.queue === undefined && command === "drop" ? retainedComponentStoreHere(cwd()) : undefined
+    const location = retainedStore === undefined ? await resolveQueueLocation(cwd(), options.queue, env) : undefined
+    const selection = location?.selection ?? (await resolveGitSelection(cwd(), { env }))
+    if (retainedStore !== undefined) {
+      const remotes = (await gitIn(retainedStore, undefined, selection, { env })(["remote"])).split("\n")
+      if (!remotes.includes("origin")) {
+        throw new Error(
+          `${retainedStore}: cold component store has no origin remote, so its branches cannot be archived; nothing was removed`,
+        )
+      }
+    }
+    const dropRepo = retainedStore ?? location?.repo
+    if (dropRepo === undefined) throw new Error(`${cwd()}: drop resolved no repository`)
     setExit(
       await coreQueueCommand(
-        location.repo,
+        dropRepo,
         io,
         {
           ...subject,
@@ -389,10 +407,10 @@ function buildProgram(
           json: options.json,
           env,
           log: log(),
-          selection: location.selection,
-          populateReference: location.owned,
-          queue: location.queue,
-          workdir: location.workdir,
+          selection,
+          populateReference: location?.owned,
+          queue: location?.queue,
+          workdir: location?.workdir,
         },
       ),
     )
