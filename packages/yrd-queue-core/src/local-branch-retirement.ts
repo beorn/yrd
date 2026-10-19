@@ -1,3 +1,5 @@
+import { resolve } from "node:path"
+
 import { archiveRefFor, ensureArchiveRef, findArchiveRefFor } from "git-super/archive-ref"
 import { changedCommitGitlinks } from "git-super/commit-graph"
 import { createGitWorktreeStore, worktreeOperationBranch } from "git-super/worktree"
@@ -18,6 +20,8 @@ export type LocalBranchRetirement = Readonly<{
   date: string
   /** Read the same eligibility and protections without writing custody or deleting a ref. */
   dryRun?: boolean
+  /** A proven worktree-less retained store: its own attached HEAD is not a live checkout (30094). */
+  worktreeLess?: boolean
   log: Pick<QueueRunLog, "write">
   /** Caller-owned holds, leases and live use, including detached rebase/bisect use.
    * Required: missing or unreadable authority must never mean unprotected.
@@ -99,7 +103,9 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       writtenArchive = completedArchive
       archiveLocation = "local"
     }
+    const self = resolve(repo)
     for (const row of await store.list()) {
+      if (input.worktreeLess === true && resolve(row.path) === self) continue
       if (row.branch === `refs/heads/${branch}`) return { code: "held", detail: `branch is checked out at ${row.path}` }
       if (row.branch === undefined) {
         const operation = worktreeOperationBranch(row.path)

@@ -200,3 +200,43 @@ it("names the store, never the enclosing root, when --release-checkout aims at a
   expect(observed.stderr()).toContain(world.store)
   expect(observed.stderr()).not.toContain(`cd '${world.enclosing}'`)
 })
+
+it("detaches a retained store's attached HEAD in place at the verified tip and retires the branch", async () => {
+  const world = await nestedRetainedWorld()
+  const storeGit = gitIn(world.store)
+  await storeGit(["symbolic-ref", "HEAD", `refs/heads/${world.branch}`])
+  const observed = capture(world.store)
+  const code = await runYrdProcess(
+    ["bun", "yrd", "drop", world.branch, "--local", "--tip", world.tip, "--submitter", "fixture", "--json"],
+    observed.io,
+  )
+  expect(code, observed.stderr() + observed.stdout()).toBe(0)
+  const report = JSON.parse(observed.stdout()) as {
+    removed: { headMove?: { before: { symbolic: string; tip: string }; after: { detached: string } } }[]
+  }
+  expect(report.removed[0]?.headMove).toEqual({
+    before: { symbolic: `refs/heads/${world.branch}`, tip: world.tip },
+    after: { detached: world.tip },
+  })
+  await expect(storeGit(["symbolic-ref", "-q", "HEAD"])).rejects.toThrow()
+  expect((await storeGit(["rev-parse", "HEAD"])).trim()).toBe(world.tip)
+  await expect(storeGit(["rev-parse", "--verify", `refs/heads/${world.branch}`])).rejects.toThrow()
+})
+
+it("an archive that reads back at a different commit leaves HEAD attached and the branch in place", async () => {
+  const world = await nestedRetainedWorld()
+  const storeGit = gitIn(world.store)
+  await storeGit(["symbolic-ref", "HEAD", `refs/heads/${world.branch}`])
+  const date = new Date().toISOString().slice(0, 10)
+  const archiveRef = `refs/archive/${date}/fixture/${world.branch}`
+  const other = (await gitIn(world.origin)(["rev-parse", "refs/heads/main"])).trim()
+  await gitIn(world.origin)(["update-ref", archiveRef, other])
+  const observed = capture(world.store)
+  const code = await runYrdProcess(
+    ["bun", "yrd", "drop", world.branch, "--local", "--tip", world.tip, "--submitter", "fixture", "--json"],
+    observed.io,
+  )
+  expect(code, observed.stderr() + observed.stdout()).toBe(1)
+  expect((await storeGit(["symbolic-ref", "-q", "HEAD"])).trim()).toBe(`refs/heads/${world.branch}`)
+  expect((await storeGit(["rev-parse", `refs/heads/${world.branch}`])).trim()).toBe(world.tip)
+})

@@ -5551,7 +5551,18 @@ describe("component-local retirement without a component queue", () => {
       if (mode === "own-malformed-selected-other") expect(run.stderr()).toContain("does not parse")
       if (ownSelectedOther) return
       if (mode === "malformed-declaration" || mode === "unreadable-declaration") return
-    } else expect(exit, run.stderr()).toBe(0)
+    } else {
+      const keptOnly =
+        mode === "held" ||
+        mode === "unmerged-held" ||
+        mode === "advanced" ||
+        mode === "checked-out" ||
+        mode === "origin-held" ||
+        mode === "origin-advanced"
+      // A kept-only retirement is not success: the component path now matches
+      // the root drop --local rule (30266, 30094): kept and removed nothing exits 1.
+      expect(exit, run.stderr()).toBe(keptOnly ? 1 : 0)
+    }
     if (origin) {
       const report = JSON.parse(run.stdout()) as {
         removed: { branch: string; head: string; custody: { kind: string; ref: string; tip: string } }[]

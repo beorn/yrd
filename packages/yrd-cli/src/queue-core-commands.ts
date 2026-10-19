@@ -724,8 +724,12 @@ export async function coreQueueCommand(
   const noQueueOnTarget = async (ref: string): Promise<YrdCliExitCode> => {
     let cleanup = ""
     if (request.command === "drop-local" || request.command === "drop-issue") {
-      cleanup = "For retained-checkout cleanup, run from the superproject that vendors it.\n"
-      const authorRepo = repositoryHere(io.cwd) ?? retainedComponentStoreHere(io.cwd)
+      const store = retainedComponentStoreHere(io.cwd)
+      cleanup =
+        store === undefined
+          ? "For retained-checkout cleanup, run from the superproject that vendors it.\n"
+          : `This is a cold retained store with no live checkout, so there is nothing to release: run the local drop from ${store} without --release-checkout.\n`
+      const authorRepo = store === undefined ? repositoryHere(io.cwd) : undefined
       if (authorRepo !== undefined) {
         let owner: string | undefined
         try {
@@ -920,7 +924,7 @@ export async function coreQueueCommand(
     ) {
       const tip = request.command === "drop-local" ? request.tip : request.retire?.tip
       if (tip === undefined) return await noQueueOnTarget(targetLabel)
-      const authorRepo = repositoryHere(io.cwd) ?? retainedComponentStoreHere(io.cwd)
+      const authorRepo = retainedComponentStoreHere(io.cwd) ?? repositoryHere(io.cwd)
       if (authorRepo === undefined) throw new Error("drop --local requires the authoring repository as cwd")
       const report = await retireComponentBranch({
         repo: authorRepo,
@@ -951,10 +955,17 @@ export async function coreQueueCommand(
           report,
           [
             `${request.command === "drop-local" ? "local" : "origin"} retirement in ${authorRepo}: retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}`,
+            ...report.removed.flatMap((row) =>
+              !("headMove" in row) || row.headMove === undefined
+                ? []
+                : [
+                    `${row.branch}: HEAD detached at ${row.headMove.after.detached} (was ${row.headMove.before.symbolic})`,
+                  ],
+            ),
             ...report.failed.map((row) => `${row.branch}: ${row.reason}`),
           ].join("\n"),
         )
-        return report.failed.length === 0 ? 0 : 1
+        return report.failed.length === 0 && (report.kept.length === 0 || report.removed.length > 0) ? 0 : 1
       }
     }
     return await noQueueOnTarget(targetLabel)

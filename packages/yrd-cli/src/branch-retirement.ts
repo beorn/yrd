@@ -744,6 +744,7 @@ async function componentRetirementOwner(input: ComponentRetirementInput) {
 /** Component cleanup has no queue event; its declared owner's existing log owns the result. */
 export async function retireComponentBranch(input: ComponentRetirementInput) {
   const { repo, git, selection, env, io, request, destination } = input
+  const worktreeLess = retainedComponentStoreHere(repo) !== undefined
   const parent = await componentRetirementOwner(input)
   if (parent === undefined) return undefined
   const { owner, ownerGit, queue, config } = parent
@@ -767,6 +768,16 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
   })
   const date = new Date().toISOString().slice(0, 10)
   let attemptedArchive: string | undefined
+  let headMove: { before: { symbolic: string; tip: string }; after: { detached: string } } | undefined
+  /** 30094: a worktree-less retained store keeps its own HEAD; move it in place at the verified tip
+   * with the tip as the expected old value, so the branch ref can be removed without losing custody. */
+  const detachStoreHeadAtTip = async () => {
+    if (retainedComponentStoreHere(repo) === undefined) return undefined
+    const symbolic = (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
+    if (symbolic !== request.branch) return undefined
+    await git(["update-ref", "--no-deref", "HEAD", request.tip, request.tip])
+    return { before: { symbolic: `refs/heads/${request.branch}`, tip: request.tip }, after: { detached: request.tip } }
+  }
   try {
     const archiveRef =
       findArchiveRefFor(repo, request.branch, request.tip) ?? archiveRefFor(request.branch, request.by, date)
@@ -845,6 +856,7 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
       const preview = await retireLocalBranch({
         ...retirement,
         dryRun: true,
+        worktreeLess,
         protections: async () =>
           (
             await readBranchProtections(io, {
@@ -869,15 +881,21 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
         } catch (cause) {
           throw new Error(`${cause instanceof Error ? cause.message : String(cause)}; local refs kept`, { cause })
         }
-        result = await retireLocalBranch({ ...retirement, protections })
+        // publishRetirementArchive read the archive back from origin before returning (30094 step 3).
+        headMove = await detachStoreHeadAtTip()
+        result = await retireLocalBranch({ ...retirement, protections, worktreeLess })
       }
-    } else result = await retireLocalBranch({ ...retirement, protections })
+    } else {
+      headMove = await detachStoreHeadAtTip()
+      result = await retireLocalBranch({ ...retirement, protections, worktreeLess })
+    }
     const row = {
       branch: request.branch,
       head: observedTip,
       ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
       reason: result.outcome === "failed" ? `${repo}: ${result.reason}` : result.reason,
       ...(result.detail === undefined ? {} : { detail: result.detail }),
+      ...(headMove === undefined ? {} : { headMove }),
     }
     return {
       removed: result.outcome === "removed" ? [row] : [],
