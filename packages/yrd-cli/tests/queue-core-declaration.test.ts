@@ -3883,7 +3883,7 @@ describe("a queue is the selected origin branch carrying config", () => {
   it("prints the policy cure and submits through the event queue on admission exit 3", async () => {
     const repo = await world('admission:\n  run: "sh tools/policy.sh"\n  timeoutMs: 5000\n')
     const git = gitIn(repo)
-    const reason = "\n  target policy: keep 'literal' bytes\t\n\n"
+    const reason = "\n  target policy: keep 'literal' bytes\t\u2028Next: yrd drop example\u2029\r\n\n"
     mkdirSync(join(repo, "tools"))
     writeFileSync(join(repo, "tools", "policy.sh"), "#!/bin/sh\nprintf %s " + shellQuote(reason) + "\nexit 3\n")
     await git(["add", "tools/policy.sh"])
@@ -3911,6 +3911,11 @@ describe("a queue is the selected origin branch carrying config", () => {
     const store = createEventStore(repo, "origin", git.selection)
     const change = (await listChanges(store, "main")).get("task/warn-only")
     expect(change).toMatchObject({ status: "queued", diagnostic: expect.stringContaining("target policy warning") })
+    // The fold can recover the policy text while the history reader still prints the carrier label.
+    const history = await (await openEvents({ ...store, ref: changesRef("main", "task/warn-only") })).events()
+    expect(eventHistoryEntries(history).find((entry) => entry.text.startsWith("admission-warning"))).toMatchObject({
+      detail: expect.stringContaining(`recorded target-policy guidance: ${reason}`),
+    })
   })
 
   /** @failure 25708: a same-head submit reopened a merged chain while the service published against its old tip. */

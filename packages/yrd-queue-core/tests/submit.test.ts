@@ -1502,16 +1502,18 @@ describe("event submit", () => {
   it("records one cannot-judge warning and deduplicates an unchanged-head retry", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/admission-warning", "one.txt")
+    // Cannot-judge warnings use the same lossless carrier as judged policy output.
+    const reason = "\r\n policy timed out\t\0 café\u2028Next: yrd drop example\u2029\n"
     const request = {
       branch: "task/admission-warning",
       submitter: "@dev/2",
       issue: "@i/26273",
       target: { branch: "main", remote: "origin" },
-      admit: async () => ({ kind: "cannot-judge" as const, reason: "policy timed out after 10ms" }),
+      admit: async () => ({ kind: "cannot-judge" as const, reason }),
     }
     const first = await submit(w.git, "origin", request)
-    expect(first.admission).toMatchObject({ kind: "cannot-judge", reason: "policy timed out after 10ms" })
-    expect(first.admissionWarning).toMatchObject({ reason: "policy timed out after 10ms" })
+    expect(first.admission).toMatchObject({ kind: "cannot-judge", reason })
+    expect(first.admissionWarning).toMatchObject({ reason })
     const firstHistory = (await listChangeHistories(store(w), "main")).histories.get(request.branch)
     expect(firstHistory?.events.map((event) => event.type)).toEqual(["opened", "admission-warning"])
     expect(firstHistory?.state).toMatchObject({ status: "queued", commit: head })
