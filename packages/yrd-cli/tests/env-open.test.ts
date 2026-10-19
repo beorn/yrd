@@ -334,7 +334,7 @@ describe("yrd env open prepares the retained environment", () => {
    * @consumer every env open whose target branch is absent from origin while a task branch exists there
    * @testonly none
    */
-  it("still adopts a remote-only task branch when origin answers but the target branch is absent", async () => {
+  it("still adopts a remote-only task branch when origin answers and the base branch is present", async () => {
     const w = await world(":")
     const base = (await w.git(["rev-parse", "HEAD"])).trim()
     const peer = join(w.work, "..", "peer-remote-only")
@@ -362,6 +362,53 @@ describe("yrd env open prepares the retained environment", () => {
     expect(result.baseSource).toBe("origin")
     // Adoption of the remote-only branch, not a fresh cut at the base.
     expect(result.head).toBe(remoteTip)
+    expect(run.stderr()).not.toContain("was not asked whether")
+  })
+
+  /**
+   * @failure The discriminating case (review2 coverage HOLD): origin ANSWERS and has no base branch,
+   *          so the base comes from refs/remotes/origin/main with no origin failure. Reading
+   *          "baseSource tracking/local" as "origin unreachable" skips the origin task-branch probe
+   *          and silently replaces an existing remote-only branch with a fresh cut. This fixture
+   *          removes main at origin while the clone keeps its tracking ref, which is the only state
+   *          that separates the measured failure fact from the base-source fact.
+   * @level l2 (real bare remote with the base branch deleted, real retained worktree)
+   * @consumer every env open whose base branch is gone from origin while a task branch exists there
+   * @testonly none
+   */
+  it("still adopts a remote-only task branch when origin answers but the base branch is absent there", async () => {
+    const w = await world(":")
+    const tracked = (await w.git(["rev-parse", "refs/remotes/origin/main"])).trim()
+    const peer = join(w.work, "..", "peer-remote-only-absent-base")
+    await w.git(["clone", "--quiet", join(w.work, "..", "remote.git"), peer])
+    const peerGit = gitIn(peer)
+    await peerGit(["checkout", "--quiet", "-b", "task/remote-only"])
+    writeFileSync(join(peer, "REMOTE"), "a branch that exists only on origin\n")
+    await peerGit(["add", "REMOTE"])
+    await peerGit(["-c", "user.email=peer@yrd.test", "-c", "user.name=peer", "commit", "--quiet", "-m", "remote only"])
+    await peerGit(["push", "--quiet", "origin", "task/remote-only"])
+    const remoteTip = (await peerGit(["rev-parse", "HEAD"])).trim()
+    // Record origin/HEAD and the tracking ref while origin still answers, exactly like a checkout
+    // that fetched before the base branch was removed. Then origin still answers; only main is gone,
+    // so the base resolves to "tracking" with NO origin failure - the state the old predicate misread.
+    await w.git(["remote", "set-head", "origin", "-a"])
+    await gitIn(join(w.work, "..", "remote.git"))(["update-ref", "-d", "refs/heads/main"])
+    expect((await w.git(["ls-remote", "--refs", "origin", "refs/heads/main"])).trim()).toBe("")
+    expect((await w.git(["rev-parse", "refs/remotes/origin/main"])).trim()).toBe(tracked)
+    const run = capture(w.work)
+
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "remote-only", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+
+    const result = JSON.parse(run.stdout()) as { base: string; baseSource: string; head: string }
+    expect(result.base).toBe(tracked)
+    expect(result.baseSource).toBe("tracking")
+    // Adoption of the remote-only branch, not a fresh cut at the stale base.
+    expect(result.head).toBe(remoteTip)
+    // Origin answered; nothing may claim it did not, and no skipped-probe notice may appear.
+    expect(run.stderr()).not.toContain("origin did not answer")
     expect(run.stderr()).not.toContain("was not asked whether")
   })
 
