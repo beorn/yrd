@@ -523,7 +523,10 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
           ? "target admission policy output recorded in Admission-Output"
           : "target admission could not judge; full reason recorded in Admission-Output",
       ])
-      props.push([EVENT_TRAILERS.admissionOutput, JSON.stringify(details.reason)])
+      props.push([
+        EVENT_TRAILERS.admissionOutput,
+        JSON.stringify(details.reason).replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029"),
+      ])
     } else props.push([EVENT_TRAILERS.reason, details.reason])
   }
   if (details.warningKind !== undefined) props.push([EVENT_TRAILERS.warningKind, details.warningKind])
@@ -983,9 +986,14 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       if (admitted === "reverted-paths") {
         return { ...next, admissionWarning: { kind: admitted, event: event.id, reason } }
       }
-      const guidance = prop(event, EVENT_TRAILERS.admissionOutput) === undefined
-        ? admitted === "policy-warning" ? "policy warning" : "could not judge"
-        : admitted === "policy-warning" ? "target policy warning (recorded guidance)" : "target policy could not judge (recorded guidance)"
+      const guidance =
+        prop(event, EVENT_TRAILERS.admissionOutput) === undefined
+          ? admitted === "policy-warning"
+            ? "policy warning"
+            : "could not judge"
+          : admitted === "policy-warning"
+            ? "target policy warning (recorded guidance)"
+            : "target policy could not judge (recorded guidance)"
       return diagnose(next, `admission ${guidance} ${head.slice(0, 12)}: ${reason}`)
     }
     case "verifying":

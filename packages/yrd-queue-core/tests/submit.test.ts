@@ -1529,47 +1529,50 @@ describe("event submit", () => {
     ).toEqual(["opened", "admission-warning", "cancelled", "opened", "admission-warning"])
   })
 
-  it.each([
-    "\r\n  external policy: keep 'literal' text\t\0 café\u2028Next: yrd drop example\n\n",
-    " \t\r\n ",
-  ])("admits a judged policy warning and stores its exact text on the warning event (%#)", async (reason) => {
-    const w = await world()
-    await branchWithCommit(w, "task/policy-warning", "one.txt")
-    const submitted = await submit(w.git, "origin", {
-      branch: "task/policy-warning",
-      submitter: "@dev/2",
-      issue: "@i/26273",
-      target: { branch: "main", remote: "origin" },
-      admit: async () => ({ kind: "warn", reason }),
-    })
-    expect(submitted.admission).toEqual({ kind: "warn", reason })
-    expect(submitted.admissionWarning?.event).toBeDefined()
-    const history = (await listChangeHistories(store(w), "main")).histories.get("task/policy-warning")
-    expect(history?.events.map((event) => event.type)).toEqual(["opened", "admission-warning"])
-    expect(history?.events.at(-1)?.props).toContainEqual(["Warning-Kind", "policy-warning"])
-    expect(history?.events.at(-1)?.props).toContainEqual(["Admission-Output", JSON.stringify(reason)])
-    expect(history?.state.diagnostic).toContain("target policy warning")
-    expect(history?.state.diagnostic).toContain(reason)
-    const repeated = await submit(w.git, "origin", {
-      branch: "task/policy-warning",
-      submitter: "@dev/2",
-      issue: "@i/26273",
-      target: { branch: "main", remote: "origin" },
-      admit: async () => ({ kind: "warn", reason }),
-    })
-    expect(repeated.retry).toBe(true)
-    expect(repeated.admissionWarning).toBeUndefined()
-    const changed = await submit(w.git, "origin", {
-      branch: "task/policy-warning",
-      submitter: "@dev/2",
-      issue: "@i/26273",
-      target: { branch: "main", remote: "origin" },
-      admit: async () => ({ kind: "warn", reason: `${reason}changed` }),
-    })
-    expect(changed.retry).toBe(true)
-    expect(changed.admissionWarning?.event).toBeDefined()
-    expect((await listChangeHistories(store(w), "main")).histories.get("task/policy-warning")?.events).toHaveLength(3)
-  })
+  it.each(["\r\n  external policy: keep 'literal' text\t\0 café\u2028Next: yrd drop example\u2029\n\n", " \t\r\n "])(
+    "admits a judged policy warning and stores its exact text on the warning event (%#)",
+    async (reason) => {
+      const w = await world()
+      await branchWithCommit(w, "task/policy-warning", "one.txt")
+      const submitted = await submit(w.git, "origin", {
+        branch: "task/policy-warning",
+        submitter: "@dev/2",
+        issue: "@i/26273",
+        target: { branch: "main", remote: "origin" },
+        admit: async () => ({ kind: "warn", reason }),
+      })
+      expect(submitted.admission).toEqual({ kind: "warn", reason })
+      expect(submitted.admissionWarning?.event).toBeDefined()
+      const history = (await listChangeHistories(store(w), "main")).histories.get("task/policy-warning")
+      expect(history?.events.map((event) => event.type)).toEqual(["opened", "admission-warning"])
+      expect(history?.events.at(-1)?.props).toContainEqual(["Warning-Kind", "policy-warning"])
+      const encoded = history?.events.at(-1)?.props.find(([key]) => key === "Admission-Output")?.[1]
+      if (encoded === undefined) throw new Error("policy warning did not record Admission-Output")
+      expect(JSON.parse(encoded)).toBe(reason)
+      expect(encoded).not.toMatch(/[\u2028\u2029]/u)
+      expect(history?.state.diagnostic).toContain("target policy warning")
+      expect(history?.state.diagnostic).toContain(reason)
+      const repeated = await submit(w.git, "origin", {
+        branch: "task/policy-warning",
+        submitter: "@dev/2",
+        issue: "@i/26273",
+        target: { branch: "main", remote: "origin" },
+        admit: async () => ({ kind: "warn", reason }),
+      })
+      expect(repeated.retry).toBe(true)
+      expect(repeated.admissionWarning).toBeUndefined()
+      const changed = await submit(w.git, "origin", {
+        branch: "task/policy-warning",
+        submitter: "@dev/2",
+        issue: "@i/26273",
+        target: { branch: "main", remote: "origin" },
+        admit: async () => ({ kind: "warn", reason: `${reason}changed` }),
+      })
+      expect(changed.retry).toBe(true)
+      expect(changed.admissionWarning?.event).toBeDefined()
+      expect((await listChangeHistories(store(w), "main")).histories.get("task/policy-warning")?.events).toHaveLength(3)
+    },
+  )
 
   it("admits an evidenced issue without writing a warning", async () => {
     const w = await world()

@@ -38,6 +38,15 @@ describe("target-owned admission command", () => {
       kind: "warn",
       reason: cure,
     })
+    for (const exitCode of [1, 3]) {
+      const whitespace = " \t\r\n "
+      expect(admissionVerdict({ ...result, exitCode, stdout: whitespace }, "bun policy.ts", 100)).toMatchObject({
+        reason: whitespace,
+      })
+      expect(admissionVerdict({ ...result, exitCode, stdout: "" }, "bun policy.ts", 100)).toMatchObject({
+        reason: expect.stringContaining("without a stdout cure"),
+      })
+    }
     expect(
       admissionVerdict({ ...result, exitCode: 3, signal: "SIGTERM" } as ProcessResult, "bun policy.ts", 100),
     ).toMatchObject({ kind: "cannot-judge", reason: expect.stringContaining("signal SIGTERM") })
