@@ -219,3 +219,50 @@ it("reports a checkout removed during the walk as gone after re-stat", async () 
     if (!existsSync(extra) && existsSync(`${extra}.during`)) renameSync(`${extra}.during`, extra)
   }
 }, 60_000)
+
+it("reports a registered root removed after discovery as gone during store collection", async () => {
+  const repo = await world()
+  const seed = await world()
+  const git = gitIn(repo)
+  await git([
+    "-c",
+    "protocol.file.allow=always",
+    "submodule",
+    "add",
+    "--quiet",
+    join(dirname(seed), "remote.git"),
+    "child",
+  ])
+  await git(["commit", "--quiet", "-am", "register child"])
+  await git(["push", "--quiet", "origin", "main"])
+  const extra = join(dirname(repo), "vanished-after-discovery")
+  await git(["worktree", "add", "--quiet", "--detach", extra, "HEAD"])
+  await gitIn(extra)(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--quiet"])
+  const saved = `${extra}-saved`
+  const out = capture(repo)
+  let moved = false
+  try {
+    // The existing inventory message separates discovery from the later store reads.
+    // Earlier cases remove the root before its stores have entered that inventory.
+    const exit = await runYrdProcess(
+      ["bun", "yrd", "drop", "--issue", issue, "--submitter", "fixture", "--dry-run", "--json"],
+      {
+        ...out.io,
+        stderr(text) {
+          out.io.stderr(text)
+          if (!moved && text.includes("issue cleanup will inspect")) {
+            renameSync(extra, saved)
+            moved = true
+          }
+        },
+      },
+    )
+    expect(moved, "registered root was not removed after discovery").toBe(true)
+    const report = reportOf(out.stdout())
+    expect(report.failed, out.stderr()).toEqual([])
+    expect(report.gone).toContainEqual(expect.objectContaining({ path: extra, adminDirectoryExists: true }))
+    expect(exit, out.stderr()).toBe(0)
+  } finally {
+    if (moved) renameSync(saved, extra)
+  }
+}, 60_000)
