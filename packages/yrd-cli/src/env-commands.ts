@@ -164,11 +164,13 @@ function legacyBaysRoot(repo: string): string {
  * sat 60 s behind main and missed the merge it needed. An origin with no such
  * branch leaves the tracking ref, else the local branch of that name. Named, so
  * a refusal says which ref was missing rather than "could not resolve HEAD". */
+type BaseSource = "origin" | "tracking" | "local" | "commit"
+
 async function resolveBaseSha(
   git: Git,
   target: string,
   io: YrdCliIO,
-): Promise<Readonly<{ sha: string; originUnreachable: boolean }>> {
+): Promise<Readonly<{ sha: string; baseSource: BaseSource }>> {
   const branchRef = `refs/heads/${target}`
   const tracking = `refs/remotes/origin/${target}`
   let head: string | undefined
@@ -178,7 +180,7 @@ async function resolveBaseSha(
   } catch (error) {
     originFailure = error instanceof Error ? error.message : String(error)
   }
-  if (head !== undefined) return { sha: head, originUnreachable: false }
+  if (head !== undefined) return { sha: head, baseSource: "origin" }
   if (originFailure !== undefined) {
     // Ruled 2026-10-19 (28385 area 11): an unreachable origin must not block a new environment.
     // Cut from the local ref and say so ONCE, naming the ref and the stale risk that motivated
@@ -189,7 +191,7 @@ async function resolveBaseSha(
         `yrd env open: origin did not answer for ${branchRef} (${originFailure}); cutting from ${tracking} instead — ` +
           `it is only as new as this checkout's last fetch, so a merge that already landed on origin may be missing\n`,
       )
-      return { sha: fallback, originUnreachable: true }
+      return { sha: fallback, baseSource: "tracking" }
     }
     const local = await refAt(git, target)
     if (local !== undefined) {
@@ -197,16 +199,16 @@ async function resolveBaseSha(
         `yrd env open: origin did not answer for ${branchRef} (${originFailure}); cutting from the local branch ${target} instead — ` +
           `it is only as new as this checkout's last fetch, so a merge that already landed on origin may be missing\n`,
       )
-      return { sha: local, originUnreachable: true }
+      return { sha: local, baseSource: "local" }
     }
     throw new Error(
       `yrd env open: origin did not answer for ${branchRef} (${originFailure}), and neither ${tracking} nor the local branch ${target} exists`,
     )
   }
   const tracked = await refAt(git, tracking)
-  if (tracked !== undefined) return { sha: tracked, originUnreachable: false }
+  if (tracked !== undefined) return { sha: tracked, baseSource: "tracking" }
   const local = await refAt(git, target)
-  if (local !== undefined) return { sha: local, originUnreachable: false }
+  if (local !== undefined) return { sha: local, baseSource: "local" }
   throw new Error(`yrd: target '${target}' is absent at both ${tracking} and the local branch`)
 }
 
@@ -507,7 +509,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process, selection)
   const resolvedBase =
-    commit === undefined ? await resolveBaseSha(git, target, io) : { sha: commit, originUnreachable: false }
+    commit === undefined ? await resolveBaseSha(git, target, io) : { sha: commit, baseSource: "commit" as const }
   const base = resolvedBase.sha
   if (commit !== undefined && (await refAt(git, commit)) !== commit) {
     throw new Error(
@@ -583,7 +585,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       name,
       branch,
       base,
-      originUnreachable: resolvedBase.originUnreachable,
+      originUnreachable: resolvedBase.baseSource === "tracking" || resolvedBase.baseSource === "local",
     })
     if (result.conclusion !== "success") {
       throw new Error(`yrd: could not open environment '${name}': ${result.error.message}`)
@@ -713,7 +715,9 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   // `base` is the base the caller REQUESTED, resolved in the owning root repository — never the head the
   // environment happens to stand at: a reused branch's head is reported as `head`, not as `base` (27165).
   if (options.json === true) {
-    io.stdout(`${JSON.stringify({ base: baseSha, branch, head: headSha, name, path })}\n`)
+    io.stdout(
+      `${JSON.stringify({ base: baseSha, baseSource: resolvedBase.baseSource, branch, head: headSha, name, path })}\n`,
+    )
   } else {
     if (!reused) {
       io.stderr(

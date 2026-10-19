@@ -311,8 +311,11 @@ describe("yrd env open prepares the retained environment", () => {
     const code = await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "origin-down", "--json"], run.io)
     expect(code, run.stderr()).toBe(0)
 
-    const result = JSON.parse(run.stdout()) as { base: string; path: string }
+    const result = JSON.parse(run.stdout()) as { base: string; baseSource: string; path: string }
     expect(result.base).toBe(tracked)
+    // The acceptance requires the stale-base fact in --json, not only on stderr: a scripted caller
+    // that never reads stderr must still see that the base came from the local tracking ref.
+    expect(result.baseSource).toBe("tracking")
     expect(run.stderr()).toContain("origin did not answer")
     expect(run.stderr()).toContain("refs/remotes/origin/main")
     expect(run.stderr().split("origin did not answer").length - 1).toBe(1)
@@ -653,7 +656,14 @@ describe("yrd env open prepares the retained environment", () => {
     expect((await opened(["rev-parse", "HEAD^"])).trim()).toBe(before)
     expect((await opened(["rev-parse", "HEAD^{tree}"])).trim()).toBe(tree)
     expect((await opened(["log", "-1", "--format=%(trailers:key=Refs,valueonly)"])).trim()).toBe(issue)
-    expect(JSON.parse(run.stdout())).toEqual({ base: before, path: bay, head, branch: "task/binding", name: "binding" })
+    expect(JSON.parse(run.stdout())).toEqual({
+      base: before,
+      baseSource: "origin",
+      path: bay,
+      head,
+      branch: "task/binding",
+      name: "binding",
+    })
     expect(run.stderr()).not.toMatch(/^binding: reused /mu)
     expect(readFileSync(join(bay, "setup-head.txt"), "utf8")).toBe(`${head}\n`)
   })
