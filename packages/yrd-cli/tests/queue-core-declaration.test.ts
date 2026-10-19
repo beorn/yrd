@@ -3140,6 +3140,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       const git = gitIn(repo)
       const branch = "task/archived-retirement"
       const issue = "@example/archived-retirement"
+      const remoteGit = gitIn(join(dirname(repo), "remote.git"))
+      if (sameHead && entry === "local") {
+        await remoteGit(["config", "core.logAllRefUpdates", "always"])
+      }
       const parent = (await git(["rev-parse", "HEAD"])).trim()
       const tree = (await git(["rev-parse", "HEAD^{tree}"])).trim()
       const recorded = (await git(["commit-tree", tree, "-p", parent, "-m", "submitted sibling"])).trim()
@@ -3311,6 +3315,9 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect(await git(["for-each-ref", "--format=%(refname)", "refs/heads/" + branch])).toBe("")
       expect(await git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/archive/"])).toBe(beforeArchives)
       expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim()).toBe(head + "\t" + archive)
+      if (sameHead) {
+        expect((await remoteGit(["reflog", "show", "--format=%H", archive])).trim().split("\n")).toEqual([head])
+      }
       expect(await git(["ls-remote", "origin", changesRef("main", branch)])).toBe(endingRef)
       expect(await git(["ls-remote", "origin", "refs/heads/" + branch])).toBe(originBranch)
       expect((await git(["rev-parse", "main"])).trim()).toBe(target)
