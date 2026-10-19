@@ -410,16 +410,19 @@ export async function retireIssueBranches(
       const recorded = reading.histories.get(candidate.branch)?.state.issue
       if (branchIssue(candidate.branch, recorded) !== issue) continue
       const base = (await authorGit(["merge-base", candidate.head, targetTip])).trim()
-      const raw = await authorGit(["diff", "--raw", "--abbrev=40", base, candidate.head])
-      for (const line of raw.split("\n")) {
-        if (!line.startsWith(":")) continue
-        const parts = line.split("\t")
-        const meta = parts[0]?.split(" ") ?? []
-        const oldMode = meta[0]?.slice(1)
-        const newMode = meta[1]
-        if (oldMode !== "160000" && newMode !== "160000") continue
-        const path = parts[parts.length - 1]
-        if (path !== undefined && path !== "") named.add(path)
+      // -z and --no-renames match queue-core/worktree.ts: a path may contain anything,
+      // and a rename is a delete plus an add so each record has exactly one path.
+      const raw = await authorGit(["diff", "--raw", "--no-renames", "-z", base, candidate.head])
+      const fields = raw.split("\0")
+      for (let index = 0; index < fields.length; index += 1) {
+        const meta = fields[index]
+        if (meta === undefined || !meta.startsWith(":")) continue
+        const path = fields[index + 1]
+        if (path === undefined || path === "") continue
+        index += 1
+        const modes = meta.slice(1).split(" ")
+        if (modes[0] !== "160000" && modes[1] !== "160000") continue
+        named.add(path)
       }
     }
     for (const path of named) {

@@ -254,7 +254,8 @@ it("inspects and retires a component the issue names", async () => {
   await child(["push", "--quiet", "origin", "task/30099-named"])
   const repoGit = gitIn(repo)
   await repoGit(["checkout", "--quiet", "-b", "task/30099-named"])
-  await repoGit(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", childRemote, "vendor/child"])
+  const component = "vendor/ümlaut"
+  await repoGit(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", childRemote, component])
   await repoGit(["commit", "--quiet", "-m", "name child"])
   await repoGit(["push", "--quiet", "origin", "task/30099-named"])
   const json = await drop(repo, true)
@@ -265,14 +266,28 @@ it("inspects and retires a component the issue names", async () => {
     eligible: { path: string; branch: string }[]
   }
   expect(report.failed).toEqual([])
-  expect(report.inspected).toContain(join(repo, "vendor/child"))
-  expect(report.eligible).toContainEqual(expect.objectContaining({ path: "vendor/child", branch: "task/30099-named" }))
+  expect(report.inspected).toContain(join(repo, component))
+  expect(report.eligible).toContainEqual(expect.objectContaining({ path: component, branch: "task/30099-named" }))
 }, 60_000)
 
-it("does not inspect a registered root removed after the inventory line", async () => {
+it("does not inspect a registered root or its initialized child removed after the inventory line", async () => {
   const repo = await world()
+  const seed = await world()
+  const git = gitIn(repo)
+  await git([
+    "-c",
+    "protocol.file.allow=always",
+    "submodule",
+    "add",
+    "--quiet",
+    join(dirname(seed), "remote.git"),
+    "child",
+  ])
+  await git(["commit", "--quiet", "-am", "register child"])
+  await git(["push", "--quiet", "origin", "main"])
   const extra = join(dirname(repo), "vanished-after-discovery")
-  await gitIn(repo)(["worktree", "add", "--quiet", "--detach", extra, "HEAD"])
+  await git(["worktree", "add", "--quiet", "--detach", extra, "HEAD"])
+  await gitIn(extra)(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--quiet"])
   const saved = `${extra}-saved`
   const out = capture(repo)
   let moved = false
@@ -295,6 +310,7 @@ it("does not inspect a registered root removed after the inventory line", async 
     expect(report.failed, out.stderr()).toEqual([])
     expect(report.gone ?? []).not.toContainEqual(expect.objectContaining({ path: extra }))
     expect(report.inspected ?? []).not.toContain(extra)
+    expect(report.inspected ?? []).not.toContain(join(extra, "child"))
     expect(exit, out.stderr()).toBe(0)
   } finally {
     if (moved) renameSync(saved, extra)
