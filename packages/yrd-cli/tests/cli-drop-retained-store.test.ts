@@ -199,6 +199,28 @@ it("names the store, never the enclosing root, when --release-checkout aims at a
   expect(code).toBe(2)
   expect(observed.stderr()).toContain(world.store)
   expect(observed.stderr()).not.toContain(`cd '${world.enclosing}'`)
+  // The cure is the exact command, not just the path (peer review, 2026-10-19).
+  expect(observed.stderr()).toContain(
+    `cd '${world.store}' && yrd 'drop' '${world.branch}' '--local' '--tip' '${world.tip}'`,
+  )
+  expect(observed.stderr()).toContain(`'--issue' '@yrd/30094'`)
+  expect(observed.stderr()).not.toContain("--release-checkout\n")
+})
+
+it("a refused retirement reattaches the store HEAD to the branch it found", async () => {
+  const world = await nestedRetainedWorld()
+  const storeGit = gitIn(world.store)
+  await storeGit(["symbolic-ref", "HEAD", `refs/heads/${world.branch}`])
+  const mainTip = (await gitIn(world.origin)(["rev-parse", "refs/heads/main"])).trim()
+  const observed = capture(world.store)
+  const code = await runYrdProcess(
+    ["bun", "yrd", "drop", world.branch, "--local", "--tip", mainTip, "--submitter", "fixture", "--json"],
+    observed.io,
+  )
+  expect(code, observed.stderr() + observed.stdout()).toBe(1)
+  expect((await storeGit(["symbolic-ref", "-q", "HEAD"])).trim()).toBe(`refs/heads/${world.branch}`)
+  expect((await storeGit(["rev-parse", "HEAD"])).trim()).toBe(world.tip)
+  expect((await storeGit(["rev-parse", `refs/heads/${world.branch}`])).trim()).toBe(world.tip)
 })
 
 it("detaches a retained store's attached HEAD in place at the verified tip and retires the branch", async () => {

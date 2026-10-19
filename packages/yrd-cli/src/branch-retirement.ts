@@ -778,6 +778,16 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
     await git(["update-ref", "--no-deref", "HEAD", request.tip, request.tip])
     return { before: { symbolic: `refs/heads/${request.branch}`, tip: request.tip }, after: { detached: request.tip } }
   }
+  /** A refused retirement must leave the store as it was found (peer review, 2026-10-19):
+   * detach is only step 5 of a successful removal, so reattach whenever the branch survived.
+   * The branch ref is the custodian; when it is already gone the detached tip is the only
+   * custody left and the receipt keeps the move rather than inventing an unborn HEAD. */
+  const restoreStoreHead = async () => {
+    if (headMove === undefined) return
+    if ((await refAt(git, `refs/heads/${request.branch}`)) === undefined) return
+    await git(["symbolic-ref", "HEAD", headMove.before.symbolic])
+    headMove = undefined
+  }
   try {
     const archiveRef =
       findArchiveRefFor(repo, request.branch, request.tip) ?? archiveRefFor(request.branch, request.by, date)
@@ -884,10 +894,12 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
         // publishRetirementArchive read the archive back from origin before returning (30094 step 3).
         headMove = await detachStoreHeadAtTip()
         result = await retireLocalBranch({ ...retirement, protections, worktreeLess })
+        if (result.outcome !== "removed") await restoreStoreHead()
       }
     } else {
       headMove = await detachStoreHeadAtTip()
       result = await retireLocalBranch({ ...retirement, protections, worktreeLess })
+      if (result.outcome !== "removed") await restoreStoreHead()
     }
     const row = {
       branch: request.branch,
@@ -903,7 +915,12 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
       failed: result.outcome === "failed" ? [row] : [],
     }
   } catch (cause) {
-    const reason = `${repo}: ${cause instanceof Error ? cause.message : String(cause)}`
+    let reason = `${repo}: ${cause instanceof Error ? cause.message : String(cause)}`
+    try {
+      await restoreStoreHead()
+    } catch (restoreCause) {
+      reason += `; store HEAD left detached at ${request.tip}: ${restoreCause instanceof Error ? restoreCause.message : String(restoreCause)}`
+    }
     log.write({
       ...(destination === "local"
         ? { kind: "local-branch-retirement" as const }

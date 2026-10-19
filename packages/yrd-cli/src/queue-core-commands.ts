@@ -728,7 +728,20 @@ export async function coreQueueCommand(
       cleanup =
         store === undefined
           ? "For retained-checkout cleanup, run from the superproject that vendors it.\n"
-          : `This is a cold retained store with no live checkout, so there is nothing to release: run the local drop from ${store} without --release-checkout.\n`
+          : request.command === "drop-local"
+            ? `This is a cold retained store with no live checkout, so there is nothing to release. Retire the branch from the store itself:\n` +
+              `cd ${shellQuote(store)} && yrd ${[
+                "drop",
+                request.branch,
+                "--local",
+                "--tip",
+                request.tip,
+                ...(request.issue === undefined ? [] : ["--issue", request.issue]),
+                ...(request.reason === undefined ? [] : ["--reason", request.reason]),
+              ]
+                .map(shellQuote)
+                .join(" ")}\n`
+            : `This is a cold retained store with no live checkout: run the issue-scoped local drop from ${store}.\n`
       const authorRepo = store === undefined ? repositoryHere(io.cwd) : undefined
       if (authorRepo !== undefined) {
         let owner: string | undefined
