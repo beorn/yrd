@@ -180,7 +180,7 @@ async function visitIssueCheckout(
         child.target,
         join(metadata.gitDirectory, "modules", child.name),
         registeredRoot,
-        true,
+        false,
       )
     }
   } catch (cause) {
@@ -387,7 +387,7 @@ export async function retireIssueBranches(
   }
   try {
     const authorHead = (await authorGit(["rev-parse", "HEAD"])).trim()
-    await visitIssueCheckout(discovery, authorRepo, "", authorHead, undefined, authorRepo, false)
+    await visitIssueCheckout(discovery, authorRepo, "", authorHead, undefined, authorRepo, true)
     const reading = await readEventQueueWithChanges(eventStore, config.target.branch)
     const authorStore = stores.find((store) => store.path === "" && store.repository === authorRepo)
     if (authorStore === undefined) throw new Error(`${authorRepo}: author store was not registered`)
@@ -429,7 +429,7 @@ export async function retireIssueBranches(
       await visitIssueCheckout(discovery, join(authorRepo, path), path, authorHead, undefined, authorRepo, false)
     }
     io.stderr(
-      `yrd: issue cleanup will inspect ${stores.length} repository stores; ${notMaterialized.length} not materialized. Inspecting the author store and component checkouts this issue names. A component branch that lives only in another worktree's store, and one never recorded on the issue, are not searched. yrd env close retires an environment's own branches.\n`,
+      `yrd: issue cleanup will inspect ${stores.length} repository stores; ${notMaterialized.length} not materialized. Inspecting the author store, its own component checkouts, and any other component this issue names. Another worktree's copy is not searched. yrd env close retires an environment's own branches.\n`,
     )
     const landings = [...reading.histories.values()].flatMap(({ events }) => {
       let state = initial

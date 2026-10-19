@@ -207,7 +207,7 @@ it("does not visit a registered root, so a visit-time removal never runs", async
   }
 }, 60_000)
 
-it("does not inspect a component store that has no branch for the issue", async () => {
+it("inspects the author component checkout without selecting an unrelated branch", async () => {
   const repo = await world()
   const root = dirname(repo)
   const childRemote = join(root, "child.git")
@@ -232,7 +232,9 @@ it("does not inspect a component store that has no branch for the issue", async 
   const report = JSON.parse(json.stdout) as { inspected: string[]; failed: FailedRow[] }
   expect(report.failed).toEqual([])
   expect(report.inspected).toContain(repo)
-  expect(report.inspected).not.toContain(childCheckout)
+  expect(report.inspected).toContain(childCheckout)
+  const eligible = (report as { eligible?: { branch: string }[] }).eligible ?? []
+  expect(eligible).toEqual([])
 }, 60_000)
 
 it("inspects and retires a component the issue names", async () => {

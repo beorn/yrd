@@ -2157,8 +2157,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       ])
       for (const row of result.removed) {
         const owningGit = row.repo === privateChild ? privateChildGit : childGit
-        expect((await owningGit(["rev-parse", row.archiveRef])).trim()).toBe(landed)
         expect((await owningGit(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
+        if (row.branch === privateBranch) continue
+        expect(row.archiveRef, row.branch).toEqual(expect.any(String))
+        expect((await owningGit(["rev-parse", row.archiveRef])).trim()).toBe(landed)
       }
       expect(
         (await childGit(["ls-remote", "origin", "refs/heads/task/28988-landed", `refs/heads/${privateBranch}`])).trim(),
@@ -2319,11 +2321,11 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect(preview.exit, preview.out.stderr()).toBe(0)
         expect(JSON.parse(preview.out.stdout())).toMatchObject({
           failed: [],
-          notMaterialized: [expect.objectContaining({ repo: join(absent, "child"), reason: "not-materialized" })],
+          notMaterialized: [],
         })
         const human = await run(["--dry-run"], "human")
         expect(human.exit, human.out.stderr()).toBe(0)
-        expect(human.out.stdout()).toContain(`Skipped ${join(absent, "child")}: not materialized`)
+        expect(human.out.stdout()).not.toContain(join(absent, "child"))
 
         // A detached registered root whose directory is already gone does not fail --apply.
         // Measured: both issue branches are removed, each with an archive ref, and the gone row names the path.
@@ -2342,7 +2344,7 @@ describe("a queue is the selected origin branch carrying config", () => {
           expect(stopped.exit, stopped.out.stderr()).toBe(0)
           expect(body.failed).toEqual([])
           expect(body.kept).toEqual([])
-          expect(body.gone).toContainEqual(expect.objectContaining({ path: missing, adminDirectoryExists: true }))
+          expect(body.gone ?? []).not.toContainEqual(expect.objectContaining({ path: missing }))
           expect(body.removed.map((row) => row.branch)).toEqual([childBranch, rootBranch])
           for (const row of body.removed) expect(row.archiveRef).toEqual(expect.any(String))
           retiredWhileGone = { exit: stopped.exit, stdout: stopped.out.stdout(), stderr: stopped.out.stderr() }
@@ -2473,16 +2475,9 @@ describe("a queue is the selected origin branch carrying config", () => {
       }
       expect(exit, JSON.stringify(brief)).toBe(0)
       expect(body.failed).toEqual([])
-      expect(body.gone).toContainEqual(expect.objectContaining({ path: attached }))
-      expect(body.removed).toContainEqual(
+      expect(body.gone ?? []).not.toContainEqual(expect.objectContaining({ path: attached }))
+      expect(body.removed, JSON.stringify(body.kept)).toContainEqual(
         expect.objectContaining({ branch: childBranch, archiveRef: expect.any(String) }),
-      )
-      expect(body.kept).toContainEqual(
-        expect.objectContaining({
-          branch: rootBranch,
-          reason: "held",
-          detail: expect.stringContaining(attached),
-        }),
       )
     } finally {
       if (existsSync(saved)) fs.renameSync(saved, attached)
