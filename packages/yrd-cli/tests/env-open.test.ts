@@ -326,6 +326,46 @@ describe("yrd env open prepares the retained environment", () => {
   })
 
   /**
+   * @failure The origin-failure fact and the base-source fact are distinct: when origin ANSWERS but
+   *          has no target branch, the base still comes from the tracking ref, and folding that into
+   *          "origin unreachable" would skip the remote branch check and miss an existing remote-only
+   *          task branch that should be adopted (review2 second REVISE, 2026-10-19).
+   * @level l2 (a real env open over a reachable origin with a remote-only task branch, in process)
+   * @consumer every env open whose target branch is absent from origin while a task branch exists there
+   * @testonly none
+   */
+  it("still adopts a remote-only task branch when origin answers but the target branch is absent", async () => {
+    const w = await world(":")
+    const base = (await w.git(["rev-parse", "HEAD"])).trim()
+    const peer = join(w.work, "..", "peer-remote-only")
+    await w.git(["clone", "--quiet", join(w.work, "..", "remote.git"), peer])
+    const peerGit = gitIn(peer)
+    await peerGit(["checkout", "--quiet", "-b", "task/remote-only"])
+    writeFileSync(join(peer, "REMOTE"), "a branch that exists only on origin\n")
+    await peerGit(["add", "REMOTE"])
+    await peerGit(["-c", "user.email=peer@yrd.test", "-c", "user.name=peer", "commit", "--quiet", "-m", "remote only"])
+    await peerGit(["push", "--quiet", "origin", "task/remote-only"])
+    const remoteTip = (await peerGit(["rev-parse", "HEAD"])).trim()
+    // The authoring clone never fetched it, so no local or tracking ref for task/remote-only exists.
+    expect((await w.git(["for-each-ref", "--format=%(refname)", "refs/remotes/origin/task/remote-only"])).trim()).toBe(
+      "",
+    )
+    const run = capture(w.work)
+
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "remote-only", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+
+    const result = JSON.parse(run.stdout()) as { base: string; baseSource: string; head: string }
+    expect(result.base).toBe(base)
+    expect(result.baseSource).toBe("origin")
+    // Adoption of the remote-only branch, not a fresh cut at the base.
+    expect(result.head).toBe(remoteTip)
+    expect(run.stderr()).not.toContain("was not asked whether")
+  })
+
+  /**
    * @failure A branch opened without --issue carries no bead id, so every retirement path that keys on the
    *          owning issue refuses it as unnameable — and the creator is never told (28113).
    * @level l2 (a real env open over a git fixture, in process)

@@ -170,7 +170,7 @@ async function resolveBaseSha(
   git: Git,
   target: string,
   io: YrdCliIO,
-): Promise<Readonly<{ sha: string; baseSource: BaseSource }>> {
+): Promise<Readonly<{ sha: string; baseSource: BaseSource; originUnreachable: boolean }>> {
   const branchRef = `refs/heads/${target}`
   const tracking = `refs/remotes/origin/${target}`
   let head: string | undefined
@@ -180,7 +180,7 @@ async function resolveBaseSha(
   } catch (error) {
     originFailure = error instanceof Error ? error.message : String(error)
   }
-  if (head !== undefined) return { sha: head, baseSource: "origin" }
+  if (head !== undefined) return { sha: head, baseSource: "origin", originUnreachable: false }
   if (originFailure !== undefined) {
     // Ruled 2026-10-19 (28385 area 11): an unreachable origin must not block a new environment.
     // Cut from the local ref and say so ONCE, naming the ref and the stale risk that motivated
@@ -191,7 +191,7 @@ async function resolveBaseSha(
         `yrd env open: origin did not answer for ${branchRef} (${originFailure}); cutting from ${tracking} instead — ` +
           `it is only as new as this checkout's last fetch, so a merge that already landed on origin may be missing\n`,
       )
-      return { sha: fallback, baseSource: "tracking" }
+      return { sha: fallback, baseSource: "tracking", originUnreachable: true }
     }
     const local = await refAt(git, target)
     if (local !== undefined) {
@@ -199,16 +199,16 @@ async function resolveBaseSha(
         `yrd env open: origin did not answer for ${branchRef} (${originFailure}); cutting from the local branch ${target} instead — ` +
           `it is only as new as this checkout's last fetch, so a merge that already landed on origin may be missing\n`,
       )
-      return { sha: local, baseSource: "local" }
+      return { sha: local, baseSource: "local", originUnreachable: true }
     }
     throw new Error(
       `yrd env open: origin did not answer for ${branchRef} (${originFailure}), and neither ${tracking} nor the local branch ${target} exists`,
     )
   }
   const tracked = await refAt(git, tracking)
-  if (tracked !== undefined) return { sha: tracked, baseSource: "tracking" }
+  if (tracked !== undefined) return { sha: tracked, baseSource: "tracking", originUnreachable: false }
   const local = await refAt(git, target)
-  if (local !== undefined) return { sha: local, baseSource: "local" }
+  if (local !== undefined) return { sha: local, baseSource: "local", originUnreachable: false }
   throw new Error(`yrd: target '${target}' is absent at both ${tracking} and the local branch`)
 }
 
@@ -509,7 +509,9 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process, selection)
   const resolvedBase =
-    commit === undefined ? await resolveBaseSha(git, target, io) : { sha: commit, baseSource: "commit" as const }
+    commit === undefined
+      ? await resolveBaseSha(git, target, io)
+      : { sha: commit, baseSource: "commit" as const, originUnreachable: false }
   const base = resolvedBase.sha
   if (commit !== undefined && (await refAt(git, commit)) !== commit) {
     throw new Error(
@@ -585,7 +587,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       name,
       branch,
       base,
-      originUnreachable: resolvedBase.baseSource === "tracking" || resolvedBase.baseSource === "local",
+      originUnreachable: resolvedBase.originUnreachable,
     })
     if (result.conclusion !== "success") {
       throw new Error(`yrd: could not open environment '${name}': ${result.error.message}`)
@@ -594,10 +596,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     // @cto verdict 93993997 (30256): skipping the origin probe also skips the answer to
     // "does task/<name> already exist there?". Say so when the branch was created fresh, or a
     // same-named branch on origin would be passed over without a word.
-    if (
-      (resolvedBase.baseSource === "tracking" || resolvedBase.baseSource === "local") &&
-      provisioned.adoption === "fresh"
-    ) {
+    if (resolvedBase.originUnreachable && provisioned.adoption === "fresh") {
       io.stderr(
         `yrd env open: origin was not asked whether ${branch} already exists there, so an existing remote copy of ${branch} was not adopted; ` +
           `this environment starts fresh at ${provisioned.baseSha.slice(0, 12)}\n`,
