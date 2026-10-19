@@ -380,7 +380,7 @@ type GitlinkWorld = World &
  * at `a`. Modelled on the queue core's own gitlink case: `b` is on the
  * submodule's main, so candidate settling accepts a change that records it.
  */
-async function gitlinkWorld(sourceReadFailure = false, eventQueue = true): Promise<GitlinkWorld> {
+async function gitlinkWorld(sourceReadFailure = false, eventQueue = true, launcher = false): Promise<GitlinkWorld> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-up-gitlink-"))
   roots.push(root)
   // Ownership comes from hosted identities; Git transports these fixture URLs locally.
@@ -417,6 +417,11 @@ async function gitlinkWorld(sourceReadFailure = false, eventQueue = true): Promi
   await git(["remote", "set-url", "origin", "https://git-super.test/owned/root.git"])
   await git(["checkout", "--quiet", "-b", "main"])
   writeFileSync(join(work, ".yrd.yml"), DECLARATION)
+  if (launcher) {
+    mkdirSync(join(work, "tools"))
+    writeFileSync(join(work, "tools/yrd-runtime.mjs"), "// launcher a\n")
+    await git(["add", "tools/yrd-runtime.mjs"])
+  }
   // The root records the submodule at its main as it stands now: `a`.
   await git(["submodule", "add", "--quiet", "https://git-super.test/owned/submodule.git", "submodule"])
   await git(["add", ".yrd.yml", ".gitmodules", "submodule"])
@@ -444,8 +449,14 @@ async function gitlinkWorld(sourceReadFailure = false, eventQueue = true): Promi
     // fail, not turn an embedded service into an unchecked standalone one.
     await gitIn(join(work, "submodule"))(["symbolic-ref", "HEAD", "refs/heads/unborn-runtime"])
   }
-  const { coreQueueCommand: command } = await import(join(cli, "src/queue-core-commands.ts"))
-  return { a, b, command, git, work, workdir }
+  const originalEntry = process.argv[1]
+  if (launcher) process.argv[1] = join(work, "tools/yrd-runtime.mjs")
+  try {
+    const { coreQueueCommand: command } = await import(join(cli, "src/queue-core-commands.ts"))
+    return { a, b, command, git, work, workdir }
+  } finally {
+    process.argv[1] = originalEntry
+  }
 }
 
 /** A change that moves the submodule's gitlink to `sha`, submitted to the queue. */
@@ -3584,6 +3595,63 @@ describe("yrd queue up, the service", () => {
       },
     })
   })
+
+  /**
+   * @failure A launcher-only target move never armed the component wait, so the old launcher kept taking rounds.
+   * @level l2
+   * @consumer Hab's supervised Yrd runner; existing pin cases never change the launcher file.
+   */
+  it("waits for a launcher-only move to reach the relaunch source, then exits 0 (30189)", async () => {
+    const w = await gitlinkWorld(false, true, true)
+    const launcher = "tools/yrd-runtime.mjs"
+    const loaded = (await w.git(["rev-list", "-1", "HEAD", "--", launcher])).trim()
+    const source = join(dirname(w.work), "next-launch")
+    await w.git(["clone", "--quiet", join(dirname(w.work), "remote.git"), source])
+    const sourceGit = gitIn(source)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    let rounds = 0
+    let target = ""
+    const service = w.command(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        afterRound: async () => {
+          rounds += 1
+          if (rounds > 1) {
+            stop.abort()
+            return
+          }
+          writeFileSync(join(w.work, launcher), "// launcher b\n")
+          await w.git(["commit", "--quiet", "-am", "launcher only"])
+          await w.git(["push", "--quiet", "origin", "main"])
+          target = (await w.git(["rev-list", "-1", "HEAD", "--", launcher])).trim()
+        },
+      },
+      { env: { ...process.env, YRD_RELAUNCH_SOURCE: source }, json: true, workdir: w.workdir },
+    )
+    try {
+      const first = await Promise.race([
+        service.then(() => "ended" as const),
+        vi.waitFor(() => expect(run.stdout()).toContain("waiting for relaunch source"), { timeout: 20_000 })
+          .then(() => "waiting" as const),
+      ])
+      expect(first, "launcher-only movement must hold before a second round").toBe("waiting")
+      expect(rounds).toBe(1)
+      expect((await sourceGit(["rev-list", "-1", "HEAD", "--", launcher])).trim()).toBe(loaded)
+      await sourceGit(["fetch", "--quiet", "origin", "main"])
+      await sourceGit(["merge", "--ff-only", "origin/main"])
+      expect(await service, run.stderr()).toBe(0)
+      expect(rounds).toBe(1)
+      expect(records(run).at(-1)).toMatchObject({ exitCode: 0, from: loaded, to: target })
+    } finally {
+      stop.abort()
+      await service
+    }
+  }, 60_000)
 
   it("ends the loop, exit 0, when the round it ran merged the change that moves its own gitlink", async () => {
     const w = await gitlinkWorld()
