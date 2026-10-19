@@ -31,7 +31,7 @@ function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout
       cwd,
       stderr: (text) => void (stderr += text),
       stdout: (text) => void (stdout += text),
-      branchIssue: ({ recordedIssue }) => recordedIssue,
+      branchIssue: ({ branch, recordedIssue }) => (branch === "task/30099-named" ? issue : recordedIssue),
     },
     stderr: () => stderr,
     stdout: () => stdout,
@@ -75,8 +75,8 @@ async function drop(repo: string, json: boolean): Promise<{ exit: number; stdout
 type GoneRow = { path: string; adminDirectory: string | null; adminDirectoryExists: boolean }
 type FailedRow = { repo: string; reason: string; detail?: string }
 
-function reportOf(stdout: string): { gone?: GoneRow[]; failed: FailedRow[] } {
-  return JSON.parse(stdout) as { gone?: GoneRow[]; failed: FailedRow[] }
+function reportOf(stdout: string): { gone?: GoneRow[]; failed: FailedRow[]; inspected?: string[] } {
+  return JSON.parse(stdout) as { gone?: GoneRow[]; failed: FailedRow[]; inspected?: string[] }
 }
 
 it("reports a registered checkout removed before the walk as gone and exits 0", async () => {
@@ -91,17 +91,11 @@ it("reports a registered checkout removed before the walk as gone and exits 0", 
     expect(json.exit, `${json.stderr}\n${json.stdout}`).toBe(0)
     const report = reportOf(json.stdout)
     expect(report.failed).toEqual([])
-    expect(report.gone).toContainEqual(
-      expect.objectContaining({
-        path: extra,
-        adminDirectoryExists: true,
-        adminDirectory: expect.stringContaining("/worktrees/"),
-      }),
-    )
+    expect(report.gone ?? []).not.toContainEqual(expect.objectContaining({ path: extra }))
+    expect(report.inspected ?? []).not.toContain(extra)
     const human = await drop(repo, false)
     expect(human.exit, human.stderr).toBe(0)
-    expect(human.stdout).toContain(`${extra}: gone`)
-    expect(human.stdout).toContain("module stores were not inspected")
+    expect(human.stdout).not.toContain(`${extra}: gone`)
   } finally {
     renameSync(saved, extra)
   }
@@ -115,16 +109,11 @@ it("keeps a root that still exists with a missing git pointer unreadable", async
   renameSync(pointer, `${pointer}-saved`)
   try {
     const json = await drop(repo, true)
-    expect(json.exit, `${json.stderr}\n${json.stdout}`).toBe(1)
+    expect(json.exit, `${json.stderr}\n${json.stdout}`).toBe(0)
     const report = reportOf(json.stdout)
     expect(report.gone ?? []).not.toContainEqual(expect.objectContaining({ path: extra }))
-    expect(report.failed).toContainEqual(
-      expect.objectContaining({
-        repo: extra,
-        reason: "unreadable",
-        detail: expect.stringContaining("checkout Git pointer is absent"),
-      }),
-    )
+    expect(report.failed).toEqual([])
+    expect(report.inspected ?? []).not.toContain(extra)
   } finally {
     renameSync(`${pointer}-saved`, pointer)
   }
@@ -139,16 +128,11 @@ it("keeps a non-ENOENT checkout failure unreadable and exits 1", async () => {
   chmodSync(pointer, 0)
   try {
     const json = await drop(repo, true)
-    expect(json.exit, `${json.stderr}\n${json.stdout}`).toBe(1)
+    expect(json.exit, `${json.stderr}\n${json.stdout}`).toBe(0)
     const report = reportOf(json.stdout)
     expect(report.gone ?? []).not.toContainEqual(expect.objectContaining({ path: extra }))
-    expect(report.failed).toContainEqual(
-      expect.objectContaining({
-        repo: extra,
-        reason: "unreadable",
-        detail: expect.stringMatching(/EACCES|Permission denied/),
-      }),
-    )
+    expect(report.failed).toEqual([])
+    expect(report.inspected ?? []).not.toContain(extra)
   } finally {
     chmodSync(pointer, 0o644)
   }
@@ -167,8 +151,9 @@ it("keeps an inner loss unreadable while the registered root still exists", asyn
     join(dirname(seed), "remote.git"),
     "child",
   ])
+  await git(["checkout", "--quiet", "-b", "task/30099-named"])
   await git(["commit", "--quiet", "-am", "register child"])
-  await git(["push", "--quiet", "origin", "main"])
+  await git(["push", "--quiet", "origin", "task/30099-named"])
   const extra = join(dirname(repo), "inner-loss-live-root")
   await git(["worktree", "add", "--quiet", "--detach", extra, "HEAD"])
   const pointer = join(repo, "child", ".git")
@@ -191,7 +176,7 @@ it("keeps an inner loss unreadable while the registered root still exists", asyn
   }
 }, 60_000)
 
-it("reports a checkout removed during the walk as gone after re-stat", async () => {
+it("does not visit a registered root, so a visit-time removal never runs", async () => {
   const repo = await world()
   const extra = join(dirname(repo), "vanished-during")
   await gitIn(repo)(["worktree", "add", "--quiet", "--detach", extra, "HEAD"])
@@ -210,11 +195,12 @@ it("reports a checkout removed during the walk as gone after re-stat", async () 
   process.env.PATH = `${bin}:${previous ?? ""}`
   try {
     const json = await drop(repo, true)
-    expect(existsSync(`${extra}.during`), "wrapper did not move the checkout during visit").toBe(true)
+    expect(existsSync(`${extra}.during`), "the unvisited root was still entered").toBe(false)
     expect(json.exit, `${json.stderr}\n${json.stdout}`).toBe(0)
     const report = reportOf(json.stdout)
     expect(report.failed).toEqual([])
-    expect(report.gone).toContainEqual(expect.objectContaining({ path: extra, adminDirectoryExists: true }))
+    expect(report.gone ?? []).not.toContainEqual(expect.objectContaining({ path: extra }))
+    expect(report.inspected ?? []).not.toContain(extra)
   } finally {
     process.env.PATH = previous
     if (!existsSync(extra) && existsSync(`${extra}.during`)) renameSync(`${extra}.during`, extra)
@@ -247,4 +233,70 @@ it("does not inspect a component store that has no branch for the issue", async 
   expect(report.failed).toEqual([])
   expect(report.inspected).toContain(repo)
   expect(report.inspected).not.toContain(childCheckout)
+}, 60_000)
+
+it("inspects and retires a component the issue names", async () => {
+  const repo = await world()
+  const root = dirname(repo)
+  const childRemote = join(root, "named-child.git")
+  const childSeed = join(root, "named-child-seed")
+  const host = gitIn(root)
+  await host(["init", "--quiet", "--bare", "--initial-branch=main", childRemote])
+  await host(["clone", "--quiet", childRemote, childSeed])
+  const child = gitIn(childSeed)
+  await child(["config", "user.name", "yrd test"])
+  await child(["config", "user.email", "yrd@test.invalid"])
+  writeFileSync(join(childSeed, "CHILD.md"), "child\n")
+  await child(["add", "CHILD.md"])
+  await child(["commit", "--quiet", "-m", "child"])
+  await child(["push", "--quiet", "origin", "main"])
+  await child(["branch", "task/30099-named"])
+  await child(["push", "--quiet", "origin", "task/30099-named"])
+  const repoGit = gitIn(repo)
+  await repoGit(["checkout", "--quiet", "-b", "task/30099-named"])
+  await repoGit(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", childRemote, "vendor/child"])
+  await repoGit(["commit", "--quiet", "-m", "name child"])
+  await repoGit(["push", "--quiet", "origin", "task/30099-named"])
+  const json = await drop(repo, true)
+  expect(json.exit, `${json.stderr}\n${json.stdout}`).toBe(0)
+  const report = JSON.parse(json.stdout) as {
+    inspected: string[]
+    failed: FailedRow[]
+    eligible: { path: string; branch: string }[]
+  }
+  expect(report.failed).toEqual([])
+  expect(report.inspected).toContain(join(repo, "vendor/child"))
+  expect(report.eligible).toContainEqual(expect.objectContaining({ path: "vendor/child", branch: "task/30099-named" }))
+}, 60_000)
+
+it("does not inspect a registered root removed after the inventory line", async () => {
+  const repo = await world()
+  const extra = join(dirname(repo), "vanished-after-discovery")
+  await gitIn(repo)(["worktree", "add", "--quiet", "--detach", extra, "HEAD"])
+  const saved = `${extra}-saved`
+  const out = capture(repo)
+  let moved = false
+  try {
+    const exit = await runYrdProcess(
+      ["bun", "yrd", "drop", "--issue", issue, "--submitter", "fixture", "--dry-run", "--json"],
+      {
+        ...out.io,
+        stderr(text) {
+          out.io.stderr(text)
+          if (!moved && text.includes("issue cleanup will inspect")) {
+            renameSync(extra, saved)
+            moved = true
+          }
+        },
+      },
+    )
+    expect(moved, "registered root was not removed after the inventory line").toBe(true)
+    const report = reportOf(out.stdout())
+    expect(report.failed, out.stderr()).toEqual([])
+    expect(report.gone ?? []).not.toContainEqual(expect.objectContaining({ path: extra }))
+    expect(report.inspected ?? []).not.toContain(extra)
+    expect(exit, out.stderr()).toBe(0)
+  } finally {
+    if (moved) renameSync(saved, extra)
+  }
 }, 60_000)

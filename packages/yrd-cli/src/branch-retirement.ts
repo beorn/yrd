@@ -142,6 +142,7 @@ async function visitIssueCheckout(
   commit: string,
   moduleStore: string | undefined,
   registeredRoot: string,
+  descend: boolean,
 ): Promise<void> {
   try {
     // Prunable is not enough. Git also sets it when the directory remains and only its git pointer is gone.
@@ -170,6 +171,7 @@ async function visitIssueCheckout(
       walk.seenStores.add(metadata.commonDirectory)
       walk.stores.push({ repository, path, git: childGit, commonDirectory: metadata.commonDirectory, commit })
     }
+    if (!descend) return
     for (const child of await readCommitSubmodules(seamProcess(childGit, repository), repository, commit)) {
       await visitIssueCheckout(
         walk,
@@ -178,6 +180,7 @@ async function visitIssueCheckout(
         child.target,
         join(metadata.gitDirectory, "modules", child.name),
         registeredRoot,
+        true,
       )
     }
   } catch (cause) {
@@ -383,35 +386,48 @@ export async function retireIssueBranches(
     return target
   }
   try {
-    await visitIssueCheckout(
-      discovery,
-      authorRepo,
-      "",
-      (await authorGit(["rev-parse", "HEAD"])).trim(),
-      undefined,
-      authorRepo,
-    )
-    for (const root of await registeredWorktrees(authorGit)) {
-      // Gone means this registered root itself is gone. Git's prunable flag also covers a root that still exists.
-      if (pathMissing(root.path)) {
-        rememberGone(discovery, root.path)
-        continue
+    const authorHead = (await authorGit(["rev-parse", "HEAD"])).trim()
+    await visitIssueCheckout(discovery, authorRepo, "", authorHead, undefined, authorRepo, false)
+    const reading = await readEventQueueWithChanges(eventStore, config.target.branch)
+    const authorStore = stores.find((store) => store.path === "" && store.repository === authorRepo)
+    if (authorStore === undefined) throw new Error(`${authorRepo}: author store was not registered`)
+    inspected.push(authorStore.repository)
+    await collect(authorStore.repository, authorStore.path, authorStore.git, authorStore.commonDirectory, reading)
+    const named = new Set<string>()
+    for (const [branch, history] of reading.histories) {
+      if (branchIssue(branch, history.state.issue) !== issue) continue
+      let state = initial
+      for (const event of history.events) {
+        state = evolve(state, event)
+        if (event.type === "merged") {
+          for (const pin of state.landedGitlinks ?? []) named.add(pin.path)
+        }
       }
-      if (root.head === undefined) {
-        failed.push({
-          repo: root.path,
-          path: "",
-          branch: root.branch ?? "",
-          head: "",
-          reason: "unreadable",
-          detail: "registered author worktree has no HEAD",
-        })
-      } else await visitIssueCheckout(discovery, root.path, "", root.head, undefined, root.path)
+    }
+    const targetTip = (await authorGit(["rev-parse", `${config.target.remote}/${config.target.branch}`])).trim()
+    for (const candidate of candidates) {
+      if (candidate.path !== "") continue
+      const recorded = reading.histories.get(candidate.branch)?.state.issue
+      if (branchIssue(candidate.branch, recorded) !== issue) continue
+      const base = (await authorGit(["merge-base", candidate.head, targetTip])).trim()
+      const raw = await authorGit(["diff", "--raw", "--abbrev=40", base, candidate.head])
+      for (const line of raw.split("\n")) {
+        if (!line.startsWith(":")) continue
+        const parts = line.split("\t")
+        const meta = parts[0]?.split(" ") ?? []
+        const oldMode = meta[0]?.slice(1)
+        const newMode = meta[1]
+        if (oldMode !== "160000" && newMode !== "160000") continue
+        const path = parts[parts.length - 1]
+        if (path !== undefined && path !== "") named.add(path)
+      }
+    }
+    for (const path of named) {
+      await visitIssueCheckout(discovery, join(authorRepo, path), path, authorHead, undefined, authorRepo, false)
     }
     io.stderr(
-      `yrd: issue cleanup will inspect ${stores.length} repository stores; ${notMaterialized.length} not materialized. Reading every registered worktree's component stores can take minutes.\n`,
+      `yrd: issue cleanup will inspect ${stores.length} repository stores; ${notMaterialized.length} not materialized. Inspecting the author store and component checkouts this issue names. A component branch that lives only in another worktree's store, and one never recorded on the issue, are not searched. yrd env close retires an environment's own branches.\n`,
     )
-    const reading = await readEventQueueWithChanges(eventStore, config.target.branch)
     const landings = [...reading.histories.values()].flatMap(({ events }) => {
       let state = initial
       const pins: { event: string; path: string; tip: string }[] = []
@@ -424,6 +440,7 @@ export async function retireIssueBranches(
       return pins
     })
     for (const store of stores) {
+      if (store.path === "" && store.repository === authorRepo) continue
       inspected.push(store.repository)
       try {
         await collect(store.repository, store.path, store.git, store.commonDirectory, reading)

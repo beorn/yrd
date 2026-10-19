@@ -1445,7 +1445,7 @@ function buildProgram(
     program
       .command("drop [branch]")
       .description(
-        "end a change, or archive and retire issue branches across all registered root/component stores by default; can take minutes; --dry-run previews",
+        "end a change, or retire issue branches in the author store and the components that issue names; --dry-run previews",
       )
       .option(
         "--local",
@@ -1462,7 +1462,7 @@ function buildProgram(
       .option("--tip <commit>", "expected full commit for --local or --retire; an advanced branch is kept")
       .option(
         "--issue <id>",
-        "retire issue-bound refs across every registered worktree's component stores; can take minutes; with --local, carry the reviewed issue identity",
+        "retire issue-bound refs in the author store and the components that issue names; with --local, carry the reviewed issue identity",
       )
       .option(
         "--submodules",

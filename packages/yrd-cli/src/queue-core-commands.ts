@@ -1773,7 +1773,7 @@ export async function coreQueueCommand(
       const issueIdentity = (value: string): string => value
       const mode =
         request.command === "drop-issue"
-          ? "Issue cleanup applies by default across every registered worktree's component stores using exact origin custody; this can take minutes. --dry-run previews. --apply and --submodules are accepted compatibility flags."
+          ? "Issue cleanup inspects the author store and the author checkout of each component this issue names. A component branch that lives only in another worktree, and one never recorded on the issue, are not searched; yrd env close retires an environment's own branches. --dry-run previews. --apply and --submodules are accepted compatibility flags."
           : "Local branch cleanup archives the exact tip before deleting its local name."
       const branchIssue = (branch: string, recordedIssue?: string): string | undefined => {
         const mapped = io.branchIssue === undefined ? recordedIssue : io.branchIssue({ branch, recordedIssue })
