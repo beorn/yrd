@@ -2479,6 +2479,13 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect(body.removed, JSON.stringify(body.kept)).toContainEqual(
         expect.objectContaining({ branch: childBranch, archiveRef: expect.any(String) }),
       )
+      expect(body.kept, JSON.stringify(body.kept)).toContainEqual(
+        expect.objectContaining({
+          branch: rootBranch,
+          reason: "held",
+          detail: expect.stringContaining(attached),
+        }),
+      )
     } finally {
       if (existsSync(saved)) fs.renameSync(saved, attached)
     }
