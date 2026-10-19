@@ -44,7 +44,7 @@ The queue surface uses ten state names (ruled 2026-09-16, v3, with deferred), ea
 | `deferred`  | checks exceeded the normal bound; waits for the long check   | runs in the long tier               |
 | `stuck`     | the queue could not judge it and stopped the line (ADR-0015) | repair and resume, merge, or cancel |
 | `failed`    | check exited non-zero; ended                                 | author fixes and resubmits          |
-| `cancelled` | withdrawn with `yrd cancel` (or `yrd queue withdraw`); ended | resubmitting re-opens it            |
+| `cancelled` | withdrawn with `yrd queue withdraw`; ended                   | resubmitting re-opens it            |
 
 A direct merge that reached the queue branch without going through the queue is reported as `direct` apart.
 
