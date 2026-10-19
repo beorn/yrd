@@ -2863,6 +2863,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
     const keptByLink = await keptLinkAdmits(gitIn(store.repo, undefined, store.selection), head, kept)
     if (
       !keptByLink &&
+      !(archive !== undefined && preparedArchive?.update.expect === head) &&
       !(await acceptsMergedLocalRetirement(gitIn(store.repo, undefined, store.selection), {
         local: archive !== undefined,
         head,

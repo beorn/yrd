@@ -14,6 +14,7 @@
  */
 
 import { shellQuote } from "git-super/shell-command"
+import { findArchiveRefFor } from "git-super/archive-ref"
 import {
   existsSync,
   appendFileSync,
@@ -1948,9 +1949,11 @@ export async function coreQueueCommand(
             })
             continue
           }
+          const existingArchive = change?.ending === undefined ? undefined : findArchiveRefFor(authorRepo, branch, head)
           if (
             change?.commit !== undefined &&
             change.commit !== head &&
+            existingArchive === undefined &&
             !(await acceptsMergedLocalRetirement(authorGit, { local: true, head, change }))
           ) {
             kept.push({
