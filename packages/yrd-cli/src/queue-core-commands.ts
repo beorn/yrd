@@ -1045,6 +1045,27 @@ export async function coreQueueCommand(
   type RetryExhaustedRound = Readonly<{ kind: "retry-exhausted"; error: QueueRunEventRetryExhausted }>
   type LegacyOverrideRound = Readonly<{ kind: "legacy-override-present"; error: LegacyOverridePresent }>
   type CleanupOutcome = Pick<QueueRunOutcome, "run" | "log" | "base" | "merged" | "target">
+  /**
+   * One housekeeping journal per service start, shared by the startup catch-up and every round's cleanup (30105).
+   * Before this, each merged round opened its own logs/post-merge file — about 1,700 a day, none of them read.
+   * The separation from the round journal stays: cleanup still cannot stale a completed round's projection.
+   *
+   * ONE header per journal, written as it opens: readers take the FIRST `run` row as the run (log.ts:228), so a
+   * header per round would read as one run and silently ignore every later round's fields. Each round, and the
+   * startup, adds an `observation` marker carrying its `command` and `queueRun` instead.
+   *
+   * Attribution is by POSITION, which rests on the post-merge worker running one cleanup at a time
+   * (post-merge.ts:614-626). A coalesced nudge already files two rounds' branches under the later cleanup
+   * (post-merge.ts:631-637); nothing finer than that is claimed here.
+   */
+  let housekeepingLog: ReturnType<typeof openLog> | undefined
+  const housekeepingFor = (): ReturnType<typeof openLog> => {
+    if (housekeepingLog !== undefined) return housekeepingLog
+    const opened = openLog(join(workdir, "logs", "post-merge"))
+    opened.write({ kind: "run", command: "post-merge housekeeping" })
+    housekeepingLog = opened
+    return opened
+  }
   const cleanupAfterRound = async (
     outcome: CleanupOutcome,
     declared: CapturedDeclaration,
@@ -1228,6 +1249,16 @@ export async function coreQueueCommand(
         ? postMergeStop.signal
         : AbortSignal.any([request.stop, postMergeStop.signal])
       : undefined
+  // Declared BEFORE postMerge so it disposes AFTER it: the post-merge worker drains first and the housekeeping
+  // journal is finished only then, never while a cleanup can still append (post-merge.ts:642-651, log.ts:283).
+  using housekeepingJournal = {
+    [Symbol.dispose]: (): void => {
+      housekeepingLog?.finish()
+      housekeepingLog = undefined
+    },
+  }
+  // The binding IS the disposal slot; the object holds no state of its own.
+  void housekeepingJournal
   await using postMerge =
     request.command === "up" || request.command === "run" || request.command === "merge"
       ? createPostMerge({
@@ -1294,25 +1325,28 @@ export async function coreQueueCommand(
         ...(noCheck === undefined ? {} : { noCheck }),
       })
       roundCleanup = async (merged) => {
-        // The queue journal is complete. Housekeeping owns a separate log,
-        // just like startup catch-up, so later cleanup cannot stale its projection.
-        const cleanupLog = openLog(join(workdir, "logs", "post-merge"))
+        // The queue journal is complete. Housekeeping owns one shared log per
+        // service start, so later cleanup cannot stale its projection and
+        // several rounds do not mint a file each (30105). This marker is the
+        // round's position in that journal; it is never a header.
+        const cleanupLog = housekeepingFor()
         cleanupLog.write({
-          kind: "run",
+          kind: "observation",
+          scope: "housekeeping",
           command: "post-merge cleanup",
           config: declared.config.blob,
           target: targetLabel,
           queueRun: outcome.run,
         })
-        try {
-          await cleanupAfterRound(
-            { ...outcome, run: cleanupLog.id, log: cleanupLog.path, merged },
-            declared,
-            baseOptions.render,
-          )
-        } finally {
-          cleanupLog.finish()
-        }
+        // Every row in this journal carries the journal's own id; a round is
+        // found by its marker's position, never by a foreign run id. The
+        // journal is finished by the disposable registered above, after the
+        // post-merge worker drains, whatever the command is.
+        await cleanupAfterRound(
+          { ...outcome, run: cleanupLog.id, log: cleanupLog.path, merged },
+          declared,
+          baseOptions.render,
+        )
       }
     } catch (error) {
       // Cleanup used to run outside this catch. Keep its original process
@@ -3754,9 +3788,10 @@ export async function coreQueueCommand(
             const declared = await declaration()
             if (declared !== undefined) {
               // Housekeeping evidence is not a queue round; keep it outside the round reader's population.
-              const startupLog = openLog(join(workdir, "logs", "post-merge"))
+              const startupLog = housekeepingFor()
               startupLog.write({
-                kind: "run",
+                kind: "observation",
+                scope: "housekeeping",
                 command: "post-merge startup",
                 config: declared.config.blob,
                 target: targetLabel,
@@ -3803,15 +3838,11 @@ export async function coreQueueCommand(
                 ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
                 queueBranch: declared.config.target.branch,
                 cleanup: async (merged) => {
-                  try {
-                    await cleanupAfterRound(
-                      { run: startupLog.id, log: startupLog.path, base: declared.oid, target: declared.oid, merged },
-                      declared,
-                      () => {},
-                    )
-                  } finally {
-                    startupLog.finish()
-                  }
+                  await cleanupAfterRound(
+                    { run: startupLog.id, log: startupLog.path, base: declared.oid, target: declared.oid, merged },
+                    declared,
+                    () => {},
+                  )
                 },
               })
               startupCatchup = false

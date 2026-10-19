@@ -209,17 +209,20 @@ async function waitForEnvironmentCleanup(workdir: string, run: string): Promise<
   await vi.waitFor(
     () => {
       const dir = join(workdir, "logs", "post-merge")
-      const cleanupRuns = new Set(
-        (existsSync(dir) ? readdirSync(dir) : [])
-          .filter((name) => name.endsWith(".jsonl"))
-          .map((name) => name.slice(0, -".jsonl".length))
-          .filter((id) => readRunLog(dir, id).some((row) => row.kind === "run" && row.queueRun === run)),
+      // 30105: one housekeeping journal per service start. Attribution is
+      // POSITIONAL: a round's rows follow its own `observation` marker, and
+      // every row carries the journal's id rather than the queue run's.
+      const rows = (existsSync(dir) ? readdirSync(dir) : [])
+        .filter((name) => name.endsWith(".jsonl"))
+        .flatMap((name) => readRunLog(dir, name.slice(0, -".jsonl".length)))
+      const marker = rows.findIndex((row) => row.kind === "observation" && row.queueRun === run)
+      const nextMarker = rows.findIndex(
+        (row, index) => index > marker && row.kind === "observation" && typeof row.queueRun === "string",
       )
+      const own = rows.slice(marker + 1, nextMarker === -1 ? undefined : nextMarker)
       expect(
-        allCleanupRows(workdir).some(
-          (row) => cleanupRuns.has(String(row.run)) && row.registry !== undefined && typeof row.remaining === "number",
-        ),
-        `completed cleanup linked to queue run ${run}`,
+        marker >= 0 && own.some((row) => row.registry !== undefined && typeof row.remaining === "number"),
+        `completed cleanup after the marker for queue run ${run}`,
       ).toBe(true)
     },
     { timeout: 30_000 },
@@ -705,6 +708,114 @@ describe("yrd queue up, the service", () => {
       )
     } finally {
       writeFileSync(release, "go")
+      census.mockRestore()
+    }
+  }, 120_000)
+
+  /**
+   * @failure A service start mints one housekeeping journal per merged round, and cleanup appends rows to a round journal whose final row was already written.
+   * @level l2
+   * @consumer the queue service operator reading logs/post-merge
+   * @testonly none
+   */
+  it("keeps one housekeeping journal for the whole service start and never appends to a finished round journal (30105)", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await redeclare(w, "setup: ':'\n")
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const branches = ["task/30105-first", "task/30105-second"]
+    for (const [index, branch] of branches.entries()) {
+      await w.git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(w.work, `work-${index}.txt`), `${branch}\n`)
+      await w.git(["add", `work-${index}.txt`])
+      await w.git(["commit", "--quiet", "-m", `${branch} work`])
+      await w.git(["checkout", "--quiet", "main"])
+      await submit(w.git, "origin", { branch, submitter: "fixture", target: { remote: "origin", branch: "main" } })
+    }
+    const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue({
+      complete: true,
+      unreadable: [],
+      mechanism: "proc",
+      rows: [],
+    })
+    try {
+      const stop = new AbortController()
+      const roundRuns: string[] = []
+      const finished = new Map<string, readonly Record<string, unknown>[]>()
+      const io = capture(w.work)
+      io.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
+      io.io.liveEnvironmentUse = async () => []
+      expect(
+        await coreQueueCommand(
+          w.work,
+          io.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async (outcome) => {
+              // Every journal a previous round finished is still exactly what it
+              // was: cleanup may never append after a round's own final row.
+              for (const [run, rows] of finished) {
+                expect(
+                  readRunLog(join(workdir, "logs"), run),
+                  `round journal ${run} unchanged by later cleanup`,
+                ).toEqual(rows)
+              }
+              if (outcome.merged.length === 0) return
+              roundRuns.push(outcome.run)
+              finished.set(outcome.run, readRunLog(join(workdir, "logs"), outcome.run))
+              await waitForEnvironmentCleanup(workdir, outcome.run)
+              if (roundRuns.length === branches.length) stop.abort()
+            },
+          },
+          { json: true, workdir },
+        ),
+        io.stderr(),
+      ).toBe(0)
+      expect(roundRuns).toHaveLength(branches.length)
+      const housekeeping = readdirSync(join(workdir, "logs", "post-merge")).filter((name) => name.endsWith(".jsonl"))
+      expect(housekeeping, "one housekeeping journal for the whole service start").toHaveLength(1)
+      const rows = readRunLog(join(workdir, "logs", "post-merge"), housekeeping[0]!.slice(0, -".jsonl".length))
+      // Condition 1: exactly one header. A second `run` row would read as one
+      // run and silently ignore every later round's header fields.
+      expect(
+        rows.filter((row) => row.kind === "run"),
+        "one header for the whole journal",
+      ).toHaveLength(1)
+      // Condition 3: finish() ran after the worker drained, so it persisted a
+      // projection instead of refusing a source that changed while it read.
+      expect(rows, "no journal-projection warning").not.toContainEqual(
+        expect.objectContaining({ subject: "journal-projection" }),
+      )
+      for (const run of roundRuns) {
+        expect(rows, `housekeeping journal carries the cleanup marker for ${run}`).toContainEqual(
+          expect.objectContaining({ kind: "observation", command: "post-merge cleanup", queueRun: run }),
+        )
+        // Condition 2: attribution is positional. Every row carries the
+        // journal's own id, so a round's rows are the ones between its marker
+        // and the next marker; they must at least carry its cleanup.
+        const marker = rows.findIndex((row) => row.kind === "observation" && row.queueRun === run)
+        const nextMarker = rows.findIndex(
+          (row, index) => index > marker && row.kind === "observation" && typeof row.queueRun === "string",
+        )
+        const own = rows.slice(marker + 1, nextMarker === -1 ? undefined : nextMarker)
+        expect(marker, `marker position for ${run}`).toBeGreaterThan(0)
+        expect(
+          own.some((row) => row.scope === "environment-cleanup"),
+          `environment-cleanup rows sit after the marker for ${run}`,
+        ).toBe(true)
+        // One home per truth: every row names this journal, never a foreign
+        // run id, so the round is found only by the marker's position.
+        expect(
+          rows.every((row) => row.run === rows[0]!.run),
+          "every row carries the journal's own id",
+        ).toBe(true)
+        expect(readRunLog(join(workdir, "logs"), run), `round journal ${run} ends as its own final row`).toEqual(
+          finished.get(run),
+        )
+      }
+    } finally {
       census.mockRestore()
     }
   }, 120_000)
@@ -4465,7 +4576,7 @@ describe("yrd queue up, the service", () => {
         .filter((name) => name.endsWith(".jsonl"))
         .flatMap((name) => readRunLog(startupRetirement, name.slice(0, -".jsonl".length)))
       expect(
-        roundCleanupHeaders.some((entry) => entry.kind === "run" && entry.queueRun === mixedRounds.at(-1)!.run),
+        roundCleanupHeaders.some((entry) => entry.kind === "observation" && entry.queueRun === mixedRounds.at(-1)!.run),
         "cleanup names the newest actual queue run",
       ).toBe(true)
       roundRead.mockRestore()
@@ -8291,19 +8402,28 @@ describe("yrd queue run --tier long", () => {
     const census = vi
       .spyOn(removely, "inspectProcessCwds")
       .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
-    const runIds = (): Set<string> => new Set(allCleanupRows(workdir).map((row) => String(row.run)))
+    // 30105: every row of a service start carries that journal's own id, so a
+    // cleanup batch is found by POSITION between its `charged` footer rows,
+    // never by a run id. Each invocation opens a fresh journal; the newest one
+    // is this invocation's.
+    const journalRows = (): readonly Record<string, unknown>[] => {
+      const dir = join(workdir, "logs", "post-merge")
+      const names = (existsSync(dir) ? readdirSync(dir) : []).filter((name) => name.endsWith(".jsonl")).sort()
+      const newest = names.at(-1)
+      return newest === undefined ? [] : readRunLog(dir, newest.slice(0, -".jsonl".length))
+    }
     // Only environment rows count: the sweep also logs cursor rows whose `path`
     // is the resume-hint file, and those are not environments evaluated.
     const envPrefix = environments + "/"
-    const batchesSince = (before: Set<string>): string[][] => {
-      const rows = allCleanupRows(workdir).filter((row) => !before.has(String(row.run)))
-      const summaries = rows
-        .filter((row) => row.charged !== undefined)
-        .sort((a, b) => String(a.at).localeCompare(String(b.at)))
-      return summaries.map((summary) => {
-        expect(summary.charged, "each native cleanup batch charges eight environments").toBe(8)
+    const batches = (): string[][] => {
+      const rows = journalRows()
+      const footers = rows.flatMap((row, index) => (row.charged !== undefined ? [index] : []))
+      return footers.map((footer, index) => {
+        expect(rows[footer]!.charged, "each native cleanup batch charges eight environments").toBe(8)
+        const start = index === 0 ? 0 : footers[index - 1]! + 1
         return rows
-          .filter((row) => row.run === summary.run && typeof row.path === "string" && row.path.startsWith(envPrefix))
+          .slice(start, footer)
+          .filter((row) => typeof row.path === "string" && (row.path as string).startsWith(envPrefix))
           .map((row) => String(row.path))
       })
     }
@@ -8335,9 +8455,8 @@ describe("yrd queue run --tier long", () => {
     }
     const hint = join(workdir, "state", "yrd", "environment-cleanup.json")
     try {
-      let before = runIds()
       await oneRound()
-      expect(new Set(batchesSince(before)[0]), "the first batch evaluates the head of the registry").toEqual(
+      expect(new Set(batches()[0]), "the first batch evaluates the head of the registry").toEqual(
         new Set(paths.slice(0, 8)),
       )
       expect(existsSync(hint), "the round writes its resume hint").toBe(true)
@@ -8345,16 +8464,14 @@ describe("yrd queue run --tier long", () => {
       const offset = paths.findIndex((path) => basename(path) === saved.cursorEnv)
       expect(offset, "startup plus one round leave a nonzero persisted continuation").toBeGreaterThan(0)
       // A RESTART is a new command invocation: fresh cleanup state, same workdir.
-      before = runIds()
       await oneRound()
-      expect(new Set(batchesSince(before)[0]), "the restarted sweep resumes at the persisted environment").toEqual(
+      expect(new Set(batches()[0]), "the restarted sweep resumes at the persisted environment").toEqual(
         new Set(paths.slice(offset, offset + 8)),
       )
       // A corrupt hint is named with its path and starts at index 0.
       writeFileSync(hint, "{ not json")
-      before = runIds()
       await oneRound()
-      expect(new Set(batchesSince(before)[0]), "a corrupt hint restarts its first batch at index 0").toEqual(
+      expect(new Set(batches()[0]), "a corrupt hint restarts its first batch at index 0").toEqual(
         new Set(paths.slice(0, 8)),
       )
       expect(
