@@ -2716,19 +2716,38 @@ describe("the queue-format boundary", () => {
     })
 
     // Old shape, unchanged: an admission warning with no Warning-Kind still folds.
-    const old = evolve(
-      opened,
-      event(
-        "admission-warning",
-        B,
-        [
-          ["Commit", A],
-          ["Reason", "no kind on the old shape"],
-        ],
-        [A],
-      ),
+    const legacyReason = "no kind on the old shape; Next: yrd drop 'literal café'"
+    const oldRecord = event(
+      "admission-warning",
+      B,
+      [
+        ["Commit", A],
+        ["Reason", legacyReason],
+      ],
+      [A],
     )
-    expect(old.diagnostic).toContain("admission could not judge")
+    const before = JSON.stringify(oldRecord)
+    const old = evolve(opened, oldRecord)
+    expect(old.diagnostic).toBe(`admission could not judge ${A.slice(0, 12)}: ${legacyReason}`)
+    expect(JSON.stringify(oldRecord)).toBe(before)
+    for (const encoded of ["{", "null", '\"\"']) {
+      expect(() =>
+        evolve(
+          opened,
+          event(
+            "admission-warning",
+            B,
+            [
+              ["Commit", A],
+              ["Reason", "target policy output recorded separately"],
+              ["Warning-Kind", "policy-warning"],
+              ["Admission-Output", encoded],
+            ],
+            [A],
+          ),
+        ),
+      ).toThrow(new RegExp(`event ${B} has invalid Admission-Output`))
+    }
   })
 
   it("gives a row the reverted-paths finding as a structured notice, counts and all (28195)", () => {

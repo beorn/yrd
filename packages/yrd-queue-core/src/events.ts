@@ -67,6 +67,7 @@ export const EVENT_TRAILERS = {
   issue: "Issue",
   queue: "Queue",
   reason: "Reason",
+  admissionOutput: "Admission-Output",
   warningKind: "Warning-Kind",
   time: "Time",
   check: "Check",
@@ -496,7 +497,10 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
     throw new TypeError(`Commit: must name a commit oid, got ${details.commit}`)
   }
   if (details.issue !== undefined && details.issue.trim() === "") throw new TypeError("Issue: cannot be empty")
-  if (details.reason !== undefined && details.reason.trim() === "") throw new TypeError("Reason: cannot be empty")
+  const policyOutput = type === "admission-warning" && details.warningKind !== "reverted-paths"
+  if (details.reason !== undefined && (policyOutput ? details.reason.length === 0 : details.reason.trim() === "")) {
+    throw new TypeError("Reason: cannot be empty")
+  }
   if (type === "admission-warning" && (details.commit === undefined || details.reason === undefined)) {
     throw new TypeError("admission-warning needs Commit: and Reason:")
   }
@@ -511,7 +515,20 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   if (details.issue !== undefined) props.push([EVENT_TRAILERS.issue, details.issue])
   if (details.by !== undefined) props.push([EVENT_TRAILERS.by, details.by])
   if (details.recipient !== undefined) props.push([EVENT_TRAILERS.recipient, details.recipient])
-  if (details.reason !== undefined) props.push([EVENT_TRAILERS.reason, details.reason])
+  if (details.reason !== undefined) {
+    if (policyOutput) {
+      props.push([
+        EVENT_TRAILERS.reason,
+        details.warningKind === "policy-warning"
+          ? "target admission policy output recorded in Admission-Output"
+          : "target admission could not judge; full reason recorded in Admission-Output",
+      ])
+      props.push([
+        EVENT_TRAILERS.admissionOutput,
+        JSON.stringify(details.reason).replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029"),
+      ])
+    } else props.push([EVENT_TRAILERS.reason, details.reason])
+  }
   if (details.warningKind !== undefined) props.push([EVENT_TRAILERS.warningKind, details.warningKind])
   if (details.run !== undefined) props.push([EVENT_TRAILERS.run, details.run])
   if (details.landedGitlinks !== undefined) {
@@ -547,6 +564,26 @@ function requiredProp(event: EventShape, key: string): string {
   const value = prop(event, key)
   if (value === undefined || value.trim() === "") throw new Error(`event ${event.id} (${event.type}) needs ${key}:`)
   return value
+}
+
+/** The supplied policy text; old records retain their original Reason semantics. */
+export function admissionWarningReason(event: EventShape): string {
+  const reason = requiredProp(event, EVENT_TRAILERS.reason)
+  const encoded = prop(event, EVENT_TRAILERS.admissionOutput)
+  if (encoded === undefined) return reason
+  if (event.type !== "admission-warning" || prop(event, EVENT_TRAILERS.warningKind) === "reverted-paths") {
+    throw new Error(`event ${event.id} has Admission-Output outside a policy admission warning`)
+  }
+  let decoded: unknown
+  try {
+    decoded = JSON.parse(encoded)
+  } catch (cause) {
+    throw new Error(`event ${event.id} has invalid Admission-Output: expected a JSON string`, { cause })
+  }
+  if (typeof decoded !== "string" || decoded.length === 0) {
+    throw new Error(`event ${event.id} has invalid Admission-Output: expected a nonempty string`)
+  }
+  return decoded
 }
 
 function checkedIssueEffect(value: unknown, where: string): AppliedIssueEffect {
@@ -934,8 +971,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
           `event ${event.id} admission-warning keeps ${head}, expected submitted head ${state.commit ?? "absent"}`,
         )
       }
-      const reason = requiredProp(event, EVENT_TRAILERS.reason)
-      if (reason.trim() === "") throw new Error(`event ${event.id} admission-warning has empty Reason:`)
+      const reason = admissionWarningReason(event)
       const warningKind = prop(event, EVENT_TRAILERS.warningKind)
       // 27363: a second admitted kind beside the policy warning. `reverted-paths`
       // names the compose revert detector's durable finding; an old reader must
@@ -950,10 +986,15 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       if (admitted === "reverted-paths") {
         return { ...next, admissionWarning: { kind: admitted, event: event.id, reason } }
       }
-      return diagnose(
-        next,
-        `admission ${admitted === "policy-warning" ? "policy warning" : "could not judge"} ${head.slice(0, 12)}: ${reason}`,
-      )
+      const guidance =
+        prop(event, EVENT_TRAILERS.admissionOutput) === undefined
+          ? admitted === "policy-warning"
+            ? "policy warning"
+            : "could not judge"
+          : admitted === "policy-warning"
+            ? "target policy warning (recorded guidance)"
+            : "target policy could not judge (recorded guidance)"
+      return diagnose(next, `admission ${guidance} ${head.slice(0, 12)}: ${reason}`)
     }
     case "verifying":
     case "checking":

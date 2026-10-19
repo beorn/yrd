@@ -106,7 +106,12 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
     next: "repair the named chain",
     word: "invalid",
   },
-  draft: { color: "$fg-muted", means: "pushed to the remote, not submitted", next: "yrd submit", word: "draft" },
+  draft: {
+    color: "$fg-muted",
+    means: "pushed to the remote, not submitted",
+    next: "submit this branch to the queue",
+    word: "draft",
+  },
   queued: { color: "$fg-warning", means: "submitted and waiting for the runner", next: "verifying", word: "queued" },
   submitted: {
     color: "$fg-warning",
@@ -197,13 +202,13 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
   stopped: {
     color: "$fg-error",
     means: "no runner process: the service's own health document is overdue, or its writer is gone",
-    next: "yrd queue up",
+    next: "start the runner for this queue",
     word: "stopped",
   },
   paused: {
     color: "$fg-warning",
     means: "an operator stopped the line",
-    next: "yrd queue resume",
+    next: "resume this queue after resolving the pause",
     word: "paused",
   },
   silent: {

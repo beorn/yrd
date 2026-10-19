@@ -3,6 +3,7 @@ import { createHash } from "node:crypto"
 import { archiveRefFor, ensureArchiveRef, findArchiveRefFor, readArchiveRows } from "git-super/archive-ref"
 import { readCommitSubmodules } from "git-super/commit-graph"
 import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
+import { shellQuote } from "git-super/shell-command"
 import { createGitWorktreeStore } from "git-super/worktree"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { inspectCheckoutGitMetadata, verifyRetainedCopy } from "git-super"
@@ -484,7 +485,16 @@ export async function retireIssueBranches(
             reason: "advanced",
             detail:
               `current tip ${head} differs from recorded change tip ${change.commit}` +
-              (await advancedCure(candidate.git, branch, head, change.commit, custody.target, targetLabel, false)),
+              (await advancedCure(
+                candidate.git,
+                candidate.repo,
+                branch,
+                head,
+                change.commit,
+                custody.target,
+                targetLabel,
+                false,
+              )),
           })
           continue
         }
@@ -2129,9 +2139,10 @@ export function createLandedBranchRetirement(
  */
 export async function advancedCure(
   git: Git,
+  repo: string,
   branch: string,
   head: string,
-  recorded: string | undefined,
+  recorded: string,
   target: string,
   targetLabel: string,
   local: boolean,
@@ -2145,7 +2156,7 @@ export async function advancedCure(
   if (!held) return `; it holds commits ${targetLabel} lacks: submit them, and drop the branch after they land`
   return (
     `; ${targetLabel} already holds ${head}, so nothing is lost: move the branch back with ` +
-    `git update-ref refs/heads/${branch} ${recorded} ${head}, then ` +
+    `git -C ${shellQuote(repo)} update-ref ${shellQuote(`refs/heads/${branch}`)} ${shellQuote(recorded)} ${shellQuote(head)}, then ` +
     (local ? `rerun with --tip ${recorded}` : "rerun this drop")
   )
 }
