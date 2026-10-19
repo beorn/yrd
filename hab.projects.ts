@@ -4,16 +4,15 @@
 // superproject's fleet scan and Hab composition both read the row below, so it
 // stays a named export rather than being inlined into the service entry.
 
-import {
-  yrdQueueRunnerDeclarations,
-  type YrdQueueRunnerDeclaration,
-} from "./packages/yrd-queue-core/src/runner-declarations.ts"
+import { yrdQueueRunnerDeclarations } from "./packages/yrd-queue-core/src/runner-declarations.ts"
 // Imported by FILE, never the barrel: hab's plan evaluation loads this module,
 // and the constant is pure, so reading it never drags the queue's module graph
 // into habd (@cto, 2026-10-07, on 27886).
-import { YRD_RUNTIME_COMPONENTS as YRD_COMPONENTS } from "./packages/yrd-queue-core/src/runtime-components.ts"
+import * as runtime from "./packages/yrd-queue-core/src/runtime-components.ts"
+const { YRD_RUNTIME_COMPONENTS: YRD_COMPONENTS, YRD_RUNTIME_ENTRY } = runtime
 
-export { yrdQueueRunnerDeclarations, type YrdQueueRunnerDeclaration }
+export { yrdQueueRunnerDeclarations }
+export type { YrdQueueRunnerDeclaration } from "./packages/yrd-queue-core/src/runner-declarations.ts"
 // 27904: re-exported so the ROOT composes the shared-main landing trigger set from the same measured vector,
 // never a hand-typed copy. The hh declaration fragment cannot import vendor (hab-config purity composes
 // cross-module coupling at the root), and the yrd fragment's own module already imports this by file.
@@ -34,7 +33,7 @@ export default {
         // take no repository argument — the declaration where the command
         // stands IS the repository, and the service stands in it
         // (`repository.path`).
-        command: "bun tools/yrd-runtime.mjs yrd queue up --interval 120",
+        command: `bun ${YRD_RUNTIME_ENTRY} yrd queue up --interval 120`,
         // The habitant stands down over this RSS (exit 12, memory-cap) instead of
         // waiting for the kernel; @cto ruling 2026-08-30 on
         // @i/10-yrd/runner-exits-and-respawns — one habitant per host. Raised
@@ -64,7 +63,7 @@ export default {
         // the stop, so the supervisor pages on unhealthy-while-running WITHOUT
         // restarting. The page clears when an act lifts the stop (the change
         // withdrawn or merged, or `yrd queue resume`), never by itself.
-        health: { command: "bun tools/yrd-runtime.mjs yrd queue health" },
+        health: { command: `bun ${YRD_RUNTIME_ENTRY} yrd queue health` },
         // The loop relaunches only after an ending it chose: 0 for a clean
         // round/gitlink recycle, or 1 for a candidate failure. Exit 2 is
         // reserved for what the loop cannot hold a line on — a declaration that
@@ -84,6 +83,8 @@ export default {
         // own alone — a dependency-only promotion (say vendor/bearly) moved the loop never saw, and moved the
         // source check never saw either, because the entrypoint file's history does not cover it. The same
         // constant drives the loop's exit and wait and this declaration's source comparison.
+        // 30189: both comparisons also watch the launcher's last-touch revision. A launcher-only move
+        // uses the same wait and exit 0; unrelated root promotions do not recycle this service.
         landingMigration: { mechanism: "self-exit" as const, bound: "45m", additionalComponents: YRD_COMPONENTS },
         // `HabServiceDefinition.owner` is a recognized service key in
         // ag/packages/hab-config. Spreading the registry row's owner here makes

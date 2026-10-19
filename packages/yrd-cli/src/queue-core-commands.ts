@@ -173,6 +173,8 @@ import {
   writtenHealthDocument,
   runtimeGitlinkPath,
   YRD_RUNTIME_COMPONENTS,
+  YRD_RUNTIME_ENTRY,
+  yrdEntryRevisionArgs,
   stopFact,
   QueuePaused,
   QueueNotPaused,
@@ -304,6 +306,40 @@ const RELAUNCH_WAIT_CAP_MS = ROUND_BUDGET_MS
 // Observe this module's checkout when it loads, before declaration fetching or
 // any later queue call. A later disk HEAD is projection state, not loaded code.
 const sourceDirectory = dirname(fileURLToPath(import.meta.url))
+// The launcher remains in its entry landing even when it imports shared-main Yrd (28817).
+// Resolve this path once: a later symlink promotion must not relabel loaded code.
+const launcherAtLoad = await (async () => {
+  let root: string | undefined
+  try {
+    const entry = process.argv[1]
+    if (entry === undefined) return { root, error: "loaded launcher revision: process.argv[1] is absent" }
+    root = dirname(dirname(realpathSync(entry)))
+    await using child = createProcess()
+    const result = await adaptProcessGit(child, { timeoutMs: 5000 }).run({
+      repo: root,
+      args: yrdEntryRevisionArgs("HEAD", YRD_RUNTIME_ENTRY),
+    })
+    if (result.code !== 0 || result.timedOut || result.signal || result.failure) {
+      return { root, error: `loaded launcher revision at ${root}: ${gitFailure(result, 5000)}` }
+    }
+    const revision = result.stdout.trim()
+    return revision === ""
+      ? { root, error: `loaded launcher revision at ${root}: git rev-list returned empty output` }
+      : { root, revision }
+  } catch (error) {
+    return { root, error: `loaded launcher revision at ${root ?? "unresolved entry"}: ${String(error)}` }
+  }
+})()
+
+async function launcherRevision(git: Git, ref: string, label: string): Promise<{ revision?: string; error?: string }> {
+  try {
+    const revision = (await git(yrdEntryRevisionArgs(ref, YRD_RUNTIME_ENTRY))).trim()
+    return revision === "" ? { error: `${label}: git rev-list ${ref} returned empty output` } : { revision }
+  } catch (error) {
+    return { error: `${label}: ${String(error)}` }
+  }
+}
+
 const sourceAtLoad = await (async () => {
   await using process = createProcess()
   const source = adaptProcessGit(process, { timeoutMs: 5000 })
@@ -3216,6 +3252,10 @@ export async function coreQueueCommand(
         io.stderr(`yrd: ${identified.why}\n`)
       }
       const gitlink = identified.kind === "gitlink" ? identified : undefined
+      let loadedLauncher = launcherAtLoad.revision
+      let launcherRevisionError =
+        gitlink?.checkout === undefined || gitlink.superproject === undefined ? undefined : launcherAtLoad.error
+      let launcherErrorAnnounced: string | undefined
       /** A fact in every health document while the exit is disarmed, so a reader meets it without looking. */
       const relaunchOff = identified.kind === "off" ? { relaunchExit: identified.reason } : {}
       /**
@@ -3235,6 +3275,7 @@ export async function coreQueueCommand(
           facts: {
             ...base.facts,
             ...relaunchOff,
+            ...(launcherRevisionError === undefined ? {} : { launcherRevisionError }),
             serviceStarted,
             ...(chainPressure === undefined ? {} : { eventChainPressure: chainPressure }),
           },
@@ -3301,6 +3342,42 @@ export async function coreQueueCommand(
           }
           moved = gitlink.components.filter((component) => targetPins.get(component.path) !== component.sha)
           awaited = moved.filter((component) => targetPins.get(component.path) !== undefined)
+          // The same switch and explicit-injection break govern launcher and pins.
+          // A failed baseline retries at its frozen root until success, then stays frozen.
+          if (gitlink.checkout !== undefined && gitlink.superproject !== undefined) {
+            launcherRevisionError = undefined
+            if (loadedLauncher === undefined) {
+              if (launcherAtLoad.root === undefined) launcherRevisionError = launcherAtLoad.error
+              else {
+                const baseline = await launcherRevision(
+                  git.at(launcherAtLoad.root),
+                  "HEAD",
+                  `loaded launcher revision at ${launcherAtLoad.root}`,
+                )
+                loadedLauncher = baseline.revision
+                launcherRevisionError = baseline.error
+              }
+            }
+            if (loadedLauncher !== undefined) {
+              const target = await launcherRevision(git, oid, `target launcher revision at ${repo}`)
+              launcherRevisionError = target.error
+              if (target.revision !== undefined && target.revision !== loadedLauncher) {
+                targetPins.set(YRD_RUNTIME_ENTRY, target.revision)
+                const entry = { path: YRD_RUNTIME_ENTRY, sha: loadedLauncher }
+                moved = [...moved, entry]
+                awaited = [...awaited, entry]
+              }
+            }
+            if (launcherRevisionError !== launcherErrorAnnounced) {
+              if (launcherRevisionError !== undefined) {
+                log?.warn?.(launcherRevisionError)
+                io.stderr(
+                  `yrd: ${launcherRevisionError}; launcher movement is unknown; component comparison remains active\n`,
+                )
+              }
+              launcherErrorAnnounced = launcherRevisionError
+            }
+          }
           return undefined
         }
         const entry = await classify(targetOid)
@@ -3340,11 +3417,21 @@ export async function coreQueueCommand(
           const source = readRelaunchSource()
           const projectedRoot = relaunchSource === undefined ? superproject : source.resolved
           let sourceError = relaunchSource === undefined ? undefined : source.error
-          const readings: { path: string; projected?: string; checkout: string; checkoutPath: string }[] = []
+          const readings: { path: string; projected?: string; checkout?: string; checkoutPath: string }[] = []
           if (projectedRoot !== undefined && sourceError === undefined) {
             try {
               for (const component of awaited) {
                 const checkoutPath = join(projectedRoot, component.path)
+                if (component.path === YRD_RUNTIME_ENTRY) {
+                  const entry = await launcherRevision(
+                    gitIn(projectedRoot, undefined, selection, { env: options.env }),
+                    "HEAD",
+                    `promoted launcher revision at ${projectedRoot}`,
+                  )
+                  if (entry.error !== undefined) sourceError = entry.error
+                  readings.push({ path: component.path, projected: entry.revision, checkoutPath })
+                  continue
+                }
                 const projected = await gitlinkAt(
                   gitIn(projectedRoot, undefined, selection, { env: options.env }),
                   "HEAD",
@@ -3366,7 +3453,7 @@ export async function coreQueueCommand(
           }
           const readingOf = (
             path: string,
-          ): { projected?: string; checkout: string; checkoutPath: string } | undefined =>
+          ): { projected?: string; checkout?: string; checkoutPath: string } | undefined =>
             readings.find((reading) => reading.path === path)
           // EVEN ONE PATH NOT YET THERE HOLDS THE WAIT. The projected source and
           // the physical checkout must carry the target pin for EVERY moved path
@@ -3379,7 +3466,7 @@ export async function coreQueueCommand(
               return (
                 reading !== undefined &&
                 reading.projected === targetPin(component.path) &&
-                reading.checkout === targetPin(component.path)
+                (component.path === YRD_RUNTIME_ENTRY || reading.checkout === targetPin(component.path))
               )
             })
           if (settled) break
@@ -3388,11 +3475,14 @@ export async function coreQueueCommand(
           const detail = awaited
             .map((component) => {
               const reading = readingOf(component.path)
+              if (component.path === YRD_RUNTIME_ENTRY) {
+                return `${component.path} at ${reading?.checkoutPath ?? projectedRoot}: loaded ${component.sha.slice(0, 12)}, target ${targetPin(component.path).slice(0, 12)}, source revision ${reading?.projected?.slice(0, 12) ?? "unreadable"}`
+              }
               return (
                 `${component.path} at ${reading?.checkoutPath ?? join(superproject, component.path)}: ` +
                 `loaded ${component.sha.slice(0, 12)}, target ${targetPin(component.path).slice(0, 12)}, ` +
                 `source gitlink ${reading?.projected?.slice(0, 12) ?? "absent"}, ` +
-                `checkout ${reading?.checkout.slice(0, 12) ?? "unreadable"}`
+                `checkout ${reading?.checkout?.slice(0, 12) ?? "unreadable"}`
               )
             })
             .join("; ")

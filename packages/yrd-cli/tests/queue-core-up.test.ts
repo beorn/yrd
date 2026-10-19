@@ -380,7 +380,11 @@ type GitlinkWorld = World &
  * at `a`. Modelled on the queue core's own gitlink case: `b` is on the
  * submodule's main, so candidate settling accepts a change that records it.
  */
-async function gitlinkWorld(sourceReadFailure = false, eventQueue = true, launcher = false): Promise<GitlinkWorld> {
+async function gitlinkWorld(
+  sourceReadFailure = false,
+  eventQueue = true,
+  launcher: boolean | "untracked" | "symlink" | "older entry" = false,
+): Promise<GitlinkWorld> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-up-gitlink-"))
   roots.push(root)
   // Ownership comes from hosted identities; Git transports these fixture URLs locally.
@@ -420,7 +424,7 @@ async function gitlinkWorld(sourceReadFailure = false, eventQueue = true, launch
   if (launcher) {
     mkdirSync(join(work, "tools"))
     writeFileSync(join(work, "tools/yrd-runtime.mjs"), "// launcher a\n")
-    await git(["add", "tools/yrd-runtime.mjs"])
+    if (launcher !== "untracked") await git(["add", "tools/yrd-runtime.mjs"])
   }
   // The root records the submodule at its main as it stands now: `a`.
   await git(["submodule", "add", "--quiet", "https://git-super.test/owned/submodule.git", "submodule"])
@@ -450,12 +454,24 @@ async function gitlinkWorld(sourceReadFailure = false, eventQueue = true, launch
     await gitIn(join(work, "submodule"))(["symbolic-ref", "HEAD", "refs/heads/unborn-runtime"])
   }
   const originalEntry = process.argv[1]
-  if (launcher) process.argv[1] = join(work, "tools/yrd-runtime.mjs")
+  if (launcher === "symlink") {
+    const link = join(root, "entry.mjs")
+    symlinkSync(join(work, "tools/yrd-runtime.mjs"), link)
+    process.argv[1] = link
+  } else if (launcher === "older entry") {
+    const entryRoot = join(root, "loaded-entry")
+    await git(["clone", "--quiet", remote, entryRoot])
+    process.argv[1] = join(entryRoot, "tools/yrd-runtime.mjs")
+    writeFileSync(join(work, "tools/yrd-runtime.mjs"), "// launcher already newer in the runtime checkout\n")
+    await git(["commit", "--quiet", "-am", "runtime checkout ahead of loaded entry landing"])
+    await git(["push", "--quiet", "origin", "main"])
+  } else if (launcher) process.argv[1] = join(work, "tools/yrd-runtime.mjs")
   try {
     const { coreQueueCommand: command } = await import(join(cli, "src/queue-core-commands.ts"))
     return { a, b, command, git, work, workdir }
   } finally {
-    process.argv[1] = originalEntry
+    if (originalEntry === undefined) process.argv.splice(1, 1)
+    else process.argv[1] = originalEntry
   }
 }
 
@@ -3601,18 +3617,215 @@ describe("yrd queue up, the service", () => {
    * @level l2
    * @consumer Hab's supervised Yrd runner; existing pin cases never change the launcher file.
    */
-  it("waits for a launcher-only move to reach the relaunch source, then exits 0 (30189)", async () => {
-    const w = await gitlinkWorld(false, true, true)
-    const launcher = "tools/yrd-runtime.mjs"
-    const loaded = (await w.git(["rev-list", "-1", "HEAD", "--", launcher])).trim()
-    const source = join(dirname(w.work), "next-launch")
-    await w.git(["clone", "--quiet", join(dirname(w.work), "remote.git"), source])
-    const sourceGit = gitIn(source)
+  it.each(["old", "unreadable", "repointed argv"] as const)(
+    "waits for a launcher-only move to reach the %s relaunch source, then exits 0 (30189)",
+    async (projection) => {
+      const w = await gitlinkWorld(false, true, projection === "repointed argv" ? "symlink" : true)
+      const launcher = "tools/yrd-runtime.mjs"
+      const loaded = (await w.git(["rev-list", "-1", "HEAD", "--", launcher])).trim()
+      const source = join(dirname(w.work), "next-launch")
+      await w.git(["clone", "--quiet", join(dirname(w.work), "remote.git"), source])
+      const sourceGit = gitIn(source)
+      if (projection === "unreadable") await sourceGit(["symbolic-ref", "HEAD", "refs/heads/unborn-launcher"])
+      if (projection === "repointed argv") {
+        await identity(sourceGit)
+        await sourceGit(["checkout", "--quiet", "-b", "unlaunched"])
+        writeFileSync(join(source, launcher), "// a different launcher behind the repointed argv path\n")
+        await sourceGit(["commit", "--quiet", "-am", "unlaunched entry root"])
+        const entryLink = join(dirname(w.work), "entry.mjs")
+        unlinkSync(entryLink)
+        symlinkSync(join(source, launcher), entryLink)
+      }
+      const run = capture(w.work)
+      const stop = new AbortController()
+      let rounds = 0
+      let target = ""
+      const service = w.command(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          relaunchWaitCapMs: 50,
+          stop: stop.signal,
+          afterRound: async () => {
+            rounds += 1
+            if (rounds > 1) {
+              stop.abort()
+              return
+            }
+            writeFileSync(join(w.work, launcher), "// launcher b\n")
+            await w.git(["commit", "--quiet", "-am", "launcher only"])
+            await w.git(["push", "--quiet", "origin", "main"])
+            target = (await w.git(["rev-list", "-1", "HEAD", "--", launcher])).trim()
+          },
+        },
+        { env: { ...process.env, YRD_RELAUNCH_SOURCE: source }, json: true, workdir: w.workdir },
+      )
+      try {
+        const first = await Promise.race([
+          service.then(() => "ended" as const),
+          vi
+            .waitFor(() => expect(run.stdout()).toContain("waiting for relaunch source"), { timeout: 20_000 })
+            .then(() => "waiting" as const),
+        ])
+        expect(first, "launcher-only movement must hold before a second round").toBe("waiting")
+        expect(rounds).toBe(1)
+        if (projection === "unreadable") {
+          await vi.waitFor(() => expect(run.stdout()).toContain("relaunch-wait-stalled"), { timeout: 20_000 })
+          expect((await readQueueHealth(w.workdir, SERVICE)).facts?.waitingSourceError).toContain(
+            "promoted launcher revision",
+          )
+          await sourceGit(["symbolic-ref", "HEAD", "refs/heads/main"])
+        }
+        if (projection === "repointed argv") await sourceGit(["checkout", "--quiet", "main"])
+        expect((await sourceGit(["rev-list", "-1", "HEAD", "--", launcher])).trim()).toBe(loaded)
+        await sourceGit(["fetch", "--quiet", "origin", "main"])
+        await sourceGit(["merge", "--ff-only", "origin/main"])
+        expect(await service, run.stderr()).toBe(0)
+        expect(rounds).toBe(1)
+        expect(records(run).at(-1)).toMatchObject({ exitCode: 0, from: loaded, to: target })
+      } finally {
+        stop.abort()
+        await service
+      }
+    },
+    60_000,
+  )
+
+  /** @failure Reading the mutable runtime checkout as the loaded launcher hides a move already present at startup.
+   * @level l2 @consumer Yrd launched from a landing while its runtime imports shared main (28817). */
+  it("uses the entry landing started with, even when the runtime checkout is newer (30189)", async () => {
+    const w = await gitlinkWorld(false, true, "older entry")
+    const entryGit = gitIn(join(dirname(w.work), "loaded-entry"))
+    const loaded = (await entryGit(["rev-list", "-1", "HEAD", "--", "tools/yrd-runtime.mjs"])).trim()
+    const target = (await w.git(["rev-list", "-1", "HEAD", "--", "tools/yrd-runtime.mjs"])).trim()
+    expect(loaded).not.toBe(target)
     const run = capture(w.work)
     const stop = new AbortController()
     let rounds = 0
-    let target = ""
-    const service = w.command(
+    const exit = await w.command(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        afterRound: () => {
+          rounds += 1
+          stop.abort()
+        },
+      },
+      { env: { ...process.env, YRD_RELAUNCH_SOURCE: w.work }, json: true, workdir: w.workdir },
+    )
+    expect(exit, run.stderr()).toBe(0)
+    expect(rounds).toBe(0)
+    expect(records(run).at(-1)).toMatchObject({ exitCode: 0, from: loaded, to: target })
+  }, 60_000)
+
+  /** @failure An unreadable loaded launcher either stopped rounds or silently replaced its baseline later.
+   * @level l2 @consumer The supervised queue; pin-only cases never read entry history. */
+  it.each([false, true])(
+    "keeps rounds on unreadable loaded launcher revision and freezes its first recovery (%s) (30189)",
+    async (recover) => {
+      const w = await gitlinkWorld(false, true, "untracked")
+      const launcher = "tools/yrd-runtime.mjs"
+      const run = capture(w.work)
+      const stop = new AbortController()
+      let rounds = 0
+      let recovered = ""
+      let target = ""
+      const exit = await w.command(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterRound: async () => {
+            rounds += 1
+            if (!recover) {
+              if (rounds === 2) stop.abort()
+              return
+            }
+            if (rounds === 1) {
+              await w.git(["add", launcher])
+              await w.git(["commit", "--quiet", "-m", "launcher baseline recovers"])
+              await w.git(["push", "--quiet", "origin", "main"])
+              recovered = (await w.git(["rev-list", "-1", "HEAD", "--", launcher])).trim()
+            } else if (rounds === 2) {
+              writeFileSync(join(w.work, launcher), "// changed after baseline recovered\n")
+              await w.git(["commit", "--quiet", "-am", "launcher moves after baseline recovery"])
+              await w.git(["push", "--quiet", "origin", "main"])
+              target = (await w.git(["rev-list", "-1", "HEAD", "--", launcher])).trim()
+            } else stop.abort()
+          },
+        },
+        { json: true, workdir: w.workdir },
+      )
+      expect(exit, run.stderr()).toBe(0)
+      expect(rounds).toBe(2)
+      expect(run.stderr().match(/loaded launcher revision/g)).toHaveLength(1)
+      if (recover) expect(records(run).at(-1)).toMatchObject({ exitCode: 0, from: recovered, to: target })
+      else {
+        expect((await readQueueHealth(w.workdir, SERVICE)).facts?.launcherRevisionError).toContain(
+          "loaded launcher revision",
+        )
+      }
+    },
+    60_000,
+  )
+
+  /** @failure Empty or failed boundary reads were mistaken for launcher movement and held healthy rounds.
+   * @level l2 @consumer The queue runner; the existing unreadable-source row exercises path resolution only. */
+  it.each([0, 73])(
+    "keeps rounds on an unreadable target launcher revision (Git exit %s) (30189)",
+    async (code) => {
+      const w = await gitlinkWorld(false, true, true)
+      const selected = await installSelectedGit(w.work)
+      const script = readFileSync(selected.executable, "utf8")
+      writeFileSync(
+        selected.executable,
+        script.replace(
+          "const result = spawnSync",
+          `if (args[0] === "rev-list" && args[2] !== "HEAD" && args.at(-1) === "tools/yrd-runtime.mjs") process.exit(${code});\nconst result = spawnSync`,
+        ),
+      )
+      const run = capture(w.work)
+      const stop = new AbortController()
+      let rounds = 0
+      const exit = await w.command(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterRound: () => {
+            if (++rounds === 2) stop.abort()
+          },
+        },
+        { json: true, workdir: w.workdir },
+      )
+      expect(exit, run.stderr()).toBe(0)
+      expect(rounds).toBe(2)
+      expect(run.stderr().match(/target launcher revision/g)).toHaveLength(1)
+      expect((await readQueueHealth(w.workdir, SERVICE)).facts?.launcherRevisionError).toContain(
+        "target launcher revision",
+      )
+      expect(selected.readCalls().some((call) => call.args[0] === "rev-list")).toBe(true)
+    },
+    60_000,
+  )
+
+  /** @failure Watching root revision instead of owned source recycled Yrd on an unrelated km-only promotion.
+   * @level l2 @consumer Hab's restart budget; this is distinct from declared-component movement. */
+  it("keeps running across a km-only promotion (30189)", async () => {
+    const w = await gitlinkWorld(false, true, true)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    let rounds = 0
+    const exit = await w.command(
       w.work,
       run.io,
       {
@@ -3620,37 +3833,20 @@ describe("yrd queue up, the service", () => {
         intervalSeconds: 0,
         stop: stop.signal,
         afterRound: async () => {
-          rounds += 1
-          if (rounds > 1) {
+          if (++rounds === 2) {
             stop.abort()
             return
           }
-          writeFileSync(join(w.work, launcher), "// launcher b\n")
-          await w.git(["commit", "--quiet", "-am", "launcher only"])
+          await w.git(["update-index", "--add", "--cacheinfo", "160000", w.b, "km"])
+          await w.git(["commit", "--quiet", "-m", "only unrelated km pin moves"])
           await w.git(["push", "--quiet", "origin", "main"])
-          target = (await w.git(["rev-list", "-1", "HEAD", "--", launcher])).trim()
         },
       },
-      { env: { ...process.env, YRD_RELAUNCH_SOURCE: source }, json: true, workdir: w.workdir },
+      { json: true, workdir: w.workdir },
     )
-    try {
-      const first = await Promise.race([
-        service.then(() => "ended" as const),
-        vi.waitFor(() => expect(run.stdout()).toContain("waiting for relaunch source"), { timeout: 20_000 })
-          .then(() => "waiting" as const),
-      ])
-      expect(first, "launcher-only movement must hold before a second round").toBe("waiting")
-      expect(rounds).toBe(1)
-      expect((await sourceGit(["rev-list", "-1", "HEAD", "--", launcher])).trim()).toBe(loaded)
-      await sourceGit(["fetch", "--quiet", "origin", "main"])
-      await sourceGit(["merge", "--ff-only", "origin/main"])
-      expect(await service, run.stderr()).toBe(0)
-      expect(rounds).toBe(1)
-      expect(records(run).at(-1)).toMatchObject({ exitCode: 0, from: loaded, to: target })
-    } finally {
-      stop.abort()
-      await service
-    }
+    expect(exit, run.stderr()).toBe(0)
+    expect(rounds).toBe(2)
+    expect(records(run).some((row) => row.reason === "gitlink-moved")).toBe(false)
   }, 60_000)
 
   it("ends the loop, exit 0, when the round it ran merged the change that moves its own gitlink", async () => {

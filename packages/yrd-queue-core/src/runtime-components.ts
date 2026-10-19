@@ -28,6 +28,18 @@
 /** The path this runtime occupies in the hh superproject: its own gitlink. */
 export const YRD_RUNTIME_OWN_COMPONENT = "vendor/yrd"
 
+/** Root-relative launcher watched by both Hab and the runner (30189). */
+export const YRD_RUNTIME_ENTRY = "tools/yrd-runtime.mjs"
+
+/** Hab's entrypoint last-touch predicate; the root contract pins both copies. */
+export const yrdEntryRevisionArgs = (ref: string, entry: string): readonly string[] => [
+  "rev-list",
+  "-1",
+  ref,
+  "--",
+  entry,
+]
+
 /**
  * Every root gitlink path the yrd runtime loads in process, own path first.
  *
