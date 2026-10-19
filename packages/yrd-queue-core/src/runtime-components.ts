@@ -31,10 +31,11 @@ export const YRD_RUNTIME_OWN_COMPONENT = "vendor/yrd"
 /**
  * Every root gitlink path the yrd runtime loads in process, own path first.
  *
- * Measured 2026-10-07 from `bin/yrd.ts` (bun-closure metafile): vendor/yrd's own
+ * Measured 2026-10-19 from `bin/yrd.ts` (bun-closure metafile): vendor/yrd's own
  * imports reach bearly (`@bearly/flock`, `@bearly/durable-file`), git-super,
- * gitomic, loggily; silvery reaches flexily and termless. npm packages (react,
- * commander, zod) are hoisted install-scope, not gitlinks, and are not listed.
+ * gitomic, loggily; silvery reaches flexily and termless, whose backend loaders
+ * reach vterm. npm packages (react, commander, zod) are hoisted install-scope,
+ * not gitlinks, and are not listed.
  */
 export const YRD_RUNTIME_COMPONENTS = [
   YRD_RUNTIME_OWN_COMPONENT,
@@ -45,4 +46,5 @@ export const YRD_RUNTIME_COMPONENTS = [
   "vendor/loggily",
   "vendor/silvery",
   "vendor/termless",
+  "vendor/vterm",
 ] as const
