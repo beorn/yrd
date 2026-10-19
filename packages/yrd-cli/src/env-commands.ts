@@ -164,23 +164,49 @@ function legacyBaysRoot(repo: string): string {
  * sat 60 s behind main and missed the merge it needed. An origin with no such
  * branch leaves the tracking ref, else the local branch of that name. Named, so
  * a refusal says which ref was missing rather than "could not resolve HEAD". */
-async function resolveBaseSha(git: Git, target: string): Promise<string> {
+async function resolveBaseSha(
+  git: Git,
+  target: string,
+  io: YrdCliIO,
+): Promise<Readonly<{ sha: string; originUnreachable: boolean }>> {
   const branchRef = `refs/heads/${target}`
   const tracking = `refs/remotes/origin/${target}`
   let head: string | undefined
+  let originFailure: string | undefined
   try {
     head = await readRemoteCommit(git, "origin", branchRef)
   } catch (error) {
+    originFailure = error instanceof Error ? error.message : String(error)
+  }
+  if (head !== undefined) return { sha: head, originUnreachable: false }
+  if (originFailure !== undefined) {
+    // Ruled 2026-10-19 (28385 area 11): an unreachable origin must not block a new environment.
+    // Cut from the local ref and say so ONCE, naming the ref and the stale risk that motivated
+    // the strict form: it is only as new as this checkout's last fetch.
+    const fallback = await refAt(git, tracking)
+    if (fallback !== undefined) {
+      io.stderr(
+        `yrd env open: origin did not answer for ${branchRef} (${originFailure}); cutting from ${tracking} instead — ` +
+          `it is only as new as this checkout's last fetch, so a merge that already landed on origin may be missing\n`,
+      )
+      return { sha: fallback, originUnreachable: true }
+    }
+    const local = await refAt(git, target)
+    if (local !== undefined) {
+      io.stderr(
+        `yrd env open: origin did not answer for ${branchRef} (${originFailure}); cutting from the local branch ${target} instead — ` +
+          `it is only as new as this checkout's last fetch, so a merge that already landed on origin may be missing\n`,
+      )
+      return { sha: local, originUnreachable: true }
+    }
     throw new Error(
-      `yrd env open: origin did not answer for ${branchRef}, so its head is unknown and ${tracking} may be ` +
-        `behind it; retry when origin answers: ${error instanceof Error ? error.message : String(error)}`,
+      `yrd env open: origin did not answer for ${branchRef} (${originFailure}), and neither ${tracking} nor the local branch ${target} exists`,
     )
   }
-  if (head !== undefined) return head
   const tracked = await refAt(git, tracking)
-  if (tracked !== undefined) return tracked
+  if (tracked !== undefined) return { sha: tracked, originUnreachable: false }
   const local = await refAt(git, target)
-  if (local !== undefined) return local
+  if (local !== undefined) return { sha: local, originUnreachable: false }
   throw new Error(`yrd: target '${target}' is absent at both ${tracking} and the local branch`)
 }
 
@@ -480,7 +506,9 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   const branch = commit === undefined ? `task/${name}` : undefined
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process, selection)
-  const base = commit ?? (await resolveBaseSha(git, target))
+  const resolvedBase =
+    commit === undefined ? await resolveBaseSha(git, target, io) : { sha: commit, originUnreachable: false }
+  const base = resolvedBase.sha
   if (commit !== undefined && (await refAt(git, commit)) !== commit) {
     throw new Error(
       `yrd env open: commit ${commit} is not a commit object in ${root}; fetch that commit before opening it`,
@@ -550,7 +578,13 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       )
     }
     const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
-    const result = await workspace.provision({ bay: name, name, branch, base })
+    const result = await workspace.provision({
+      bay: name,
+      name,
+      branch,
+      base,
+      originUnreachable: resolvedBase.originUnreachable,
+    })
     if (result.conclusion !== "success") {
       throw new Error(`yrd: could not open environment '${name}': ${result.error.message}`)
     }

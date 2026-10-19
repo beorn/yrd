@@ -293,6 +293,32 @@ describe("yrd env open prepares the retained environment", () => {
   })
 
   /**
+   * @failure `yrd env open` refuses when origin does not answer, so an unreachable remote blocks
+   *          every new environment even though the local tracking ref can cut it (28385 area 11,
+   *          env-commands.ts:174, ruled by @chief 2026-10-19).
+   * @level l2 (a real env open over a git fixture whose origin URL points nowhere, in process)
+   * @consumer every seat opening an environment while the remote is down
+   * @testonly none
+   */
+  it("cuts from the local tracking ref with one loud warning when origin does not answer", async () => {
+    const w = await world(":")
+    // Record refs/remotes/origin/HEAD while origin still answers, so the branch name is read locally.
+    await w.git(["remote", "set-head", "origin", "-a"])
+    const tracked = (await w.git(["rev-parse", "refs/remotes/origin/main"])).trim()
+    await w.git(["remote", "set-url", "origin", join(w.work, "..", "absent-remote.git")])
+    const run = capture(w.work)
+
+    const code = await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "origin-down", "--json"], run.io)
+    expect(code, run.stderr()).toBe(0)
+
+    const result = JSON.parse(run.stdout()) as { base: string; path: string }
+    expect(result.base).toBe(tracked)
+    expect(run.stderr()).toContain("origin did not answer")
+    expect(run.stderr()).toContain("refs/remotes/origin/main")
+    expect(run.stderr().split("origin did not answer").length - 1).toBe(1)
+  })
+
+  /**
    * @failure A branch opened without --issue carries no bead id, so every retirement path that keys on the
    *          owning issue refuses it as unnameable — and the creator is never told (28113).
    * @level l2 (a real env open over a git fixture, in process)

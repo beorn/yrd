@@ -1889,7 +1889,26 @@ export async function coreQueueCommand(
       }))
       const heads = await listRefs("refs/heads/", createLocalEventStore(authorRepo, selection))
       if (!heads.has(`refs/heads/${request.branch}`)) {
-        throw new Error(`drop --local: refs/heads/${request.branch} is absent in ${authorRepo}; nothing was removed`)
+        // Ruled 2026-10-19 (28385 area 11): when the branch is already absent the requested
+        // post-condition holds, so an idempotent retry reports a no-op instead of failing. The
+        // exact-tip guard above still runs whenever the ref exists, so a live branch is never
+        // dropped on a stale or mistyped expectation.
+        const detail = `already gone: refs/heads/${request.branch} is absent in ${authorRepo}; nothing was removed`
+        const report = {
+          branch: request.branch,
+          repo: authorRepo,
+          apply: true,
+          mode,
+          examined: heads.size,
+          excluded: 0,
+          eligible: [],
+          removed: [],
+          kept: [],
+          failed: [],
+          detail,
+        }
+        emit(io, options.json, report, `branch ${request.branch}: ${detail}`)
+        return 0
       }
       const target = await readRemoteCommit(authorGit, eventStore.remote, `refs/heads/${config.target.branch}`)
       if (target === undefined) {

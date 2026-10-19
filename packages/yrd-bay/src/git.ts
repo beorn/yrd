@@ -94,7 +94,10 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           }
           madeWorktree = true
         } else {
-          const remoteHead = tracking.code === 0 ? undefined : await remoteBranchHead(git, repo, input.branch)
+          const remoteHead =
+            tracking.code === 0 || input.originUnreachable === true
+              ? undefined
+              : await remoteBranchHead(git, repo, input.branch)
           adoption = tracking.code === 0 ? "tracking" : remoteHead === undefined ? "fresh" : "remote"
           if (remoteHead !== undefined) {
             // Fetch the captured object, not a branch that may move after the

@@ -33,6 +33,11 @@ export type ProvisionBayInput = Readonly<{
   base: string
   /** Root-relative submodule paths left empty and uninitialized (27147). */
   excludedSubmodules?: readonly string[]
+  /**
+   * The caller already proved origin unreachable and warned its user (28385 area 11). Provision from
+   * what is local instead of asking the same dead remote again; the caller's warning covers the risk.
+   */
+  originUnreachable?: boolean
 }>
 
 export type ProvisionedBay = Readonly<{

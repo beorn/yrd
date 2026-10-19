@@ -137,3 +137,52 @@ it("refuses loudly and keeps the branch when origin will not take the archive", 
   expect(observed.stdout() + observed.stderr()).toContain("refs/archive/")
   expect((await git(["rev-parse", "refs/heads/task/never-submitted"])).trim()).toBe(tip)
 })
+
+it("treats an already-gone branch as a no-op success (28385 area 11, ruled 2026-10-19)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "yrd-drop-local-gone-"))
+  roots.push(root)
+  const remote = join(root, "remote.git")
+  const repo = join(root, "repo")
+  const seed = gitIn(root)
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["clone", "--quiet", remote, repo])
+  const git = gitIn(repo)
+  await git(["config", "user.name", "yrd test"])
+  await git(["config", "user.email", "yrd@test.invalid"])
+  writeFileSync(join(repo, ".yrd.yml"), 'checks:\n  - verify: {run: "true"}\n')
+  await git(["add", "."])
+  await git(["commit", "--quiet", "-m", "queue"])
+  await git(["push", "--quiet", "origin", "main"])
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+  if (config === undefined) throw new Error("fixture lost .yrd.yml")
+  await createEventQueue(
+    createEventStore(repo, "origin", git.selection),
+    "main",
+    target,
+    config,
+    new Date("2020-01-01T00:00:00.000Z"),
+  )
+
+  const observed = capture(repo)
+  const code = await runYrdProcess(
+    [
+      "bun",
+      "yrd",
+      "drop",
+      "task/never-existed",
+      "--local",
+      "--tip",
+      "0000000000000000000000000000000000000000",
+      "--submitter",
+      "fixture",
+      "--json",
+    ],
+    observed.io,
+  )
+  // The requested post-condition already holds: a retry must report a no-op, not a failure.
+  expect(code, observed.stderr()).toBe(0)
+  const report = JSON.parse(observed.stdout()) as { removed: unknown[]; detail?: string }
+  expect(report.removed).toEqual([])
+  expect(report.detail).toContain("already gone")
+})
