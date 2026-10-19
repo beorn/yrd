@@ -182,6 +182,12 @@ export function expiredRoundOutput(
           if (started.getTime() <= cutoff) found.push({ path, name: entry.name, within, started })
           continue
         }
+        // A name that claims a run id (`q-` then a digit) but does not parse is named and not descended into.
+        // Anchored at the start, so a bay or topic that merely contains `-q-` is still entered.
+        if (/^q-\d/u.test(entry.name)) {
+          unreadable.push(path)
+          continue
+        }
         if (current.depth < MAX_WALK_DEPTH) stack.push({ directory: path, depth: current.depth + 1 })
       }
     }

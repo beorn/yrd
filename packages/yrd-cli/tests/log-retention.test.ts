@@ -123,6 +123,15 @@ describe("expiredRoundOutput (selection, by name only)", () => {
     expect(scan.withheld).toEqual([])
   })
 
+  it("names a q- round whose stamp cannot be read and does not select it", () => {
+    const { checks } = tree("q-round-unreadable")
+    const broken = join(checks, "fixer", "26673-thing@20eb", "q-2027-new-format")
+    place(broken, "setup.log")
+    const scan = expiredRoundOutput({ roots: [checks], now: NOW })
+    expect(scan.entries).toEqual([])
+    expect(scan.unreadable).toEqual([broken])
+  })
+
   it("names a directory whose q- stamp cannot be read and does not select it", () => {
     const { logs } = tree("unreadable")
     const broken = join(logs, "environments", "0010d72a646a-q-2026not-a-stamp")
