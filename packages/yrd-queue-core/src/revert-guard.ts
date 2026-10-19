@@ -145,7 +145,7 @@ type Level = {
 }
 
 type HistoryBoundary =
-  | Readonly<{ kind: "full-window" }>
+  | Readonly<{ kind: "full-window"; bases: readonly string[] }>
   | Readonly<{ kind: "bases"; bases: readonly string[] }>
   | Readonly<{ kind: "unjudged" }>
 
@@ -309,7 +309,7 @@ async function walk(level: Level, skipHistory = false): Promise<void> {
     revisions,
     judged.map((row) => row.path),
   )
-  for (const row of judged) await assessPath(level, row, revisions, touched)
+  for (const row of judged) await assessPath(level, row, revisions, touched, boundary)
 }
 
 /**
@@ -388,8 +388,10 @@ async function touchedPaths(
  * When the candidate is a merge commit whose first parent is `target` (the root compose merge or a
  * component merge of `target` with the author branch), `mergeBases(target, candidate)` is `target`
  * itself; resolve the divergence base against `incoming` or the merge's non-target parent. A linear
- * fast-forward pin move keeps the full window (#27363). An unreadable base is a named `unjudged`
- * gap, never a silent widening or narrowing of the proof.
+ * fast-forward pin move keeps the full window (#27363). The resolved bases name the bound in a
+ * capped gap's reason when the walk was bounded to them (#30354); they change no coverage or
+ * refusal semantics. An unreadable base is a named `unjudged` gap, never a silent widening or
+ * narrowing of the proof.
  */
 async function advanceBase(level: Level): Promise<HistoryBoundary> {
   try {
@@ -416,7 +418,7 @@ async function advanceBase(level: Level): Promise<HistoryBoundary> {
         }
       }
     }
-    return { kind: "full-window" }
+    return { kind: "full-window", bases }
   } catch (error) {
     level.report.gaps.push({
       kind: "unjudged",
@@ -433,6 +435,7 @@ async function assessPath(
   row: RawRow,
   revisions: readonly string[],
   touched: ReadonlySet<string> | undefined,
+  boundary: HistoryBoundary,
 ): Promise<void> {
   const full = level.prefix + row.path
   // #28195: only a path the target's first-parent range touched can hold a value the target put
@@ -482,17 +485,32 @@ async function assessPath(
     }
   }
   // A capped NEGATIVE proof is not a clean one: name it and state what the bounded reading proves (#29963).
+  // #30354: coverage and refusal semantics are unchanged — a cap is a bounded gap whatever range
+  // the walk was bounded to, because a candidate can restore a value from history it carries
+  // (the original cappedWorld: merge base == target, W=1, a real restore the cap hides). Only
+  // the reason improves: when the walk was already bounded at the resolved divergence base(s), it
+  // names that bound and the unread remainder of THAT range instead of calling it older history.
   if (capped) {
     level.report.gaps.push({
       kind: "bounded",
       depth: level.depth,
       path: full,
       reason:
-        "target history window W=" +
-        String(level.bounds.window) +
-        " exhausted: proves no revert within the latest " +
-        String(level.bounds.window) +
-        " first-parent target commit(s) touching this path; older target history was not read",
+        boundary.kind === "bases"
+          ? "target history window W=" +
+            String(level.bounds.window) +
+            " exhausted within " +
+            boundary.bases.join(",") +
+            "..target (bound: resolved divergence base(s) " +
+            boundary.bases.join(",") +
+            "): proves no revert within the latest " +
+            String(level.bounds.window) +
+            " first-parent target commit(s) touching this path in that range; the rest of that range was not read"
+          : "target history window W=" +
+            String(level.bounds.window) +
+            " exhausted: proves no revert within the latest " +
+            String(level.bounds.window) +
+            " first-parent target commit(s) touching this path; older target history was not read",
     })
   }
 }
