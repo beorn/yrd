@@ -270,7 +270,7 @@ const CHECK_SERVICE_COMMAND = `hab ps ${SERVICE}`
 const ISSUE_DISPLAY_READ_CAP = 4
 
 import { queueTempRoot, workdirOf } from "./workdir.ts"
-import { originHead } from "./queue-location.ts"
+import { originHead, retainedComponentStoreHere } from "./queue-location.ts"
 import {
   formatDeclarationSkewCure,
   formatUnknownNotifyEventWarning,
@@ -725,7 +725,7 @@ export async function coreQueueCommand(
     let cleanup = ""
     if (request.command === "drop-local" || request.command === "drop-issue") {
       cleanup = "For retained-checkout cleanup, run from the superproject that vendors it.\n"
-      const authorRepo = repositoryHere(io.cwd)
+      const authorRepo = repositoryHere(io.cwd) ?? retainedComponentStoreHere(io.cwd)
       if (authorRepo !== undefined) {
         let owner: string | undefined
         try {
@@ -920,7 +920,7 @@ export async function coreQueueCommand(
     ) {
       const tip = request.command === "drop-local" ? request.tip : request.retire?.tip
       if (tip === undefined) return await noQueueOnTarget(targetLabel)
-      const authorRepo = repositoryHere(io.cwd)
+      const authorRepo = repositoryHere(io.cwd) ?? retainedComponentStoreHere(io.cwd)
       if (authorRepo === undefined) throw new Error("drop --local requires the authoring repository as cwd")
       const report = await retireComponentBranch({
         repo: authorRepo,

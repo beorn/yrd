@@ -163,19 +163,27 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     }
     let kept = await protection()
     if (kept === undefined) kept = await reachability()
+    // A landed tip is archived locally only, never written to origin (29949).
+    const alreadyMerged =
+      kept === undefined && disposition.kind === "closed" && (await isAncestor(git, tip, disposition.target))
     if (kept === undefined && !input.dryRun && completedArchive === undefined) {
       const custody = ensureArchiveRef(repo, archiveRef, tip)
       if (!custody.ok) throw new Error(custody.reason)
       writtenArchive = archiveRef
-      archiveLocation = disposition.kind === "archived" ? "origin" : "local"
-    }
-    const alreadyMerged =
-      kept === undefined && disposition.kind === "closed" && (await isAncestor(git, tip, disposition.target))
-    if (kept === undefined && !input.dryRun && disposition.kind === "closed" && !alreadyMerged) {
-      if (existingArchive !== undefined) {
+      // The ref written by ensureArchiveRef is LOCAL. Origin custody is claimed only
+      // after a push reads back at the remote (30247).
+      archiveLocation = "local"
+      if (disposition.kind === "closed" && !alreadyMerged) {
+        // prepareRetirementArchive.publish verifies the exact head at the remote.
         await publishRetirementArchive(disposition.store, { branch, archive: archiveRef, head: tip })
         archiveLocation = "origin"
+      } else if (disposition.kind === "archived") {
+        // The archived disposition carries no store; its caller published and read it
+        // back at that origin before calling here (retireComponentBranch).
+        archiveLocation = "origin"
       }
+    }
+    if (kept === undefined && !input.dryRun && disposition.kind === "closed" && !alreadyMerged) {
       await drop(disposition.store, {
         queue: disposition.queue,
         branch,

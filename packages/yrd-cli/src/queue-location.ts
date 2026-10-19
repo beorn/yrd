@@ -26,6 +26,19 @@ import {
 } from "./address.ts"
 import { repositoryHere } from "./declaration.ts"
 
+/**
+ * A cold component store: a bare Git directory kept for custody (a retained module
+ * store), never a checkout. A drop aimed here must retire the store's own branch;
+ * resolving a queue from it would look in the shared root instead (30094).
+ */
+export function retainedComponentStoreHere(path: string): string | undefined {
+  const root = resolve(path)
+  if (existsSync(join(root, ".git"))) return undefined
+  if (!existsSync(join(root, "HEAD")) || !existsSync(join(root, "objects"))) return undefined
+  if (!existsSync(join(root, "refs"))) return undefined
+  return root
+}
+
 export type QueueLocation = Readonly<{
   repo: string
   queue: string | undefined
