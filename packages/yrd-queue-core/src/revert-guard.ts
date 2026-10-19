@@ -488,7 +488,7 @@ async function assessPath(
   // #30354: coverage and refusal semantics are unchanged — a cap is a bounded gap whatever range
   // the walk was bounded to, because a candidate can restore a value from history it carries
   // (the original cappedWorld: merge base == target, W=1, a real restore the cap hides). Only
-  // the reason improves: when the walk was already bounded at the resolved merge base(s), it
+  // the reason improves: when the walk was already bounded at the resolved divergence base(s), it
   // names that bound and the unread remainder of THAT range instead of calling it older history.
   if (capped) {
     level.report.gaps.push({
@@ -501,7 +501,7 @@ async function assessPath(
             String(level.bounds.window) +
             " exhausted within " +
             boundary.bases.join(",") +
-            "..target (bound: candidate merge base " +
+            "..target (bound: resolved divergence base(s) " +
             boundary.bases.join(",") +
             "): proves no revert within the latest " +
             String(level.bounds.window) +

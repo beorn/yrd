@@ -468,11 +468,12 @@ describe("revert guard review regressions (27363)", () => {
   })
 
   /**
-   * #30354: when the walk was already bounded at the candidate merge base, a
-   * capped gap's reason names that bound and the unread remainder of that
-   * range. Coverage and refusal semantics do not move: a candidate can
-   * restore a value from history it carries (the original cappedWorld
-   * above), so no range recount may call a capped walk complete.
+   * #30354: when the walk was already bounded at the resolved divergence
+   * base(s), a capped gap's reason names that bound and the unread
+   * remainder of that range. Coverage and refusal semantics do not move:
+   * a candidate can restore a value from history it carries (the original
+   * cappedWorld above), so no range recount may call a capped walk
+   * complete.
    */
   async function boundedWorld(rangeTouches: number) {
     const root = mkdtempSync(join(tmpdir(), "yrd-revert-30354-"))
@@ -519,7 +520,7 @@ describe("revert guard review regressions (27363)", () => {
     expect(report.coverage).toBe("complete")
   })
 
-  it("30354: a diverged range above the window names its merge-base bound and the missing coverage", async () => {
+  it("30354: a diverged range above the window names its divergence-base bound and the missing coverage", async () => {
     const w = await boundedWorld(3)
     const root = await w.checkoutAt(w.candidate)
     const report = await detectReverted({
@@ -537,7 +538,7 @@ describe("revert guard review regressions (27363)", () => {
         (gap) =>
           gap.kind === "bounded" &&
           gap.reason.includes("window W=2 exhausted") &&
-          gap.reason.includes(w.base) &&
+          gap.reason.includes(`bound: resolved divergence base(s) ${w.base}`) &&
           gap.reason.includes("was not read"),
       ),
     ).toBe(true)
