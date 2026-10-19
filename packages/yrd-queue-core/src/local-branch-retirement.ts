@@ -3,7 +3,7 @@ import { changedCommitGitlinks } from "git-super/commit-graph"
 import { createGitWorktreeStore, worktreeOperationBranch } from "git-super/worktree"
 import { drop, type QueueLocation } from "./events.ts"
 import { publishRetirementArchive } from "./origin-branch-retirement.ts"
-import { isAncestor, readRemoteCommit, refAt, seamProcess, type Git } from "./git.ts"
+import { isAncestor, refAt, seamProcess, type Git } from "./git.ts"
 import type { QueueRunLog } from "./log.ts"
 
 export type LocalBranchRetirement = Readonly<{
@@ -174,14 +174,8 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       // after a push reads back at the remote (30247).
       archiveLocation = "local"
       if (disposition.kind === "closed" && !alreadyMerged) {
+        // prepareRetirementArchive.publish verifies the exact head at the remote.
         await publishRetirementArchive(disposition.store, { branch, archive: archiveRef, head: tip })
-        const readBack = await readRemoteCommit(git, disposition.store.remote, archiveRef)
-        if (readBack !== tip) {
-          throw new Error(
-            `${repo}: archive ${archiveRef} did not read back at ${disposition.store.remote} ` +
-              `(${readBack ?? "absent"}); local refs kept`,
-          )
-        }
         archiveLocation = "origin"
       } else if (disposition.kind === "archived") {
         // The archived disposition carries no store; its caller published and read it
@@ -190,10 +184,6 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       }
     }
     if (kept === undefined && !input.dryRun && disposition.kind === "closed" && !alreadyMerged) {
-      if (existingArchive !== undefined) {
-        await publishRetirementArchive(disposition.store, { branch, archive: archiveRef, head: tip })
-        archiveLocation = "origin"
-      }
       await drop(disposition.store, {
         queue: disposition.queue,
         branch,

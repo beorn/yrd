@@ -866,11 +866,6 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
             archive: archiveRef,
             head: request.tip,
           })
-          // Origin custody is claimed only when the ref reads back at that remote (30247).
-          const readBack = await readRemoteCommit(git, remote, archiveRef)
-          if (readBack !== request.tip) {
-            throw new Error(`${repo}: archive ${archiveRef} did not read back at ${remote} (${readBack ?? "absent"})`)
-          }
         } catch (cause) {
           throw new Error(`${cause instanceof Error ? cause.message : String(cause)}; local refs kept`, { cause })
         }
