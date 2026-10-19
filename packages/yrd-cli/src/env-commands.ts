@@ -591,6 +591,18 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       throw new Error(`yrd: could not open environment '${name}': ${result.error.message}`)
     }
     provisioned = result.output
+    // @cto verdict 93993997 (30256): skipping the origin probe also skips the answer to
+    // "does task/<name> already exist there?". Say so when the branch was created fresh, or a
+    // same-named branch on origin would be passed over without a word.
+    if (
+      (resolvedBase.baseSource === "tracking" || resolvedBase.baseSource === "local") &&
+      provisioned.adoption === "fresh"
+    ) {
+      io.stderr(
+        `yrd env open: origin was not asked whether ${branch} already exists there, so an existing remote copy of ${branch} was not adopted; ` +
+          `this environment starts fresh at ${provisioned.baseSha.slice(0, 12)}\n`,
+      )
+    }
   }
   const { path, baseSha } = provisioned
   await pinDeclaredIdentity(path, gitIn(path, process, selection), declaredIdentity, io)

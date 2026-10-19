@@ -319,6 +319,10 @@ describe("yrd env open prepares the retained environment", () => {
     expect(run.stderr()).toContain("origin did not answer")
     expect(run.stderr()).toContain("refs/remotes/origin/main")
     expect(run.stderr().split("origin did not answer").length - 1).toBe(1)
+    // @cto verdict 93993997: skipping the origin probe must also say that a same-named branch on
+    // origin was never asked about, so an existing remote copy was not adopted.
+    expect(run.stderr()).toContain("was not asked whether task/origin-down already exists")
+    expect(run.stderr()).toContain("was not adopted")
   })
 
   /**
