@@ -74,8 +74,8 @@ async function drop(repo: string, json: boolean): Promise<{ exit: number; stdout
 type GoneRow = { path: string; adminDirectory: string | null; adminDirectoryExists: boolean }
 type FailedRow = { repo: string; reason: string; detail?: string }
 
-function reportOf(stdout: string): { gone?: GoneRow[]; failed: FailedRow[] } {
-  return JSON.parse(stdout) as { gone?: GoneRow[]; failed: FailedRow[] }
+function reportOf(stdout: string): { gone?: GoneRow[]; failed: FailedRow[]; kept?: FailedRow[] } {
+  return JSON.parse(stdout) as { gone?: GoneRow[]; failed: FailedRow[]; kept?: FailedRow[] }
 }
 
 it("reports a registered checkout removed before the walk as gone and exits 0", async () => {
@@ -220,49 +220,81 @@ it("reports a checkout removed during the walk as gone after re-stat", async () 
   }
 }, 60_000)
 
-it("reports a registered root removed after discovery as gone during store collection", async () => {
-  const repo = await world()
-  const seed = await world()
-  const git = gitIn(repo)
-  await git([
-    "-c",
-    "protocol.file.allow=always",
-    "submodule",
-    "add",
-    "--quiet",
-    join(dirname(seed), "remote.git"),
-    "child",
-  ])
-  await git(["commit", "--quiet", "-am", "register child"])
-  await git(["push", "--quiet", "origin", "main"])
-  const extra = join(dirname(repo), "vanished-after-discovery")
-  await git(["worktree", "add", "--quiet", "--detach", extra, "HEAD"])
-  await gitIn(extra)(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--quiet"])
-  const saved = `${extra}-saved`
-  const out = capture(repo)
-  let moved = false
-  try {
-    // The existing inventory message separates discovery from the later store reads.
-    // Earlier cases remove the root before its stores have entered that inventory.
-    const exit = await runYrdProcess(
-      ["bun", "yrd", "drop", "--issue", issue, "--submitter", "fixture", "--dry-run", "--json"],
-      {
-        ...out.io,
-        stderr(text) {
-          out.io.stderr(text)
-          if (!moved && text.includes("issue cleanup will inspect")) {
-            renameSync(extra, saved)
-            moved = true
-          }
+it.each(["root", "child", "candidate"] as const)(
+  "classifies %s loss after discovery during store collection",
+  async (loss) => {
+    const repo = await world()
+    const seed = await world()
+    const git = gitIn(repo)
+    await git([
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "--quiet",
+      join(dirname(seed), "remote.git"),
+      "child",
+    ])
+    await git(["commit", "--quiet", "-am", "register child"])
+    await git(["push", "--quiet", "origin", "main"])
+    const extra = join(dirname(repo), "vanished-after-discovery")
+    await git(["worktree", "add", "--quiet", "--detach", extra, "HEAD"])
+    await gitIn(extra)(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--quiet"])
+    const removed = loss === "child" ? join(extra, "child") : extra
+    const saved = `${removed}-saved`
+    const candidateBranch = "task/vanished-candidate"
+    if (loss === "candidate") await gitIn(join(extra, "child"))(["branch", candidateBranch])
+    const out = capture(repo)
+    let moved = false
+    try {
+      // The existing inventory message separates discovery from the later store reads.
+      // Earlier cases remove the root before its stores have entered that inventory.
+      const exit = await runYrdProcess(
+        ["bun", "yrd", "drop", "--issue", issue, "--submitter", "fixture", "--dry-run", "--json"],
+        {
+          ...out.io,
+          stderr(text) {
+            out.io.stderr(text)
+            if (loss !== "candidate" && !moved && text.includes("issue cleanup will inspect")) {
+              renameSync(removed, saved)
+              moved = true
+            }
+          },
+          branchIssue({ branch, recordedIssue }) {
+            if (loss === "candidate" && branch === candidateBranch) {
+              if (!moved) {
+                renameSync(removed, saved)
+                moved = true
+              }
+              return issue
+            }
+            return recordedIssue
+          },
         },
-      },
-    )
-    expect(moved, "registered root was not removed after discovery").toBe(true)
-    const report = reportOf(out.stdout())
-    expect(report.failed, out.stderr()).toEqual([])
-    expect(report.gone).toContainEqual(expect.objectContaining({ path: extra, adminDirectoryExists: true }))
-    expect(exit, out.stderr()).toBe(0)
-  } finally {
-    if (moved) renameSync(saved, extra)
-  }
-}, 60_000)
+      )
+      expect(moved, "fixture path was not removed after discovery").toBe(true)
+      const report = reportOf(out.stdout())
+      if (loss === "child") {
+        expect(exit, out.stderr()).toBe(1)
+        expect(report.gone ?? []).not.toContainEqual(expect.objectContaining({ path: extra }))
+        expect(report.failed).toContainEqual(expect.objectContaining({ repo: removed, reason: "unreadable" }))
+        return
+      }
+      expect(report.failed, out.stderr()).toEqual([])
+      expect(report.gone).toContainEqual(expect.objectContaining({ path: extra, adminDirectoryExists: true }))
+      expect(exit, out.stderr()).toBe(0)
+      if (loss === "candidate") {
+        expect(report.kept).toContainEqual(
+          expect.objectContaining({
+            repo: join(extra, "child"),
+            reason: "held",
+            detail: expect.stringContaining(extra),
+          }),
+        )
+      }
+    } finally {
+      if (moved) renameSync(saved, removed)
+    }
+  },
+  60_000,
+)
