@@ -1,6 +1,7 @@
 /**
  * @failure `drop --issue` treats a registered checkout whose root vanished as an
- * unreadable store and fails the issue, or treats an inner loss as gone.
+ * unreadable store and fails the issue, treats an inner loss as gone, or
+ * inspects a component store that has no branch for the issue.
  * @level l3
  * @consumer Authors retiring one issue with `yrd drop --issue`
  * @testonly none
@@ -218,4 +219,32 @@ it("reports a checkout removed during the walk as gone after re-stat", async () 
     process.env.PATH = previous
     if (!existsSync(extra) && existsSync(`${extra}.during`)) renameSync(`${extra}.during`, extra)
   }
+}, 60_000)
+
+it("does not inspect a component store that has no branch for the issue", async () => {
+  const repo = await world()
+  const root = dirname(repo)
+  const childRemote = join(root, "child.git")
+  const childSeed = join(root, "child-seed")
+  const host = gitIn(root)
+  await host(["init", "--quiet", "--bare", "--initial-branch=main", childRemote])
+  await host(["clone", "--quiet", childRemote, childSeed])
+  const child = gitIn(childSeed)
+  await child(["config", "user.name", "yrd test"])
+  await child(["config", "user.email", "yrd@test.invalid"])
+  writeFileSync(join(childSeed, "CHILD.md"), "child\n")
+  await child(["add", "CHILD.md"])
+  await child(["commit", "--quiet", "-m", "child"])
+  await child(["push", "--quiet", "origin", "main"])
+  const repoGit = gitIn(repo)
+  await repoGit(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", childRemote, "vendor/child"])
+  await repoGit(["commit", "--quiet", "-m", "add child"])
+  await repoGit(["push", "--quiet", "origin", "HEAD"])
+  const childCheckout = join(repo, "vendor/child")
+  const json = await drop(repo, true)
+  expect(json.exit, `${json.stderr}\n${json.stdout}`).toBe(0)
+  const report = JSON.parse(json.stdout) as { inspected: string[]; failed: FailedRow[] }
+  expect(report.failed).toEqual([])
+  expect(report.inspected).toContain(repo)
+  expect(report.inspected).not.toContain(childCheckout)
 }, 60_000)
