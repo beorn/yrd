@@ -43,6 +43,7 @@ type World = Readonly<{
   origin: string
   branch: string
   tip: string
+  legacyArchiveRef: string
 }>
 
 /** A cold retained component store: a bare repository with its own origin, and a branch held only there. */
@@ -76,10 +77,14 @@ async function retainedWorld(options: Readonly<{ withOrigin: boolean }>): Promis
   const storeGit = gitIn(store)
   if (options.withOrigin) await storeGit(["remote", "add", "origin", origin])
   await storeGit(["fetch", "--quiet", options.withOrigin ? origin : seed, `refs/heads/*:refs/heads/*`])
+  // An unrelated legacy archive at the same tip used to abort readArchiveRows, so findArchiveRefFor
+  // refused this drop before it could retire the branch (30263).
+  const legacyArchiveRef = "refs/archive/2026-10-01/@dev/13/task/unrelated-legacy"
+  await storeGit(["update-ref", legacyArchiveRef, tip])
 
   const sharedRoot = join(root, "shared-root")
   await storeSeed(["init", "--quiet", "--bare", "--initial-branch=main", sharedRoot])
-  return { root, sharedRoot, store, origin, branch, tip }
+  return { root, sharedRoot, store, origin, branch, tip, legacyArchiveRef }
 }
 
 it("retires a branch held in a cold retained module store and leaves the shared root untouched", async () => {
@@ -90,7 +95,7 @@ it("retires a branch held in a cold retained module store and leaves the shared 
     ["bun", "yrd", "drop", world.branch, "--local", "--tip", world.tip, "--submitter", "fixture", "--json"],
     observed.io,
   )
-  expect(code, observed.stderr()).toBe(0)
+  expect(code, observed.stderr() + observed.stdout()).toBe(0)
   const report = JSON.parse(observed.stdout()) as {
     removed: { branch: string; head: string; archiveRef?: string }[]
   }
@@ -105,6 +110,8 @@ it("retires a branch held in a cold retained module store and leaves the shared 
   expect(archived).toBeDefined()
   const archivedTip = (await gitIn(world.origin)(["rev-parse", archived!])).trim()
   expect(archivedTip).toBe(world.tip)
+  // The unrelated legacy custody is evidence, so the drop neither read it as branch custody nor removed it.
+  expect((await gitIn(world.store)(["rev-parse", world.legacyArchiveRef])).trim()).toBe(world.tip)
 })
 
 it("refuses loudly and names the store when the cold store has no origin", async () => {
