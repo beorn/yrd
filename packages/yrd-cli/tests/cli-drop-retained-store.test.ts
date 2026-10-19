@@ -6,7 +6,7 @@
  * @consumer yrd drop cleanup of retained/cold component stores.
  * @testonly none
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, expect, it } from "vitest"
@@ -125,4 +125,78 @@ it("refuses loudly and names the store when the cold store has no origin", async
   expect(observed.stderr()).toContain(world.store)
   expect(observed.stderr()).not.toContain(world.sharedRoot)
   expect((await gitIn(world.store)(["rev-parse", `refs/heads/${world.branch}`])).trim()).toBe(world.tip)
+})
+
+/**
+ * The same cold store moved inside a Git root: a `.git` walk-up from the store
+ * now finds the enclosing repository first, which is how a retained module
+ * store under /hh resolved to STATE instead of itself (30094 counterexample).
+ */
+async function nestedRetainedWorld(): Promise<World & { enclosing: string }> {
+  const world = await retainedWorld({ withOrigin: true })
+  const enclosing = join(world.root, "enclosing-root")
+  mkdirSync(enclosing, { recursive: true })
+  const enclosingGit = gitIn(enclosing)
+  await enclosingGit(["init", "--quiet", "--initial-branch=main"])
+  await enclosingGit(["config", "user.name", "yrd test"])
+  await enclosingGit(["config", "user.email", "yrd@test.invalid"])
+  writeFileSync(join(enclosing, "README.md"), "enclosing root\n")
+  await enclosingGit(["add", "."])
+  await enclosingGit(["commit", "--quiet", "-m", "enclosing root"])
+  const store = join(enclosing, "var", "retained-modules", "demo", "modules", "ag")
+  mkdirSync(dirname(store), { recursive: true })
+  renameSync(world.store, store)
+  return { ...world, store, enclosing }
+}
+
+it("retires a branch in a retained store nested inside a Git root and leaves that root untouched", async () => {
+  const world = await nestedRetainedWorld()
+  const enclosingRefsBefore = (await gitIn(world.enclosing)(["for-each-ref"])).trim()
+  const observed = capture(world.store)
+  const code = await runYrdProcess(
+    ["bun", "yrd", "drop", world.branch, "--local", "--tip", world.tip, "--submitter", "fixture", "--json"],
+    observed.io,
+  )
+  expect(code, observed.stderr() + observed.stdout()).toBe(0)
+  await expect(gitIn(world.store)(["rev-parse", "--verify", `refs/heads/${world.branch}`])).rejects.toThrow()
+  expect((await gitIn(world.enclosing)(["for-each-ref"])).trim()).toBe(enclosingRefsBefore)
+})
+
+it("exits 1 when a nested retained store keeps the branch", async () => {
+  const world = await nestedRetainedWorld()
+  const mainTip = (await gitIn(world.origin)(["rev-parse", "refs/heads/main"])).trim()
+  const observed = capture(world.store)
+  const code = await runYrdProcess(
+    ["bun", "yrd", "drop", world.branch, "--local", "--tip", mainTip, "--submitter", "fixture", "--json"],
+    observed.io,
+  )
+  expect(code, observed.stderr() + observed.stdout()).toBe(1)
+  expect((await gitIn(world.store)(["rev-parse", `refs/heads/${world.branch}`])).trim()).toBe(world.tip)
+})
+
+it("names the store, never the enclosing root, when --release-checkout aims at a retained store", async () => {
+  const world = await nestedRetainedWorld()
+  const observed = capture(world.store)
+  const code = await runYrdProcess(
+    [
+      "bun",
+      "yrd",
+      "drop",
+      world.branch,
+      "--local",
+      "--tip",
+      world.tip,
+      "--submitter",
+      "fixture",
+      "--issue",
+      "@yrd/30094",
+      "--reason",
+      "fixture",
+      "--release-checkout",
+    ],
+    observed.io,
+  )
+  expect(code).toBe(2)
+  expect(observed.stderr()).toContain(world.store)
+  expect(observed.stderr()).not.toContain(`cd '${world.enclosing}'`)
 })
