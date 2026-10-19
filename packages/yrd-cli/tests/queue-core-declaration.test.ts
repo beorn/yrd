@@ -3055,7 +3055,9 @@ describe("a queue is the selected origin branch carrying config", () => {
             ]
       const exit = await runYrdProcess(argv, out.io)
       // Unreadable authority is a CLI execution error (2), rather than an ordinary kept result.
-      expect(exit, out.stderr()).toBe(mode === "unknown-ancestry" ? 2 : 0)
+      // 30266: a kept branch is not a retirement either, so it exits non-zero.
+      const retained = mode === "wrong-tip" || mode === "non-descendant" || mode === "unmerged"
+      expect(exit, out.stderr()).toBe(mode === "unknown-ancestry" ? 2 : retained ? 1 : 0)
       if (mode === "unknown-ancestry") {
         expect(out.stderr()).toContain("ancestry evidence intentionally unreadable")
         expect(out.stdout()).toBe("")
@@ -3178,7 +3180,8 @@ describe("a queue is the selected origin branch carrying config", () => {
         heldManual.io,
       ),
       heldManual.stderr(),
-    ).toBe(0)
+      // 30266: the branch was held, not retired, so the receipt cannot report success.
+    ).toBe(1)
     const heldManualReport = JSON.parse(heldManual.stdout()) as {
       removed: unknown[]
       kept: { branch: string; head: string; reason: string; detail?: string; archiveRef?: string }[]
@@ -3229,7 +3232,8 @@ describe("a queue is the selected origin branch carrying config", () => {
         local.io,
       ),
       local.stderr(),
-    ).toBe(0)
+      // 30266: kept "advanced", so the requested deletion did not happen.
+    ).toBe(1)
     expect(JSON.parse(local.stdout())).toMatchObject({
       removed: [],
       kept: [
@@ -3273,7 +3277,8 @@ describe("a queue is the selected origin branch carrying config", () => {
         requested.io,
       ),
       requested.stderr(),
-    ).toBe(0)
+      // 30266: kept "advanced" again, so this rerun also deleted nothing.
+    ).toBe(1)
     expect(JSON.parse(requested.stdout())).toMatchObject({
       removed: [],
       kept: [

@@ -2016,7 +2016,11 @@ export async function coreQueueCommand(
             .map((row) => `\n${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`)
             .join(""),
       )
-      return failed.length === 0 ? 0 : 1
+      // 30266 — a kept branch is not a retirement. A caller that trusts exit 0 records
+      // the branch as retired while it still resolves, so the receipt must not report
+      // success when the requested deletion did not happen.
+      const deleted = removed.length > 0
+      return failed.length === 0 && (kept.length === 0 || deleted) ? 0 : 1
     }
     case "drop": {
       const eventStore = createEventStore(repo, config.target.remote, selection)

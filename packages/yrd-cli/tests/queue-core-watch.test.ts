@@ -1067,6 +1067,7 @@ process.exit(result.exitCode)
       }
       return { protections: [], evidence: [] }
     }
+    // 30266: the branch was kept, so the command must not report success.
     await expect(
       coreQueueCommand(
         w.work,
@@ -1074,7 +1075,7 @@ process.exit(result.exitCode)
         { command: "drop-local", branch, tip, by: "@dev/4" },
         { json: true, workdir: w.workdir },
       ),
-    ).resolves.toBe(0)
+    ).resolves.toBe(1)
     expect(moved).toBe(true)
     expect(JSON.parse(run.stdout())).toMatchObject({
       removed: [],
