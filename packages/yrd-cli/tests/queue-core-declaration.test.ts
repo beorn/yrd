@@ -3181,16 +3181,18 @@ describe("a queue is the selected origin branch carrying config", () => {
       const archive =
         "refs/archive/2000-01-01/previous-seat/" +
         (guard === "other-branch" ? "task/other-archived-retirement" : branch)
-      if (guard !== "missing")
+      if (guard !== "missing") {
         await git(["update-ref", archive, guard === "wrong-tip" ? recorded : head, "0".repeat(40)])
+      }
       const beforeArchives = await git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/archive/"])
       expect(await git(["ls-remote", "origin", archive])).toBe("")
       const endingRef = await git(["ls-remote", "origin", changesRef("main", branch)])
       const originBranch = await git(["ls-remote", "origin", "refs/heads/" + branch])
       const status = await git(["status", "--porcelain=v2", "-z"])
       const out = capture(repo)
-      if (guard === "held")
+      if (guard === "held") {
         out.io.localBranchProtections = async () => ({ protections: ["fixture checkout is held"], evidence: [] })
+      }
       if (guard === "publication") {
         const lock = join(dirname(repo), "remote.git", archive + ".lock")
         mkdirSync(dirname(lock), { recursive: true })
