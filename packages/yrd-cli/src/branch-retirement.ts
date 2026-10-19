@@ -478,7 +478,11 @@ export async function retireIssueBranches(
           continue
         }
         const custody = await targetFor(candidate)
-        if (path === "" && change?.commit !== undefined && change.commit !== head) {
+        const existingArchive =
+          path === "" && candidate.local && change?.ending !== undefined
+            ? findArchiveRefFor(repo, branch, head)
+            : undefined
+        if (path === "" && change?.commit !== undefined && change.commit !== head && existingArchive === undefined) {
           kept.push({
             ...row,
             reason: "advanced",
@@ -540,6 +544,8 @@ export async function retireIssueBranches(
             }
           } else if (archive !== undefined) {
             disposition = { kind: "archived", target: head, ref: archive[0] }
+          } else if (existingArchive !== undefined) {
+            disposition = { kind: "closed", target: custody.target, store: eventStore, queue: config.target.branch }
           } else if (!(await isAncestor(candidate.git, head, custody.target))) {
             kept.push({
               ...row,

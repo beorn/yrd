@@ -2,6 +2,7 @@ import { archiveRefFor, ensureArchiveRef, findArchiveRefFor } from "git-super/ar
 import { changedCommitGitlinks } from "git-super/commit-graph"
 import { createGitWorktreeStore, worktreeOperationBranch } from "git-super/worktree"
 import { drop, type QueueLocation } from "./events.ts"
+import { publishRetirementArchive } from "./origin-branch-retirement.ts"
 import { isAncestor, refAt, seamProcess, type Git } from "./git.ts"
 import type { QueueRunLog } from "./log.ts"
 
@@ -59,7 +60,8 @@ class RetirementKept extends Error {
  */
 export async function retireLocalBranch(input: LocalBranchRetirement): Promise<LocalBranchRetirementResult> {
   const { repo, git, branch, tip, actor, issue, reason, date, disposition } = input
-  const archiveRef = disposition.kind === "archived" ? disposition.ref : archiveRefFor(branch, actor, date)
+  let archiveRef = disposition.kind === "archived" ? disposition.ref : archiveRefFor(branch, actor, date)
+  let existingArchive: string | undefined
   const store = createGitWorktreeStore({ repo, gitProcess: seamProcess(git, repo) })
   let firstProtectionRead = true
   let completedArchive: string | undefined
@@ -133,6 +135,10 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
   try {
     if (actor.trim() === "" || reason.trim() === "") throw new Error("retirement requires an actor and reason")
     await git(["check-ref-format", "--branch", branch])
+    if (disposition.kind === "closed") {
+      existingArchive = findArchiveRefFor(repo, branch, tip)
+      archiveRef = existingArchive ?? archiveRef
+    }
     await git(["check-ref-format", archiveRef])
     if (disposition.kind === "archived" && (await refAt(git, disposition.ref)) === tip) {
       writtenArchive = disposition.ref
@@ -166,6 +172,10 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     const alreadyMerged =
       kept === undefined && disposition.kind === "closed" && (await isAncestor(git, tip, disposition.target))
     if (kept === undefined && !input.dryRun && disposition.kind === "closed" && !alreadyMerged) {
+      if (existingArchive !== undefined) {
+        await publishRetirementArchive(disposition.store, { branch, archive: archiveRef, head: tip })
+        archiveLocation = "origin"
+      }
       await drop(disposition.store, {
         queue: disposition.queue,
         branch,
@@ -214,6 +224,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       result = {
         outcome: "failed",
         ...(writtenArchive === undefined ? {} : { archiveRef: writtenArchive }),
+        ...(archiveLocation === undefined ? {} : { archiveLocation }),
         reason: error instanceof Error ? error.message : String(error),
       }
     }

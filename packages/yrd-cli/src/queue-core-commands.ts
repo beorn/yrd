@@ -14,6 +14,7 @@
  */
 
 import { shellQuote } from "git-super/shell-command"
+import { findArchiveRefFor } from "git-super/archive-ref"
 import {
   existsSync,
   appendFileSync,
@@ -1940,10 +1941,12 @@ export async function coreQueueCommand(
             kept.push({ ...row, reason: "mismatch", detail: `recorded issue ${bound} differs from requested ${issue}` })
             continue
           }
+          const existingArchive = change?.ending === undefined ? undefined : findArchiveRefFor(authorRepo, branch, head)
           if (
             head !== request.tip ||
             (change?.commit !== undefined &&
               change.commit !== head &&
+              existingArchive === undefined &&
               !(await acceptsMergedLocalRetirement(authorGit, { local: true, head, change })))
           ) {
             kept.push({
