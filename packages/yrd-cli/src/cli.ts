@@ -1589,6 +1589,8 @@ function buildProgram(
               removed: result.removed.length,
               remaining: result.remaining.length,
               ...(result.missing.length === 0 ? {} : { missing: result.missing }),
+              ...(result.unreadable.length === 0 ? {} : { unreadable: result.unreadable }),
+              ...(result.withheld.length === 0 ? {} : { withheld: result.withheld }),
               ...(result.failures.length === 0 ? {} : { failures: result.failures }),
               ...(result.failuresOmitted === 0 ? {} : { failuresOmitted: result.failuresOmitted }),
               ...(dryRun === true ? { list: result.planned.map((entry) => entry.path) } : {}),
@@ -1602,7 +1604,13 @@ function buildProgram(
                 remaining: result.remaining,
                 missing: result.missing,
               },
-              { roots: roots.map((root) => root.path), dryRun: dryRun === true, listed },
+              {
+                roots: roots.map((root) => root.path),
+                dryRun: dryRun === true,
+                listed,
+                unreadable: result.unreadable,
+                withheld: result.withheld,
+              },
             ).join("\n") + "\n",
       )
     })
