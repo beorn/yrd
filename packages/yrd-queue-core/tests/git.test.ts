@@ -61,6 +61,23 @@ function temporaryRoot(name: string): string {
   return mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), `yrd-git-runner-${name}-`))
 }
 
+// @failure Native exit 1 with diagnostic output is mistaken for an ordinary content conflict and hidden as false.
+// @level l2; @consumer draft-retirement error reporting; @testonly none
+// Real-Git CLI coverage owns content/custody; this existing Process boundary distinguishes error text without a new seam.
+it.each(["error: Could not read " + "a".repeat(40), "fatal: component object store is unreadable"])(
+  "preserves the native retirement error: %s",
+  async (stderr) => {
+    const root = temporaryRoot("retirement-stderr")
+    const process = createScriptedProcess({ result: exitedResult({ exitCode: 1, stderr }) })
+    const git = gitIn(root, process)
+    const failure = await gitRunner
+      .mergeChangesNothing(git, "b".repeat(40), "c".repeat(40))
+      .catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(gitRunner.GitExit)
+    expect(failure).toMatchObject({ exitCode: 1, detail: stderr, evidence: git.lastInvocation })
+  },
+)
+
 function declareGit(root: string, value: string, file?: string): void {
   // Native Git accepts an empty value; Process intentionally rejects empty
   // argv words, so fixture authoring must not depend on that wrapper.

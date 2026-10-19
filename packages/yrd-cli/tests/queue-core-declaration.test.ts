@@ -57,6 +57,7 @@ import {
 } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { retireLocalBranch } from "../../yrd-queue-core/src/local-branch-retirement.ts"
+import { GitExit } from "../../yrd-queue-core/src/git.ts"
 import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 import { openEvents } from "gitomic/events"
 import {
@@ -73,7 +74,7 @@ import { shellQuote } from "git-super/shell-command"
 import { readEnvOpenRecord } from "../src/env-open-record.ts"
 import { SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
-import { parseQueueAddress } from "../src/address.ts"
+import { parseQueueAddress, queueDirectory } from "../src/address.ts"
 import { eventHistoryEntries } from "../src/watch-change.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import type { WatchSource } from "../src/watch-pane.tsx"
@@ -5697,6 +5698,109 @@ describe("component-local retirement without a component queue", () => {
 })
 
 describe("exact-tip origin retirement of a draft", () => {
+  // @failure An archived, delivered origin-only draft is refused because Git's alternate-backed split graph is stale.
+  // @level l2; @consumer public drop --retire; @testonly none
+  // The plain-repository table below cannot exercise child graph reads. Minimal adaptation of
+  // git-super/tests/merge.test.ts's stale-commit-graph fixture (a9aabea); that private test is not a package export.
+  it.each(["delivered", "root-conflict", "component-conflict"] as const)(
+    "preserves content and custody when retiring an alternate-backed %s draft",
+    async (mode) => {
+      const repo = await world("{}\n")
+      const child = await world(undefined, "component-source")
+      const source = gitIn(child)
+      const git = gitIn(repo)
+      const path = "component"
+      await git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", child, path])
+      await git(["commit", "--quiet", "-am", "declare component"])
+      const base = (await git(["rev-parse", "HEAD"])).trim()
+      const childBase = (await source(["rev-parse", "HEAD"])).trim()
+      writeFileSync(join(child, "delivered.txt"), "delivered component work\n")
+      await source(["add", "delivered.txt"])
+      await source(["commit", "--quiet", "-m", "component draft"])
+      const childDraft = (await source(["rev-parse", "HEAD"])).trim()
+      const component = gitIn(join(repo, path))
+      await component(["fetch", "--quiet", "origin"])
+      await component(["checkout", "--quiet", childDraft])
+      await git(["checkout", "--quiet", "--detach", base])
+      writeFileSync(join(repo, "delivered.txt"), "delivered root work\n")
+      await git(["add", path, "delivered.txt"])
+      await git(["commit", "--quiet", "-m", "mixed root and component draft"])
+      const head = (await git(["rev-parse", "HEAD"])).trim()
+      const branch = "task/30206-archived-draft"
+      const archive = `refs/archive/fixture/${branch}`
+      await git(["push", "--quiet", "origin", `HEAD:refs/heads/${branch}`, `HEAD:${archive}`])
+      await git(["checkout", "--quiet", "main"])
+      await component(["checkout", "--quiet", childBase])
+      const workdir = join(dirname(repo), "queue-workdir")
+      await git(["config", "yrd.workdir", workdir])
+      const origin = (await git(["config", "--get", "remote.origin.url"])).trim()
+      // The public CLI selects this queue-owned path, not the author checkout's graph.
+      const repoReader = queueDirectory(workdir, parseQueueAddress(`${origin}#main`))
+      mkdirSync(dirname(repoReader), { recursive: true })
+      await git(["super", "--repo", repo, "worktree", "add", repoReader, base])
+      const reader = gitIn(repoReader)
+      const readerChild = gitIn(join(repoReader, path))
+      await readerChild(["checkout", "--quiet", mode === "component-conflict" ? childBase : childDraft])
+      await readerChild(["commit-graph", "write", "--reachable", "--split"])
+      for (const step of [1, 2]) {
+        writeFileSync(join(repoReader, path, "later.txt"), `later component work ${step}\n`)
+        await readerChild(["add", "later.txt"])
+        await readerChild(["commit", "--quiet", "-m", `component work after graph ${step}`])
+      }
+      await readerChild(["push", "--quiet", "origin", "HEAD:refs/heads/later-delivered-work"])
+      writeFileSync(
+        join(repoReader, "delivered.txt"),
+        mode === "root-conflict" ? "conflicting root work\n" : "delivered root work\n",
+      )
+      writeFileSync(join(repoReader, "later.txt"), "later independent root work\n")
+      await reader(["add", path, "delivered.txt", "later.txt"])
+      await reader(["commit", "--quiet", "-m", "independently delivered work and later main edits"])
+      const main = (await reader(["rev-parse", "HEAD"])).trim()
+      await reader(["push", "--quiet", "origin", "HEAD:refs/heads/main"])
+      await createQueue(repoReader, "main", main, new Date())
+      expect((await resolveQueueLocation(repoReader, undefined, process.env)).repo).toBe(repoReader)
+      const mainTree = (await reader(["rev-parse", `${main}^{tree}`])).trim()
+      const merge = ["merge-tree", "--write-tree", "--no-messages", main, head]
+      if (mode === "delivered") {
+        await expect(reader(["-c", "core.commitGraph=true", ...merge])).rejects.toThrow("Could not read")
+        expect(reader.lastInvocation?.result?.exitCode).toBe(1)
+        await expect(reader(merge)).rejects.toThrow("Could not read")
+        expect((await reader(["-c", "core.commitGraph=false", ...merge])).trim()).toBe(mainTree)
+        expect(reader.lastInvocation?.result?.stderr).toBe("")
+      } else {
+        await expect(reader(["-c", "core.commitGraph=false", ...merge])).rejects.toBeInstanceOf(GitExit)
+        // CTO discriminator: real ordinary conflicts must be exit 1 with empty stderr under --no-messages.
+        expect(reader.lastInvocation?.result).toMatchObject({ exitCode: 1, stderr: "" })
+      }
+      expect((await reader(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).trim()).toBe("")
+      expect((await reader(["ls-remote", "origin", archive])).trim()).toBe(`${head}\t${archive}`)
+      const output = capture(repoReader)
+      const code = await runYrdProcess(
+        ["bun", "yrd", "drop", branch, "--retire", "--tip", head, "--reason", archive, "--json"],
+        output.io,
+      )
+      const store = createEventStore(repoReader, "origin", reader.selection)
+      if (mode === "delivered") {
+        expect(code, output.stderr()).toBe(0)
+        expect(JSON.parse(output.stdout())).toMatchObject({ head, main: { ref: "refs/heads/main", tip: main } })
+        expect((await reader(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
+        expect(await readStatus(store, "main", branch)).toMatchObject({ status: "cancelled", commit: head })
+        const events = await (await openEvents({ ...store, ref: changesRef("main", branch) })).events()
+        expect(events.at(-1)).toMatchObject({ type: "cancelled", links: [head] })
+      } else {
+        expect(code).not.toBe(0)
+        expect(output.stderr()).toContain(`merging into fresh refs/heads/main@${main} changes main`)
+        expect((await reader(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(
+          `${head}\trefs/heads/${branch}`,
+        )
+        expect((await listChanges(store, "main")).size).toBe(0)
+      }
+      expect((await reader(["ls-remote", "origin", "refs/heads/main"])).trim()).toBe(`${main}\trefs/heads/main`)
+      expect((await reader(["ls-remote", "origin", archive])).trim()).toBe(`${head}\t${archive}`)
+      expect((await reader(["rev-parse", "HEAD^{tree}"])).trim()).toBe(mainTree)
+    },
+  )
+
   // Ended-only cases miss safe never-submitted work and its required ending fold.
   // Use the real origin and Git merge result: matching trees are not ancestry proof.
   it.each([

@@ -1162,9 +1162,12 @@ export async function isAncestor(git: Git, sha: string, of: string): Promise<boo
 export async function mergeChangesNothing(git: Git, main: string, tip: string): Promise<boolean> {
   let tree: string
   try {
-    tree = (await git(["merge-tree", "--write-tree", "--no-messages", main, tip])).trim()
+    // Git 2.55 alternate-backed split graphs can invent gitlink conflicts; match GitSuper's prospectiveTree (a9aabea).
+    tree = (
+      await git(["-c", "core.commitGraph=false", "merge-tree", "--write-tree", "--no-messages", main, tip])
+    ).trim()
   } catch (error) {
-    if (isExit(error, 1)) return false
+    if (isExit(error, 1) && error instanceof GitExit && error.evidence?.result?.stderr === "") return false
     throw error
   }
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(tree)) {
