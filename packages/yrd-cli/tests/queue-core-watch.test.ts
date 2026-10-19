@@ -49,7 +49,7 @@ import {
 } from "@yrd/queue-core"
 import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
-import { openLog } from "../../yrd-queue-core/src/log.ts"
+import { openLog, runId, runStartedAt } from "../../yrd-queue-core/src/log.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { formatStoredQueueAddress } from "../src/address.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
@@ -384,8 +384,8 @@ describe("event queue observation refusals", () => {
     // A run the listing does not read — no change event points at it — and newer
     // than the round just drained, so the runner's own read falls back to a raw
     // journal whose projection artifact does not exist yet.
-    const pending = "q-20261018T235959000Z-5eedface"
-    const startedAt = Date.parse("2026-10-18T23:59:59.000Z")
+    const startedAt = runStartedAt(run)!.getTime() + 1
+    const pending = runId(new Date(startedAt))
     const lock = (since: number): void =>
       writeFileSync(
         join(w.workdir, "round.lock"),
