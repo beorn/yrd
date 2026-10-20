@@ -102,11 +102,6 @@ describe("expiredRoundOutput (selection, by name only)", () => {
   })
 
   /**
-   * @failure An environment directory named <commit>-q-<utc>-<id> is older than the window and prune reports selected 0.
-   * @level l2
-   * @consumer yrd logs prune
-   */
-  /**
    * @failure An empty logs/environments/<env> directory older than the window stays forever, so prune reports selected 0.
    * @level l2
    * @consumer yrd logs prune
@@ -126,6 +121,25 @@ describe("expiredRoundOutput (selection, by name only)", () => {
     expect(found).toEqual([oldDir])
   })
 
+  /**
+   * @failure An old plain container holding an old round is removed as one unit, taking the round with it.
+   * @level l2
+   * @consumer yrd logs prune
+   */
+  it("keeps an old plain container that holds an old round and selects the round", () => {
+    const { logs } = tree("env-old-round")
+    const parent = join(logs, "environments", "fixer-28499")
+    const child = place(join(parent, round(ago(12))))
+    utimesSync(parent, ago(12), ago(12))
+    const found = expiredRoundOutput({ roots: [logs], now: NOW }).entries.map((entry) => entry.path)
+    expect(found).toEqual([child])
+  })
+
+  /**
+   * @failure An environment directory named <commit>-q-<utc>-<id> is older than the window and prune reports selected 0.
+   * @level l2
+   * @consumer yrd logs prune
+   */
   it("selects an old environment directory named <commit>-q-<utc>-<id> with no round child", () => {
     const { logs } = tree("env-stamp")
     const envDir = place(join(logs, "environments", `0010d72a646a-${round(ago(12))}`), "setup.log")

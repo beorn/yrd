@@ -176,11 +176,18 @@ export function expiredRoundOutput(
             unreadable.push(path)
             continue
           }
-          // The live container is `<env>`, not `<env>-q-<utc>-<id>`. Its age is the directory mtime.
-          // A younger round inside keeps the container; the round walk below still sees that child.
+          // The live container is `<env>`, not `<env>-q-<utc>-<id>`. Select it only when it is empty
+          // and its own mtime is past the window. Any entry keeps the container; the walk below
+          // prunes a stale round child on its own. Nested writes do not move this mtime.
           const containerStarted = directoryMtime(path)
-          const holdsYoungRound = roundInstants(path).some((started) => started.getTime() > cutoff)
-          if (!holdsYoungRound && containerStarted !== undefined && containerStarted.getTime() <= cutoff) {
+          let contained: string[]
+          try {
+            contained = readdirSync(path)
+          } catch (cause) {
+            if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue
+            throw new Error(`log retention cannot read ${path}: ${String(cause)}`, { cause })
+          }
+          if (contained.length === 0 && containerStarted !== undefined && containerStarted.getTime() <= cutoff) {
             found.push({ path, name: entry.name, within, started: containerStarted })
             continue
           }
