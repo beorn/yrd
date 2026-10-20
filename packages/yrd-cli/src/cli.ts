@@ -269,7 +269,7 @@ function buildProgram(
     ) {
       throw new Error(`replace --tip ${options.tip} with the branch's exact full commit`)
     }
-    if (command === "drop" && options.reason?.trim() === "<why>") {
+    if (command === "drop" && options.reason?.trim() === "<why>" && (options.retire || options.releaseCheckout)) {
       throw new Error("replace --reason <why> with the reason for this retirement")
     }
     if (options.local !== true && (branch === undefined) === (options.issue === undefined)) {
