@@ -19,7 +19,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { tryAcquireFlock } from "@bearly/flock"
+import { isFlockHeld, tryAcquireFlock } from "@bearly/flock"
 import { afterAll, describe, expect, it } from "vitest"
 import { type Git } from "../src/git.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
@@ -376,6 +376,56 @@ describe("refreshMirror", () => {
     expect(readFileSync(stampPath, "utf8")).toBe(priorStamp)
     await invalidateMirrorStamp(created.path, url)
     expect(existsSync(stampPath)).toBe(false)
+  })
+
+  // The CLI owns early stderr; this owner test covers publication and observer
+  // lifecycle facts that a caller holding a prewritten fixture body cannot see.
+  it("observes only changed recorded bodies, propagates observer errors, and publishes its own command", async () => {
+    const { store, upstream, env } = host()
+    await upstreamRepository(upstream, "child", env)
+    const url = `${HOSTED}child.git`
+    const created = await refreshMirror({ root: store, url, gitIn: through(env) })
+    const lock = `${created.path}.lock`
+    const held = tryAcquireFlock(lock, { body: "" })
+    if (held === null) throw new Error("isolated mirror lock was already held")
+    const waits: { lock: string; holder: string }[] = []
+    const refreshing = refreshMirror({ root: store, url, gitIn: through(env), onWait: (wait) => waits.push(wait) })
+    try {
+      expect(waits).toEqual([{ lock, holder: "no body written" }])
+      const legacy = "321 2000-01-01T00:00:00.000Z"
+      writeFileSync(lock, legacy)
+      await expect.poll(() => waits.at(-1)?.holder).toBe(legacy)
+      // Multiple existing 100ms acquisition attempts must not repeat one body.
+      await Bun.sleep(220)
+      expect(waits).toEqual([
+        { lock, holder: "no body written" },
+        { lock, holder: legacy },
+      ])
+      writeFileSync(lock, "{")
+      await expect.poll(() => waits.at(-1)?.holder).toBe("{")
+      const error = new Error("observer output failed")
+      await expect(
+        refreshMirror({
+          root: store,
+          url,
+          gitIn: through(env),
+          lockWaitMs: 300,
+          onWait: () => {
+            throw error
+          },
+        }),
+      ).rejects.toBe(error)
+      expect(isFlockHeld(lock)).toBe(true)
+    } finally {
+      held.release()
+      await refreshing
+    }
+    expect(waits).toHaveLength(3)
+    expect((await refreshing).outcome).toBe("fetched")
+    const recorded = JSON.parse(readFileSync(lock, "utf8")) as { pid: number; command: string; since: string }
+    expect(recorded).toMatchObject({ pid: process.pid, command: process.argv.join(" ") })
+    expect(Number.isNaN(Date.parse(recorded.since))).toBe(false)
+    expect(isFlockHeld(lock)).toBe(false)
   })
 
   it("refuses by name when the lock is held past the bound, and fetches nothing", async () => {

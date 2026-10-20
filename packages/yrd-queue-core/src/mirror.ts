@@ -69,6 +69,8 @@ export type RefreshMirrorOptions = Readonly<
     /** Skip the remote when the last refresh is younger than this. Absent: always refresh. */
     maxAgeMs?: number
     lockWaitMs?: number
+    /** First lock wait and changes to its recorded diagnostic body; never ownership evidence. */
+    onWait?: (wait: Readonly<{ lock: string; holder: string }>) => void
     /** Exact refs the display reads. An owned queue clone supplies these. */
     refspecs?: readonly string[]
   } & ({ root: string; path?: never } | { path: string; root?: never })
@@ -220,7 +222,7 @@ export async function refreshMirror(options: RefreshMirrorOptions): Promise<Mirr
   ) {
     return result("fresh", before.at, before.asOf)
   }
-  using _lock = await lockMirror(options.url, path, options.lockWaitMs ?? MIRROR_LOCK_WAIT_MS)
+  using _lock = await lockMirror(options.url, path, options.lockWaitMs ?? MIRROR_LOCK_WAIT_MS, options.onWait)
   const meanwhile = recordedScope(path, options.path === undefined)
   if (options.path !== undefined && meanwhile !== undefined && !covers(meanwhile, remote, refspecs)) {
     throw new MirrorUnavailable(
@@ -267,15 +269,29 @@ export async function invalidateMirrorStamp(path: string, url: string): Promise<
   }
 }
 
-async function lockMirror(url: string, path: string, waitMs: number): Promise<FlockHandle> {
+async function lockMirror(
+  url: string,
+  path: string,
+  waitMs: number,
+  onWait?: RefreshMirrorOptions["onWait"],
+): Promise<FlockHandle> {
   const lock = `${path}.lock`
   const deadline = Date.now() + waitMs
+  let observed: string | undefined
   for (;;) {
     const handle = tryAcquireFlock(lock, {
       createParent: true,
-      body: `${process.pid} ${new Date().toISOString()}\n`,
+      body:
+        JSON.stringify({ pid: process.pid, command: process.argv.join(" "), since: new Date().toISOString() }) + "\n",
     })
     if (handle !== null) return handle
+    if (onWait !== undefined) {
+      const holder = lockHolder(lock)
+      if (holder !== observed) {
+        onWait({ lock, holder })
+        observed = holder
+      }
+    }
     if (Date.now() >= deadline) {
       throw new MirrorUnavailable(url, path, `the lock ${lock} was held past ${waitMs}ms (holder: ${lockHolder(lock)})`)
     }

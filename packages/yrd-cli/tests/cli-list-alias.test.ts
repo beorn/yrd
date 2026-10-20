@@ -7,13 +7,15 @@
  * @consumer the operator at the prompt (2026-09-04: "yrd list = yrd queue
  *           list") · the /yrd skill, which keeps `yrd queue list` canonical
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
+import { isFlockHeld, tryAcquireFlock } from "@bearly/flock"
 import { submit } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { resolveQueueLocation } from "../src/queue-location.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
@@ -50,7 +52,7 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
 }
 
 /** A bare remote whose `main` declares the queue, a clone of it, and one change submitted from the clone. */
-async function queueWithOneChange(): Promise<string> {
+async function queueWithOneChange(hosted?: string): Promise<string> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-list-alias-"))
   roots.push(root)
   const seed = gitIn(root)
@@ -66,6 +68,14 @@ async function queueWithOneChange(): Promise<string> {
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
+  if (hosted !== undefined) {
+    const transport = join(root, "transport.gitconfig")
+    await git(["config", "--file", transport, `url.${remote}.insteadOf`, hosted])
+    await git(["config", `url.${remote}.insteadOf`, hosted])
+    await git(["remote", "set-url", "origin", hosted])
+    vi.stubEnv("GIT_CONFIG_GLOBAL", transport)
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1")
+  }
   await birthEventQueue(work)
   await git(["checkout", "--quiet", "-b", "task/one", "main"])
   writeFileSync(join(work, "pass.txt"), "pass\n")
@@ -89,6 +99,61 @@ function timeless(json: string): unknown {
 }
 
 describe("`yrd list` is `yrd queue list`", () => {
+  // 30420: normal JSON assertions and terminal lock errors cannot witness a
+  // diagnostic emitted before a real held mirror lock is released.
+  it("reports the recorded mirror-lock holder before release and preserves JSON after release", async () => {
+    try {
+      const work = await queueWithOneChange("https://yrd-list.test/org/queue.git")
+      const initial = await yrd(work, "queue", "list", "--json")
+      expect(initial.exitCode, initial.report).toBe(0)
+      const location = await resolveQueueLocation(work, undefined, process.env, "reader")
+      const stampPath = join(location.workdir, "repo", "yrd-refreshed-at")
+      const stamp = JSON.parse(readFileSync(stampPath, "utf8")) as Record<string, unknown>
+      writeFileSync(stampPath, JSON.stringify({ ...stamp, at: "2000-01-01T00:00:00.000Z" }))
+      const lock = join(location.workdir, "repo.lock")
+      const command = "yrd fixture mirror refresh"
+      const holder = tryAcquireFlock(lock, {
+        body: JSON.stringify({ pid: process.pid, command, since: new Date().toISOString() }) + "\n",
+      })
+      if (holder === null) throw new Error("isolated mirror lock was already held")
+      let stdout = ""
+      let stderr = ""
+      let observedAt: number | undefined
+      const started = performance.now()
+      const waiting = runYrdProcess([process.execPath, "/usr/local/bin/yrd", "queue", "list", "--json"], {
+        localBranchProtections: null,
+        cwd: work,
+        color: false,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+          if (stderr.includes(command) && observedAt === undefined) observedAt = performance.now()
+        },
+      })
+      let exit: YrdCliExitCode
+      try {
+        // The 5s bound is the accepted user contract, not a fixture readiness limit.
+        await expect.poll(() => stderr, { timeout: 5000 }).toContain(command)
+        expect(stderr).toContain(String(process.pid))
+        expect(stderr).toContain(lock)
+        expect(observedAt! - started).toBeLessThanOrEqual(5000)
+        expect(isFlockHeld(lock)).toBe(true)
+        expect(stdout).toBe("")
+      } finally {
+        holder.release()
+        exit = await waiting
+      }
+      expect(exit!, stderr).toBe(0)
+      const result = JSON.parse(stdout) as { source: string; changes: unknown[] }
+      expect(result.source).toBe("local")
+      expect(result.changes).toEqual((JSON.parse(initial.stdout) as { changes: unknown[] }).changes)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it("prints the same reading with the same exit code", async () => {
     const work = await queueWithOneChange()
 
