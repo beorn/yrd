@@ -3414,7 +3414,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       })
       await (
         await openEvents({ ...location, ref: eventRef, writer: "fixture" })
-      ).append([retention], { expect: merged.history!.state.tip })
+      ).append([retention], { expect: merged.history!.state.tip! })
     }
     await git(["branch", branch, head])
     await git(["push", "--quiet", "origin", `refs/heads/${branch}`])
