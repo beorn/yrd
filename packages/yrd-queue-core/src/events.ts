@@ -1018,9 +1018,8 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       }
       const commit = keptCommit(event)
       if (!COMMIT_OID.test(commit)) throw new Error(`event ${event.id} retained Commit: must name a commit oid`)
-      for (const key of [EVENT_TRAILERS.by, EVENT_TRAILERS.reason]) {
-        if (requiredProp(event, key).trim() === "") throw new Error(`event ${event.id} retained needs ${key}:`)
-      }
+      requiredProp(event, EVENT_TRAILERS.by)
+      requiredProp(event, EVENT_TRAILERS.reason)
       // Retention records custody, not another ending or a change to its factual clock and metadata.
       return { ...state, tip: event.id }
     }
