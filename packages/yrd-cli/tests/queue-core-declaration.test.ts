@@ -31,6 +31,7 @@ import {
   readChangeEvents,
   readBranchHistory,
   MIRROR_REFRESHED_AT,
+  invalidateMirrorStamp,
   assertPlainEventQueueConfig,
   changeInput,
   changesRef,
@@ -398,6 +399,43 @@ it("reads a fresh queue-owned store without remote Git calls and refreshes once 
     if (previousTrace === undefined) delete process.env.GIT_TRACE2_EVENT
     else process.env.GIT_TRACE2_EVENT = previousTrace
   }
+  // 30419: root-v1 deadline tests cannot catch an omitted native caller bound.
+  // Keep real Git for the journey; only its fetch hangs. The fixture's later
+  // exit bounds the pre-fix RED without supplying the timeout under test.
+  const hungGit = join(root, "hung-status-git.mjs")
+  const fetchPid = join(root, "hung-fetch.pid")
+  const nativeGit = Bun.which("git")
+  if (nativeGit === null) throw new Error("native Git is required by the local-status journey")
+  writeFileSync(
+    hungGit,
+    `#!${process.execPath}\n` +
+      `import { writeFileSync } from "node:fs";\n` +
+      `import { spawnSync } from "node:child_process";\n` +
+      `const args = process.argv.slice(2);\n` +
+      `if (args[0] === "fetch") {\n` +
+      `  writeFileSync(${JSON.stringify(fetchPid)}, String(process.pid));\n` +
+      `  setTimeout(() => { process.stderr.write("fixture fetch outlived caller deadline\\n"); process.exit(79); }, 70_000);\n` +
+      `} else { process.exit(spawnSync(${JSON.stringify(nativeGit)}, args, { stdio: "inherit" }).status ?? 1); }\n`,
+  )
+  chmodSync(hungGit, 0o755)
+  unlinkSync(join(owned, MIRROR_REFRESHED_AT))
+  const failedRead = coreQueueCommand(
+    repo,
+    capture(repo).io,
+    { command: "list" },
+    {
+      ...options,
+      selection: { executable: hungGit, contract: "native", scope: "local", origin: "fixture" },
+    },
+  )
+  // Observe rejection immediately, before waiting for the child to enter fetch.
+  const settled = failedRead.catch((error: unknown) => error)
+  await vi.waitFor(() => expect(existsSync(fetchPid)).toBe(true), { timeout: 15_000 })
+  const invalidating = invalidateMirrorStamp(owned, remote)
+  expect(String(await settled)).toContain("timedOut=true")
+  await invalidating
+  expect(existsSync(join(owned, MIRROR_REFRESHED_AT))).toBe(false)
+  expect(() => process.kill(Number(readFileSync(fetchPid, "utf8")), 0)).toThrow()
   await expect(
     coreQueueCommand(
       repo,
@@ -418,7 +456,7 @@ it("reads a fresh queue-owned store without remote Git calls and refreshes once 
   await expect(coreQueueCommand(repo, capture(repo).io, { command: "list" }, options)).rejects.toThrow(
     "index with checked-out files",
   )
-})
+}, 100_000)
 
 it("refreshes local status after an event queue write in the same workdir (25626)", async () => {
   const repo = await world("{}\n")

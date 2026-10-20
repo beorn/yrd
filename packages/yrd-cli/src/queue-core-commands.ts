@@ -866,7 +866,7 @@ export async function coreQueueCommand(
     const refreshed = await refreshMirror({
       path: repo,
       url: actual,
-      gitIn: (cwd) => gitIn(cwd, undefined, selection, { env }),
+      gitIn: (cwd) => gitIn(cwd, undefined, selection, { env, timeoutMs: 60_000 }),
       refspecs,
       maxAgeMs: 60_000,
     })

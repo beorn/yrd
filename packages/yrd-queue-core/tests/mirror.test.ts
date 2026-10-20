@@ -358,6 +358,24 @@ describe("refreshMirror", () => {
       (await refreshMirror({ path: created.path, url, gitIn: through(counted.env), maxAgeMs: 60_000 })).outcome,
     ).toBe("fetched")
     expect(readRemoteCalls(counted.dir).verbs.fetch).toBe(1)
+    // A failed fetch must preserve the prior certification, never publish a
+    // newer stamp. The invalidator owns removing that old stamp afterwards.
+    const stampPath = join(created.path, MIRROR_REFRESHED_AT)
+    const priorStamp = readFileSync(stampPath, "utf8")
+    await expect(
+      refreshMirror({
+        path: created.path,
+        url,
+        maxAgeMs: 0,
+        gitIn: (cwd) => async (args, input) => {
+          if (args[0] === "fetch") throw new Error("fixture fetch failed")
+          return gitIn(cwd, undefined, undefined, { env })(args, input)
+        },
+      }),
+    ).rejects.toThrow("fixture fetch failed")
+    expect(readFileSync(stampPath, "utf8")).toBe(priorStamp)
+    await invalidateMirrorStamp(created.path, url)
+    expect(existsSync(stampPath)).toBe(false)
   })
 
   it("refuses by name when the lock is held past the bound, and fetches nothing", async () => {
