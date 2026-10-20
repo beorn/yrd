@@ -20,6 +20,7 @@ import {
 import { hostname, tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { describe, expect, it, vi } from "vitest"
+import * as gitomic from "gitomic"
 import { createProcess } from "@yrd/process"
 import { createScriptedProcess, exitedResult } from "@yrd/process/testing/scripted-process"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
@@ -698,6 +699,66 @@ describe("the git runner", () => {
       expect(announced.mock.calls[0]?.[0]).toContain("retry 2/2")
     } finally {
       announced.mockRestore()
+    }
+  })
+
+  // @failure A bounded remote-read timeout skips its retry, or caller cancellation starts another process.
+  // @level l2; @consumer queue service remote acquisition; @testonly none
+  // Inject the exported producer error at the real backend boundary: HTTP/2/SSH
+  // subprocess coverage cannot express GitTimeout separately from GitSignaled.
+  it.each([
+    ["ls-remote", "timeout", 1],
+    ["ls-remote", "timeout", 2],
+    ["fetch", "timeout", 1],
+    ["fetch", "timeout", 2],
+    ["ls-remote", "signal", 1],
+    ["fetch", "signal", 1],
+  ] as const)("handles Gitomic %s %s without more than one retry (failures=%i)", async (verb, kind, failures) => {
+    const { repo, ssh } = legacyPublickeyRepo(0)
+    const fault =
+      kind === "timeout"
+        ? new gitomic.GitTimeout(`git ${verb} origin refs/heads/main`, 300_000)
+        : new gitomic.GitSignaled(`git ${verb} origin refs/heads/main`, "SIGTERM", "caller cancelled")
+    const create = gitomic.createShellBackend
+    let attempts = 0
+    const attempt = () => {
+      attempts++
+      if (attempts <= failures) throw fault
+    }
+    const factory = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
+      const backend = create(options)
+      const wrapped: gitomic.GitomicBackend = {
+        ...backend,
+        listRefs: async (repo, prefix, remote) => {
+          if (verb === "ls-remote") attempt()
+          return backend.listRefs!(repo, prefix, remote)
+        },
+        fetchRefs: async (repo, refs, remote, options) => {
+          if (verb === "fetch") attempt()
+          return backend.fetchRefs!(repo, refs, remote, options)
+        },
+      }
+      return wrapped
+    })
+    const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const backend = gitRunner.createLegacyBackend("git", {
+        ...process.env,
+        GIT_SSH_COMMAND: ssh,
+        GIT_SSH_VARIANT: "ssh",
+      })
+      const read =
+        verb === "fetch"
+          ? backend.fetchRefs!(repo, ["refs/heads/main"], "git@github.com:fixture")
+          : backend.listRefs!(repo, "refs/heads/", "git@github.com:fixture")
+      if (kind === "timeout" && failures === 1) {
+        expect((await read).get("refs/heads/main")).toMatch(/^[a-f0-9]{40}$/u)
+      } else await expect(read).rejects.toBe(fault)
+      expect(attempts).toBe(kind === "timeout" ? 2 : 1)
+      expect(announced).toHaveBeenCalledTimes(kind === "timeout" ? 1 : 0)
+    } finally {
+      announced.mockRestore()
+      factory.mockRestore()
     }
   })
 

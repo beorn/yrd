@@ -20,7 +20,7 @@ import { accessSync, constants, statSync } from "node:fs"
 import { basename, isAbsolute, resolve, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
-import { createShellBackend, type GitomicBackend } from "gitomic"
+import { createShellBackend, GitTimeout, type GitomicBackend } from "gitomic"
 import type { Event } from "gitomic/events"
 import { GIT_REPOSITORY_LOCAL_ENV_VARS } from "removely"
 import { requireFrozenGitSuper, withGitConfig } from "./git-super-selection.ts"
@@ -917,9 +917,12 @@ async function retryLegacyPublickeyRead<T>(
   try {
     return await read()
   } catch (error) {
-    if (isLegacySshSessionDrop(error, verb)) {
+    const message = error instanceof Error ? error.message : String(error)
+    const sshDropped = isLegacySshSessionDrop(error, verb)
+    if (sshDropped || isLegacyHttp2Reset(error, verb) || error instanceof GitTimeout) {
+      const cause = sshDropped ? "SSH session dropped" : message
       console.error(
-        `yrd: git ${verb} ${remote} ${JSON.stringify(refs)} in ${repo}: SSH session dropped; ` +
+        `yrd: git ${verb} ${remote} ${JSON.stringify(refs)} in ${repo}: ${cause}; ` +
           `retry 2/2 after ${String(PUBLICKEY_BACKOFF_MS)}ms`,
       )
       await delay(PUBLICKEY_BACKOFF_MS)
@@ -950,6 +953,15 @@ function isLegacySshSessionDrop(error: unknown, verb: "fetch" | "ls-remote"): er
   if (!(error instanceof Error)) return false
   const prefix = `git ${verb} failed (128): `
   return error.message.startsWith(prefix) && isSshSessionDrop({ code: 128, stderr: error.message.slice(prefix.length) })
+}
+
+function isLegacyHttp2Reset(error: unknown, verb: "fetch" | "ls-remote"): error is Error {
+  if (!(error instanceof Error)) return false
+  const prefix = `git ${verb} failed (128): `
+  if (!error.message.startsWith(prefix)) return false
+  return /^error: RPC failed; curl 92 HTTP\/2 stream \d+ reset by server \(error 0x[\da-f]+ CANCEL\)(?:\r?\n|$)/u.test(
+    error.message.slice(prefix.length),
+  )
 }
 
 function isLegacyPublickeyRefusal(error: unknown, verb: "fetch" | "ls-remote"): error is Error {
