@@ -6170,6 +6170,12 @@ describe("drop --local --release-checkout", () => {
       expect(detail).toContain(`yrd 'drop' 'task/29600-retained' '--local' '--tip' '${fixture.tip}'`)
       expect(detail).toContain("--release-checkout")
       expect(detail).toContain("can read every same-UID pid")
+      // 30417: the cure names the discriminator that separates a capable reader
+      // from a blind one, and carries this process's own observed value, so a
+      // caller cannot mistake the hold for a host-wide /proc restriction.
+      expect(detail).toContain("NoNewPrivs=")
+      expect(detail).toMatch(/NoNewPrivs=(0|1|absent|unreadable)/u)
+      expect(detail).not.toContain("outside any sandbox restricting /proc reads")
       // Nothing was archived or deleted under an uncertified census.
       expect(await fixture.git(["for-each-ref", "refs/archive/"])).toBe("")
       expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
