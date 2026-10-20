@@ -650,7 +650,10 @@ it.each([CHANGES, "refs/heads/main"])("stops after two exhausted acquisition rea
   expect(fault.message).toContain("Retried: 1")
   const logs = readdirSync(join(w.workdir, "logs")).filter((name) => name.endsWith(".jsonl"))
   expect(logs).toHaveLength(1)
-  const records = readFileSync(join(w.workdir, "logs", logs[0]!), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line))
+  const records = readFileSync(join(w.workdir, "logs", logs[0]!), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
   expect(records.filter((row) => row.kind === "warning" && row.reason === "retried")).toEqual([
     expect.objectContaining({ verb: "ls-remote", remote: "origin", refs, attempt: 2, attempts: 2 }),
   ])
