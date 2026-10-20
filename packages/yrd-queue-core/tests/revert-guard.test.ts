@@ -475,7 +475,7 @@ describe("revert guard review regressions (27363)", () => {
    * cappedWorld above), so no range recount may call a capped walk
    * complete.
    */
-  async function boundedWorld(rangeTouches: number) {
+  async function boundedWorld(rangeTouches: number, fastForward = false) {
     const root = mkdtempSync(join(tmpdir(), "yrd-revert-30354-"))
     roots.push(root)
     const dep = join(root, "dep")
@@ -484,8 +484,10 @@ describe("revert guard review regressions (27363)", () => {
     await depGit(["init", "--quiet", "--initial-branch=main"])
     const base = await commit(dep, { "a.txt": "base\n" }, "base")
     let targetPin = base
-    for (let i = 0; i < rangeTouches; i++) targetPin = await commit(dep, { "a.txt": `target-${i}\n` }, `target touch ${i}`)
-    await depGit(["checkout", "--quiet", "-b", "candidate", base])
+    for (let i = 0; i < rangeTouches; i++) {
+      targetPin = await commit(dep, { "a.txt": `target-${i}\n` }, `target touch ${i}`)
+    }
+    await depGit(["checkout", "--quiet", "-b", "candidate", fastForward ? targetPin : base])
     const candidatePin = await commit(dep, { "a.txt": "candidate\n" }, "candidate advance")
     await depGit(["checkout", "--quiet", "main"])
     const product = join(root, "product")
@@ -503,6 +505,21 @@ describe("revert guard review regressions (27363)", () => {
     }
     return { base, candidate, checkoutAt, target }
   }
+
+  it("30422: the default window fully checks a 59-commit fast-forward history", async () => {
+    const w = await boundedWorld(58, true)
+    const root = await w.checkoutAt(w.candidate)
+    const report = await detectReverted({
+      candidate: w.candidate,
+      git: gitIn(root, undefined, undefined, { env }),
+      head: w.candidate,
+      root,
+      targetHead: w.target,
+    })
+    expect(report.paths).toEqual([])
+    expect(report.gaps).toEqual([])
+    expect(report.coverage).toBe("complete")
+  })
 
   it("30354: a diverged range at the window bound reports complete", async () => {
     const w = await boundedWorld(2)
