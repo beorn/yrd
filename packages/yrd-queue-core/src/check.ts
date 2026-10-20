@@ -87,7 +87,7 @@ export const STEP_BOUNDS_MS = {
   beforeMerge: 30 * 60 * 1000,
   derive: 30 * 60 * 1000,
   "derive-again": 30 * 60 * 1000,
-  // #27363: the compose revert guard's bounded walk (P_max 500, depth 3, window 50).
+  // #27363: the compose revert guard's bounded walk; limits live in revert-guard.ts.
   "revert-guard": 5 * 60 * 1000,
   // #27510: a submit preview's custody swap: the clone's mutation-lock wait, then create-only anchors in existing
   // stores. The queue's own run never times it.
