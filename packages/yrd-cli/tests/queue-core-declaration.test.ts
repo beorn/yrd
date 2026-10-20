@@ -5619,7 +5619,7 @@ describe("component-local retirement without a component queue", () => {
       expect(exit, run.stdout() + run.stderr()).toBe(keptOnly ? 1 : 0)
     }
     if (mode === "origin-equivalent" || mode === "origin-unmerged") {
-      const report = JSON.parse(run.stdout())
+      const report = JSON.parse(run.stdout()) as { failed: unknown[]; removed: unknown[] }
       expect(report.failed).toEqual([])
       expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).trim()).toBe("")
       if (mode === "origin-equivalent") {
