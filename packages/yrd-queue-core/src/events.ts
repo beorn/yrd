@@ -151,6 +151,7 @@ export const CHANGE_EVENT_TYPES = [
   "notified",
   "adopted",
   "archived",
+  "retained",
 ] as const
 const ARCHIVE_MIN_AGE_DAYS = 7
 export type ChangeEventType = (typeof CHANGE_EVENT_TYPES)[number]
@@ -474,11 +475,17 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   if (type === "archived") throw new TypeError("archived needs the exact custody audit; use archiveQueue")
   if (!COMMIT_OID.test(details.queueTip)) throw new TypeError(`Queue: must name a commit oid, got ${details.queueTip}`)
   if (Number.isNaN(details.at.getTime())) throw new TypeError("Time: needs a valid instant")
-  if ((type === "opened" || type === "verifying" || type === "merging") && details.commit === undefined) {
+  if (
+    (type === "opened" || type === "verifying" || type === "merging" || type === "retained") &&
+    details.commit === undefined
+  ) {
     throw new TypeError(`${type} needs Commit:`)
   }
-  if (type === "opened" && (details.by === undefined || details.by.trim() === "")) {
-    throw new TypeError("opened needs By:")
+  if ((type === "opened" || type === "retained") && (details.by === undefined || details.by.trim() === "")) {
+    throw new TypeError(`${type} needs By:`)
+  }
+  if (type === "retained" && (details.reason === undefined || details.reason.trim() === "")) {
+    throw new TypeError("retained needs Reason:")
   }
   if (details.recipient !== undefined) {
     if (type !== "cancelled") throw new TypeError("Recipient: belongs on cancelled")
@@ -1005,6 +1012,17 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       return deferChange(state, event, next, at)
     case "notified":
       return issueEffect === undefined ? settleNotice(state, event) : { ...state, tip: event.id }
+    case "retained": {
+      if (state.status !== "merged" || state.ending?.kind !== "merged" || state.endedAt === undefined) {
+        throw new Error(`event ${event.id} retained needs a merged ending; got ${state.status}`)
+      }
+      const commit = keptCommit(event)
+      if (!COMMIT_OID.test(commit)) throw new Error(`event ${event.id} retained Commit: must name a commit oid`)
+      requiredProp(event, EVENT_TRAILERS.by)
+      requiredProp(event, EVENT_TRAILERS.reason)
+      // Retention records custody, not another ending or a change to its factual clock and metadata.
+      return { ...state, tip: event.id }
+    }
     case "archived": {
       if ((state.status !== "merged" && state.status !== "cancelled") || state.endedAt === undefined) {
         throw new Error(`event ${event.id} cannot archive ${state.status}`)

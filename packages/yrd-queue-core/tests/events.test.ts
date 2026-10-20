@@ -491,7 +491,114 @@ describe("ADR-0016 event fold", () => {
       "notified",
       "adopted",
       "archived",
+      "retained",
     ])
+  })
+
+  /** @failure Retaining an extra head rewrites the factual merge, its clocks, or its metadata.
+   * @level l0 @consumer merged-branch retirement and every event projection
+   * Existing neutral-event cases cover notification and archive transfer, not extra-head custody.
+   */
+  it("30432: retained keeps an extra head while changing only the merged projection tip", () => {
+    const history = [
+      event(
+        "opened",
+        A,
+        [
+          ["Commit", A],
+          ["Issue", "30432"],
+          ["Component-Authors", JSON.stringify([{ path: "vendor/dep", branch: "task/dep", tip: B }])],
+        ],
+        [A],
+      ),
+      event(
+        "merged",
+        MERGED_EVENT,
+        [
+          ["Commit", A],
+          ["Run", "retention-reader-fixture"],
+          ["Gitlinks", JSON.stringify([{ path: "vendor/dep", target: A }])],
+        ],
+        [A],
+      ),
+      event("notified", EFFECT_EVENT, [
+        ["For", MERGED_EVENT],
+        ["To", "@dev/3"],
+        ["Result", "delivered"],
+        ["Key", `${MERGED_EVENT}:@dev/3`],
+      ]),
+    ]
+    const before = history.reduce(evolve, initial)
+    const retained = event(
+      "retained",
+      "e".repeat(40),
+      [
+        ["Commit", B],
+        ["By", "@dev/3"],
+        ["Reason", "keep the unlinked extra head before retirement"],
+        ["Time", "2026-10-20T12:00:00.000Z"],
+      ],
+      [B],
+    )
+    expect(evolve(before, retained)).toEqual({ ...before, tip: retained.id })
+    const write = changeInput("retained", {
+      queueTip: A,
+      at: new Date("2026-10-20T12:00:00.000Z"),
+      commit: B,
+      by: "@dev/3",
+      reason: "keep the unlinked extra head before retirement",
+    })
+    expect(write.keeps).toEqual([B])
+    expect(decide(history, write)).toEqual([write])
+  })
+
+  /** @failure A malformed retained record grants custody without a real parent or factual merge.
+   * @level l0 @consumer retained-event construction and persisted history folding
+   * Existing kept-commit rows do not require this event's actor/reason or validate its persisted OID.
+   */
+  it("30432: retained requires a merged ending, valid kept commit, actor and reason at both boundaries", () => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const merged = [opened, event("merged", MERGED_EVENT, [["Commit", A]], [A])].reduce(evolve, initial)
+    const details = {
+      queueTip: A,
+      at: new Date("2026-10-20T12:00:00.000Z"),
+      commit: B,
+      by: "@dev/3",
+      reason: "keep extra head",
+    }
+    for (const [field, key, value] of [
+      ["commit", "Commit", undefined],
+      ["commit", "Commit", "not-an-oid"],
+      ["by", "By", undefined],
+      ["by", "By", " "],
+      ["reason", "Reason", undefined],
+      ["reason", "Reason", " "],
+    ] as const) {
+      expect(() => changeInput("retained", { ...details, [field]: value }), `${field}: ${String(value)}`).toThrow(key)
+      const props: [string, string][] = [
+        ["Commit", B],
+        ["By", "@dev/3"],
+        ["Reason", "keep extra head"],
+      ]
+      const malformed = props.filter(([name]) => name !== key)
+      if (value !== undefined) malformed.push([key, value])
+      expect(() =>
+        evolve(
+          merged,
+          event("retained", EFFECT_EVENT, malformed, [value === undefined ? B : field === "commit" ? value : B]),
+        ),
+      ).toThrow(key)
+    }
+    const valid = changeInput("retained", details)
+    expect(() => evolve(merged, event("retained", EFFECT_EVENT, valid.props, []))).toThrow(/keep Commit/u)
+    for (const history of [
+      [],
+      [opened],
+      [opened, event("failed", MERGED_EVENT)],
+      [opened, event("cancelled", MERGED_EVENT, [["Reason", "resubmitted"]])],
+    ]) {
+      expect(() => decide(history, valid)).toThrow(/merged/u)
+    }
   })
 
   /** @failure Invalid landing metadata grants false component retirement proof, or leaks into resubmission.
@@ -3990,6 +4097,60 @@ describe("the queue-format boundary", () => {
     await branch.append(reports, { expect: await branch.head() })
     expect((await listChanges(location, "lab")).get("task/42")?.status).toBe("queued")
     expect((await readStatus(location, "lab", "task/42")).status).toBe("queued")
+  })
+
+  /** @failure A retained tip makes hot/cold history unreadable or loses the extra commit parent.
+   * @level l1 @consumer selected change history, list and detail readers
+   * Existing custody fixtures have no retained event and cannot expose an old-reader diagnostic.
+   */
+  it.each(["hot", "cold"] as const)("30432: reads retained custody through the %s event ref", async (custody) => {
+    const { store, location } = remoteMemStore(`yrd-retained-${custody}`)
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const head = (await target.transact(async (map) => map.set("work.txt", "merged"), "merged work")).oid
+    const extra = (await target.transact(async (map) => map.set("extra.txt", "unmerged"), "extra head")).oid
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const queueTip = await seedEventQueue(location, "lab", head, at)
+    const branch = "task/retained"
+    const hotRef = changesRef("lab", branch)
+    const selectedRef = custody === "hot" ? hotRef : `refs/yrd-archive/lab/${branch}`
+    const chain = await openEvents({ ...store, ref: hotRef })
+    await chain.append(
+      [
+        changeInput("opened", { queueTip, at, commit: head, by: "@dev/3" }),
+        changeInput("merged", { queueTip, at, commit: head }),
+      ],
+      { expect: null },
+    )
+    const before = await readStatus(location, "lab", branch)
+    if (custody === "cold") {
+      await store.backend.publish!(
+        store.repo,
+        [
+          { ref: selectedRef, expect: "0".repeat(40), oid: before.tip! },
+          { ref: hotRef, expect: before.tip!, oid: null },
+        ],
+        "origin",
+      )
+    }
+    const selected = await readBranchHistory(location, "lab", branch)
+    expect(selected.ref).toBe(selectedRef)
+    const write = changeInput("retained", {
+      queueTip,
+      at: new Date("2026-10-20T12:00:00.000Z"),
+      commit: extra,
+      by: "@dev/3",
+      reason: "keep extra head before retirement",
+    })
+    const retained = await (
+      await openEvents({ ...store, ref: selected.ref })
+    ).append(decide(selected.history!.events, write), { expect: before.tip! })
+    const tip = retained.events[0]!.id
+    const reread = await readBranchHistory(location, "lab", branch)
+    expect(reread.ref).toBe(selectedRef)
+    expect(reread.history?.events.at(-1)?.links).toContain(extra)
+    expect(reread.history?.state).toEqual({ ...before, tip })
+    expect(await readStatus(location, "lab", branch)).toEqual({ ...before, tip })
+    expect((await listChanges(location, "lab")).get(branch)).toEqual({ ...before, tip })
   })
 
   /** @failure 27957: moving an ended chain outside the hot prefix hides its merge and history from list/detail.
