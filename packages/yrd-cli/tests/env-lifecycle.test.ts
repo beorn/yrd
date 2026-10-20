@@ -381,6 +381,7 @@ it.each(["snapshot", "shared", "advanced", "unsealed"] as const)(
     await authorGit(["add", "vendor/dependency"])
     await authorGit(["commit", "--quiet", "-m", "deliver component\n\nRefs: @example/29340-component-release"])
     const rootTip = (await authorGit(["rev-parse", "HEAD"])).trim()
+    await w.git(["worktree", "lock", "--reason", "component custody fixture awaiting explicit close", author])
     const submitted = capture(author)
     expect(await runYrdProcess(["bun", "yrd", "submit", "--json"], submitted.io), submitted.stderr()).toBe(0)
     const landed = capture(w.work)
@@ -404,6 +405,8 @@ it.each(["snapshot", "shared", "advanced", "unsealed"] as const)(
             ])
           ).trim()
         : undefined
+
+    await w.git(["worktree", "unlock", author])
 
     const closed = capture(w.work)
     const stderr = closed.io.stderr
