@@ -83,6 +83,7 @@ export {
   decide,
   expireQueueOverrides,
   drop,
+  DropRetireRefused,
   evolve,
   enumerateChangeSegments,
   initial,

@@ -269,7 +269,7 @@ function buildProgram(
     ) {
       throw new Error(`replace --tip ${options.tip} with the branch's exact full commit`)
     }
-    if (command === "drop" && options.reason?.trim() === "<why>" && (options.retire || options.releaseCheckout)) {
+    if (command === "drop" && options.reason?.trim() === "<why>") {
       throw new Error("replace --reason <why> with the reason for this retirement")
     }
     if (options.local !== true && (branch === undefined) === (options.issue === undefined)) {
@@ -1494,7 +1494,8 @@ function buildProgram(
       "\nFor a component branch, run from its component author checkout:\n" +
         "  yrd drop <branch> --local --tip <full-oid>\n" +
         "Plain --local has no preview: it archives at origin, then deletes the local branch.\n" +
-        "To archive at origin and detach the branch while keeping checkout bytes: yrd drop <branch> --local --release-checkout --tip <full-oid> --issue <id> --reason <why> [--apply]\n",
+        "To archive at origin and detach the branch while keeping checkout bytes: yrd drop <branch> --local --release-checkout --tip <full-oid> --issue <id> --reason <why> [--apply]\n" +
+        "For a queue-backed draft, --retire writes an ending event that keeps the exact tip as a Git parent; it creates no separate branch archive under refs/archive/. The event chain is retained, including after a manual move to refs/yrd-archive.\n",
     )
     .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
 

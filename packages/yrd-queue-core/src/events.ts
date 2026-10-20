@@ -1272,6 +1272,7 @@ export type Dropped = Readonly<{
   archive?: string
   main?: Readonly<{ ref: string; tip: string }>
 }>
+export class DropRetireRefused extends Error {}
 export type SetBranchIgnoredRequest = Readonly<
   { queue: string; branch: string; by: string } & ({ ignored: true; reason: string } | { ignored: false })
 >
@@ -2811,7 +2812,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
       )
     }
     if (!retiringDraft && (state.ending === undefined || isOpen(state.status) || selectedTip === null)) {
-      throw new Error(`${branch}: drop --retire requires an already-ended change; found ${state.status}`)
+      throw new DropRetireRefused(`${branch}: drop --retire requires an already-ended change; found ${state.status}`)
     }
   }
   if (archive !== undefined) {
@@ -2871,7 +2872,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
     if (target === undefined) throw new Error(`${branch}: published ${mainRef} is absent at ${store.remote}`)
     const git = gitIn(store.repo, undefined, store.selection)
     if (!(await isAncestor(git, head, target)) && !(await mergeChangesNothing(git, target, head))) {
-      throw new Error(
+      throw new DropRetireRefused(
         `${branch}@${head}: merging into fresh ${mainRef}@${target} changes main; keep this draft or explicitly abandon its unmerged work with a reason`,
       )
     }

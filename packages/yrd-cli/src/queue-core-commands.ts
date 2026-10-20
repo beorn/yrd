@@ -136,6 +136,7 @@ import {
   submit,
   withdraw,
   NothingToWithdraw,
+  DropRetireRefused,
   sweepCandidateRefs,
   sweepCheckRefs,
   liftLine,
@@ -2114,16 +2115,27 @@ export async function coreQueueCommand(
     }
     case "drop": {
       const eventStore = createEventStore(repo, config.target.remote, selection)
-      const dropped = await drop(eventStore, {
-        queue: config.target.branch,
-        branch: request.branch,
-        by: request.by,
-        ...(request.retire === undefined ? {} : { retire: request.retire }),
-        protections: async (tip, issue) =>
-          (await readBranchProtections(io, { repo, branch: request.branch, tip, issue })).protections,
-        ...(request.reason === undefined ? {} : { note: request.reason }),
-        ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
-      })
+      let dropped: Awaited<ReturnType<typeof drop>>
+      try {
+        dropped = await drop(eventStore, {
+          queue: config.target.branch,
+          branch: request.branch,
+          by: request.by,
+          ...(request.retire === undefined ? {} : { retire: request.retire }),
+          protections: async (tip, issue) =>
+            (await readBranchProtections(io, { repo, branch: request.branch, tip, issue })).protections,
+          ...(request.reason === undefined ? {} : { note: request.reason }),
+          ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
+        })
+      } catch (error) {
+        if (error instanceof DropRetireRefused) {
+          const queue = formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))
+          const remedy = formatQueueCommand(io, queue, ["drop", request.branch, "--reason", request.reason ?? "<why>"])
+          io.stderr(`yrd: ${error.message}; to end and drop this branch now: ${remedy}\n`)
+          return 2
+        }
+        throw error
+      }
       emit(
         io,
         options.json,

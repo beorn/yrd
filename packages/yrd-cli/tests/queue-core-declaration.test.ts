@@ -2966,6 +2966,9 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await runYrdProcess(["bun", "yrd", "drop", "--help"], out.io), out.stderr()).toBe(0)
     expect(out.stdout()).toContain("needs no retire")
     expect(out.stdout()).toContain("custody proof")
+    expect(out.stdout()).toContain(
+      "For a queue-backed draft, --retire writes an ending event that keeps the exact tip as a Git parent; it creates no separate branch archive under refs/archive/. The event chain is retained, including after a manual move to refs/yrd-archive.",
+    )
   })
 
   /** @failure The submodule-flag refusal on the BRANCH form still says "--issue <id>" is missing when the caller passed it,
@@ -6010,6 +6013,7 @@ describe("exact-tip origin retirement of a draft", () => {
     "equivalent",
     "equivalent-human",
     "unmerged",
+    "already-open",
     "advanced",
     "held",
     "held-later",
@@ -6036,6 +6040,15 @@ describe("exact-tip origin retirement of a draft", () => {
     }
     await git(["push", "--quiet", "origin", "main"])
     const main = (await git(["rev-parse", "HEAD"])).trim()
+    if (mode === "already-open") {
+      const chain = await openEvents({
+        ...createEventStore(repo, "origin", git.selection),
+        ref: changesRef("main", branch),
+      })
+      await chain.append([changeInput("opened", { queueTip, at: new Date(), commit: head, by: "concurrent writer" })], {
+        expect: null,
+      })
+    }
     const output = capture(repo)
     let reads = 0
     output.io.localBranchProtections = async () => {
@@ -6075,6 +6088,7 @@ describe("exact-tip origin retirement of a draft", () => {
     const store = createEventStore(repo, "origin", git.selection)
     if (
       mode === "unmerged" ||
+      mode === "already-open" ||
       mode === "advanced" ||
       mode === "held" ||
       mode === "held-later" ||
@@ -6082,14 +6096,41 @@ describe("exact-tip origin retirement of a draft", () => {
     ) {
       expect(code).not.toBe(0)
       expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(`${head}\trefs/heads/${branch}`)
-      if (mode === "opened-later") {
+      if (mode === "opened-later" || mode === "already-open") {
         expect(await readStatus(store, "main", branch)).toMatchObject({ status: "queued", commit: head })
       } else expect((await listChanges(store, "main")).size).toBe(0)
       if (mode === "held" || mode === "held-later") expect(output.stderr()).toContain("fixture draft hold")
+      if (mode === "already-open") {
+        expect(output.stderr()).toContain(`${branch}: drop --retire requires an already-ended change; found queued`)
+      }
       if (mode === "unmerged") {
         expect(output.stderr()).toContain(`merging into fresh refs/heads/main@${main} changes main`)
         expect(output.stderr()).toContain("keep this draft or explicitly abandon its unmerged work with a reason")
         expect(output.stderr()).not.toContain(`yrd drop ${branch} --reason <why>`)
+      }
+      if (mode === "unmerged" || mode === "already-open") {
+        const printed = output.stderr().split("to end and drop this branch now: ")[1]?.trim()
+        expect(printed, output.stderr()).toBeDefined()
+        const remedyArgv = [
+          ...printed!
+            .split(" && ")
+            .at(-1)!
+            .matchAll(/'([^']*)'/gu),
+        ].map((match) => match[1]!)
+        const followUp = capture(repo)
+        const remedyCode = await runYrdProcess(
+          ["bun", "yrd", ...remedyArgv, "--submitter", "fixture", "--json"],
+          followUp.io,
+        )
+        expect(remedyCode, followUp.stderr()).toBe(0)
+        expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
+        expect(await readStatus(store, "main", branch)).toMatchObject({
+          status: "cancelled",
+          reason: "dropped",
+          commit: head,
+        })
+        const droppedEvents = await (await openEvents({ ...store, ref: changesRef("main", branch) })).events()
+        expect(droppedEvents.at(-1)).toMatchObject({ type: "cancelled", links: [head] })
       }
       if (mode === "advanced") expect(output.stderr()).toContain(`expected ${base} at origin, found ${head}`)
       return
