@@ -141,31 +141,66 @@ describe("projectionFallbackReport, the not-yet-written proof", () => {
     expect(projectionFallbackReport(missing, ended, "idle")?.reason).toBe("missing")
   })
 
-  // A local drop has neither a round lock nor a provisioning step. Its preview
-  // may write an eligible outcome before the final retirement is attempted.
-  it("reads a local drop 910 ms after its start, but keeps completed and unowned absences loud", async () => {
-    for (const sample of [
-      { command: "drop --local", pid: process.pid, outcome: undefined, reason: "not-yet-written" },
-      { command: "drop --local", pid: process.pid, outcome: "eligible", reason: "not-yet-written" },
-      { command: "drop --local", pid: process.pid, outcome: "removed", reason: "missing" },
-      { command: "drop --local", pid: process.pid, outcome: "failed", reason: "missing" },
-      { command: "drop --local", pid: process.pid, outcome: "kept", reason: "missing" },
-      { command: "drop --local", pid: undefined, outcome: undefined, reason: "missing" },
-      { command: "drop --retire", pid: process.pid, outcome: undefined, reason: "missing" },
-    ]) {
-      const start = new Date(NOW.getTime() - 910)
-      const workdir = workdirWith({
-        ageMs: 910,
-        header: `${JSON.stringify({ kind: "run", run: runId(start), at: start.toISOString(), target: "origin/main", command: sample.command, pid: sample.pid })}\n`,
-        after:
-          sample.outcome === undefined
-            ? ""
-            : `${JSON.stringify({ kind: "local-branch-retirement", outcome: sample.outcome })}\n`,
-      })
-      const facts = await readRunnerFacts(workdir, NOW)
-      expect(projectionFallbackReport(facts.projectionFallback, facts, "idle")?.reason, JSON.stringify(sample)).toBe(
-        sample.reason,
+  it("ignores a concurrent unrelated drop record at the same instant and names only the queue round's own projection (30401)", async () => {
+    for (const command of ["drop --local --release-checkout", "drop --local", "drop --retire", "drop --issue"]) {
+      const workdir = mkdtempSync(join(tmpdir(), "yrd-drop-fallback-"))
+      const dir = join(workdir, "logs")
+      mkdirSync(dir, { recursive: true })
+      const instant = NOW.toISOString().replace(/[-:]/gu, "").replace(/\./gu, "")
+      const roundRunId = `q-${instant}-00000001`
+      const dropRunId = `q-${instant}-zzzzzzzz`
+      const roundPath = join(dir, `${roundRunId}.jsonl`)
+      const dropPath = join(dir, `${dropRunId}.jsonl`)
+      fs.writeFileSync(
+        roundPath,
+        `${JSON.stringify({ kind: "run", run: roundRunId, at: NOW.toISOString(), target: "main", queue: "main", checks: ["verify"] })}\n` +
+          `${JSON.stringify({ kind: "remote-calls", run: roundRunId, at: NOW.toISOString(), count: 1, ms: 5 })}\n`,
       )
+      fs.writeFileSync(
+        dropPath,
+        `${JSON.stringify({ kind: "run", run: dropRunId, at: NOW.toISOString(), target: "origin#main", command })}\n` +
+          `${JSON.stringify({ kind: "queue", run: dropRunId, at: NOW.toISOString(), queue: "origin#main" })}\n`,
+      )
+
+      // 1. Queue round's own projection is missing while an unrelated drop record sits at the same instant:
+      //    fallback names ONLY the queue round's file, never the unrelated drop file.
+      const missingRound = await readRunnerFacts(workdir, NOW)
+      expect(missingRound.latest?.id, command).toBe(roundRunId)
+      expect(missingRound.projectionFallback?.run, command).toBe(roundRunId)
+      expect(missingRound.projectionFallback?.detail, command).toContain(`${roundRunId}.projection.json`)
+      expect(missingRound.projectionFallback?.detail, command).not.toContain(dropRunId)
+      expect(projectionFallbackReport(missingRound.projectionFallback, missingRound, "idle"), command).toMatchObject({
+        run: roundRunId,
+        reason: "missing",
+      })
+
+      // 2. Queue round has its projection while the unrelated drop record has none:
+      //    neither readRunnerFacts nor readJournals reports a fallback for the drop file.
+      const roundLog = openLog(dir, () => new Date(NOW.getTime() + 1_000))
+      roundLog.write({ kind: "run", target: "main", queue: "main", checks: ["verify"] })
+      roundLog.write({ kind: "remote-calls", count: 1, ms: 5 })
+      roundLog.finish()
+      const laterInstant = new Date(NOW.getTime() + 1_000).toISOString().replace(/[-:]/gu, "").replace(/\./gu, "")
+      const concurrentDropId = `q-${laterInstant}-zzzzzzzz`
+      fs.writeFileSync(
+        join(dir, `${concurrentDropId}.jsonl`),
+        `${JSON.stringify({ kind: "run", run: concurrentDropId, at: new Date(NOW.getTime() + 1_000).toISOString(), target: "origin#main", command })}\n`,
+      )
+      fs.unlinkSync(roundPath)
+      const projectedRound = await readRunnerFacts(workdir, NOW)
+      expect(projectedRound.latest?.id, command).toBe(roundLog.id)
+      expect(projectedRound.projectionFallback, command).toBeUndefined()
+      const allJournals = readJournals(dir, { now: NOW })
+      expect(allJournals.fallbacks, command).toBeUndefined()
+
+      // 3. Only unrelated drop records exist (no queue round journal):
+      //    readRunnerFacts reports no run journal without naming an unrelated drop file.
+      fs.unlinkSync(roundLog.path)
+      fs.unlinkSync(roundLog.path.replace(/\.jsonl$/u, ".projection.json"))
+      const dropOnly = await readRunnerFacts(workdir, NOW)
+      expect(dropOnly.latest, command).toBeUndefined()
+      expect(dropOnly.projectionFallback, command).toBeUndefined()
+      expect(dropOnly.absent, command).toContain("holds no run journal")
     }
   })
 })

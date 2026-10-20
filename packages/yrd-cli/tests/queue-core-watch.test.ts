@@ -473,6 +473,22 @@ describe("event queue observation refusals", () => {
       reason: "missing",
     })
     expect(unreadableTrace.projectionFallback?.runnerState).toBe("idle")
+
+    // 30401: a concurrent unrelated `drop --local --release-checkout` journal at
+    // the same instant (or newer) must never be named as the queue entry's or
+    // runner's projectionFallback.
+    const dropId = `${pending.slice(0, -8)}zzzzzzzz`
+    writeFileSync(
+      join(logs, `${dropId}.jsonl`),
+      `${JSON.stringify({ kind: "run", run: dropId, at: new Date(startedAt).toISOString(), target: "origin#main", command: "drop --local --release-checkout" })}\n` +
+        `${JSON.stringify({ kind: "queue", run: dropId, at: new Date(startedAt).toISOString(), queue: "origin#main" })}\n`,
+    )
+    const withConcurrentDrop = await list()
+    expect(withConcurrentDrop.projectionFallback).toMatchObject({
+      run: pending,
+      reason: "missing",
+    })
+    expect(withConcurrentDrop.projectionFallback?.run).not.toBe(dropId)
   })
 
   // Queue list built the claim-bearing runner one line above the state

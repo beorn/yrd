@@ -1146,6 +1146,7 @@ function cachedRunsIn(
   startedAt: Date,
   detail: "include" | "omit",
   sourceTerminal: () => boolean,
+  explicitRun: boolean,
 ): Readonly<{
   runs: readonly JournalSummary[]
   fallback?: JournalProjectionFallback
@@ -1173,7 +1174,16 @@ function cachedRunsIn(
   // cutoff: an old round can be the ONLY journal a currently listed change has,
   // and a bound that reached it would drop that change's fact while the page
   // still read complete (@i/10-yrd/28799 finding 1).
-  const runs = [...runsIn(readRunLog(dir, id), id, startedAt, detail)]
+  const rawRecords = readRunLog(dir, id)
+  const commandJournal = rawRecords.find((record) => record.kind === "run")?.command !== undefined
+  const runs = [...runsIn(rawRecords, id, startedAt, detail)]
+  // Standalone CLI command journals (`drop --local`, `drop --local --release-checkout`,
+  // `drop --retire`, `drop --issue`, `withdraw`, `author release`) share `<workdir>/logs/`
+  // and carry `command` on their `run` header. When scanning `logs/` without an explicit
+  // run selection, do not report their absent projection as a queue round fallback (30401).
+  if (!explicitRun && commandJournal) {
+    return { runs }
+  }
   let persist: JournalPersistOutcome | undefined
   if (projection.source !== undefined) {
     try {
@@ -1450,7 +1460,14 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
     if (startedAt === undefined) continue
     let read: ReturnType<typeof cachedRunsIn>
     try {
-      read = cachedRunsIn(dir, id, startedAt, options.detail ?? "include", () => options.runTerminal?.(id) === true)
+      read = cachedRunsIn(
+        dir,
+        id,
+        startedAt,
+        options.detail ?? "include",
+        () => options.runTerminal?.(id) === true,
+        options.runIds !== undefined,
+      )
     } catch (error) {
       if (options.runIds === undefined) throw error
       if (options.runIds !== undefined && (error as NodeJS.ErrnoException).code === "ENOENT") {
