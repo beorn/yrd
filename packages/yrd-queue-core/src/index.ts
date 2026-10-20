@@ -140,6 +140,7 @@ export {
   readRemoteCommit,
   readRemoteCommits,
   isAncestor,
+  mergeChangesNothing,
   seamProcess,
   refAt,
   resolveGitSelection,

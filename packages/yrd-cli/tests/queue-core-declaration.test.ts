@@ -5310,6 +5310,11 @@ describe("component-local retirement without a component queue", () => {
     // The local-only fixture missed origin retirement and an absent local twin.
     // Fresh published-main custody suffices, but host holds and exact-tip races still keep the name.
     const origin = mode.startsWith("origin-")
+    const contentIntegrated =
+      mode === "origin-equivalent" ||
+      mode === "origin-held" ||
+      mode === "origin-main-moved" ||
+      mode === "origin-publication-refused"
     const root = await world("{}\n")
     const rootGit = gitIn(root)
     const ownSelectedOther = mode === "own-declared-selected-other" || mode === "own-malformed-selected-other"
@@ -5347,7 +5352,7 @@ describe("component-local retirement without a component queue", () => {
       mode === "archive-readback-lost" ||
       mode === "prior-day-archive" ||
       mode === "origin-advanced" ||
-      mode === "origin-equivalent" ||
+      contentIntegrated ||
       mode === "origin-unmerged" ||
       mode === "origin-stale-local-main" ||
       mode === "origin-stale-default-ref"
@@ -5375,7 +5380,7 @@ describe("component-local retirement without a component queue", () => {
     // Existing origin-only rows use ancestors, and queue-backed draft rows have an ending event.
     // Independently delivered content plus later main work also defeats direct tree equality.
     let integratedMain: string | undefined
-    if (mode === "origin-equivalent") {
+    if (contentIntegrated) {
       const publisher = gitIn(seed)
       writeFileSync(join(seed, "private.txt"), "reviewed unmerged work\n")
       writeFileSync(join(seed, "later.txt"), "independent main work\n")
@@ -5386,7 +5391,17 @@ describe("component-local retirement without a component queue", () => {
       await git(["fetch", "--quiet", "origin", "main"])
       await expect(git(["merge-base", "--is-ancestor", actualTip, integratedMain])).rejects.toBeInstanceOf(GitExit)
       expect(
-        (await git(["-c", "core.commitGraph=false", "merge-tree", "--write-tree", "--no-messages", integratedMain, actualTip])).trim(),
+        (
+          await git([
+            "-c",
+            "core.commitGraph=false",
+            "merge-tree",
+            "--write-tree",
+            "--no-messages",
+            integratedMain,
+            actualTip,
+          ])
+        ).trim(),
       ).toBe((await git(["rev-parse", `${integratedMain}^{tree}`])).trim())
       expect((await git(["rev-parse", `${actualTip}^{tree}`])).trim()).not.toBe(
         (await git(["rev-parse", `${integratedMain}^{tree}`])).trim(),
@@ -5471,7 +5486,7 @@ describe("component-local retirement without a component queue", () => {
             "commit-tree",
             tree,
             "-p",
-            baseTip,
+            integratedMain ?? baseTip,
             "-m",
             "concurrent published-main move",
           ])
@@ -5609,11 +5624,16 @@ describe("component-local retirement without a component queue", () => {
       expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).trim()).toBe("")
       if (mode === "origin-equivalent") {
         expect(report).toMatchObject({ removed: [{ branch, head: tip, archiveRef: collisionRef }], kept: [] })
-        expect(report.removed[0].custody?.kind).not.toBe("published-main")
+        expect(report.removed[0]).toMatchObject({
+          custody: { kind: "origin-archive", ref: collisionRef, tip },
+          main: { ref: "refs/heads/main", tip: integratedMain },
+        })
         expect((await git(["ls-remote", "origin", collisionRef])).trim()).toBe(`${tip}\t${collisionRef}`)
         expect((await git(["ls-remote", "origin", priorRef])).trim()).toBe(`${baseTip}\t${priorRef}`)
         expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
-        expect((await git(["ls-remote", "origin", "refs/heads/main"])).trim()).toBe(`${integratedMain}\trefs/heads/main`)
+        expect((await git(["ls-remote", "origin", "refs/heads/main"])).trim()).toBe(
+          `${integratedMain}\trefs/heads/main`,
+        )
       } else {
         expect(report).toMatchObject({ removed: [], kept: [{ branch, head: tip }] })
         expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(`${tip}\trefs/heads/${branch}`)

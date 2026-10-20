@@ -1,11 +1,12 @@
 /** Shared remote custody sequence; callers own ending and archive eligibility. */
 import { shellQuote } from "git-super/shell-command"
 import type { QueueLocation } from "./events.ts"
-import { listRefs } from "./git.ts"
+import { gitIn, listRefs, mergeChangesNothing, refAt } from "./git.ts"
 
 export type OriginRetirementAuthority =
   | Readonly<{ kind: "event"; ref: string; tip: string }>
   | Readonly<{ kind: "published-main"; ref: string; tip: string }>
+  | Readonly<{ kind: "published-main-content"; ref: string; tip: string; archive: string }>
 
 /** Prepare one archive lease and its custody readback, alone or inside an ending-event push. */
 export async function prepareRetirementArchive(
@@ -70,9 +71,13 @@ export async function retireOriginBranch(
     protections?: () => Promise<readonly string[]>
   }>,
 ): Promise<void> {
-  const { branch, head, authority, archive } = input
+  const { branch, head, authority } = input
+  const archive = authority.kind === "published-main-content" ? authority.archive : input.archive
   const branchRef = `refs/heads/${branch}`
   const subject = `${branchRef}@${head} at ${store.remote}`
+  if (authority.kind === "published-main-content" && (typeof archive !== "string" || archive.length === 0)) {
+    throw new Error(`${subject}: content retirement requires an exact-tip archive`)
+  }
   const publish = store.backend.publish
   if (publish === undefined) throw new Error(`${subject}: Gitomic backend lacks publish for retirement`)
   const protect = async (): Promise<void> => {
@@ -80,11 +85,13 @@ export async function retireOriginBranch(
     if (reasons !== undefined && reasons.length > 0) throw new Error(`${subject}: kept: ${reasons.join("; ")}`)
   }
   await protect()
-  if (authority.kind === "published-main") {
+  if (authority.kind === "published-main" || authority.kind === "published-main-content") {
     const fetch = store.backend.fetchRefs
     const contains = store.backend.isAncestor
-    if (fetch === undefined || contains === undefined) {
-      throw new Error(`${subject}: backend cannot read fresh published-main ancestry`)
+    if (fetch === undefined) {
+      throw new Error(
+        `${subject}: backend cannot read fresh published-main ${authority.kind === "published-main" ? "ancestry" : "content authority"}`,
+      )
     }
     const observed = (await fetch(store.repo, authority.ref, store.remote)).get(authority.ref)
     if (observed !== authority.tip) {
@@ -92,8 +99,15 @@ export async function retireOriginBranch(
         `${subject}: published main moved: ${authority.ref} expected ${authority.tip}, found ${observed ?? "absent"}`,
       )
     }
-    if (!(await contains(store.repo, head, authority.tip))) {
-      throw new Error(`${subject}: tip is not an ancestor of published ${authority.ref}@${authority.tip}`)
+    if (authority.kind === "published-main-content") {
+      if (!(await mergeChangesNothing(gitIn(store.repo, undefined, store.selection), authority.tip, head))) {
+        throw new Error(`${subject}: merging tip into published ${authority.ref}@${authority.tip} changes its tree`)
+      }
+    } else {
+      if (contains === undefined) throw new Error(`${subject}: backend cannot read fresh published-main ancestry`)
+      if (!(await contains(store.repo, head, authority.tip))) {
+        throw new Error(`${subject}: tip is not an ancestor of published ${authority.ref}@${authority.tip}`)
+      }
     }
   }
   if (archive !== undefined) {
@@ -115,6 +129,30 @@ export async function retireOriginBranch(
     listRefs(authority.ref, store),
   ])
   const branchHead = branches.get(branchRef)
+  if (
+    authority.kind === "published-main-content" &&
+    (branchHead !== undefined ||
+      archives?.get(authority.archive) !== head ||
+      authorities.get(authority.ref) !== authority.tip)
+  ) {
+    const localHead = (await listRefs(branchRef, { repo: store.repo, backend: store.backend })).get(branchRef)
+    const git = `git -C ${shellQuote(store.repo)}`
+    const originCustody =
+      branchHead === head ? branchRef : archives?.get(authority.archive) === head ? authority.archive : undefined
+    const recovery =
+      originCustody !== undefined
+        ? `exact commit retained at ${store.remote}:${originCustody}; inspect it: ${git} fetch ${shellQuote(store.remote)} ${shellQuote(originCustody)} && ${git} show ${shellQuote(head)}`
+        : localHead === head
+          ? `local branch ${branch} still retains the exact commit; inspect it: ${git} show-ref --verify ${shellQuote(branchRef)}`
+          : (await refAt(gitIn(store.repo, undefined, store.selection), head)) === head
+            ? `exact commit remains in local objects; inspect it: ${git} show ${shellQuote(head)}`
+            : "no exact-tip recovery source remains in the observed origin refs or local objects; recover it from another retained copy"
+    throw new Error(
+      `${subject}: retirement failed after conditional removal; observed ${branchRef}=${branchHead ?? "absent"}, ` +
+        `${authority.archive}=${archives?.get(authority.archive) ?? "absent"}, ${authority.ref}=${authorities.get(authority.ref) ?? "absent"}; ` +
+        `main content equality does not retain the original commit; ${recovery}`,
+    )
+  }
   if (branchHead !== undefined) throw new Error(`${subject}: removal did not read back absent; found ${branchHead}`)
   // A server may omit a same-value archive update from its transaction. The
   // lease narrows that race; this readback makes lost custody a loud failure.
