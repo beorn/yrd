@@ -119,8 +119,18 @@ const roots: string[] = []
 let idleCensus: removely.ProcessCensus<"same-uid"> | undefined
 beforeAll(async () => {
   if (process.platform !== "linux") return
+  const startedAt = performance.now()
+  console.error(JSON.stringify({ diagnostic: "yrd-hook-timing", hook: "beforeAll", phase: "start" }))
   const observed = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
   idleCensus = { ...observed, rows: [], coverage: { ...observed.coverage, complete: true, unreadable: [] } }
+  console.error(
+    JSON.stringify({
+      diagnostic: "yrd-hook-timing",
+      hook: "beforeAll",
+      phase: "end",
+      elapsedMs: performance.now() - startedAt,
+    }),
+  )
 })
 beforeEach(() => {
   if (idleCensus !== undefined) vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue(idleCensus)
@@ -147,7 +157,20 @@ const queueCoreEntry = Bun.resolveSync("@yrd/queue-core", import.meta.dirname)
 const gitSuperBin = resolve(Bun.resolveSync("git-super", dirname(queueCoreEntry)), "../../bin")
 
 afterAll(() => {
+  const startedAt = performance.now()
+  console.error(
+    JSON.stringify({ diagnostic: "yrd-hook-timing", hook: "afterAll", phase: "start", roots: roots.length }),
+  )
   for (const root of roots) rmSync(root, { force: true, recursive: true })
+  console.error(
+    JSON.stringify({
+      diagnostic: "yrd-hook-timing",
+      hook: "afterAll",
+      phase: "end",
+      roots: roots.length,
+      elapsedMs: performance.now() - startedAt,
+    }),
+  )
 })
 
 type Capture = Readonly<{ io: YrdCliIO; stdout(): string; stderr(): string }>
