@@ -735,7 +735,7 @@ describe("the git runner", () => {
     let attempts = 0
     const attempt = () => {
       attempts++
-      if (kind === "cancel-before-retry" && attempts === 1) controller.abort(cancellation)
+      if (kind === "cancel-before-retry" && attempts === 1) setTimeout(() => controller.abort(cancellation), 0)
       if (kind === "second-signal" && attempts === 2) throw cancellation
       if (attempts <= failures) throw fault
     }
@@ -784,7 +784,7 @@ describe("the git runner", () => {
       }
       const retryTaken = kind === "timeout" || kind === "second-signal"
       expect(attempts).toBe(retryTaken ? 2 : 1)
-      expect(announced).toHaveBeenCalledTimes(kind === "signal" ? 0 : 1)
+      expect(announced).toHaveBeenCalledTimes(retryTaken ? 1 : 0)
       expect(observed).toHaveBeenCalledTimes(retryTaken || kind === "journal-failure" ? 1 : 0)
       if (retryTaken) {
         expect(observed).toHaveBeenCalledWith(

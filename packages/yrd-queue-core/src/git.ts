@@ -936,12 +936,12 @@ async function retryLegacyPublickeyRead<T>(
     const message = error instanceof Error ? error.message : String(error)
     const sshDropped = isLegacySshSessionDrop(error, verb)
     let retryEnv = baseEnv
+    let retryMessage: string
     if (sshDropped || isLegacyHttp2Reset(error, verb) || error instanceof GitTimeout) {
       const cause = sshDropped ? "SSH session dropped" : message
-      console.error(
+      retryMessage =
         `yrd: git ${verb} ${remote} ${JSON.stringify(refs)} in ${repo}: ${cause}; ` +
-          `retry 2/2 after ${String(PUBLICKEY_BACKOFF_MS)}ms`,
-      )
+        `retry 2/2 after ${String(PUBLICKEY_BACKOFF_MS)}ms`
     } else {
       if (!isLegacyPublickeyRefusal(error, verb)) throw error
       let verbose: ReturnType<typeof verboseSshRetryEnvironment>
@@ -956,14 +956,14 @@ async function retryLegacyPublickeyRead<T>(
         throw error
       }
       retryEnv = verbose.env
-      console.error(
+      retryMessage =
         `yrd: git ${verb} ${remote} ${JSON.stringify(refs)} in ${repo}: ${error.message}; ` +
-          `retry 2/2 after ${String(PUBLICKEY_BACKOFF_MS)}ms with ${verbose.command}`,
-      )
+        `retry 2/2 after ${String(PUBLICKEY_BACKOFF_MS)}ms with ${verbose.command}`
     }
     await delay(PUBLICKEY_BACKOFF_MS)
     options.signal?.throwIfAborted()
     options.onReadRetry?.({ verb, repo, remote, refs, attempt: 2, attempts: 2, cause: message })
+    console.error(retryMessage)
     try {
       return await retry(retryEnv)
     } catch (retryError) {
