@@ -5279,6 +5279,8 @@ describe("component-local retirement without a component queue", () => {
   it.each([
     "origin-merged",
     "origin-only",
+    "origin-equivalent",
+    "origin-unmerged",
     "origin-held",
     "origin-advanced",
     "origin-stale-local-main",
@@ -5345,6 +5347,8 @@ describe("component-local retirement without a component queue", () => {
       mode === "archive-readback-lost" ||
       mode === "prior-day-archive" ||
       mode === "origin-advanced" ||
+      mode === "origin-equivalent" ||
+      mode === "origin-unmerged" ||
       mode === "origin-stale-local-main" ||
       mode === "origin-stale-default-ref"
     ) {
@@ -5367,9 +5371,32 @@ describe("component-local retirement without a component queue", () => {
     }
     const actualTip = (await git(["rev-parse", "refs/heads/" + branch])).trim()
     const tip = mode === "advanced" || mode === "origin-advanced" ? baseTip : actualTip
+    // Explicit retirement must distinguish integrated content from ancestry (30396).
+    // Existing origin-only rows use ancestors, and queue-backed draft rows have an ending event.
+    // Independently delivered content plus later main work also defeats direct tree equality.
+    let integratedMain: string | undefined
+    if (mode === "origin-equivalent") {
+      const publisher = gitIn(seed)
+      writeFileSync(join(seed, "private.txt"), "reviewed unmerged work\n")
+      writeFileSync(join(seed, "later.txt"), "independent main work\n")
+      await publisher(["add", "private.txt", "later.txt"])
+      await publisher(["commit", "--quiet", "-m", "independent integration and later work"])
+      await publisher(["push", "--quiet", "origin", "main"])
+      integratedMain = (await publisher(["rev-parse", "HEAD"])).trim()
+      await git(["fetch", "--quiet", "origin", "main"])
+      await expect(git(["merge-base", "--is-ancestor", actualTip, integratedMain])).rejects.toBeInstanceOf(GitExit)
+      expect(
+        (await git(["-c", "core.commitGraph=false", "merge-tree", "--write-tree", "--no-messages", integratedMain, actualTip])).trim(),
+      ).toBe((await git(["rev-parse", `${integratedMain}^{tree}`])).trim())
+      expect((await git(["rev-parse", `${actualTip}^{tree}`])).trim()).not.toBe(
+        (await git(["rev-parse", `${integratedMain}^{tree}`])).trim(),
+      )
+    }
     if (origin) {
       await git(["push", "--quiet", "origin", `refs/heads/${branch}:refs/heads/${branch}`])
-      if (mode === "origin-only") await git(["update-ref", "-d", `refs/heads/${branch}`, actualTip])
+      if (mode === "origin-only" || mode === "origin-equivalent" || mode === "origin-unmerged") {
+        await git(["update-ref", "-d", `refs/heads/${branch}`, actualTip])
+      }
       // The local main stays stale: a local-only authority reader must miss this accepted head.
       if (mode === "origin-stale-local-main") await git(["push", "--quiet", "origin", `${actualTip}:refs/heads/main`])
       if (mode === "origin-stale-default-ref") {
@@ -5380,6 +5407,17 @@ describe("component-local retirement without a component queue", () => {
     }
     const collisionRef = archiveRefFor(branch, "fixture", new Date().toISOString().slice(0, 10))
     const priorRef = archiveRefFor(branch, "fixture", new Date(Date.now() - 86_400_000).toISOString().slice(0, 10))
+    if (mode === "origin-equivalent") {
+      // An older archive of a different commit is not custody of the selected exact tip.
+      await git(["push", "--quiet", "origin", `${baseTip}:${priorRef}`])
+      const hook = join(dirname(seed), "remote.git", "hooks", "pre-receive")
+      writeFileSync(
+        hook,
+        `#!/bin/sh\nwhile read old new ref; do\nif [ "$ref" = "refs/heads/${branch}" ] && [ "$new" = "${"0".repeat(actualTip.length)}" ]; then\n` +
+          `test "$(git rev-parse --verify '${collisionRef}')" = '${actualTip}' || { echo 'exact archive must be readable before deletion' >&2; exit 1; }\nfi\ndone\n`,
+      )
+      chmodSync(hook, 0o755)
+    }
     if (mode === "prior-day-archive") {
       // Previous-day custody survived a kept/failed deletion; retry must reuse its exact name.
       await git(["update-ref", priorRef, tip])
@@ -5559,10 +5597,31 @@ describe("component-local retirement without a component queue", () => {
         mode === "advanced" ||
         mode === "checked-out" ||
         mode === "origin-held" ||
+        mode === "origin-unmerged" ||
         mode === "origin-advanced"
       // A kept-only retirement is not success: the component path now matches
       // the root drop --local rule (30266, 30094): kept and removed nothing exits 1.
-      expect(exit, run.stderr()).toBe(keptOnly ? 1 : 0)
+      expect(exit, run.stdout() + run.stderr()).toBe(keptOnly ? 1 : 0)
+    }
+    if (mode === "origin-equivalent" || mode === "origin-unmerged") {
+      const report = JSON.parse(run.stdout())
+      expect(report.failed).toEqual([])
+      expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).trim()).toBe("")
+      if (mode === "origin-equivalent") {
+        expect(report).toMatchObject({ removed: [{ branch, head: tip, archiveRef: collisionRef }], kept: [] })
+        expect(report.removed[0].custody?.kind).not.toBe("published-main")
+        expect((await git(["ls-remote", "origin", collisionRef])).trim()).toBe(`${tip}\t${collisionRef}`)
+        expect((await git(["ls-remote", "origin", priorRef])).trim()).toBe(`${baseTip}\t${priorRef}`)
+        expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
+        expect((await git(["ls-remote", "origin", "refs/heads/main"])).trim()).toBe(`${integratedMain}\trefs/heads/main`)
+      } else {
+        expect(report).toMatchObject({ removed: [], kept: [{ branch, head: tip }] })
+        expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(`${tip}\trefs/heads/${branch}`)
+        expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim()).toBe("")
+      }
+      expect((await git(["ls-remote", "origin", "refs/yrd/*"])).trim()).toBe("")
+      expect((await git(["rev-parse", "refs/heads/main"])).trim()).toBe(baseTip)
+      return
     }
     if (origin) {
       const report = JSON.parse(run.stdout()) as {
