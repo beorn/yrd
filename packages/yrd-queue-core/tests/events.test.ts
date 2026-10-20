@@ -4126,8 +4126,8 @@ describe("the queue-format boundary", () => {
       await store.backend.publish!(
         store.repo,
         [
-          { ref: selectedRef, expect: "0".repeat(40), oid: before.tip },
-          { ref: hotRef, expect: before.tip, oid: null },
+          { ref: selectedRef, expect: "0".repeat(40), oid: before.tip! },
+          { ref: hotRef, expect: before.tip!, oid: null },
         ],
         "origin",
       )
@@ -4143,7 +4143,7 @@ describe("the queue-format boundary", () => {
     })
     const retained = await (
       await openEvents({ ...store, ref: selected.ref })
-    ).append(decide(selected.history!.events, write), { expect: before.tip })
+    ).append(decide(selected.history!.events, write), { expect: before.tip! })
     const tip = retained.events[0]!.id
     const reread = await readBranchHistory(location, "lab", branch)
     expect(reread.ref).toBe(selectedRef)
