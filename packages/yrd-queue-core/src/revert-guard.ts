@@ -107,7 +107,7 @@ export type RevertGuardBounds = Readonly<{
   window: number
 }>
 
-export const REVERT_GUARD_BOUNDS: RevertGuardBounds = Object.freeze({ depth: 3, pathCap: 500, window: 50 })
+export const REVERT_GUARD_BOUNDS: RevertGuardBounds = Object.freeze({ depth: 3, pathCap: 500, window: 100 })
 
 export type RevertGuardOptions = Readonly<{
   git: Git
