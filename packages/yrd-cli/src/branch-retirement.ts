@@ -18,6 +18,7 @@ import {
   createLocalEventStore,
   gitIn,
   isAncestor,
+  keptLinkAdmits,
   mergeChangesNothing,
   listRefs,
   openLog,
@@ -543,11 +544,25 @@ export async function retireIssueBranches(
           })
           continue
         }
+        const needsExplicitRetention =
+          path === "" &&
+          origin &&
+          history !== undefined &&
+          change?.status === "merged" &&
+          !(await keptLinkAdmits(
+            candidate.git,
+            head,
+            history.events.flatMap((event) => event.links),
+          ))
         // Exact root event/archive custody remains authoritative even when the
         // submitted head is no longer in main's graph (including adopted history).
         // A bad branch record is reported independently; only discovery or an
         // attempted retirement failure stops subsequent mutations.
-        if (path === "" && candidate.local && (!origin || !(await isAncestor(candidate.git, head, custody.target)))) {
+        if (
+          path === "" &&
+          candidate.local &&
+          (needsExplicitRetention || !origin || !(await isAncestor(candidate.git, head, custody.target)))
+        ) {
           const landing =
             history === undefined
               ? undefined
@@ -603,7 +618,10 @@ export async function retireIssueBranches(
               disposition,
             })
             const detail = origin
-              ? `origin ${candidate.remote}#${branch}@${candidate.originHead} remains; this custody path selects only the local name${result.detail === undefined ? "" : `; ${result.detail}`}`
+              ? `origin ${candidate.remote}#${branch}@${candidate.originHead} remains; this custody path selects only the local name${result.detail === undefined ? "" : `; ${result.detail}`}` +
+                (needsExplicitRetention
+                  ? `; retire origin explicitly with ${formatYrdCommand(io, ["drop", branch, "--retire", "--tip", head, "--reason", "<why>", "--submitter", request.by], repo)} after preserving the exact head in its generated origin archive`
+                  : "")
               : result.detail
             const output = {
               ...row,

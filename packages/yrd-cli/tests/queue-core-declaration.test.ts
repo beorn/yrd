@@ -3371,6 +3371,91 @@ describe("a queue is the selected origin branch carrying config", () => {
   )
 
   /**
+   * @failure Issue cleanup treats its local archive as permission to retire an unlinked merged head on origin and adds retention to the selected history.
+   * @level l3 @consumer Applied issue cleanup for a merged root whose submitted commit is distinct from its fresh-main head
+   * The sibling table has no exact generated origin archive and does not snapshot the full selected event history.
+   */
+  it.each([
+    { admission: "unlinked", keepChild: false },
+    { admission: "ancestor of later kept link", keepChild: true },
+  ] as const)("30432: issue cleanup with exact archives handles a head $admission", async ({ keepChild }) => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const branch = "task/30432-issue-boundary"
+    const issue = "@example/30432-issue-boundary"
+    const parent = (await git(["rev-parse", "HEAD"])).trim()
+    const tree = (await git(["rev-parse", "HEAD^{tree}"])).trim()
+    const recorded = (await git(["commit-tree", tree, "-p", parent, "-m", "submitted root"])).trim()
+    const head = (await git(["commit-tree", tree, "-p", recorded, "-m", "fresh main head"])).trim()
+    const keptLink = keepChild ? (await git(["commit-tree", tree, "-p", head, "-m", "later kept link"])).trim() : head
+    await git(["update-ref", "refs/heads/main", keptLink, parent])
+    await git(["push", "--quiet", "origin", "main"])
+    const queueTip = await createQueue(repo, "main", keptLink, new Date())
+    const eventRef = changesRef("main", branch)
+    const chain = await openEvents({
+      ...createEventStore(repo, "origin", git.selection),
+      ref: eventRef,
+      writer: "fixture",
+    })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date(), commit: recorded, by: "fixture", issue })],
+      { expect: null },
+    )
+    await chain.append([changeInput("merged", { queueTip, at: new Date(), commit: recorded })], { expect: opened.head })
+    const location = createEventStore(repo, "origin", git.selection)
+    if (keepChild) {
+      const merged = await readBranchHistory(location, "main", branch)
+      const retention = changeInput("retained", {
+        queueTip,
+        at: new Date(),
+        commit: keptLink,
+        by: "fixture",
+        reason: "keep later main link for issue-retirement admission",
+      })
+      await (
+        await openEvents({ ...location, ref: eventRef, writer: "fixture" })
+      ).append([retention], { expect: merged.history!.state.tip })
+    }
+    await git(["branch", branch, head])
+    await git(["push", "--quiet", "origin", `refs/heads/${branch}`])
+    const localArchive = `refs/archive/2000-01-01/previous-seat/${branch}`
+    const originArchive = archiveRefFor(branch, "fixture", new Date().toISOString().slice(0, 10))
+    await git(["update-ref", localArchive, head, "0".repeat(40)])
+    await git(["push", "--quiet", "origin", `${head}:${originArchive}`])
+
+    const before = await readBranchHistory(location, "main", branch)
+    const originBranchBefore = await git(["ls-remote", "origin", `refs/heads/${branch}`])
+    const originArchiveBefore = await git(["ls-remote", "origin", originArchive])
+    const out = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "drop", "--issue", issue, "--submitter", "fixture", "--json"], out.io),
+      out.stderr(),
+    ).toBe(0)
+    expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).trim()).toBe("")
+    expect(await git(["ls-remote", "origin", `refs/heads/${branch}`])).toBe(keepChild ? "" : originBranchBefore)
+    expect(await git(["ls-remote", "origin", originArchive])).toBe(originArchiveBefore)
+    expect((await git(["rev-parse", localArchive])).trim()).toBe(head)
+    const after = await readBranchHistory(location, "main", branch)
+    expect(after.history).toEqual(before.history)
+    expect(after.history?.events.some((event) => event.type === "retained")).toBe(keepChild)
+    expect((await git(["rev-parse", "main"])).trim()).toBe(keptLink)
+    const report = JSON.parse(out.stdout()) as {
+      removed: { branch: string; head: string; archiveRef: string; detail?: string }[]
+      kept: unknown[]
+      failed: unknown[]
+    }
+    expect(report.removed).toEqual([expect.objectContaining({ branch, head, archiveRef: originArchive })])
+    if (!keepChild) {
+      const remote = (await git(["remote", "get-url", "origin"])).trim()
+      expect(report.removed[0]?.detail).toContain(`origin ${remote}#${branch}@${head} remains`)
+      expect(report.removed[0]?.detail).toContain(`'--retire' '--tip' '${head}'`)
+      expect(report.removed[0]?.detail).toContain("'--submitter' 'fixture'")
+    }
+    expect(report.kept).toEqual([])
+    expect(report.failed).toEqual([])
+  })
+
+  /**
    * @failure Issue cleanup deletes unpublished work without origin custody, or removes an advanced submitted branch.
    * @level l3
    * @consumer The closer running yrd drop --issue after durable issue closure

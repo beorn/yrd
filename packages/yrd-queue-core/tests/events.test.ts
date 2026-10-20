@@ -2148,6 +2148,272 @@ describe("the queue-format boundary", () => {
     expect((await readStatus(location, "lab", "task/merged")).status).toBe("merged")
   })
 
+  /** @failure Explicit merged retirement loses an unlinked divergent head, duplicates retention on retry, or rewrites merge facts.
+   * @level l2 @consumer public drop against native hot/cold Git refs, and retirement retry
+   * Existing retained-reader fixtures append the event directly; the retirement fixture uses a head already kept by the merge.
+   */
+  it.each(["hot", "cold"] as const)(
+    "30432: explicitly retires a divergent merged head from %s custody",
+    async (custody) => {
+      const root = mkdtempSync(join(tmpdir(), `yrd-30432-${custody}-`))
+      const origin = mkdtempSync(join(tmpdir(), `yrd-30432-${custody}-origin-`))
+      const git = gitIn(root)
+      await git(["init", "--quiet"])
+      await git(["init", "--bare", "--quiet", origin])
+      await git(["remote", "add", "origin", origin])
+      await git(["config", "user.name", "fixture"])
+      await git(["config", "user.email", "fixture@yrd.test"])
+      const commit = async (name: string, body: string): Promise<string> => {
+        writeFileSync(join(root, name), body)
+        await git(["add", name])
+        await git(["commit", "--quiet", "-m", name])
+        return (await git(["rev-parse", "HEAD"])).trim()
+      }
+      const base = await commit("base", "base\n")
+      await git(["update-ref", "refs/heads/lab", base])
+      await git(["push", "--quiet", "origin", "refs/heads/lab:refs/heads/lab"])
+      const branch = `task/30432-${custody}`
+      const branchRef = `refs/heads/${branch}`
+      await git(["checkout", "--quiet", "-b", branch, base])
+      const mergedHead = await commit("merged", "merged side\n")
+      await git(["push", "--quiet", "origin", `${branchRef}:${branchRef}`])
+      await git(["checkout", "--quiet", "--detach", base])
+      const extra = await commit("extra", "unmerged sibling\n")
+      expect((await git(["merge-base", mergedHead, extra])).trim()).toBe(base)
+      await git(["push", "--quiet", "--force", "origin", `${extra}:${branchRef}`])
+      const store = { repo: root, backend: git.backend }
+      const location = { ...store, remote: "origin", selection: git.selection }
+      const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+      const hotRef = changesRef("lab", branch)
+      const chain = await openEvents({ ...location, ref: hotRef })
+      const opened = await chain.append(
+        [
+          changeInput("opened", {
+            queueTip,
+            at: new Date("2026-09-22T14:01:00.000Z"),
+            commit: mergedHead,
+            by: "@dev/3",
+            issue: "30432",
+          }),
+        ],
+        { expect: null },
+      )
+      const merged = await chain.append(
+        [changeInput("merged", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), commit: mergedHead })],
+        { expect: opened.head },
+      )
+      const selectedRef = custody === "hot" ? hotRef : `refs/yrd-archive/lab/${branch}`
+      if (custody === "cold") {
+        await git.backend.publish!(
+          root,
+          [
+            { ref: selectedRef, expect: "0".repeat(40), oid: merged.head! },
+            { ref: hotRef, expect: merged.head!, oid: null },
+          ],
+          "origin",
+        )
+      }
+      const archive = archiveRefFor(branch, "@dev/3", new Date().toISOString().slice(0, 10))
+      const publish = git.backend.publish
+      if (publish === undefined) throw new Error("fixture lacks publication")
+      const beforeArchive = await readBranchHistory(location, "lab", branch)
+      const prematureRetirement = await drop(location, {
+        queue: "lab",
+        branch,
+        by: "@dev/3",
+        note: "retain the exact divergent head",
+        retire: { tip: extra },
+      }).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      expect(prematureRetirement).toBeInstanceOf(Error)
+      expect((await git(["ls-remote", "origin", branchRef])).trim()).toBe(`${extra}\t${branchRef}`)
+      expect((await listRefs(branchRef, location)).get(branchRef)).toBe(extra)
+      expect((await listRefs(archive, location)).get(archive)).toBeUndefined()
+      const afterPrematureRetirement = await readBranchHistory(location, "lab", branch)
+      expect(afterPrematureRetirement.history).toEqual(beforeArchive.history)
+      expect(afterPrematureRetirement.history?.events.some((item) => item.type === "retained")).toBe(false)
+      await publish(root, [{ ref: archive, expect: "0".repeat(40), oid: extra }], "origin")
+      const refTipBefore = (await listRefs(selectedRef, location)).get(selectedRef)
+      const ordinaryDrop = await drop(location, { queue: "lab", branch, by: "@dev/3" }).then(
+        () => undefined,
+        (error: unknown) => String(error),
+      )
+      expect(ordinaryDrop).toContain("kept-link retirement, 25671")
+      expect(ordinaryDrop).toContain(`preserve ${extra} at origin:${archive}`)
+      expect(ordinaryDrop).toContain(`--retire --tip ${extra} --reason <why>`)
+      expect(ordinaryDrop).toContain("30432")
+      expect((await listRefs(branchRef, location)).get(branchRef)).toBe(extra)
+      expect((await listRefs(selectedRef, location)).get(selectedRef)).toBe(refTipBefore)
+      expect((await listRefs(archive, location)).get(archive)).toBe(extra)
+
+      let racedSelectedTip: string | undefined
+      const staleSelectedTip = await drop(location, {
+        queue: "lab",
+        branch,
+        by: "@dev/3",
+        note: "retain the exact divergent head",
+        retire: { tip: extra },
+        protections: async () => {
+          const selected = await readBranchHistory(location, "lab", branch)
+          expect(selected.history?.events.some((item) => item.type === "retained")).toBe(false)
+          if (selected.history?.state.tip === undefined) throw new Error("selected history lacks its CAS tip")
+          const concurrentNotice = changeInput("notified", {
+            queueTip,
+            at: new Date("2026-10-20T12:00:00.000Z"),
+            notice: {
+              for: merged.events.at(-1)!.id,
+              to: "first-racer",
+              key: `${merged.events.at(-1)!.id}:first-racer`,
+              result: "delivered",
+            },
+          })
+          const competing = await (
+            await openEvents({ ...location, ref: selectedRef })
+          ).append([concurrentNotice], {
+            expect: selected.history.state.tip,
+          })
+          racedSelectedTip = competing.head ?? undefined
+          return []
+        },
+      }).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      expect(staleSelectedTip).toBeInstanceOf(Conflict)
+      expect(racedSelectedTip).toBeDefined()
+      const afterSelectedRace = await readBranchHistory(location, "lab", branch)
+      expect(afterSelectedRace.history?.events.at(-1)?.id).toBe(racedSelectedTip)
+      expect(afterSelectedRace.history?.events.some((item) => item.type === "retained")).toBe(false)
+      expect((await listRefs(branchRef, location)).get(branchRef)).toBe(extra)
+      const before = await readStatus(location, "lab", branch)
+
+      let readbackRaced = false
+      const readbackBackend: GitomicBackend = {
+        ...git.backend,
+        publish: async (repo, updates, remote) => {
+          const result = await publish(repo, updates, remote)
+          const retainedUpdate = updates.find((update) => update.ref === selectedRef && update.oid !== null)
+          if (!readbackRaced && retainedUpdate?.oid !== null && retainedUpdate?.oid !== undefined) {
+            readbackRaced = true
+            const written = await readBranchHistory(location, "lab", branch)
+            const retained = written.history?.events.find((item) => item.id === retainedUpdate.oid)
+            expect(retained?.type).toBe("retained")
+            expect(retained?.links).toContain(extra)
+            expect(written.history?.state).toEqual({ ...before, tip: retainedUpdate.oid })
+            const next = changeInput("notified", {
+              queueTip,
+              at: new Date("2026-10-20T12:01:00.000Z"),
+              notice: {
+                for: merged.events.at(-1)!.id,
+                to: "readback-racer",
+                key: `${merged.events.at(-1)!.id}:readback-racer`,
+                result: "delivered",
+              },
+            })
+            await (await openEvents({ ...location, ref: selectedRef })).append([next], { expect: retainedUpdate.oid })
+          }
+          return result
+        },
+      }
+      let preRetentionChecks = 0
+      const readbackProtections = async () => {
+        preRetentionChecks++
+        const selected = await readBranchHistory(location, "lab", branch)
+        expect(selected.history?.events.some((item) => item.type === "retained")).toBe(false)
+        expect(selected.history?.state).toEqual(before)
+        expect((await listRefs(archive, location)).get(archive)).toBe(extra)
+        return []
+      }
+      const readbackFailure = await drop(
+        { ...location, backend: readbackBackend },
+        {
+          queue: "lab",
+          branch,
+          by: "@dev/3",
+          note: "retain the exact divergent head",
+          retire: { tip: extra },
+          protections: readbackProtections,
+        },
+      ).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      expect(readbackFailure).toBeInstanceOf(Error)
+      expect(readbackRaced).toBe(true)
+      expect(preRetentionChecks).toBe(1)
+      const afterReadbackRace = await readBranchHistory(location, "lab", branch)
+      expect(afterReadbackRace.history?.events.filter((item) => item.type === "retained")).toHaveLength(1)
+      expect(afterReadbackRace.history?.events.at(-1)?.type).toBe("notified")
+      expect((await listRefs(branchRef, location)).get(branchRef)).toBe(extra)
+      const beforeDeleteRetry = await readStatus(location, "lab", branch)
+
+      let rejectDelete = true
+      const flakyBackend: GitomicBackend = {
+        ...git.backend,
+        publish: async (repo, updates, remote) => {
+          if (rejectDelete && updates.some((update) => update.ref === branchRef && update.oid === null)) {
+            rejectDelete = false
+            throw new Conflict("fixture refused one branch deletion")
+          }
+          return await publish(repo, updates, remote)
+        },
+      }
+      const flakyLocation = { ...location, backend: flakyBackend }
+      let protectionChecks = 0
+      const protections = async () => {
+        protectionChecks++
+        const selected = await readBranchHistory(flakyLocation, "lab", branch)
+        const retainedEvent = selected.history?.events.find((item) => item.type === "retained")
+        expect((await listRefs(archive, flakyLocation)).get(archive)).toBe(extra)
+        expect((await listRefs(branchRef, flakyLocation)).get(branchRef)).toBe(extra)
+        expect(retainedEvent?.links).toContain(extra)
+        expect(selected.ref).toBe(selectedRef)
+        expect(selected.history?.state).toEqual(beforeDeleteRetry)
+        return []
+      }
+      const request = {
+        queue: "lab",
+        branch,
+        by: "@dev/3",
+        note: "retain the exact divergent head before retirement",
+        retire: { tip: extra },
+        protections,
+      }
+      await expect(drop(flakyLocation, request)).rejects.toThrow("fixture refused one branch deletion")
+      expect(protectionChecks).toBeGreaterThan(1)
+      const retainedHistory = await readBranchHistory(location, "lab", branch)
+      const retainedEvent = retainedHistory.history?.events.find((item) => item.type === "retained")
+      expect(retainedEvent?.links).toContain(extra)
+      expect(retainedHistory.history?.state).toEqual(beforeDeleteRetry)
+      expect((await listRefs(branchRef, location)).get(branchRef)).toBe(extra)
+
+      const retry =
+        custody === "hot"
+          ? await drop(location, { queue: "lab", branch, by: "@dev/3", protections })
+          : await drop(location, request)
+      expect(retry).toMatchObject({ archive, head: extra, event: merged.head })
+      const afterRetry = await readBranchHistory(location, "lab", branch)
+      expect(afterRetry.history?.events.filter((item) => item.type === "retained")).toHaveLength(1)
+      expect(afterRetry.history?.state).toEqual(beforeDeleteRetry)
+      expect((await listRefs(branchRef, location)).has(branchRef)).toBe(false)
+
+      let absentPublishes = 0
+      const readOnlyBackend: GitomicBackend = {
+        ...git.backend,
+        publish: async () => {
+          absentPublishes++
+          throw new Error("absent retirement retry must not publish")
+        },
+      }
+      const absent = await drop({ ...location, backend: readOnlyBackend }, request)
+      expect(absent).toEqual(retry)
+      expect(absentPublishes).toBe(0)
+      expect((await listRefs(selectedRef, location)).get(selectedRef)).toBe(afterRetry.history?.state.tip)
+    },
+  )
+
   // 29399: the old delete-only tests missed terminal-only selection, archive
   // custody races and host protections changing between custody and deletion.
   // These faults use the existing publish hooks and exercise the public drop API.
@@ -2603,6 +2869,144 @@ describe("the queue-format boundary", () => {
     expect(recovered.status, recovered.stderr).toBe(0)
     expect((await git(["rev-parse", archivedBranchRef])).trim()).toBe(archivedHead)
     expect(await git(["ls-remote", "origin"])).toBe(beforeRecovery)
+  })
+
+  /** @failure Losing the generated archive during deletion leaves a divergent merged head without event custody.
+   * @level l2 @consumer origin branch retirement, Git GC, and a fresh event-only consumer
+   * Existing archive-loss coverage proves archive recovery for a failed ending, not retained custody for a merged head.
+   */
+  it("30432: retained event alone preserves a divergent head through archive loss and fresh fetch", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-30432-archive-loss-"))
+    const origin = mkdtempSync(join(tmpdir(), "yrd-30432-archive-loss-origin-"))
+    const git = gitIn(root)
+    await git(["init", "--quiet"])
+    await git(["init", "--bare", "--quiet", origin])
+    await git(["remote", "add", "origin", origin])
+    await git(["config", "user.name", "fixture"])
+    await git(["config", "user.email", "fixture@yrd.test"])
+    const commit = async (name: string, body: string): Promise<string> => {
+      writeFileSync(join(root, name), body)
+      await git(["add", name])
+      await git(["commit", "--quiet", "-m", name])
+      return (await git(["rev-parse", "HEAD"])).trim()
+    }
+    const base = await commit("base", "base\n")
+    await git(["update-ref", "refs/heads/lab", base])
+    await git(["push", "--quiet", "origin", "refs/heads/lab:refs/heads/lab"])
+    const branch = "task/30432-archive-loss"
+    const branchRef = `refs/heads/${branch}`
+    await git(["checkout", "--quiet", "-b", branch, base])
+    const mergedHead = await commit("merged", "merged sibling\n")
+    await git(["push", "--quiet", "origin", `${branchRef}:${branchRef}`])
+    await git(["checkout", "--quiet", "--detach", base])
+    const extra = await commit("extra", "divergent payload\n")
+    expect((await git(["merge-base", mergedHead, extra])).trim()).toBe(base)
+    await git(["push", "--quiet", "--force", "origin", `${extra}:${branchRef}`])
+
+    const store = { repo: root, backend: git.backend }
+    const location = { ...store, remote: "origin", selection: git.selection }
+    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const eventRef = changesRef("lab", branch)
+    const chain = await openEvents({ ...location, ref: eventRef })
+    const opened = await chain.append(
+      [
+        changeInput("opened", {
+          queueTip,
+          at: new Date("2026-09-22T14:01:00.000Z"),
+          commit: mergedHead,
+          by: "@dev/3",
+          issue: "30432",
+        }),
+      ],
+      { expect: null },
+    )
+    await chain.append(
+      [changeInput("merged", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), commit: mergedHead })],
+      { expect: opened.head },
+    )
+    const before = await readStatus(location, "lab", branch)
+    const archive = archiveRefFor(branch, "@dev/3", new Date().toISOString().slice(0, 10))
+    const publish = git.backend.publish
+    if (publish === undefined) throw new Error("native fixture lacks publication")
+    await publish(root, [{ ref: archive, expect: "0".repeat(40), oid: extra }], "origin")
+    let archiveLost = false
+    const backend: GitomicBackend = {
+      ...git.backend,
+      publish: async (repo, updates, remote) => {
+        const result = await publish(repo, updates, remote)
+        if (!archiveLost && updates.some((update) => update.ref === branchRef && update.oid === null)) {
+          archiveLost = true
+          await publish(repo, [{ ref: archive, expect: extra, oid: null }], remote)
+          const localCustody = (await git(["for-each-ref", `--contains=${extra}`, "--format=%(refname)"]))
+            .trim()
+            .split("\n")
+            .filter((ref) => ref.length > 0 && ref !== eventRef)
+          for (const ref of localCustody) await git(["update-ref", "-d", ref])
+          await git(["checkout", "--quiet", "--detach", base])
+          await git(["reflog", "expire", "--expire=now", "--all"])
+          await git(["gc", "--prune=now", "--quiet"])
+          const remoteReflog = spawnSync("git", ["--git-dir", origin, "reflog", "expire", "--expire=now", "--all"], {
+            encoding: "utf8",
+          })
+          if (remoteReflog.status !== 0) throw new Error(`bare origin reflog expiry failed: ${remoteReflog.stderr}`)
+          const remoteGc = spawnSync("git", ["--git-dir", origin, "gc", "--prune=now", "--quiet"], {
+            encoding: "utf8",
+          })
+          if (remoteGc.status !== 0) throw new Error(`bare origin GC failed: ${remoteGc.stderr}`)
+        }
+        return result
+      },
+    }
+    const failure = await drop(
+      { ...location, backend },
+      {
+        queue: "lab",
+        branch,
+        by: "@dev/3",
+        note: "retain the divergent exact head",
+        retire: { tip: extra },
+      },
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+    expect(String(failure)).toMatch(/archive .* no longer holds .* retaining event/u)
+    expect(archiveLost).toBe(true)
+    expect((await git(["ls-remote", "origin", branchRef])).trim()).toBe("")
+    expect((await git(["ls-remote", "origin", archive])).trim()).toBe("")
+    const retained = await readBranchHistory(location, "lab", branch)
+    expect(retained.ref).toBe(eventRef)
+    expect(retained.history?.events.at(-1)).toMatchObject({ type: "retained", links: [extra] })
+    expect(retained.history?.state).toEqual({ ...before, tip: retained.history?.state.tip })
+    const keepingRefs = (await git(["for-each-ref", `--contains=${extra}`, "--format=%(refname) %(objectname)"]))
+      .trim()
+      .split("\n")
+    expect(keepingRefs).toHaveLength(1)
+    expect(keepingRefs[0]?.split(" ")[1]).toBe(retained.history?.state.tip)
+    expect(await git(["cat-file", "-e", `${extra}^{commit}`])).toBe("")
+
+    const consumer = mkdtempSync(join(tmpdir(), "yrd-30432-fresh-consumer-"))
+    const initConsumer = spawnSync("git", ["init", "--bare", "--quiet", consumer], { encoding: "utf8" })
+    expect(initConsumer.status, initConsumer.stderr).toBe(0)
+    const fetched = spawnSync("git", ["--git-dir", consumer, "fetch", "--no-tags", origin, `${eventRef}:${eventRef}`], {
+      encoding: "utf8",
+    })
+    expect(fetched.status, fetched.stderr).toBe(0)
+    expect(
+      spawnSync("git", ["--git-dir", consumer, "for-each-ref", "--format=%(refname)"], {
+        encoding: "utf8",
+      }).stdout.trim(),
+    ).toBe(eventRef)
+    expect(
+      spawnSync("git", ["--git-dir", consumer, "cat-file", "-e", `${extra}^{commit}`], { encoding: "utf8" }).status,
+    ).toBe(0)
+    const fetchedEvent = spawnSync("git", ["--git-dir", consumer, "rev-parse", eventRef], { encoding: "utf8" })
+    expect(fetchedEvent.status, fetchedEvent.stderr).toBe(0)
+    const fetchedParents = spawnSync("git", ["--git-dir", consumer, "show", "-s", "--format=%P", eventRef], {
+      encoding: "utf8",
+    })
+    expect(fetchedParents.status, fetchedParents.stderr).toBe(0)
+    expect(fetchedParents.stdout.trim().split(/\s+/u)).toContain(extra)
   })
 
   // @failure an ended retire tip behind its own kept link is refused, so a shipped head cannot be deleted (25671).
