@@ -19,7 +19,7 @@
 
 import { shellQuote } from "git-super/shell-command"
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { createGitWorkspace, worktreeHomeRoot, type ProvisionedBay } from "@yrd/bay"
 import {
   checkedTree,
@@ -1141,7 +1141,7 @@ export async function closeEnvironment(
       ...(initialized ? [`look at and empty ${checkout}`] : []),
       ...(verify === undefined || store === undefined
         ? []
-        : [`run ${verify}`, `then remove the environment admin's modules subtree ${dirname(store)}`]),
+        : [`run ${verify}`, `then remove the private store ${store}`]),
     ]
     if (options.json === true) {
       io.stdout(

@@ -1532,6 +1532,8 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     const refused = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
     expect(refused.stderr()).toContain("is initialized and still holds private content")
+    // #30434: the removal step must name this store, not its parent containing other vendor stores.
+    expect(refused.stderr()).toContain(`then remove the private store ${store}. This tool`)
     expect((JSON.parse(refused.stdout()) as { class?: string }).class).toBe("private checkout")
     expect(existsSync(checkout)).toBe(true)
     expect(existsSync(store)).toBe(true)
@@ -1547,14 +1549,14 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     const emptied = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], emptied.io), emptied.stderr()).toBe(2)
     expect(emptied.stderr()).toContain("is still present")
-    expect(emptied.stderr()).toContain(dirname(store))
+    expect(emptied.stderr()).toContain(`then remove the private store ${store}. This tool`)
     expect(JSON.parse(emptied.stdout())).toMatchObject({ kept: path, class: "private checkout", store })
     expect(existsSync(path)).toBe(true)
     expect(existsSync(store)).toBe(true)
 
-    // STAGE 3 — the operator's store step (remove the admin modules subtree), and only then does the
+    // STAGE 3 — the operator's store step (remove only the refused store), and only then does the
     // ordinary close succeed.
-    rmSync(dirname(dirname(store)), { recursive: true, force: true })
+    rmSync(store, { recursive: true, force: true })
     const closed = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
     expect(existsSync(path)).toBe(false)
