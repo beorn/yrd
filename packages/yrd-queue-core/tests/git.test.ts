@@ -713,16 +713,30 @@ describe("the git runner", () => {
     ["fetch", "timeout", 2],
     ["ls-remote", "signal", 1],
     ["fetch", "signal", 1],
+    ["ls-remote", "cancel-before-retry", 1],
+    ["fetch", "cancel-before-retry", 1],
+    ["ls-remote", "journal-failure", 1],
+    ["fetch", "journal-failure", 1],
+    ["ls-remote", "second-signal", 1],
+    ["fetch", "second-signal", 1],
   ] as const)("handles Gitomic %s %s without more than one retry (failures=%i)", async (verb, kind, failures) => {
     const { repo, ssh } = legacyPublickeyRepo(0)
     const fault =
-      kind === "timeout"
-        ? new gitomic.GitTimeout(`git ${verb} origin refs/heads/main`, 300_000)
-        : new gitomic.GitSignaled(`git ${verb} origin refs/heads/main`, "SIGTERM", "caller cancelled")
+      kind === "signal"
+        ? new gitomic.GitSignaled(`git ${verb} origin refs/heads/main`, "SIGTERM", "caller cancelled")
+        : new gitomic.GitTimeout(`git ${verb} origin refs/heads/main`, 300_000)
+    const cancellation = new gitomic.GitSignaled(`git ${verb} origin refs/heads/main`, "SIGTERM", "caller cancelled")
+    const journalFailure = new Error("round journal write failed")
+    const controller = new AbortController()
+    const observed = vi.fn(() => {
+      if (kind === "journal-failure") throw journalFailure
+    })
     const create = gitomic.createShellBackend
     let attempts = 0
     const attempt = () => {
       attempts++
+      if (kind === "cancel-before-retry" && attempts === 1) controller.abort(cancellation)
+      if (kind === "second-signal" && attempts === 2) throw cancellation
       if (attempts <= failures) throw fault
     }
     const factory = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
@@ -742,20 +756,47 @@ describe("the git runner", () => {
     })
     const announced = vi.spyOn(console, "error").mockImplementation(() => {})
     try {
-      const backend = gitRunner.createLegacyBackend("git", {
-        ...process.env,
-        GIT_SSH_COMMAND: ssh,
-        GIT_SSH_VARIANT: "ssh",
-      })
+      const backend = gitRunner.createLegacyBackend(
+        "git",
+        {
+          ...process.env,
+          GIT_SSH_COMMAND: ssh,
+          GIT_SSH_VARIANT: "ssh",
+        },
+        undefined,
+        { onReadRetry: observed, signal: controller.signal },
+      )
       const read =
         verb === "fetch"
           ? backend.fetchRefs!(repo, ["refs/heads/main"], "git@github.com:fixture")
           : backend.listRefs!(repo, "refs/heads/", "git@github.com:fixture")
       if (kind === "timeout" && failures === 1) {
         expect((await read).get("refs/heads/main")).toMatch(/^[a-f0-9]{40}$/u)
-      } else await expect(read).rejects.toBe(fault)
-      expect(attempts).toBe(kind === "timeout" ? 2 : 1)
-      expect(announced).toHaveBeenCalledTimes(kind === "timeout" ? 1 : 0)
+      } else {
+        const expected =
+          kind === "journal-failure"
+            ? journalFailure
+            : kind === "cancel-before-retry" || kind === "second-signal"
+              ? cancellation
+              : fault
+        await expect(read).rejects.toBe(expected)
+        expect(expected.message.includes("Retried: 1")).toBe(kind === "timeout")
+      }
+      const retryTaken = kind === "timeout" || kind === "second-signal"
+      expect(attempts).toBe(retryTaken ? 2 : 1)
+      expect(announced).toHaveBeenCalledTimes(kind === "signal" ? 0 : 1)
+      expect(observed).toHaveBeenCalledTimes(retryTaken || kind === "journal-failure" ? 1 : 0)
+      if (retryTaken) {
+        expect(observed).toHaveBeenCalledWith(
+          expect.objectContaining({
+            verb,
+            repo,
+            remote: "git@github.com:fixture",
+            attempt: 2,
+            attempts: 2,
+          }),
+        )
+      }
     } finally {
       announced.mockRestore()
       factory.mockRestore()
@@ -769,10 +810,12 @@ describe("the git runner", () => {
     const previousVariant = process.env.GIT_SSH_VARIANT
     process.env.GIT_SSH_COMMAND = ssh
     process.env.GIT_SSH_VARIANT = "ssh"
+    const observed = vi.fn()
     try {
-      const backend = gitRunner.createLegacyBackend()
+      const backend = gitRunner.createLegacyBackend("git", process.env, undefined, { onReadRetry: observed })
       await expect(backend.listRefs!(repo, "refs/heads/", "git@github.com:fixture")).rejects.toThrow(refusal)
       expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(1)
+      expect(observed).not.toHaveBeenCalled()
     } finally {
       if (previous === undefined) delete process.env.GIT_SSH_COMMAND
       else process.env.GIT_SSH_COMMAND = previous

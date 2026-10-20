@@ -20,7 +20,7 @@ import { accessSync, constants, statSync } from "node:fs"
 import { basename, isAbsolute, resolve, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
-import { createShellBackend, GitTimeout, type GitomicBackend } from "gitomic"
+import { createShellBackend, GitSignaled, GitTimeout, type GitomicBackend } from "gitomic"
 import type { Event } from "gitomic/events"
 import { GIT_REPOSITORY_LOCAL_ENV_VARS } from "removely"
 import { requireFrozenGitSuper, withGitConfig } from "./git-super-selection.ts"
@@ -130,6 +130,18 @@ export type GitInvocationOptions = Readonly<{
   timeoutMs?: number
   openOutput?: (invocation: Pick<GitInvocation, "args" | "cwd" | "selection">) => GitOutputSink
   onInvocation?: (invocation: GitInvocation) => void
+  /** A remote read's one retry, observed before dispatch even when it recovers. */
+  onReadRetry?: (
+    notice: Readonly<{
+      verb: "fetch" | "ls-remote"
+      repo: string
+      remote: string
+      refs: string | readonly string[]
+      attempt: 2
+      attempts: 2
+      cause: string
+    }>,
+  ) => void
 }>
 
 export type GitRunner = Git &
@@ -407,7 +419,7 @@ export function gitIn(
           : Object.freeze({ directory: objects.directory, alternates: Object.freeze([...(objects.alternates ?? [])]) }),
     },
     at: { value: (path: string) => gitIn(path, runner, selection, { ...options, env: source, objects }) },
-    backend: { get: () => (backend ??= createLegacyBackend(selection.executable, source, objects)) },
+    backend: { get: () => (backend ??= createLegacyBackend(selection.executable, source, objects, options)) },
     lastInvocation: { get: () => lastInvocation },
     observe: {
       value: async (input: GitObservationInput): Promise<GitObservation> => {
@@ -833,6 +845,7 @@ export function createLegacyBackend(
   gitExecutable = "git",
   source: NodeJS.ProcessEnv = globalThis.process.env,
   objects?: GitInvocationOptions["objects"],
+  options: Pick<GitInvocationOptions, "onReadRetry" | "signal"> = {},
 ): GitomicBackend {
   const baseEnv = gitEnvironment(source, objects)
   const makeReader = (env: NodeJS.ProcessEnv) => {
@@ -869,7 +882,7 @@ export function createLegacyBackend(
   }
   return {
     ...first.backend,
-    fetchRefs: (repo, refs, remote, options) => {
+    fetchRefs: (repo, refs, remote, fetchOptions) => {
       const { env, reader } = readerForCall()
       return retryLegacyPublickeyRead(
         "fetch",
@@ -877,8 +890,9 @@ export function createLegacyBackend(
         remote,
         refs,
         env,
-        () => reader.fetchRefs(repo, refs, remote, options),
-        (env) => makeReader(env).fetchRefs(repo, refs, remote, options),
+        () => reader.fetchRefs(repo, refs, remote, fetchOptions),
+        (env) => makeReader(env).fetchRefs(repo, refs, remote, fetchOptions),
+        options,
       )
     },
     listRefs: (repo, prefix, remote) => {
@@ -892,6 +906,7 @@ export function createLegacyBackend(
         env,
         () => reader.listRefs(repo, prefix, remote),
         (env) => makeReader(env).listRefs(repo, prefix, remote),
+        options,
       )
     },
     // `fetchedTip` runs a `rev-parse` of its own, so it takes the same per-call seam label the other
@@ -913,39 +928,54 @@ async function retryLegacyPublickeyRead<T>(
   baseEnv: NodeJS.ProcessEnv,
   read: () => Promise<T>,
   retry: (env: NodeJS.ProcessEnv) => Promise<T>,
+  options: Pick<GitInvocationOptions, "onReadRetry" | "signal">,
 ): Promise<T> {
   try {
     return await read()
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     const sshDropped = isLegacySshSessionDrop(error, verb)
+    let retryEnv = baseEnv
     if (sshDropped || isLegacyHttp2Reset(error, verb) || error instanceof GitTimeout) {
       const cause = sshDropped ? "SSH session dropped" : message
       console.error(
         `yrd: git ${verb} ${remote} ${JSON.stringify(refs)} in ${repo}: ${cause}; ` +
           `retry 2/2 after ${String(PUBLICKEY_BACKOFF_MS)}ms`,
       )
-      await delay(PUBLICKEY_BACKOFF_MS)
-      return retry(baseEnv)
-    }
-    if (!isLegacyPublickeyRefusal(error, verb)) throw error
-    let verbose: ReturnType<typeof verboseSshRetryEnvironment>
-    try {
-      const config = baseEnv.GIT_SSH_COMMAND === undefined ? await readCoreSshCommand(repo, baseEnv) : undefined
-      verbose = verboseSshRetryEnvironment(baseEnv, config)
-    } catch (configError) {
+    } else {
+      if (!isLegacyPublickeyRefusal(error, verb)) throw error
+      let verbose: ReturnType<typeof verboseSshRetryEnvironment>
+      try {
+        const config = baseEnv.GIT_SSH_COMMAND === undefined ? await readCoreSshCommand(repo, baseEnv) : undefined
+        verbose = verboseSshRetryEnvironment(baseEnv, config)
+      } catch (configError) {
+        console.error(
+          `yrd: git ${verb} ${remote} ${JSON.stringify(refs)} in ${repo}: ${error.message}; ` +
+            `SSH retry skipped: ${String(configError)}`,
+        )
+        throw error
+      }
+      retryEnv = verbose.env
       console.error(
         `yrd: git ${verb} ${remote} ${JSON.stringify(refs)} in ${repo}: ${error.message}; ` +
-          `SSH retry skipped: ${String(configError)}`,
+          `retry 2/2 after ${String(PUBLICKEY_BACKOFF_MS)}ms with ${verbose.command}`,
       )
-      throw error
     }
-    console.error(
-      `yrd: git ${verb} ${remote} ${JSON.stringify(refs)} in ${repo}: ${error.message}; ` +
-        `retry 2/2 after ${String(PUBLICKEY_BACKOFF_MS)}ms with ${verbose.command}`,
-    )
     await delay(PUBLICKEY_BACKOFF_MS)
-    return retry(verbose.env)
+    options.signal?.throwIfAborted()
+    options.onReadRetry?.({ verb, repo, remote, refs, attempt: 2, attempts: 2, cause: message })
+    try {
+      return await retry(retryEnv)
+    } catch (retryError) {
+      if (
+        retryError instanceof Error &&
+        !(retryError instanceof GitSignaled) &&
+        retryError !== options.signal?.reason
+      ) {
+        retryError.message += "\nRetried: 1"
+      }
+      throw retryError
+    }
   }
 }
 

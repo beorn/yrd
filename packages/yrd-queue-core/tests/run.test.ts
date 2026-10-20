@@ -635,13 +635,18 @@ it.each([CHANGES, "refs/heads/main"])("stops after two exhausted acquisition rea
   const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined }
   const fault = new gitomic.GitTimeout(`git ls-remote origin ${refs}`, 300_000)
   let reads = 0
-  using _backend = beforeGitomicPublish(async () => {}, undefined, undefined, async (_repo, prefix, remote) => {
-    if (remote === "origin" && prefix === refs) {
-      reads++
-      throw fault
-    }
-    return undefined
-  })
+  using _backend = beforeGitomicPublish(
+    async () => {},
+    undefined,
+    undefined,
+    async (_repo, prefix, remote) => {
+      if (remote === "origin" && prefix === refs) {
+        reads++
+        throw fault
+      }
+      return undefined
+    },
+  )
   using warning = vi.spyOn(console, "error").mockImplementation(() => {})
 
   await expect(queueRun(options)).rejects.toBe(fault)

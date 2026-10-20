@@ -413,7 +413,12 @@ export async function eventQueueRun(
 ): Promise<QueueRunOutcome> {
   assertPlainEventQueueRun(options, options)
   const store = {
-    ...createEventStore(options.repo, options.target.remote, options.selection ?? selectionFor(prepared.selected)),
+    ...createEventStore(
+      options.repo,
+      options.target.remote,
+      options.selection ?? selectionFor(prepared.selected),
+      prepared.selected.backend,
+    ),
     retryBudgetMs: options.retryBudgetMs ?? DEFAULT_QUEUE_RUN_RETRY_BUDGET_MS,
   }
   const queue = options.target.branch
