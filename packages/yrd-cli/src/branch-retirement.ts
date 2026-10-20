@@ -951,6 +951,14 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
   }
 }
 
+/** The launcher supplies the environment authority `--release-checkout` needs and
+ * the bare `bin/yrd` entry carries none of it (30421). Name the supported entry
+ * point, never an internal reader the caller cannot supply.
+ */
+const RELEASE_CHECKOUT_NEEDS_LAUNCHER =
+  "release-checkout needs the landing launcher's environment authority; re-run the same drop through " +
+  "tools/yrd-runtime.mjs (the @in <env> -- bun yrd path), not the bare bin/yrd entry"
+
 /** This process's own privilege-bounding facts, from /proc/self/status.
  * That file stays readable when sibling pids do not, so a refusal can name the
  * discriminator between a blind reader and a capable one (30417). A value that
@@ -1082,7 +1090,7 @@ export async function releaseRetainedCheckouts(
       ]
     }
     if (io.liveEnvironmentUse === undefined) {
-      throw new Error("release-checkout requires the liveEnvironmentUse authority reader")
+      throw new Error(RELEASE_CHECKOUT_NEEDS_LAUNCHER)
     }
     const uses: unknown = await io.liveEnvironmentUse()
     if (!Array.isArray(uses)) throw new Error("live environment-use reader did not return an array")
@@ -1102,7 +1110,7 @@ export async function releaseRetainedCheckouts(
       if (overlaps(checkout, use.path)) return [`live use: ${use.reason} (${use.path})`]
     }
     if (typeof io.localBranchProtections !== "function") {
-      throw new Error("release-checkout requires the localBranchProtections authority reader")
+      throw new Error(RELEASE_CHECKOUT_NEEDS_LAUNCHER)
     }
     const result = await io.localBranchProtections({
       repo: row.repo,
@@ -1169,7 +1177,7 @@ export async function releaseRetainedCheckouts(
   }
   try {
     for (const reader of ["liveEnvironmentUse", "localBranchProtections"] as const) {
-      if (typeof io[reader] !== "function") throw new Error(`release-checkout requires the ${reader} authority reader`)
+      if (typeof io[reader] !== "function") throw new Error(RELEASE_CHECKOUT_NEEDS_LAUNCHER)
     }
     const rootStore = createEventStore(input.repo, await remoteUrl(input.git, input.remote), input.selection)
     rootRow.remote = publicText(rootStore.remote)

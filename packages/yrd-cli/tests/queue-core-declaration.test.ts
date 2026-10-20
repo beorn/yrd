@@ -6122,7 +6122,7 @@ describe("drop --local --release-checkout", () => {
         expect(report.failed[0]?.detail).toContain(
           reader === "empty liveEnvironmentUse"
             ? "live environment-use reader did not return an array"
-            : `release-checkout requires the ${reader.replace("standalone ", "")} authority reader`,
+            : "release-checkout needs the landing launcher's environment authority",
         )
         expect(report.removed).toEqual([])
         expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
@@ -6217,6 +6217,37 @@ describe("drop --local --release-checkout", () => {
       // Nothing was archived or deleted under an uncertified census.
       expect(await fixture.git(["for-each-ref", "refs/archive/"])).toBe("")
       expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
+  /** @failure A caller of `drop --release-checkout` that carries no environment
+   * authority is told to use the landing launcher (30421). The message must name
+   * the supported entry point, never an internal reader the caller cannot
+   * supply, so the two entries cannot drift apart without the caller seeing why.
+   * @level l2 @consumer releaseRetainedCheckouts callers
+   */
+  it("30421: a caller without the launcher's authority is pointed at the launcher", async () => {
+    const fixture = await releaseWorld()
+    const { spy } = await permitCensus()
+    try {
+      const output = releaseCapture(fixture.repo)
+      delete (output.io as { liveEnvironmentUse?: () => Promise<readonly unknown[]> }).liveEnvironmentUse
+      const report = await releaseRetainedCheckouts({
+        repo: fixture.repo,
+        git: fixture.git,
+        selection: fixture.git.selection,
+        io: output.io,
+        log: { write: vi.fn() },
+        queue: "main",
+        remote: "origin",
+        issueIdentity: (value) => value,
+        request: { branch: fixture.branch, tip: fixture.tip, issue: "29600", reason: "retain checkout", by: "fixture" },
+      })
+      expect(report.failed).toHaveLength(1)
+      const detail = report.failed[0]?.detail ?? ""
+      expect(detail).toContain("tools/yrd-runtime.mjs")
+      expect(detail).not.toContain("liveEnvironmentUse")
     } finally {
       spy.mockRestore()
     }
