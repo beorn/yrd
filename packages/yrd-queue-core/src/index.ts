@@ -76,6 +76,7 @@ export {
   archiveQueue,
   appendNumberedPublishedMerge,
   acceptsMergedLocalRetirement,
+  keptLinkAdmits,
   changeInput,
   createEventQueue,
   createLocalEventStore,

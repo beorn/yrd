@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Explicit `yrd drop --retire` can retire a merged branch's unkept exact head when its
+  generated origin archive already exists for the same actor and UTC date. A `retained`
+  event keeps that commit before branch removal, preserving the original merged ending
+  even if deletion fails. Hot and cold histories use the same operation; retry reuses
+  retained custody. Clients must support the `retained` event before using this writer
+  (30432).
+
 - `Incident` keeps required `code` and `subject`, makes `via`, `evidence` and `next`
   optional, and removes diagnostic `owner`. Existing renderers put the subject first.
   New `incidentIn` decodes stored rows as `none`, `incident` or `malformed`; both
