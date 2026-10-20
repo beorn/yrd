@@ -16,7 +16,7 @@
  *    when it sits BELOW the target pin the walk is bounded at it, so a branch that
  *    deletes lines an earlier, already-shared change added is its own deliberate
  *    deletion, never a put-back. A candidate pin that CONTAINS the target pin (the
- *    measured fast-forward pin move) keeps the full window: its ancestry carries the
+ *    measured fast-forward pin move) keeps the complete history: its ancestry carries the
  *    target's change, so an interior regression against the target is the revert this
  *    guard exists to catch.
  *  - S3 (swallowed composition): a component pin the compose moved (or reused) has a
@@ -33,7 +33,7 @@
  * not read) and does not warn by itself in `observe` mode (#28000).
  */
 import { join } from "node:path"
-import { GitExit, isAncestor, mergeBases, runnerFor, type Git } from "./git.ts"
+import { isAncestor, mergeBases, runnerFor, type Git } from "./git.ts"
 
 /** One interior path the candidate put back to a value the target's own history held before its advance. */
 export type RevertedPath = Readonly<{
@@ -96,18 +96,18 @@ export type RevertGuardReport = Readonly<{
 export type RevertGuardBounds = Readonly<{
   /**
    * Interior paths WITH target history judged before the proof is named incomplete. A path the
-   * target's window never touched cannot hide a revert, so it is judged clean without spending a
+   * target's history range never touched cannot hide a revert, so it is judged clean without spending a
    * unit and without naming a gap (#28195): the cap bounds real judgments, not the path count, so an
    * add-only landing no longer reports incomplete for paths it could never hide behind.
    */
   pathCap: number
   /** Gitlink recursion depth; the root level is 0. */
   depth: number
-  /** Commits of the target's first-parent history examined per path. */
-  window: number
+  /** Optional explicit commit limit per path; the default reads the complete first-parent history. */
+  window?: number
 }>
 
-export const REVERT_GUARD_BOUNDS: RevertGuardBounds = Object.freeze({ depth: 3, pathCap: 500, window: 100 })
+export const REVERT_GUARD_BOUNDS: RevertGuardBounds = Object.freeze({ depth: 3, pathCap: 500 })
 
 export type RevertGuardOptions = Readonly<{
   git: Git
@@ -455,9 +455,32 @@ async function assessPath(
     return
   }
   level.budget.remaining -= 1
-  let viewed: readonly string[]
+  const window = level.bounds.window
+  let capped = false
+  let viewed: readonly RawRow[]
   try {
-    viewed = await firstParentTouching(level.git, revisions, level.bounds.window + 1, row.path)
+    if (window !== undefined) {
+      // Count commits, not raw rows: a historical directory can contribute several descendant rows.
+      const commits = await firstParentTouching(level.git, revisions, window + 1, row.path)
+      capped = commits.length > window
+    }
+    viewed = parseRaw(
+      await level.git([
+        "--literal-pathspecs",
+        "log",
+        "--first-parent",
+        "--format=",
+        "--raw",
+        "--no-abbrev",
+        "--no-renames",
+        "--diff-merges=first-parent",
+        "-z",
+        ...(window === undefined ? [] : [`--max-count=${String(window)}`]),
+        ...revisions,
+        "--",
+        row.path,
+      ]),
+    )
   } catch (error) {
     level.report.gaps.push({
       kind: "unjudged",
@@ -467,15 +490,12 @@ async function assessPath(
     })
     return
   }
-  // One extra commit was requested, so an exhausted window is observable below.
-  const capped = viewed.length > level.bounds.window
-  for (const commit of viewed.slice(0, level.bounds.window)) {
-    const previous = await entryAt(level.git, `${commit}^`, row.path)
-    if (previous === undefined) continue
+  for (const previous of viewed) {
+    if (previous.path !== row.path || previous.oldMode === "000000") continue
     // OID+mode, matching the entry contract: a mode-only put-back is the same revert.
-    if (previous.oid === row.newSha && previous.mode === row.newMode) {
+    if (previous.oldSha === row.newSha && previous.oldMode === row.newMode) {
       level.report.paths.push({
-        base: previous.oid,
+        base: previous.oldSha,
         candidate: row.newSha,
         mode: row.newMode,
         path: full,
@@ -543,36 +563,21 @@ async function treeOf(git: Git, commit: string): Promise<string> {
   return out
 }
 
-async function entryAt(
-  git: Git,
-  commit: string,
-  path: string,
-): Promise<Readonly<{ mode: string; oid: string }> | undefined> {
-  let out: string
-  try {
-    out = await git(["ls-tree", "-z", commit, "--", path])
-  } catch (error) {
-    // A root commit has no `^`; an absent object is "no previous value", not a failure.
-    if (error instanceof GitExit && error.exitCode === 128) return undefined
-    throw error
-  }
-  const first = out.split("\0")[0] ?? ""
-  if (first === "") return undefined
-  const [header] = first.split("\t")
-  const parts = (header ?? "").split(" ")
-  const mode = parts[0]
-  const oid = parts[2]
-  if (mode === undefined || mode === "" || oid === undefined || oid === "") return undefined
-  return { mode, oid }
-}
-
 async function firstParentTouching(
   git: Git,
   revisions: readonly string[],
   window: number,
   path: string,
 ): Promise<readonly string[]> {
-  const out = await git(["rev-list", "--first-parent", `--max-count=${String(window)}`, ...revisions, "--", path])
+  const out = await git([
+    "--literal-pathspecs",
+    "rev-list",
+    "--first-parent",
+    `--max-count=${String(window)}`,
+    ...revisions,
+    "--",
+    path,
+  ])
   return out
     .split("\n")
     .map((row) => row.trim())

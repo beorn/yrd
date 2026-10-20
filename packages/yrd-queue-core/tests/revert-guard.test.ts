@@ -274,6 +274,42 @@ describe("revert guard (27363)", () => {
     expect(revertGuardAction(report, "refuse")).toBe("stick")
   })
 
+  /**
+   * @failure A historical directory's descendant looks like a reverted file, or its rows spend a commit window.
+   * @level l1 @consumer submit/compose revert coverage with explicit diagnostic bounds
+   * Four commits touching x yield more raw rows, and only x/a ever held the candidate's content.
+   */
+  it("30438: historical directories preserve exact-path matching and finite commit counts", async () => {
+    const w = await flatWorld()
+    await commit(w.repo, { x: "original file\n" }, "file base")
+    rmSync(join(w.repo, "x"))
+    await commit(w.repo, { "x/a": "candidate\n", "x/b": "first\n" }, "file becomes directory")
+    await commit(w.repo, { "x/a": "child advance\n", "x/b": "second\n" }, "two descendant changes")
+    rmSync(join(w.repo, "x"), { recursive: true })
+    const target = await commit(w.repo, { x: "target\n" }, "directory becomes file")
+    const candidate = await commit(w.repo, { x: "candidate\n" }, "fresh file content")
+    const root = await w.checkoutAt(candidate)
+    for (const [window, coverage] of [
+      [undefined, "complete"],
+      [4, "complete"],
+      [3, "incomplete"],
+    ] as const) {
+      const report = await detectReverted({
+        ...(window === undefined ? {} : { bounds: { depth: 3, pathCap: 500, window } }),
+        candidate,
+        git: gitIn(root, undefined, undefined, { env }),
+        head: candidate,
+        root,
+        targetHead: target,
+      })
+      expect(report.paths).toEqual([])
+      expect(report.coverage).toBe(coverage)
+      expect(report.gaps.map(({ kind, path }) => ({ kind, path }))).toEqual(
+        coverage === "complete" ? [] : [{ kind: "bounded", path: "x" }],
+      )
+    }
+  })
+
   it("the durable finding is silent only for a complete, hit-free report", () => {
     expect(revertedPathsFinding(undefined)).toBeUndefined()
     expect(
@@ -475,7 +511,7 @@ describe("revert guard review regressions (27363)", () => {
    * cappedWorld above), so no range recount may call a capped walk
    * complete.
    */
-  async function boundedWorld(rangeTouches: number, fastForward = false) {
+  async function boundedWorld(rangeTouches: number, fastForward = false, candidateContent = "candidate\n") {
     const root = mkdtempSync(join(tmpdir(), "yrd-revert-30354-"))
     roots.push(root)
     const dep = join(root, "dep")
@@ -488,7 +524,7 @@ describe("revert guard review regressions (27363)", () => {
       targetPin = await commit(dep, { "a.txt": `target-${i}\n` }, `target touch ${i}`)
     }
     await depGit(["checkout", "--quiet", "-b", "candidate", fastForward ? targetPin : base])
-    const candidatePin = await commit(dep, { "a.txt": "candidate\n" }, "candidate advance")
+    const candidatePin = await commit(dep, { "a.txt": candidateContent }, "candidate advance")
     await depGit(["checkout", "--quiet", "main"])
     const product = join(root, "product")
     mkdirSync(product)
@@ -506,8 +542,17 @@ describe("revert guard review regressions (27363)", () => {
     return { base, candidate, checkoutAt, target }
   }
 
-  it("30422: the default window fully checks a 59-commit fast-forward history", async () => {
-    const w = await boundedWorld(58, true)
+  /**
+   * @failure A hot path exhausts a fixed default window, hiding an old restore or a complete negative.
+   * @level l1 @consumer submit/compose revert coverage
+   * The former 59-touch case could not expose the observed 100-touch cliff. The same real-Git
+   * fixture now checks both fresh content and a restore older than that bound, with no custom window.
+   */
+  it.each([
+    { name: "fresh content", content: "candidate\n", paths: [] },
+    { name: "an old restore", content: "base\n", paths: ["vendor/dep/a.txt"] },
+  ])("30438: default history completely judges $name beyond 100 touches", async ({ content, paths }) => {
+    const w = await boundedWorld(160, true, content)
     const root = await w.checkoutAt(w.candidate)
     const report = await detectReverted({
       candidate: w.candidate,
@@ -516,9 +561,10 @@ describe("revert guard review regressions (27363)", () => {
       root,
       targetHead: w.target,
     })
-    expect(report.paths).toEqual([])
+    expect(report.paths.map((row) => row.path)).toEqual(paths)
     expect(report.gaps).toEqual([])
     expect(report.coverage).toBe("complete")
+    expect(report.swallowed).toEqual([])
   })
 
   it("30354: a diverged range at the window bound reports complete", async () => {
