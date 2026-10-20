@@ -979,6 +979,28 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
   }
 }
 
+/** This process's own privilege-bounding facts, from /proc/self/status.
+ * That file stays readable when sibling pids do not, so a refusal can name the
+ * discriminator between a blind reader and a capable one (30417). A value that
+ * cannot be read says how it failed; it is never rendered as a default.
+ */
+function readerPrivilegeFacts(): string {
+  let status: string
+  try {
+    status = readFileSync("/proc/self/status", "utf8")
+  } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : String(cause)
+    return `NoNewPrivs=unreadable, CapEff=unreadable (${reason})`
+  }
+  const field = (name: string): string => {
+    const line = status.split("\n").find((entry) => entry.startsWith(`${name}:`))
+    if (line === undefined) return "absent"
+    const value = line.slice(name.length + 1).trim()
+    return value === "" ? "blank" : value
+  }
+  return `NoNewPrivs=${field("NoNewPrivs")}, CapEff=${field("CapEff")}`
+}
+
 /** Explicit exact-tip drop retaining the checkout and its private bytes.
  * The root event owns the environment receipt; each repository owns its archive.
  */
@@ -1057,8 +1079,9 @@ export async function releaseRetainedCheckouts(
     if (admission.kind !== "admitted") {
       // The drop path has no delegation target of its own, so the hold must
       // name the cure that exists: the same command re-run from a context
-      // whose census can read every same-UID pid (e.g. outside a sandbox
-      // restricting /proc reads). The census receipt rides along so the
+      // whose census can read every same-UID pid (e.g. outside a sandbox that
+      // sets NoNewPrivs=1 or otherwise denies same-UID cwd reads). The census
+      // receipt and this reader's own privilege facts ride along so the
       // capable context can compare coverage; the uncleared pids stay named
       // in the refusal — an unreadable pid is never treated as absent.
       const census = admission.census
@@ -1082,7 +1105,7 @@ export async function releaseRetainedCheckouts(
       )
       return [
         `needs-delegation: ${admission.refusal}; census ${census.mechanism}: ${census.rows} readable, ${census.unreadable} unreadable, ${census.uncleared} uncleared. ` +
-          `This caller cannot certify the release; re-run from a context that can read every same-UID pid (outside any sandbox restricting /proc reads): ${rerun}. ` +
+          `This caller cannot certify the release; re-run from a context that can read every same-UID pid (outside any sandbox that sets NoNewPrivs=1 or otherwise denies same-UID cwd reads; this reader: ${readerPrivilegeFacts()}): ${rerun}. ` +
           `The admission there is unchanged: a process holding the checkout still refuses`,
       ]
     }
@@ -1615,9 +1638,14 @@ export type WorktreeRemovalProof = Parameters<
   NonNullable<NonNullable<Parameters<GitWorktreeStore["remove"]>[1]>["retention"]>["report"]
 >[0]
 
+export type AuthorReleaseOutcome = Readonly<{
+  retirement: "complete" | "incomplete"
+  reasons: readonly string[]
+}>
+
 export type AuthorRelease = Readonly<{
   /** Best-effort retirement after the native action has released the captured checkout. */
-  retireAfterRelease(proof?: WorktreeRemovalProof): Promise<void>
+  retireAfterRelease(proof?: WorktreeRemovalProof): Promise<AuthorReleaseOutcome>
   [Symbol.dispose](): void
 }>
 
@@ -1798,18 +1826,29 @@ async function captureAuthorRelease(
             }
             const actor = globalThis.process.env.YRD_DEFAULT_SUBMITTER?.trim() || "yrd"
             attempted = true
-            await retireMergedComponentAuthors({
+            const componentResult = await retireMergedComponentAuthors({
               ...captured,
               authors,
               actor,
               proofs: proof === undefined ? [] : [proof],
             })
             const root = await retireMergedRootAuthor({ ...captured, target: freshTarget, actor })
+            if (root.outcome === "removed" && root.archiveRef !== undefined) {
+              await publishRetirementArchive(store, { branch, archive: root.archiveRef, head: tip })
+            }
             if (root.outcome !== "removed" && !(root.outcome === "kept" && root.reason === "unreached")) {
               input.io.stderr(
                 `yrd: ${branch}@${tip} ${root.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept after release"}: ${root.detail ?? root.reason}\n`,
               )
             }
+            const rootIncomplete = root.outcome === "failed"
+            if (componentResult.incomplete.length > 0 || rootIncomplete) {
+              return {
+                retirement: "incomplete",
+                reasons: [...componentResult.incomplete, ...(rootIncomplete ? [root.detail ?? root.reason] : [])],
+              }
+            }
+            return { retirement: "complete", reasons: [] }
           } catch (cause) {
             const outcome = attempted ? "retirement incomplete; inspect ref and archive" : "kept before retirement"
             input.io.stderr(`yrd: ${branch}@${tip} ${outcome}: ${String(cause)}\n`)
@@ -1822,6 +1861,10 @@ async function captureAuthorRelease(
               })
             } catch (journalCause) {
               input.io.stderr(`yrd: ${branch}: release warning journal failed: ${String(journalCause)}\n`)
+            }
+            return {
+              retirement: "incomplete",
+              reasons: [`${outcome}: ${String(cause)}`],
             }
           }
         },
@@ -1970,7 +2013,8 @@ export async function retireMergedComponentAuthors(
     queue: string
     proofs?: readonly WorktreeRemovalProof[]
   }>,
-): Promise<void> {
+): Promise<Readonly<{ incomplete: readonly string[] }>> {
+  const incomplete: string[] = []
   for (const author of input.authors) {
     try {
       const modules = join(author.rootGitDirectory, "modules")
@@ -2092,6 +2136,8 @@ export async function retireMergedComponentAuthors(
         },
       })
       if (result.outcome !== "removed") {
+        const reason = `${author.path} ${result.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept"}: ${result.detail ?? result.reason}`
+        incomplete.push(reason)
         input.io.stderr(
           `yrd: component ${author.path} ${author.branch}@${author.tip} ${result.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept"}: ${result.detail ?? result.reason}\n`,
         )
@@ -2099,21 +2145,22 @@ export async function retireMergedComponentAuthors(
           kind: "warning",
           branch: author.branch,
           scope: "local-branch-retirement",
-          reason: `${author.path} ${result.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept"}: ${result.detail ?? result.reason}`,
+          reason,
         })
       }
     } catch (cause) {
-      input.io.stderr(
-        `yrd: component ${author.path} ${author.branch}@${author.tip} retirement incomplete; inspect ref and archive: ${String(cause)}\n`,
-      )
+      const reason = `${author.path} ${author.branch}@${author.tip} retirement incomplete; inspect ref and archive: ${String(cause)}`
+      incomplete.push(reason)
+      input.io.stderr(`yrd: component ${reason}\n`)
       input.log.write({
         kind: "warning",
         branch: author.branch,
         scope: "local-branch-retirement",
-        reason: `${author.path} ${author.branch}@${author.tip} retirement incomplete; inspect ref and archive: ${String(cause)}`,
+        reason,
       })
     }
   }
+  return { incomplete }
 }
 
 type LandingPin = Readonly<{ event: string; path: string; tip: string }>

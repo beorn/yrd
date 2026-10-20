@@ -314,7 +314,7 @@ it.each(["released", "held", "advanced", "failed"] as const)(
  * @level l3 @consumer automatic component retirement after native environment release
  * Root-only release and component landing coverage do not observe post-removal component custody or retained-copy bytes.
  */
-it.each(["snapshot", "shared", "advanced"] as const)(
+it.each(["snapshot", "shared", "advanced", "unsealed"] as const)(
   "native component release preserves retained custody: %s",
   async (mode) => {
     const seeded = await world(":")
@@ -418,37 +418,55 @@ it.each(["snapshot", "shared", "advanced"] as const)(
       }
     }
     let releaseReads = 0
-    const exit =
-      mode === "advanced"
-        ? await closeEnvironment(author, { json: true }, closed.io, undefined, "delegate", async () => {
-            // The second existing intent check is after author capture and before retention seals.
-            if (++releaseReads !== 2) return
-            await componentGit(["checkout", "--quiet", "--detach", componentTip])
-            await componentGit(["update-ref", `refs/heads/${componentBranch}`, advancedTip!, componentTip])
-          })
-        : await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io)
-    expect(exit, closed.stderr()).toBe(0)
+    if (mode === "unsealed") {
+      const prepared = await publicCli.prepareAuthorRelease(author, closed.io)
+      expect(prepared.kind).toBe("eligible")
+      if (prepared.kind !== "eligible") throw new Error(JSON.stringify(prepared))
+      using handle = prepared.handle
+      // raw-delete-allow: simulate a worktree delegate removal that releases the checkout without a git-super sealed proof
+      rmSync(author, { recursive: true })
+      await w.git(["worktree", "prune"])
+      const release = await handle.retireAfterRelease()
+      expect(release).toMatchObject({
+        retirement: "incomplete",
+        reasons: [expect.stringContaining("root-owned component store kept: no sealed proof")],
+      })
+      expect(closed.stderr()).toContain("retirement incomplete; inspect ref and archive")
+      expect(closed.stderr()).toContain("root-owned component store kept: no sealed proof")
+    } else {
+      const exit =
+        mode === "advanced"
+          ? await closeEnvironment(author, { json: true }, closed.io, undefined, "delegate", async () => {
+              // The second existing intent check is after author capture and before retention seals.
+              if (++releaseReads !== 2) return
+              await componentGit(["checkout", "--quiet", "--detach", componentTip])
+              await componentGit(["update-ref", `refs/heads/${componentBranch}`, advancedTip!, componentTip])
+            })
+          : await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io)
+      expect(exit, closed.stderr()).toBe(0)
+      expect(proofPath).not.toBe("")
+      expect(readFileSync(proofPath)).toEqual(sealedManifest)
+      const entry = dirname(proofPath)
+      const verified = await verifyRetainedEntry({
+        entry,
+        root: dirname(entry),
+        artifactDir: join(dirname(w.work), `copy-proof-${mode}`),
+        allowTemporaryArtifactDir: true,
+        clock: new Date("2099-01-01T00:00:00.000Z"),
+        namespaceRoots: [w.work],
+      })
+      expect(
+        verified.gates.find((gate) => gate.gate === "copy-manifest"),
+        JSON.stringify(verified),
+      ).toMatchObject({ status: "pass" })
+      expect(readFileSync(proofPath)).toEqual(sealedManifest)
+    }
     expect(existsSync(author)).toBe(false)
-    expect(proofPath).not.toBe("")
-    expect(readFileSync(proofPath)).toEqual(sealedManifest)
-    const entry = dirname(proofPath)
-    const verified = await verifyRetainedEntry({
-      entry,
-      root: dirname(entry),
-      artifactDir: join(dirname(w.work), `copy-proof-${mode}`),
-      allowTemporaryArtifactDir: true,
-      clock: new Date("2099-01-01T00:00:00.000Z"),
-      namespaceRoots: [w.work],
-    })
-    expect(
-      verified.gates.find((gate) => gate.gate === "copy-manifest"),
-      JSON.stringify(verified),
-    ).toMatchObject({ status: "pass" })
-    expect(readFileSync(proofPath)).toEqual(sealedManifest)
     expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${rootBranch}`])).trim()).toBe("")
     expect((await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")).toContain(
       rootTip,
     )
+    expect((await w.git(["ls-remote", "origin", "refs/archive/*"])).trim()).toContain(rootTip)
     if (mode === "shared") {
       const registrations = await gitIn(componentStore)(["worktree", "list", "--porcelain"])
       expect(registrations, `${closed.stderr()}\nNative child registrations:\n${registrations}`).not.toContain(
@@ -465,11 +483,12 @@ it.each(["snapshot", "shared", "advanced"] as const)(
       ).toContain(componentTip)
     } else if (mode === "advanced") {
       expect(releaseReads).toBe(2)
+      expect(JSON.parse(closed.stdout())).toMatchObject({ closed: author, retirement: "incomplete" })
       expect(closed.stderr()).toContain("kept")
       expect(closed.stderr()).toContain(`refs/heads/${componentBranch}`)
       expect(closed.stderr()).toContain(advancedTip)
       expect(closed.stderr()).not.toContain("ended with its root")
-    } else {
+    } else if (mode !== "unsealed") {
       const proof = JSON.parse(sealedManifest!.toString("utf8")) as { retainUntil: string }
       expect(closed.stderr()).toContain("ended with its root")
       expect(closed.stderr()).toContain(`refs/heads/${componentBranch}`)

@@ -1316,14 +1316,20 @@ export async function closeEnvironment(
     // to the repository that owns the worktree registry.
     await worktreeWithoutSubmodules(treeGit, git, commit, ["remove", path])
   }
-  if (retirementHandle !== undefined) await retirementHandle.retireAfterRelease(removalProof)
+  const retirementOutcome =
+    retirementHandle !== undefined ? await retirementHandle.retireAfterRelease(removalProof) : undefined
   if (removalProof !== undefined) removedProof?.(removalProof)
+  const incomplete = retirementOutcome?.retirement === "incomplete"
   io.stdout(
     options.json === true
-      ? `${JSON.stringify(skipped === undefined ? { closed: path } : { closed: path, skipped })}\n`
+      ? `${JSON.stringify({
+          closed: path,
+          ...(skipped === undefined ? {} : { skipped }),
+          ...(incomplete ? { retirement: "incomplete" } : {}),
+        })}\n`
       : `closed environment ${path}\n`,
   )
-  return 0
+  return incomplete && removalProof === undefined ? 1 : 0
 }
 
 /** The loud refusal a queue-round caller makes when its own census cannot certify. */

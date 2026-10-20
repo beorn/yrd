@@ -238,8 +238,6 @@ export function projectionFallbackReport(
   //     when the trace is unreadable), while the run's own pid is still live.
   // A completed run never qualifies — it has that row — so a newer round's lock
   // cannot hide an older run's genuinely missing projection (@yrd/29994 review).
-  // Covered run kinds: queue rounds and ordinary `drop --local`. Local drops
-  // have no round lock; their header pid and final retirement outcome own this proof.
   const latest = runner.latest
   const lock = runner.roundLockLastHolder
   const ownStep = latest?.activeStep !== undefined && activeStepStage(latest.activeStep) === "provisioning"
@@ -254,8 +252,7 @@ export function projectionFallbackReport(
     latest.ended !== true &&
     Number.isFinite(since) &&
     latest.startedAt.getTime() >= since
-  const ownLocalDrop = latest?.command === "drop --local" && latest.alive && latest.ended !== true
-  return ownStep || ownRound || ownLocalDrop
+  return ownStep || ownRound
     ? { ...fallback, reason: "not-yet-written", runnerState: state }
     : { ...fallback, runnerState: state }
 }
@@ -511,12 +508,43 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
     .map((name) => name.slice(0, -".jsonl".length))
     .filter((id) => runStartedAt(id) !== undefined)
     .sort()
-  const id = ours.at(-1)
-  const startedAt = id === undefined ? undefined : runStartedAt(id)
-  if (id === undefined || startedAt === undefined) {
-    return { absent: `no run journal was read: ${journalDir} — it holds no run journal`, journalDir, service }
+  let selected:
+    | Readonly<{
+        id: string
+        startedAt: Date
+        path: string
+        projection: ReturnType<typeof readJournalProjection>
+        read: JournalHead
+      }>
+    | undefined
+  let excludedCommands = 0
+  for (let index = ours.length - 1; index >= 0; index -= 1) {
+    const candidate = ours[index]
+    const startedAt = candidate === undefined ? undefined : runStartedAt(candidate)
+    if (candidate === undefined || startedAt === undefined) continue
+    const path = join(journalDir, `${candidate}.jsonl`)
+    const projection = readJournalProjection(journalDir, candidate, { detail: "omit" })
+    const read = readRunHeader(path, projection.kind === "projection" ? projection.runnerRecords : undefined)
+    // Standalone CLI commands (`drop --local`, `drop --local --release-checkout`,
+    // `drop --retire`, `drop --issue`, `withdraw`, `author release`) share
+    // `<workdir>/logs/` and name their command on the run header. They are not
+    // queue rounds, so the runner's row and projection fallback skip them and
+    // read the newest queue round instead (30401).
+    if (read.fields.command !== undefined) {
+      excludedCommands += 1
+      continue
+    }
+    selected = { id: candidate, startedAt, path, projection, read }
+    break
   }
-  const path = join(journalDir, `${id}.jsonl`)
+  if (selected === undefined) {
+    const held =
+      excludedCommands > 0
+        ? `no queue-round journal qualified (${String(excludedCommands)} standalone command journal(s) were excluded)`
+        : "it holds no run journal"
+    return { absent: `no run journal was read: ${journalDir} — ${held}`, journalDir, service }
+  }
+  const { id, startedAt, path, projection, read } = selected
   const lastWriteAt = statSync(path).mtime
   // THE HEADER'S PID OUTRANKS THE WORKTREE'S, and during a preamble it is the
   // only one there is: `claimWorktrees` does not run until after the whole Git
@@ -525,8 +553,6 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
   // no `.pid` file exists. Reading liveness from that absence would call a run
   // three seconds old dead. The worktree pid still answers for journals written
   // before 24470, and for a run past its preamble it is the same process.
-  const projection = readJournalProjection(journalDir, id, { detail: "omit" })
-  const read = readRunHeader(path, projection.kind === "projection" ? projection.runnerRecords : undefined)
   const pidPath = join(workdir, "worktrees", id, RUN_PID)
   const claimed = existsSync(pidPath) ? readPid(pidPath) : undefined
   const pid = read.pid ?? claimed
