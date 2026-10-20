@@ -867,6 +867,9 @@ export async function coreQueueCommand(
       path: repo,
       url: actual,
       gitIn: (cwd) => gitIn(cwd, undefined, selection, { env, timeoutMs: 60_000 }),
+      onWait: ({ lock, holder }) => {
+        io.stderr(`yrd: ${lock}: waiting for mirror refresh; recorded holder: ${holder}\n`)
+      },
       refspecs,
       maxAgeMs: 60_000,
     })
