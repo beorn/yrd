@@ -2092,13 +2092,14 @@ describe("yrd queue up, the service", () => {
    *          when the root target and tracked cleanup inputs are unchanged.
    *          A reachable remote that excludes the component HEAD must keep it.
    *          A published component HEAD must not hide an unpublished non-HEAD
-   *          commit that exists only in the environment's private object store.
+   *          commit that exists only in the environment's private object store,
+   *          whether a ref, only a reflog, or neither reaches it.
    * @level l2
    * @consumer the operator whose environment is held open by an issue named
    *           only inside a submodule, whose closure root history never records
    * @testonly none
    */
-  it.each(["fresh", "stale", "local-only ref"] as const)(
+  it.each(["fresh", "stale", "local-only ref", "reflog-only", "dangling commit"] as const)(
     "requires component publication custody independently of component-only issue references (%s)",
     async (tracking) => {
       const w = await world()
@@ -2147,8 +2148,8 @@ describe("yrd queue up, the service", () => {
       const privateComponentStore = (await environmentDependencyGit(["rev-parse", "--absolute-git-dir"])).trim()
       let unpublishedComponent: string | undefined
       let custodyBefore: Record<string, unknown> | undefined
-      if (tracking === "local-only ref") {
-        // This non-HEAD ref and its new commit belong only to the temporary
+      if (tracking !== "fresh" && tracking !== "stale") {
+        // This non-HEAD commit belongs only to the temporary
         // environment store; the checked-out, published HEAD stays clean.
         unpublishedComponent = (
           await environmentDependencyGit(
@@ -2156,7 +2157,28 @@ describe("yrd queue up, the service", () => {
             `unpublished component work in ${environment}\n`,
           )
         ).trim()
-        await environmentDependencyGit(["update-ref", "refs/heads/local-only", unpublishedComponent])
+        if (tracking !== "dangling commit") {
+          await environmentDependencyGit([
+            "update-ref",
+            "--create-reflog",
+            "refs/heads/local-only",
+            unpublishedComponent,
+          ])
+          if (tracking === "reflog-only") {
+            await environmentDependencyGit([
+              "update-ref",
+              "refs/heads/local-only",
+              publishedDependencyHead,
+              unpublishedComponent,
+            ])
+          }
+        }
+        const reachableFromRefs = (await environmentDependencyGit(["rev-list", "--all"])).trim().split("\n")
+        const reachableWithReflogs = (await environmentDependencyGit(["rev-list", "--reflog", "--all"]))
+          .trim()
+          .split("\n")
+        expect(reachableFromRefs.includes(unpublishedComponent)).toBe(tracking === "local-only ref")
+        expect(reachableWithReflogs.includes(unpublishedComponent)).toBe(tracking !== "dangling commit")
         expect((await environmentDependencyGit(["rev-parse", "HEAD"])).trim()).toBe(publishedDependencyHead)
         expect(await gitIn(environment)(["status", "--porcelain", "--untracked-files=all"])).toBe("")
         expect(await environmentDependencyGit(["status", "--porcelain", "--untracked-files=all"])).toBe("")
@@ -2172,8 +2194,11 @@ describe("yrd queue up, the service", () => {
           missing.push({ exitCode: absent.exitCode, detail: absent.detail })
         }
         custodyBefore = {
+          variant: tracking,
           head: publishedDependencyHead,
           unpublishedComponent,
+          reachableFromRefs,
+          reachableWithReflogs,
           privateComponentStore,
           sharedStore: (await dependencyGit(["rev-parse", "--absolute-git-dir"])).trim(),
           origin: componentOrigin,
@@ -2183,7 +2208,7 @@ describe("yrd queue up, the service", () => {
         }
       }
       const unavailableOrigin = join(environment, "unavailable-component-origin.git")
-      if (tracking !== "local-only ref") {
+      if (unpublishedComponent === undefined) {
         await environmentDependencyGit(["remote", "set-url", "origin", unavailableOrigin])
       }
       await ageOpening(environment)
@@ -2255,18 +2280,23 @@ describe("yrd queue up, the service", () => {
           const retained = await Promise.all(
             [...stderr.matchAll(/retained environment removal proof (.+)/g)].map(async (match) => {
               const proof = JSON.parse(readFileSync(match[1]!, "utf8"))
-              const retainedRef =
-                proof.retained === null
-                  ? undefined
-                  : await dependencyGit([
-                      "--git-dir",
-                      join(proof.retained, relative(proof.modules, privateComponentStore)),
-                      "--work-tree",
-                      w.work,
-                      "rev-parse",
-                      "refs/heads/local-only",
-                    ])
-              return { manifest: match[1], proof, retainedRef: retainedRef?.trim() }
+              if (proof.retained === null) return { manifest: match[1], proof }
+              const retainedArgs = [
+                "--git-dir",
+                join(proof.retained, relative(proof.modules, privateComponentStore)),
+                "--work-tree",
+                w.work,
+              ]
+              const retainedCommitType = await dependencyGit([...retainedArgs, "cat-file", "-t", unpublishedComponent])
+              const retainedRefs = await dependencyGit([...retainedArgs, "rev-list", "--all"])
+              const retainedWithReflogs = await dependencyGit([...retainedArgs, "rev-list", "--reflog", "--all"])
+              return {
+                manifest: match[1],
+                proof,
+                retainedCommitType: retainedCommitType.trim(),
+                retainedRefs: retainedRefs.trim().split("\n"),
+                retainedWithReflogs: retainedWithReflogs.trim().split("\n"),
+              }
             }),
           )
           const environmentRetained = existsSync(environment)
