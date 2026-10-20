@@ -1587,9 +1587,14 @@ export type WorktreeRemovalProof = Parameters<
   NonNullable<NonNullable<Parameters<GitWorktreeStore["remove"]>[1]>["retention"]>["report"]
 >[0]
 
+export type AuthorReleaseOutcome = Readonly<{
+  retirement: "complete" | "incomplete"
+  reasons: readonly string[]
+}>
+
 export type AuthorRelease = Readonly<{
   /** Best-effort retirement after the native action has released the captured checkout. */
-  retireAfterRelease(proof?: WorktreeRemovalProof): Promise<void>
+  retireAfterRelease(proof?: WorktreeRemovalProof): Promise<AuthorReleaseOutcome>
   [Symbol.dispose](): void
 }>
 
@@ -1770,18 +1775,29 @@ async function captureAuthorRelease(
             }
             const actor = globalThis.process.env.YRD_DEFAULT_SUBMITTER?.trim() || "yrd"
             attempted = true
-            await retireMergedComponentAuthors({
+            const componentResult = await retireMergedComponentAuthors({
               ...captured,
               authors,
               actor,
               proofs: proof === undefined ? [] : [proof],
             })
             const root = await retireMergedRootAuthor({ ...captured, target: freshTarget, actor })
+            if (root.outcome === "removed" && root.archiveRef !== undefined) {
+              await publishRetirementArchive(store, { branch, archive: root.archiveRef, head: tip })
+            }
             if (root.outcome !== "removed" && !(root.outcome === "kept" && root.reason === "unreached")) {
               input.io.stderr(
                 `yrd: ${branch}@${tip} ${root.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept after release"}: ${root.detail ?? root.reason}\n`,
               )
             }
+            const rootIncomplete = root.outcome === "failed"
+            if (componentResult.incomplete.length > 0 || rootIncomplete) {
+              return {
+                retirement: "incomplete",
+                reasons: [...componentResult.incomplete, ...(rootIncomplete ? [root.detail ?? root.reason] : [])],
+              }
+            }
+            return { retirement: "complete", reasons: [] }
           } catch (cause) {
             const outcome = attempted ? "retirement incomplete; inspect ref and archive" : "kept before retirement"
             input.io.stderr(`yrd: ${branch}@${tip} ${outcome}: ${String(cause)}\n`)
@@ -1794,6 +1810,10 @@ async function captureAuthorRelease(
               })
             } catch (journalCause) {
               input.io.stderr(`yrd: ${branch}: release warning journal failed: ${String(journalCause)}\n`)
+            }
+            return {
+              retirement: "incomplete",
+              reasons: [`${outcome}: ${String(cause)}`],
             }
           }
         },
@@ -1942,7 +1962,8 @@ export async function retireMergedComponentAuthors(
     queue: string
     proofs?: readonly WorktreeRemovalProof[]
   }>,
-): Promise<void> {
+): Promise<Readonly<{ incomplete: readonly string[] }>> {
+  const incomplete: string[] = []
   for (const author of input.authors) {
     try {
       const modules = join(author.rootGitDirectory, "modules")
@@ -2064,6 +2085,8 @@ export async function retireMergedComponentAuthors(
         },
       })
       if (result.outcome !== "removed") {
+        const reason = `${author.path} ${result.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept"}: ${result.detail ?? result.reason}`
+        incomplete.push(reason)
         input.io.stderr(
           `yrd: component ${author.path} ${author.branch}@${author.tip} ${result.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept"}: ${result.detail ?? result.reason}\n`,
         )
@@ -2071,21 +2094,22 @@ export async function retireMergedComponentAuthors(
           kind: "warning",
           branch: author.branch,
           scope: "local-branch-retirement",
-          reason: `${author.path} ${result.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept"}: ${result.detail ?? result.reason}`,
+          reason,
         })
       }
     } catch (cause) {
-      input.io.stderr(
-        `yrd: component ${author.path} ${author.branch}@${author.tip} retirement incomplete; inspect ref and archive: ${String(cause)}\n`,
-      )
+      const reason = `${author.path} ${author.branch}@${author.tip} retirement incomplete; inspect ref and archive: ${String(cause)}`
+      incomplete.push(reason)
+      input.io.stderr(`yrd: component ${reason}\n`)
       input.log.write({
         kind: "warning",
         branch: author.branch,
         scope: "local-branch-retirement",
-        reason: `${author.path} ${author.branch}@${author.tip} retirement incomplete; inspect ref and archive: ${String(cause)}`,
+        reason,
       })
     }
   }
+  return { incomplete }
 }
 
 type LandingPin = Readonly<{ event: string; path: string; tip: string }>
