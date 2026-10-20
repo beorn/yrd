@@ -498,7 +498,7 @@ describe("revert guard review regressions (27363)", () => {
     expect(revertGuardAction(capped, "observe")).toBe("clean")
     // Refusal never loosens for it: the cap CAN hide a real revert, as the full run below proves.
     expect(revertGuardAction(capped, "refuse")).toBe("stick")
-    // The full window finds the restore the cap hid: the cap, not the change, was the finding.
+    // The full history finds the restore the cap hid: the cap, not the change, was the finding.
     const full = await detect(w, w.candidate, w.head)
     expect(full.paths.map((row) => row.path)).toContain("vendor/dep/a.txt")
   })

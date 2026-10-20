@@ -381,14 +381,14 @@ async function touchedPaths(
 }
 
 /**
- * The level's complete divergence boundary, full window, or an explicitly unjudged read.
+ * The level's complete divergence boundary, full history, or an explicitly unjudged read.
  *
  * `mergeBases(target, candidate)`: bases BELOW the target pin mean the candidate pin
  * diverged and never carried the target's later advance, so only advances after the base count.
  * When the candidate is a merge commit whose first parent is `target` (the root compose merge or a
  * component merge of `target` with the author branch), `mergeBases(target, candidate)` is `target`
  * itself; resolve the divergence base against `incoming` or the merge's non-target parent. A linear
- * fast-forward pin move keeps the full window (#27363). The resolved bases name the bound in a
+ * fast-forward pin move keeps the full history (#27363). The resolved bases name the bound in a
  * capped gap's reason when the walk was bounded to them (#30354); they change no coverage or
  * refusal semantics. An unreadable base is a named `unjudged` gap, never a silent widening or
  * narrowing of the proof.
