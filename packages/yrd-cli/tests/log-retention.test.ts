@@ -19,6 +19,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs"
 import { homedir, tmpdir } from "node:os"
@@ -105,6 +106,26 @@ describe("expiredRoundOutput (selection, by name only)", () => {
    * @level l2
    * @consumer yrd logs prune
    */
+  /**
+   * @failure An empty logs/environments/<env> directory older than the window stays forever, so prune reports selected 0.
+   * @level l2
+   * @consumer yrd logs prune
+   */
+  it("selects an empty environment directory older than the window and leaves a young one", () => {
+    const { logs } = tree("env-empty-old")
+    const oldDir = join(logs, "environments", "fixer-28499")
+    mkdirSync(oldDir, { recursive: true })
+    utimesSync(oldDir, ago(12), ago(12))
+    const youngDir = join(logs, "environments", "fixer-young")
+    mkdirSync(youngDir, { recursive: true })
+    utimesSync(youngDir, ago(1), ago(1))
+    const held = join(logs, "environments", "fixer-held")
+    place(join(held, round(ago(1))))
+    utimesSync(held, ago(12), ago(12))
+    const found = expiredRoundOutput({ roots: [logs], now: NOW }).entries.map((entry) => entry.path)
+    expect(found).toEqual([oldDir])
+  })
+
   it("selects an old environment directory named <commit>-q-<utc>-<id> with no round child", () => {
     const { logs } = tree("env-stamp")
     const envDir = place(join(logs, "environments", `0010d72a646a-${round(ago(12))}`), "setup.log")

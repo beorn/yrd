@@ -176,6 +176,14 @@ export function expiredRoundOutput(
             unreadable.push(path)
             continue
           }
+          // The live container is `<env>`, not `<env>-q-<utc>-<id>`. Its age is the directory mtime.
+          // A younger round inside keeps the container; the round walk below still sees that child.
+          const containerStarted = directoryMtime(path)
+          const holdsYoungRound = roundInstants(path).some((started) => started.getTime() > cutoff)
+          if (!holdsYoungRound && containerStarted !== undefined && containerStarted.getTime() <= cutoff) {
+            found.push({ path, name: entry.name, within, started: containerStarted })
+            continue
+          }
         }
         const started = runStartedAt(entry.name)
         if (started !== undefined) {
@@ -196,6 +204,16 @@ export function expiredRoundOutput(
   unreadable.sort((left, right) => left.localeCompare(right))
   withheld.sort((left, right) => left.localeCompare(right))
   return { entries: found, missing, unreadable, withheld }
+}
+
+/** The directory's own mtime. A name with no round stamp has no other age. A vanished directory has none. */
+function directoryMtime(path: string): Date | undefined {
+  try {
+    return statSync(path).mtime
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    throw new Error(`log retention cannot read ${path}: ${String(cause)}`, { cause })
+  }
 }
 
 /** Start instants of round directories directly inside `directory`. Names only; a vanished directory has none. */
