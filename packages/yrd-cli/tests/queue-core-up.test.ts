@@ -36,7 +36,7 @@ import {
 } from "node:fs"
 import { hostname, tmpdir } from "node:os"
 import { monitorEventLoopDelay } from "node:perf_hooks"
-import { basename, dirname, join, resolve } from "node:path"
+import { basename, dirname, join, relative, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { tryAcquireFlock } from "@bearly/flock"
@@ -2091,13 +2091,15 @@ describe("yrd queue up, the service", () => {
    *          A failed remote proof must retry when the remote recovers, even
    *          when the root target and tracked cleanup inputs are unchanged.
    *          A reachable remote that excludes the component HEAD must keep it.
+   *          A published component HEAD must not hide an unpublished non-HEAD
+   *          commit that exists only in the environment's private object store.
    * @level l2
    * @consumer the operator whose environment is held open by an issue named
    *           only inside a submodule, whose closure root history never records
    * @testonly none
    */
-  it.each(["fresh", "stale"] as const)(
-    "closes an ancestor environment despite component-only issue references (%s component tracking ref)",
+  it.each(["fresh", "stale", "local-only ref"] as const)(
+    "requires component publication custody independently of component-only issue references (%s)",
     async (tracking) => {
       const w = await world()
       await w.git(["config", "yrd.workdir", w.workdir])
@@ -2141,8 +2143,49 @@ describe("yrd queue up, the service", () => {
         publishedDependencyHead,
       )
       const componentOrigin = (await environmentDependencyGit(["remote", "get-url", "origin"])).trim()
+      const originGit = gitIn(componentOrigin)
+      const privateComponentStore = (await environmentDependencyGit(["rev-parse", "--absolute-git-dir"])).trim()
+      let unpublishedComponent: string | undefined
+      let custodyBefore: Record<string, unknown> | undefined
+      if (tracking === "local-only ref") {
+        // This non-HEAD ref and its new commit belong only to the temporary
+        // environment store; the checked-out, published HEAD stays clean.
+        unpublishedComponent = (
+          await environmentDependencyGit(
+            ["commit-tree", `${publishedDependencyHead}^{tree}`, "-p", publishedDependencyHead],
+            `unpublished component work in ${environment}\n`,
+          )
+        ).trim()
+        await environmentDependencyGit(["update-ref", "refs/heads/local-only", unpublishedComponent])
+        expect((await environmentDependencyGit(["rev-parse", "HEAD"])).trim()).toBe(publishedDependencyHead)
+        expect(await gitIn(environment)(["status", "--porcelain", "--untracked-files=all"])).toBe("")
+        expect(await environmentDependencyGit(["status", "--porcelain", "--untracked-files=all"])).toBe("")
+        expect(await environmentDependencyGit(["cat-file", "-t", unpublishedComponent])).toBe("commit\n")
+        const missing: { exitCode: number; detail: string }[] = []
+        for (const store of [dependencyGit, originGit]) {
+          expect(await store(["cat-file", "-t", publishedDependencyHead])).toBe("commit\n")
+          const absent = await store(["cat-file", "-e", `${unpublishedComponent}^{commit}`]).catch((cause) => cause)
+          expect(absent).toMatchObject({
+            exitCode: 128,
+            detail: expect.stringContaining(`Not a valid object name ${unpublishedComponent}^{commit}`),
+          })
+          missing.push({ exitCode: absent.exitCode, detail: absent.detail })
+        }
+        custodyBefore = {
+          head: publishedDependencyHead,
+          unpublishedComponent,
+          privateComponentStore,
+          sharedStore: (await dependencyGit(["rev-parse", "--absolute-git-dir"])).trim(),
+          origin: componentOrigin,
+          sharedAndOriginMissing: missing,
+          rootStatus: "",
+          componentStatus: "",
+        }
+      }
       const unavailableOrigin = join(environment, "unavailable-component-origin.git")
-      await environmentDependencyGit(["remote", "set-url", "origin", unavailableOrigin])
+      if (tracking !== "local-only ref") {
+        await environmentDependencyGit(["remote", "set-url", "origin", unavailableOrigin])
+      }
       await ageOpening(environment)
       const census = vi
         .spyOn(removely, "inspectProcessCwds")
@@ -2163,7 +2206,7 @@ describe("yrd queue up, the service", () => {
               afterRound: async (outcome) => {
                 await waitForEnvironmentCleanup(workdir, outcome.run)
                 rounds++
-                if (tracking === "fresh") {
+                if (tracking !== "stale") {
                   stop.abort()
                   return
                 }
@@ -2206,6 +2249,45 @@ describe("yrd queue up, the service", () => {
         ).toBe(0)
         expect(rounds).toBe(tracking === "stale" ? 3 : 1)
         const stderr = run.stderr()
+        if (unpublishedComponent !== undefined) {
+          const sharedReachable = (await dependencyGit(["rev-list", "--all"])).trim().split("\n")
+          const originReachable = (await originGit(["rev-list", "--all"])).trim().split("\n")
+          const retained = await Promise.all(
+            [...stderr.matchAll(/retained environment removal proof (.+)/g)].map(async (match) => {
+              const proof = JSON.parse(readFileSync(match[1]!, "utf8"))
+              const retainedRef =
+                proof.retained === null
+                  ? undefined
+                  : await dependencyGit([
+                      "--git-dir",
+                      join(proof.retained, relative(proof.modules, privateComponentStore)),
+                      "--work-tree",
+                      w.work,
+                      "rev-parse",
+                      "refs/heads/local-only",
+                    ])
+              return { manifest: match[1], proof, retainedRef: retainedRef?.trim() }
+            }),
+          )
+          const environmentRetained = existsSync(environment)
+          const keptForCommit = allCleanupRows(workdir).findLast(
+            (row) =>
+              row.path === environment &&
+              row.result === "kept" &&
+              typeof row.why === "string" &&
+              row.why.includes(unpublishedComponent),
+          )
+          expect(
+            (environmentRetained && keptForCommit !== undefined) ||
+              sharedReachable.includes(unpublishedComponent) ||
+              originReachable.includes(unpublishedComponent),
+            JSON.stringify({
+              before: custodyBefore,
+              after: { environmentRetained, keptForCommit, sharedReachable, originReachable, retained },
+            }),
+          ).toBe(true)
+          return
+        }
         expect(existsSync(environment), stderr).toBe(false)
         expect(await w.git(["worktree", "list", "--porcelain", "-z"]), stderr).not.toContain(environment)
         expect(stderr).not.toContain("27601")
