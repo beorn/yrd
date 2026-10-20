@@ -2086,71 +2086,136 @@ describe("yrd queue up, the service", () => {
    *          own binding: an environment that root history binds to nothing is
    *          kept — or has its issue status consulted — on component-only
    *          evidence the ruling says must be counted, not widened.
+   *          A stale component tracking ref must not hide its published HEAD.
+   *          A fresh local proof must not depend on remote availability.
+   *          A failed remote proof must retry when the remote recovers, even
+   *          when the root target and tracked cleanup inputs are unchanged.
+   *          A reachable remote that excludes the component HEAD must keep it.
    * @level l2
    * @consumer the operator whose environment is held open by an issue named
    *           only inside a submodule, whose closure root history never records
    * @testonly none
    */
-  it("closes an ancestor environment despite component-only issue references", async () => {
-    const w = await world()
-    await w.git(["config", "yrd.workdir", w.workdir])
-    await addMaterializedDependency(w)
-    // The component's own commit names issue 27601; no root commit ever does, so
-    // root-only binding must leave the environment unbound.
-    const dependencyGit = gitIn(join(w.work, "vendor/dependency"))
-    await dependencyGit(["commit", "--quiet", "--allow-empty", "-m", "component-only binding", "-m", "Refs: 27601"])
-    await dependencyGit(["push", "--quiet", "origin", "main"])
-    await w.git(["add", "vendor/dependency"])
-    await w.git(["commit", "--quiet", "-m", "record the moved component"])
-    await w.git(["push", "--quiet", "origin", "main"])
-    // The fixture's whole point: the component names 27601 and no root commit does.
-    expect((await dependencyGit(["log", "-1", "--format=%B"])).trim()).toContain("Refs: 27601")
-    expect(await w.git(["log", "--format=%B"])).not.toContain("27601")
-    // Component issue references do not participate in native cleanup.
-    await redeclare(w, "setup: ':'\n")
-    await w.git(["fetch", "--quiet", "origin", "main"])
-    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
-    const workdir = await workdirOf(w.git, { cwd: w.work })
-    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    const opened = capture(w.work)
-    expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "component-only", "--json"], opened.io),
-      opened.stderr(),
-    ).toBe(0)
-    const environment = (JSON.parse(opened.stdout()) as { path: string }).path
-    await ageOpening(environment)
-    const census = vi
-      .spyOn(removely, "inspectProcessCwds")
-      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
-    const stop = new AbortController()
-    const run = capture(w.work)
-    try {
+  it.each(["fresh", "stale"] as const)(
+    "closes an ancestor environment despite component-only issue references (%s component tracking ref)",
+    async (tracking) => {
+      const w = await world()
+      await w.git(["config", "yrd.workdir", w.workdir])
+      await addMaterializedDependency(w)
+      // The component's own commit names issue 27601; no root commit ever does, so
+      // root-only binding must leave the environment unbound.
+      const dependencyGit = gitIn(join(w.work, "vendor/dependency"))
+      const staleDependencyHead = (await dependencyGit(["rev-parse", "HEAD"])).trim()
+      await dependencyGit(["commit", "--quiet", "--allow-empty", "-m", "component-only binding", "-m", "Refs: 27601"])
+      await dependencyGit(["push", "--quiet", "origin", "main"])
+      await w.git(["add", "vendor/dependency"])
+      await w.git(["commit", "--quiet", "-m", "record the moved component"])
+      await w.git(["push", "--quiet", "origin", "main"])
+      // The fixture's whole point: the component names 27601 and no root commit does.
+      expect((await dependencyGit(["log", "-1", "--format=%B"])).trim()).toContain("Refs: 27601")
+      expect(await w.git(["log", "--format=%B"])).not.toContain("27601")
+      // Component issue references do not participate in native cleanup.
+      await redeclare(w, "setup: ':'\n")
+      await w.git(["fetch", "--quiet", "origin", "main"])
+      await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+      const workdir = await workdirOf(w.git, { cwd: w.work })
+      const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+      const opened = capture(w.work)
       expect(
-        await coreQueueCommand(
-          w.work,
-          run.io,
-          {
-            command: "up",
-            intervalSeconds: 0,
-            stop: stop.signal,
-            afterRound: async (outcome) => {
-              await waitForEnvironmentCleanup(workdir, outcome.run)
-              stop.abort()
-            },
-          },
-          { json: true, workdir },
-        ),
-        run.stderr(),
+        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "component-only", "--json"], opened.io),
+        opened.stderr(),
       ).toBe(0)
-      const stderr = run.stderr()
-      expect(existsSync(environment), stderr).toBe(false)
-      expect(await w.git(["worktree", "list", "--porcelain", "-z"]), stderr).not.toContain(environment)
-      expect(stderr).not.toContain("27601")
-    } finally {
-      stop.abort()
-      census.mockRestore()
-    }
-  }, 120_000)
+      const environment = (JSON.parse(opened.stdout()) as { path: string }).path
+      // The remote already has this exact component, but this environment's
+      // tracking ref still predates it, as in a long-lived inactive environment.
+      const environmentDependencyGit = gitIn(join(environment, "vendor/dependency"))
+      const publishedDependencyHead = (await environmentDependencyGit(["rev-parse", "HEAD"])).trim()
+      if (tracking === "stale") {
+        await environmentDependencyGit(["update-ref", "refs/remotes/origin/main", staleDependencyHead])
+      }
+      expect((await environmentDependencyGit(["rev-parse", "origin/main"])).trim()).toBe(
+        tracking === "stale" ? staleDependencyHead : publishedDependencyHead,
+      )
+      expect(staleDependencyHead).not.toBe(publishedDependencyHead)
+      expect((await environmentDependencyGit(["ls-remote", "origin", "refs/heads/main"])).trim().split(/\s+/)[0]).toBe(
+        publishedDependencyHead,
+      )
+      const componentOrigin = (await environmentDependencyGit(["remote", "get-url", "origin"])).trim()
+      const unavailableOrigin = join(environment, "unavailable-component-origin.git")
+      await environmentDependencyGit(["remote", "set-url", "origin", unavailableOrigin])
+      await ageOpening(environment)
+      const census = vi
+        .spyOn(removely, "inspectProcessCwds")
+        .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+      const stop = new AbortController()
+      const run = capture(w.work)
+      let rounds = 0
+      let firstTarget: string | undefined
+      try {
+        expect(
+          await coreQueueCommand(
+            w.work,
+            run.io,
+            {
+              command: "up",
+              intervalSeconds: 0,
+              stop: stop.signal,
+              afterRound: async (outcome) => {
+                await waitForEnvironmentCleanup(workdir, outcome.run)
+                rounds++
+                if (tracking === "fresh") {
+                  stop.abort()
+                  return
+                }
+                if (rounds === 1) {
+                  firstTarget = outcome.target
+                  expect(existsSync(environment), run.stderr()).toBe(true)
+                  expect(run.stderr()).toContain(unavailableOrigin)
+                  expect(run.stderr()).toContain("origin refs/heads/main publication unproven")
+                  // Rewind only this fixture's temporary bare remote, so its
+                  // reachable main cannot prove custody of the component HEAD.
+                  await gitIn(componentOrigin)([
+                    "update-ref",
+                    "refs/heads/main",
+                    staleDependencyHead,
+                    publishedDependencyHead,
+                  ])
+                  await environmentDependencyGit(["remote", "set-url", "origin", componentOrigin])
+                } else {
+                  expect(outcome.target, "remote recovery needs no root target change").toBe(firstTarget)
+                  if (rounds === 2) {
+                    expect(existsSync(environment), run.stderr()).toBe(true)
+                    const refused = allCleanupRows(workdir)
+                      .filter((row) => row.path === environment && row.result === "kept")
+                      .at(-1)
+                    expect(refused?.why).toContain("origin refs/heads/main publication unproven")
+                    expect(refused?.why).toContain(publishedDependencyHead)
+                    await gitIn(componentOrigin)([
+                      "update-ref",
+                      "refs/heads/main",
+                      publishedDependencyHead,
+                      staleDependencyHead,
+                    ])
+                  } else stop.abort()
+                }
+              },
+            },
+            { json: true, workdir },
+          ),
+          run.stderr(),
+        ).toBe(0)
+        expect(rounds).toBe(tracking === "stale" ? 3 : 1)
+        const stderr = run.stderr()
+        expect(existsSync(environment), stderr).toBe(false)
+        expect(await w.git(["worktree", "list", "--porcelain", "-z"]), stderr).not.toContain(environment)
+        expect(stderr).not.toContain("27601")
+      } finally {
+        stop.abort()
+        census.mockRestore()
+      }
+    },
+    120_000,
+  )
 
   /**
    * @failure Issue-association creation evidence blocks cleanup even though

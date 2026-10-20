@@ -4,7 +4,10 @@ import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   createEventStore,
   gitIn,
+  isAncestor,
   readBranchHistory,
+  readRemoteCommit,
+  refAt,
   registeredWorktrees,
   remoteUrl,
   selectionFor,
@@ -59,6 +62,7 @@ type CachedEnvironment = {
   bindingKey?: string
   expensiveKey?: string
   verdict?: string
+  retryRemoteProof?: boolean
   hold?: string | null
   busy?: string
 }
@@ -713,6 +717,7 @@ async function proveEnvironmentRemovable(input: {
   entry: CachedEnvironment
   ancestor: (root: string, head: string, target: string) => Promise<void>
 }): Promise<void> {
+  input.entry.retryRemoteProof = false
   await input.ancestor(input.path, input.head, input.target)
   const inspection = await createLocalGitWorktreeStore({ repo: input.repo, env: input.env }).inspectRemoval(input.path)
   for (const component of inspection.consultedRepositories) {
@@ -738,8 +743,24 @@ async function proveEnvironmentRemovable(input: {
   for (const component of inspection.consultedRepositories) {
     if (component.path === ".") continue
     if (component.to === undefined) throw new Error(`materialized component ${component.root} has no HEAD`)
-    await input.ancestor(component.root, component.to, `refs/remotes/origin/${input.originBranch}`)
+    const componentGit = input.treeGit.at(component.root)
+    const localTarget = await refAt(componentGit, `refs/remotes/origin/${input.originBranch}`)
+    if (localTarget !== undefined && (await isAncestor(componentGit, component.to, localTarget))) continue
+    // A private tracking ref may lag publication. Remote-dependent keeps must
+    // retry even when neither the root target nor local filesystem changes.
+    input.entry.retryRemoteProof = true
+    const remoteRef = `refs/heads/${input.originBranch}`
+    try {
+      const published = await readRemoteCommit(componentGit, "origin", remoteRef)
+      if (published === undefined) throw new Error(`origin ${remoteRef} is absent`)
+      await input.ancestor(component.root, component.to, published)
+    } catch (cause) {
+      throw new Error(`component ${component.root}: origin ${remoteRef} publication unproven: ${reasonText(cause)}`, {
+        cause,
+      })
+    }
   }
+  input.entry.retryRemoteProof = false
 }
 
 /**
@@ -1171,7 +1192,7 @@ async function cleanupEnvironments(
             entry.expensiveKey = expensiveKey()
           } catch (cause) {
             entry.verdict = String(cause)
-            entry.expensiveKey = expensiveKey()
+            entry.expensiveKey = entry.retryRemoteProof ? undefined : expensiveKey()
             throw cause
           }
         }
