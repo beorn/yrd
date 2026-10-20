@@ -20,6 +20,7 @@ import {
 import { hostname, tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { describe, expect, it, vi } from "vitest"
+import * as gitomic from "gitomic"
 import { createProcess } from "@yrd/process"
 import { createScriptedProcess, exitedResult } from "@yrd/process/testing/scripted-process"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
@@ -668,6 +669,140 @@ describe("the git runner", () => {
     }
   })
 
+  // @failure A transient HTTP/2 reset ends queue acquisition before its one permitted read retry.
+  // @level l2; @consumer queue service remote acquisition; @testonly none
+  // Existing SSH-drop rows cannot catch curl 92: Gitomic emits the same plain Error
+  // boundary for both, but the SSH classifier deliberately does not match HTTP/2.
+  it.each([
+    ["ls-remote", 1],
+    ["ls-remote", 2],
+    ["fetch", 1],
+    ["fetch", 2],
+  ] as const)("retries a Gitomic %s HTTP/2 reset exactly once (failures=%i)", async (verb, failures) => {
+    const reset = "error: RPC failed; curl 92 HTTP/2 stream 5 reset by server (error 0x8 CANCEL)"
+    const { repo, ssh, calls } = legacyPublickeyRepo(failures, reset)
+    const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const backend = gitRunner.createLegacyBackend("git", {
+        ...process.env,
+        GIT_SSH_COMMAND: ssh,
+        GIT_SSH_VARIANT: "ssh",
+      })
+      const read =
+        verb === "fetch"
+          ? backend.fetchRefs!(repo, ["refs/heads/main"], "git@github.com:fixture")
+          : backend.listRefs!(repo, "refs/heads/", "git@github.com:fixture")
+      if (failures === 1) expect((await read).get("refs/heads/main")).toMatch(/^[a-f0-9]{40}$/u)
+      else await expect(read).rejects.toThrow(reset)
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(2)
+      expect(announced).toHaveBeenCalledOnce()
+      expect(announced.mock.calls[0]?.[0]).toContain("retry 2/2")
+    } finally {
+      announced.mockRestore()
+    }
+  })
+
+  // @failure A bounded remote-read timeout skips its retry, or caller cancellation starts another process.
+  // @level l2; @consumer queue service remote acquisition; @testonly none
+  // Inject the exported producer error at the real backend boundary: HTTP/2/SSH
+  // subprocess coverage cannot express GitTimeout separately from GitSignaled.
+  it.each([
+    ["ls-remote", "timeout", 1],
+    ["ls-remote", "timeout", 2],
+    ["fetch", "timeout", 1],
+    ["fetch", "timeout", 2],
+    ["ls-remote", "signal", 1],
+    ["fetch", "signal", 1],
+    ["ls-remote", "cancel-before-retry", 1],
+    ["fetch", "cancel-before-retry", 1],
+    ["ls-remote", "journal-failure", 1],
+    ["fetch", "journal-failure", 1],
+    ["ls-remote", "second-signal", 1],
+    ["fetch", "second-signal", 1],
+  ] as const)("handles Gitomic %s %s without more than one retry (failures=%i)", async (verb, kind, failures) => {
+    const { repo, ssh } = legacyPublickeyRepo(0)
+    const fault =
+      kind === "signal"
+        ? new gitomic.GitSignaled(`git ${verb} origin refs/heads/main`, "SIGTERM", "caller cancelled")
+        : new gitomic.GitTimeout(`git ${verb} origin refs/heads/main`, 300_000)
+    const cancellation = new gitomic.GitSignaled(`git ${verb} origin refs/heads/main`, "SIGTERM", "caller cancelled")
+    const journalFailure = new Error("round journal write failed")
+    const controller = new AbortController()
+    const observed = vi.fn(() => {
+      if (kind === "journal-failure") throw journalFailure
+    })
+    const create = gitomic.createShellBackend
+    let attempts = 0
+    const attempt = () => {
+      attempts++
+      if (kind === "cancel-before-retry" && attempts === 1) setTimeout(() => controller.abort(cancellation), 0)
+      if (kind === "second-signal" && attempts === 2) throw cancellation
+      if (attempts <= failures) throw fault
+    }
+    const factory = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
+      const backend = create(options)
+      const wrapped: gitomic.GitomicBackend = {
+        ...backend,
+        listRefs: async (repo, prefix, remote) => {
+          if (verb === "ls-remote") attempt()
+          return backend.listRefs!(repo, prefix, remote)
+        },
+        fetchRefs: async (repo, refs, remote, options) => {
+          if (verb === "fetch") attempt()
+          return backend.fetchRefs!(repo, refs, remote, options)
+        },
+      }
+      return wrapped
+    })
+    const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const backend = gitRunner.createLegacyBackend(
+        "git",
+        {
+          ...process.env,
+          GIT_SSH_COMMAND: ssh,
+          GIT_SSH_VARIANT: "ssh",
+        },
+        undefined,
+        { onReadRetry: observed, signal: controller.signal },
+      )
+      const read =
+        verb === "fetch"
+          ? backend.fetchRefs!(repo, ["refs/heads/main"], "git@github.com:fixture")
+          : backend.listRefs!(repo, "refs/heads/", "git@github.com:fixture")
+      if (kind === "timeout" && failures === 1) {
+        expect((await read).get("refs/heads/main")).toMatch(/^[a-f0-9]{40}$/u)
+      } else {
+        const expected =
+          kind === "journal-failure"
+            ? journalFailure
+            : kind === "cancel-before-retry" || kind === "second-signal"
+              ? cancellation
+              : fault
+        await expect(read).rejects.toBe(expected)
+        expect(expected.message.includes("Retried: 1")).toBe(kind === "timeout")
+      }
+      const retryTaken = kind === "timeout" || kind === "second-signal"
+      expect(attempts).toBe(retryTaken ? 2 : 1)
+      expect(announced).toHaveBeenCalledTimes(retryTaken ? 1 : 0)
+      expect(observed).toHaveBeenCalledTimes(retryTaken || kind === "journal-failure" ? 1 : 0)
+      if (retryTaken) {
+        expect(observed).toHaveBeenCalledWith(
+          expect.objectContaining({
+            verb,
+            repo,
+            remote: "git@github.com:fixture",
+            attempt: 2,
+            attempts: 2,
+          }),
+        )
+      }
+    } finally {
+      announced.mockRestore()
+      factory.mockRestore()
+    }
+  })
+
   it("does not retry a different Gitomic SSH failure", async () => {
     const refusal = "fatal: repository not found"
     const { repo, ssh, calls } = legacyPublickeyRepo(1, refusal)
@@ -675,10 +810,12 @@ describe("the git runner", () => {
     const previousVariant = process.env.GIT_SSH_VARIANT
     process.env.GIT_SSH_COMMAND = ssh
     process.env.GIT_SSH_VARIANT = "ssh"
+    const observed = vi.fn()
     try {
-      const backend = gitRunner.createLegacyBackend()
+      const backend = gitRunner.createLegacyBackend("git", process.env, undefined, { onReadRetry: observed })
       await expect(backend.listRefs!(repo, "refs/heads/", "git@github.com:fixture")).rejects.toThrow(refusal)
       expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(1)
+      expect(observed).not.toHaveBeenCalled()
     } finally {
       if (previous === undefined) delete process.env.GIT_SSH_COMMAND
       else process.env.GIT_SSH_COMMAND = previous

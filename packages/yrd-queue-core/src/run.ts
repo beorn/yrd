@@ -178,6 +178,7 @@ function gitInvocationOptions(options: QueueRunOptions, log: QueueRunLog): GitIn
     ...(options.env === undefined ? {} : { env: options.env }),
     openOutput: log.openGitOutput,
     onInvocation: log.writeGitInvocation,
+    onReadRetry: (notice) => log.write({ kind: "warning", reason: "retried", ...notice }),
   }
 }
 
@@ -296,7 +297,7 @@ async function queueRunWithLog(options: QueueRunOptions, log: QueueRunLog): Prom
     )
   }
   const url = await remoteUrl(git, options.target.remote)
-  const store = createEventStore(options.repo, options.target.remote, selection)
+  const store = createEventStore(options.repo, options.target.remote, selection, selected.backend)
   if ((await queueFormat(store, options.target.branch)) !== "event") {
     throw new Error(
       `${url}#${options.target.branch} in ${options.repo}: expected event queue ref ${queueRef(options.target.branch)}; legacy queue authority is retired`,

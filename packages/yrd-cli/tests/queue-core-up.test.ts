@@ -6703,6 +6703,36 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     expect(run.stdout()).not.toContain("then run yrd queue run")
   })
 
+  /** @failure A mirror-lock finalizer failure hides the original remote acquisition fault, or its own failure is swallowed.
+   * @level l2 @consumer Hab-supervised queue command diagnostics
+   * Two independently failing public owners are required: the ordinary terminal-error
+   * control above cannot witness the finally path replacing a prior exit result.
+   */
+  it("retains the remote fault when status invalidation also fails", async () => {
+    const w = await world()
+    const remote = new Error(
+      "git ls-remote failed (128): error: RPC failed; curl 92 HTTP/2 stream 5 reset by server (error 0x8 CANCEL)",
+    )
+    const finalizer = new Error("status stamp could not be invalidated: mirror repo.lock wait expired")
+    const round = vi.spyOn(queueCore, "queueRun").mockRejectedValue(remote)
+    const invalidation = vi.spyOn(queueCore, "invalidateMirrorStamp").mockRejectedValue(finalizer)
+    const run = capture(w.work)
+    try {
+      await expect(
+        coreQueueCommand(w.work, run.io, { command: "up", intervalSeconds: 0 }, { json: true, workdir: w.workdir }),
+      ).rejects.toBe(finalizer)
+      expect(round).toHaveBeenCalledOnce()
+      expect(invalidation).toHaveBeenCalledOnce()
+      expect(run.stdout()).toContain(remote.message)
+      expect(records(run)).toContainEqual(
+        expect.objectContaining({ exitCode: 2, why: expect.stringContaining(remote.message) }),
+      )
+    } finally {
+      invalidation.mockRestore()
+      round.mockRestore()
+    }
+  })
+
   /** @failure 25946: a second change-ref write between the rival status and its selected history read
    * escaped as an unexpected round error and ended the supervised service with exit 2.
    * The discard must carry the second tip, not the stale status read before that write.

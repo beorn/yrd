@@ -584,6 +584,86 @@ it("merged local retirement reports only changed component branches without owne
   expect(readRunLog(dirname(unchangedLog.path), unchangedLog.id).some((row) => row.kind === "warning")).toBe(false)
 })
 
+/** @failure A recovered acquisition fault disappears from the round journal when a store loses its runner's observer.
+ * @level l3 @consumer queue operator reading the durable round journal
+ * Backend retry tests cannot observe either round-owned store's journal wiring.
+ * Uses the existing real-remote fixture and existing Gitomic fault boundary; no production test seam.
+ */
+it.each([CHANGES, "refs/heads/main"])("journals one recovered remote read retry for %s", async (refs) => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined }
+  const fault = new gitomic.GitTimeout(`git ls-remote origin ${refs}`, 300_000)
+  let reads = 0
+  using _backend = beforeGitomicPublish(
+    async () => {},
+    undefined,
+    undefined,
+    async (_repo, prefix, remote) => {
+      if (remote === "origin" && prefix === refs && ++reads === 1) throw fault
+      return undefined
+    },
+  )
+  using warning = vi.spyOn(console, "error").mockImplementation(() => {})
+
+  const outcome = await queueRun(options)
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [], stuck: [] })
+  expect(reads).toBeGreaterThanOrEqual(2)
+  expect(warning).toHaveBeenCalledTimes(1)
+  const retries = logRecords(outcome).filter((row) => row.kind === "warning" && row.reason === "retried")
+  expect(retries).toEqual([
+    expect.objectContaining({
+      verb: "ls-remote",
+      repo: w.work,
+      remote: "origin",
+      refs,
+      attempt: 2,
+      attempts: 2,
+      cause: fault.message,
+    }),
+  ])
+})
+
+/** @failure An exhausted acquisition read could lose retry provenance or be retried again by the round.
+ * @level l3 @consumer queue operator reading acquisition failure and the durable journal
+ * Backend-only tests cannot prove that the round refrains from a third read.
+ */
+it.each([CHANGES, "refs/heads/main"])("stops after two exhausted acquisition reads for %s", async (refs) => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined }
+  const fault = new gitomic.GitTimeout(`git ls-remote origin ${refs}`, 300_000)
+  let reads = 0
+  using _backend = beforeGitomicPublish(
+    async () => {},
+    undefined,
+    undefined,
+    async (_repo, prefix, remote) => {
+      if (remote === "origin" && prefix === refs) {
+        reads++
+        throw fault
+      }
+      return undefined
+    },
+  )
+  using warning = vi.spyOn(console, "error").mockImplementation(() => {})
+
+  await expect(queueRun(options)).rejects.toBe(fault)
+  expect(reads).toBe(2)
+  expect(warning).toHaveBeenCalledTimes(1)
+  expect(fault.message).toContain("Retried: 1")
+  const logs = readdirSync(join(w.workdir, "logs")).filter((name) => name.endsWith(".jsonl"))
+  expect(logs).toHaveLength(1)
+  const records = readFileSync(join(w.workdir, "logs", logs[0]!), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+  expect(records.filter((row) => row.kind === "warning" && row.reason === "retried")).toEqual([
+    expect.objectContaining({ verb: "ls-remote", remote: "origin", refs, attempt: 2, attempts: 2 }),
+  ])
+})
+
 /** @failure Submit and the queue drift to different composition paths.
  * @level l2 @consumer the submitter and the queue runner
  * Separate behaviour tests cannot prove both entry points invoke one verifier.
