@@ -668,6 +668,39 @@ describe("the git runner", () => {
     }
   })
 
+  // @failure A transient HTTP/2 reset ends queue acquisition before its one permitted read retry.
+  // @level l2; @consumer queue service remote acquisition; @testonly none
+  // Existing SSH-drop rows cannot catch curl 92: Gitomic emits the same plain Error
+  // boundary for both, but the SSH classifier deliberately does not match HTTP/2.
+  it.each([
+    ["ls-remote", 1],
+    ["ls-remote", 2],
+    ["fetch", 1],
+    ["fetch", 2],
+  ] as const)("retries a Gitomic %s HTTP/2 reset exactly once (failures=%i)", async (verb, failures) => {
+    const reset = "error: RPC failed; curl 92 HTTP/2 stream 5 reset by server (error 0x8 CANCEL)"
+    const { repo, ssh, calls } = legacyPublickeyRepo(failures, reset)
+    const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const backend = gitRunner.createLegacyBackend("git", {
+        ...process.env,
+        GIT_SSH_COMMAND: ssh,
+        GIT_SSH_VARIANT: "ssh",
+      })
+      const read =
+        verb === "fetch"
+          ? backend.fetchRefs!(repo, ["refs/heads/main"], "git@github.com:fixture")
+          : backend.listRefs!(repo, "refs/heads/", "git@github.com:fixture")
+      if (failures === 1) expect((await read).get("refs/heads/main")).toMatch(/^[a-f0-9]{40}$/u)
+      else await expect(read).rejects.toThrow(reset)
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(2)
+      expect(announced).toHaveBeenCalledOnce()
+      expect(announced.mock.calls[0]?.[0]).toContain("retry 2/2")
+    } finally {
+      announced.mockRestore()
+    }
+  })
+
   it("does not retry a different Gitomic SSH failure", async () => {
     const refusal = "fatal: repository not found"
     const { repo, ssh, calls } = legacyPublickeyRepo(1, refusal)
