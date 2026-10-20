@@ -951,6 +951,28 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
   }
 }
 
+/** This process's own privilege-bounding facts, from /proc/self/status.
+ * That file stays readable when sibling pids do not, so a refusal can name the
+ * discriminator between a blind reader and a capable one (30417). A value that
+ * cannot be read says how it failed; it is never rendered as a default.
+ */
+function readerPrivilegeFacts(): string {
+  let status: string
+  try {
+    status = readFileSync("/proc/self/status", "utf8")
+  } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : String(cause)
+    return `NoNewPrivs=unreadable, CapEff=unreadable (${reason})`
+  }
+  const field = (name: string): string => {
+    const line = status.split("\n").find((entry) => entry.startsWith(`${name}:`))
+    if (line === undefined) return "absent"
+    const value = line.slice(name.length + 1).trim()
+    return value === "" ? "blank" : value
+  }
+  return `NoNewPrivs=${field("NoNewPrivs")}, CapEff=${field("CapEff")}`
+}
+
 /** Explicit exact-tip drop retaining the checkout and its private bytes.
  * The root event owns the environment receipt; each repository owns its archive.
  */
@@ -1029,8 +1051,9 @@ export async function releaseRetainedCheckouts(
     if (admission.kind !== "admitted") {
       // The drop path has no delegation target of its own, so the hold must
       // name the cure that exists: the same command re-run from a context
-      // whose census can read every same-UID pid (e.g. outside a sandbox
-      // restricting /proc reads). The census receipt rides along so the
+      // whose census can read every same-UID pid (e.g. outside a sandbox that
+      // sets NoNewPrivs=1 or otherwise denies same-UID cwd reads). The census
+      // receipt and this reader's own privilege facts ride along so the
       // capable context can compare coverage; the uncleared pids stay named
       // in the refusal — an unreadable pid is never treated as absent.
       const census = admission.census
@@ -1054,7 +1077,7 @@ export async function releaseRetainedCheckouts(
       )
       return [
         `needs-delegation: ${admission.refusal}; census ${census.mechanism}: ${census.rows} readable, ${census.unreadable} unreadable, ${census.uncleared} uncleared. ` +
-          `This caller cannot certify the release; re-run from a context that can read every same-UID pid (outside any sandbox restricting /proc reads): ${rerun}. ` +
+          `This caller cannot certify the release; re-run from a context that can read every same-UID pid (outside any sandbox that sets NoNewPrivs=1 or otherwise denies same-UID cwd reads; this reader: ${readerPrivilegeFacts()}): ${rerun}. ` +
           `The admission there is unchanged: a process holding the checkout still refuses`,
       ]
     }
