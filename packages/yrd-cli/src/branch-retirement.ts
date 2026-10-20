@@ -18,6 +18,7 @@ import {
   createLocalEventStore,
   gitIn,
   isAncestor,
+  mergeChangesNothing,
   listRefs,
   openLog,
   readBranchHistory,
@@ -802,6 +803,41 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
     if (destination === "origin") {
       const row = { repo, branch: request.branch, head: observedTip ?? request.tip }
       const custody = { kind: "published-main" as const, ref: `refs/heads/${targetBranch}`, tip: target }
+      const protections = async () =>
+        (await readBranchProtections(io, { repo, branch: request.branch, tip: request.tip, issue: request.issue }))
+          .protections
+      if (!merged && observedTip === request.tip && (await mergeChangesNothing(git, target, request.tip))) {
+        const reasons = await protections()
+        if (reasons.length > 0) {
+          return { removed: [], kept: [{ ...row, reason: "held", detail: reasons.join("; ") }], failed: [] }
+        }
+        attemptedArchive = archiveRef
+        await retireOriginBranch(createEventStore(repo, remote, selection), {
+          branch: request.branch,
+          head: request.tip,
+          authority: { kind: "published-main-content", ref: custody.ref, tip: target, archive: archiveRef },
+          protections,
+        })
+        log.write({
+          kind: "observation",
+          scope: "branch-retirement",
+          branch: request.branch,
+          reason: `${repo}: retired origin ${request.branch}@${request.tip}; archive ${archiveRef} retains its exact tip; merge into ${custody.ref}@${target} changes no content`,
+        })
+        return {
+          removed: [
+            {
+              ...row,
+              reason: "content integrated",
+              archiveRef,
+              custody: { kind: "origin-archive" as const, ref: archiveRef, tip: request.tip },
+              main: { ref: custody.ref, tip: target },
+            },
+          ],
+          kept: [],
+          failed: [],
+        }
+      }
       const retire = createLandedBranchRetirement({ repo, git, selection, remote, target, targetRef: custody.ref })
       const result = await retire({
         path: "",
@@ -815,15 +851,7 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
         log,
         local: false,
         origin: true,
-        protections: async () =>
-          (
-            await readBranchProtections(io, {
-              repo,
-              branch: request.branch,
-              tip: request.tip,
-              issue: request.issue,
-            })
-          ).protections,
+        protections,
       })
       const output = {
         ...row,
