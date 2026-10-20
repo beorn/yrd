@@ -517,6 +517,7 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
         read: JournalHead
       }>
     | undefined
+  let excludedCommands = 0
   for (let index = ours.length - 1; index >= 0; index -= 1) {
     const candidate = ours[index]
     const startedAt = candidate === undefined ? undefined : runStartedAt(candidate)
@@ -529,12 +530,19 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
     // `<workdir>/logs/` and name their command on the run header. They are not
     // queue rounds, so the runner's row and projection fallback skip them and
     // read the newest queue round instead (30401).
-    if (read.fields.command !== undefined) continue
+    if (read.fields.command !== undefined) {
+      excludedCommands += 1
+      continue
+    }
     selected = { id: candidate, startedAt, path, projection, read }
     break
   }
   if (selected === undefined) {
-    return { absent: `no run journal was read: ${journalDir} — it holds no run journal`, journalDir, service }
+    const held =
+      excludedCommands > 0
+        ? `no queue-round journal qualified (${String(excludedCommands)} standalone command journal(s) were excluded)`
+        : "it holds no run journal"
+    return { absent: `no run journal was read: ${journalDir} — ${held}`, journalDir, service }
   }
   const { id, startedAt, path, projection, read } = selected
   const lastWriteAt = statSync(path).mtime

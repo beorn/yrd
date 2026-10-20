@@ -677,7 +677,10 @@ function runLogRecords(text: string, projecting = false): readonly LogRecord[] {
   return records
 }
 
-const journalFileCache = new Map<string, { source: JournalSource; runs: readonly JournalSummary[] }>()
+const journalFileCache = new Map<
+  string,
+  { source: JournalSource; runs: readonly JournalSummary[]; commandJournal: boolean }
+>()
 
 // Change the fold identity whenever JournalRun or runner interpretation changes.
 // Exact equality is required: an older fold cannot recognize a newer artifact.
@@ -1160,6 +1163,9 @@ function cachedRunsIn(
   }
   const hit = journalFileCache.get(cacheKey)
   if (hit !== undefined && projection.source !== undefined && sameJournalSource(hit.source, projection.source)) {
+    if (!explicitRun && hit.commandJournal) {
+      return { runs: hit.runs }
+    }
     // A cache hit over a projection that still cannot be reused: an earlier
     // read in this process rebuilt from raw, so persist that rebuild now
     // (28908) — the read that pays is not always the read that rebuilds. The
@@ -1177,18 +1183,11 @@ function cachedRunsIn(
   const rawRecords = readRunLog(dir, id)
   const commandJournal = rawRecords.find((record) => record.kind === "run")?.command !== undefined
   const runs = [...runsIn(rawRecords, id, startedAt, detail)]
-  // Standalone CLI command journals (`drop --local`, `drop --local --release-checkout`,
-  // `drop --retire`, `drop --issue`, `withdraw`, `author release`) share `<workdir>/logs/`
-  // and carry `command` on their `run` header. When scanning `logs/` without an explicit
-  // run selection, do not report their absent projection as a queue round fallback (30401).
-  if (!explicitRun && commandJournal) {
-    return { runs }
-  }
   let persist: JournalPersistOutcome | undefined
   if (projection.source !== undefined) {
     try {
       if (sameJournalSource(projection.source, journalSource(path, id))) {
-        journalFileCache.set(cacheKey, { source: projection.source, runs })
+        journalFileCache.set(cacheKey, { source: projection.source, runs, commandJournal })
         // The raw rebuild just paid for these facts: persist them through the
         // one projection writer so the next read finds the projection present
         // instead of rebuilding (and re-noticing) forever. The writer folds
@@ -1197,13 +1196,20 @@ function cachedRunsIn(
         // from it, while full detail remains in the raw journal. A failed write
         // changes nothing this read returns; it is counted and named in the
         // read's fallback facts instead of swallowed.
-        if (projection.fallback !== undefined && repairableProjection(dir, id, projection.fallback, sourceTerminal)) {
+        if (
+          (explicitRun || !commandJournal) &&
+          projection.fallback !== undefined &&
+          repairableProjection(dir, id, projection.fallback, sourceTerminal)
+        ) {
           persist = attemptJournalPersist(dir, id, projection.source)
         }
       }
     } catch (error) {
       // Raw facts were read successfully. Optional process caching must not
       // turn a failed metadata check into a refusal of those facts.
+      if (!explicitRun && commandJournal) {
+        return { runs }
+      }
       return {
         runs,
         fallback: {
@@ -1213,6 +1219,13 @@ function cachedRunsIn(
         },
       }
     }
+  }
+  // Standalone CLI command journals (`drop --local`, `drop --local --release-checkout`,
+  // `drop --retire`, `drop --issue`, `withdraw`, `author release`) share `<workdir>/logs/`
+  // and carry `command` on their `run` header. When scanning `logs/` without an explicit
+  // run selection, do not report their absent projection as a queue round fallback (30401).
+  if (!explicitRun && commandJournal) {
+    return { runs }
   }
   return { runs, fallback: projection.fallback, ...(persist === undefined ? {} : { persist }) }
 }

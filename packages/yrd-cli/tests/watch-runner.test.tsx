@@ -200,7 +200,48 @@ describe("projectionFallbackReport, the not-yet-written proof", () => {
       const dropOnly = await readRunnerFacts(workdir, NOW)
       expect(dropOnly.latest, command).toBeUndefined()
       expect(dropOnly.projectionFallback, command).toBeUndefined()
-      expect(dropOnly.absent, command).toContain("holds no run journal")
+      expect(dropOnly.absent, command).toContain(dir)
+      expect(dropOnly.absent, command).toContain(
+        "no queue-round journal qualified (2 standalone command journal(s) were excluded)",
+      )
+      expect(dropOnly.absent, command).not.toContain("holds no run journal")
+
+      // 4. Process-cache parity across explicit-selected and unselected reads on an
+      //    unrepairable newer-version command-journal projection:
+      //    (a) explicit selection retains its fallback and populates journalFileCache,
+      //        then an unselected scan hitting that same cache key still omits the fallback;
+      //    (b) unselected scan omits the fallback and populates journalFileCache,
+      //        then an explicit selection hitting that same cache key still retains its fallback.
+      const unrepairableProjection = `${JSON.stringify({
+        schema: 99,
+        fold: 99,
+        source: {},
+        runs: [],
+        runnerRecords: [],
+      })}\n`
+      fs.writeFileSync(dropPath.replace(/\.jsonl$/u, ".projection.json"), unrepairableProjection)
+      const explicitFirst = readJournals(dir, { runIds: [dropRunId], detail: "omit", now: NOW })
+      expect(explicitFirst.fallbacks?.count, command).toBe(1)
+      expect(explicitFirst.fallbacks?.reasons[0], command).toMatchObject({
+        reason: "incompatible",
+        count: 1,
+      })
+      expect(explicitFirst.fallbacks?.reasons[0]?.example, command).toContain(`${dropRunId}.projection.json`)
+      const unselectedAfterExplicit = readJournals(dir, { detail: "omit", now: NOW })
+      expect(unselectedAfterExplicit.fallbacks, command).toBeUndefined()
+
+      fs.writeFileSync(join(dir, `${concurrentDropId}.projection.json`), unrepairableProjection)
+      const unselectedFirst = readJournals(dir, { detail: "omit", now: NOW })
+      expect(unselectedFirst.fallbacks, command).toBeUndefined()
+      const explicitAfterUnselected = readJournals(dir, { runIds: [concurrentDropId], detail: "omit", now: NOW })
+      expect(explicitAfterUnselected.fallbacks?.count, command).toBe(1)
+      expect(explicitAfterUnselected.fallbacks?.reasons[0], command).toMatchObject({
+        reason: "incompatible",
+        count: 1,
+      })
+      expect(explicitAfterUnselected.fallbacks?.reasons[0]?.example, command).toContain(
+        `${concurrentDropId}.projection.json`,
+      )
     }
   })
 })
