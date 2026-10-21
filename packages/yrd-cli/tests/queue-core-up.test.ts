@@ -4623,7 +4623,14 @@ describe("yrd queue up, the service", () => {
     symlinkSync(resolve(import.meta.dirname, "../node_modules"), join(aCli, "node_modules"), "dir")
     symlinkSync(aLanding, join(home, "current"), "dir")
     const { coreQueueCommand: fromLandingA } = await import(join(aCli, "src/queue-core-commands.ts"))
-    await gitIn(join(w.work, "submodule"))(["fetch", "--quiet", "origin", "main"])
+    const primaryComponent = gitIn(join(w.work, "submodule"))
+    await primaryComponent(["fetch", "--quiet", "origin", "main"])
+    // This native root-queue fixture publishes B without advancing the primary
+    // component's local main. Give the close sequence a real surviving witness;
+    // a remote-tracking ref alone does not provide durable component custody.
+    const componentPin = `refs/yrd/pins/${w.b}`
+    await primaryComponent(["update-ref", componentPin, w.b])
+    expect((await primaryComponent(["rev-parse", componentPin])).trim()).toBe(w.b)
     const authors: { branch: string; head: string; path: string; opening: string; gitDir: string }[] = []
     for (let index = 0; index < 3; index += 1) {
       const branch = `task/gitlink-landing-${String(index)}`
@@ -4883,7 +4890,7 @@ describe("yrd queue up, the service", () => {
       const closed = authors.filter(({ path }) => !existsSync(path))
       expect(
         closed.map(({ branch }) => branch),
-        "a started attempt finishes the eligible close sequence",
+        `a started attempt finishes the eligible close sequence\n${successor.stderr()}`,
       ).toEqual(authors.slice(1).map(({ branch }) => branch))
       const remaining = authors.filter(({ path }) => existsSync(path))
       expect(
