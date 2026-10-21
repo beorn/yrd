@@ -223,6 +223,22 @@ async function compose(w: World, run: string | undefined, path: string, process?
   })
 }
 
+/**
+ * Put the fixture's URL rewrites in the process environment for one test. Readers that run Git outside the injected
+ * transport see only the ambient environment: Submit's verifier, Gitomic's event backend, and git-super's
+ * synchronous module-store reads when a worktree that held a submodule is removed (30580).
+ */
+function ambientTransport(w: World): Disposable {
+  for (const [key, value] of Object.entries(w.env)) {
+    if (key.startsWith("GIT_CONFIG_")) vi.stubEnv(key, value)
+  }
+  return {
+    [Symbol.dispose]() {
+      vi.unstubAllEnvs()
+    },
+  }
+}
+
 describe("derive: the compose regenerates what the merged gitlinks decide", () => {
   /** @failure 27176 AC1: child publication can precede verification or publish a different derived candidate.
    * @level l2 @consumer the real event queue's check and child-publication path
@@ -230,14 +246,7 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
   it("verifies the derived tree before publishing that exact candidate", async () => {
     const w = await world()
     // Submit's verifier and Gitomic's event backend read the ambient transport environment.
-    for (const [key, value] of Object.entries(w.env)) {
-      if (key.startsWith("GIT_CONFIG_")) vi.stubEnv(key, value)
-    }
-    using _fixtureEnvironment = {
-      [Symbol.dispose]() {
-        vi.unstubAllEnvs()
-      },
-    }
+    using _fixtureEnvironment = ambientTransport(w)
     const target = { branch: "main", remote: "origin" }
     const config = await readConfig(w.git, w.target, target)
     if (config === undefined) throw new Error("fixture target lost its declaration")
@@ -486,6 +495,7 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
    */
   it("admits the leftover of a submodule the candidate removes, and a run that only reconciled it derives nothing", async () => {
     const w = await world({ removesChild: true })
+    using _fixtureEnvironment = ambientTransport(w)
     const verified = await compose(w, deriveScript(w.root, "quiet"), "removed")
     expect(verified.state).toBe("verified")
     expect(verified.verifying.state).toBe("verified")
@@ -502,6 +512,7 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
    */
   it("admits the per-file form of the removed submodule's leftover", async () => {
     const w = await world({ removesChild: true })
+    using _fixtureEnvironment = ambientTransport(w)
     const verified = await compose(w, deriveScript(w.root, "perfile"), "perfile")
     expect(verified.state).toBe("verified")
     const candidate = (verified.verifying as Readonly<{ candidate: string }>).candidate
@@ -515,6 +526,7 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
    */
   it("still refuses a tracked change under the path of a submodule the candidate removes", async () => {
     const w = await world({ removesChild: true })
+    using _fixtureEnvironment = ambientTransport(w)
     await expect(compose(w, deriveScript(w.root, "staged"), "staged")).rejects.toThrow(
       /vendor\/nested\/keep\.txt.*outside every submodule; root derivation is not admitted yet/u,
     )
