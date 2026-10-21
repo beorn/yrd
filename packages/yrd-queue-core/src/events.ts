@@ -3344,10 +3344,10 @@ export async function readEventQueueWithChanges(
   recent?: RecentEventReadOptions,
 ): Promise<Readonly<{ queue: EventQueue } & ChangeHistories>> {
   const prefixes = [`${queueRefPrefix(queue)}/changes/`, archivedChangesPrefix(queue)]
-  const [queueState, chains] = await Promise.all([
-    readEventQueue(store, queue),
-    readEventChains(prefixes, store, recent),
-  ])
+  // One after the other: run together, the whole queue chain and every tip's metadata were live at once, which set
+  // the read's high-water mark even with a collection between phases (28925).
+  const queueState = await readEventQueue(store, queue)
+  const chains = await readEventChains(prefixes, store, recent)
   return { queue: queueState, ...projectChangeHistories(chains, prefixes, store.repo) }
 }
 

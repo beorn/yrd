@@ -1026,20 +1026,24 @@ export async function coreQueueCommand(
     captured.fetched !== undefined && config.target.remote === remote && config.target.branch === queue
       ? captured.fetched
       : undefined
-  const advertisedFormat = await withRemoteSeam("queueFormat", () =>
-    queueFormat(eventStore, config.target.branch, fetchedQueue === undefined ? {} : { fetched: fetchedQueue }),
-  )
-  switch (advertisedFormat) {
-    case "legacy":
-      throw new Error(
-        `${config.target.remote}#${config.target.branch} uses a legacy Record ref; expected ${queueRef(config.target.branch)}`,
-      )
-    case "event":
-    case "empty":
-      break
-    default: {
-      const unreachable: never = advertisedFormat
-      throw new Error(`${config.target.remote}#${config.target.branch} classified ${String(unreachable)}`)
+  // A local status read (list, show, ls) checks the format on the mirror it reads, in its own command path; asking
+  // the remote here too cost a network round trip against a mirror refreshed seconds earlier (28925).
+  if (localStatus === undefined) {
+    const advertisedFormat = await withRemoteSeam("queueFormat", () =>
+      queueFormat(eventStore, config.target.branch, fetchedQueue === undefined ? {} : { fetched: fetchedQueue }),
+    )
+    switch (advertisedFormat) {
+      case "legacy":
+        throw new Error(
+          `${config.target.remote}#${config.target.branch} uses a legacy Record ref; expected ${queueRef(config.target.branch)}`,
+        )
+      case "event":
+      case "empty":
+        break
+      default: {
+        const unreachable: never = advertisedFormat
+        throw new Error(`${config.target.remote}#${config.target.branch} classified ${String(unreachable)}`)
+      }
     }
   }
   const workdir = options.workdir ?? (await workdirOf(git))
