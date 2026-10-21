@@ -925,7 +925,24 @@ console.log(JSON.stringify(args.includes("--component-custody")
       const removes = readFileSync(calls, "utf8")
         .split("\n")
         .filter(Boolean)
-        .map((line) => JSON.parse(line))
+        .map((line) => {
+          const value: unknown = JSON.parse(line)
+          if (
+            typeof value !== "object" ||
+            value === null ||
+            !("marker" in value) ||
+            typeof value.marker !== "string" ||
+            !("args" in value) ||
+            !Array.isArray(value.args)
+          ) {
+            throw new Error("malformed selected GitSuper shim record")
+          }
+          const args: unknown[] = value.args
+          if (!args.every((argument): argument is string => typeof argument === "string")) {
+            throw new Error("malformed selected GitSuper shim arguments")
+          }
+          return { marker: value.marker, args }
+        })
       expect(removes).toHaveLength(mode === "manual" ? 0 : 1)
       if (removes[0] !== undefined) {
         expect(removes[0].marker).toBe("custody-forwarding")

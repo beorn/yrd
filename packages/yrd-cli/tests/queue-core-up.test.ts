@@ -2187,6 +2187,16 @@ describe("yrd queue up, the service", () => {
         for (const store of [dependencyGit, originGit]) {
           expect(await store(["cat-file", "-t", publishedDependencyHead])).toBe("commit\n")
           const absent = await store(["cat-file", "-e", `${unpublishedComponent}^{commit}`]).catch((cause) => cause)
+          if (
+            typeof absent !== "object" ||
+            absent === null ||
+            !("exitCode" in absent) ||
+            typeof absent.exitCode !== "number" ||
+            !("detail" in absent) ||
+            typeof absent.detail !== "string"
+          ) {
+            throw new Error("malformed missing-object fixture result", { cause: absent })
+          }
           expect(absent).toMatchObject({
             exitCode: 128,
             detail: expect.stringContaining(`Not a valid object name ${unpublishedComponent}^{commit}`),
@@ -2280,6 +2290,16 @@ describe("yrd queue up, the service", () => {
           const retained = await Promise.all(
             [...stderr.matchAll(/retained environment removal proof (.+)/g)].map(async (match) => {
               const proof = JSON.parse(readFileSync(match[1]!, "utf8"))
+              if (
+                typeof proof !== "object" ||
+                proof === null ||
+                !("retained" in proof) ||
+                (proof.retained !== null && typeof proof.retained !== "string") ||
+                !("modules" in proof) ||
+                typeof proof.modules !== "string"
+              ) {
+                throw new Error("malformed retained removal proof in fixture evidence")
+              }
               if (proof.retained === null) return { manifest: match[1], proof }
               const retainedArgs = [
                 "--git-dir",
