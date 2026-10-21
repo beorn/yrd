@@ -310,11 +310,12 @@ it.each(["released", "held", "advanced", "failed"] as const)(
   60_000,
 )
 
-/** @failure Native close skips a released component author or mutates a copied retained store after its proof is sealed.
+/** @failure Native close skips a released component author or mutates a copied retained store after its proof is sealed,
+ * or a root retirement that FAILED after a sealed removal reports a successful close (30642).
  * @level l3 @consumer automatic component retirement after native environment release
  * Root-only release and component landing coverage do not observe post-removal component custody or retained-copy bytes.
  */
-it.each(["snapshot", "shared", "advanced", "unsealed"] as const)(
+it.each(["snapshot", "shared", "advanced", "unsealed", "unreadable"] as const)(
   "native component release preserves retained custody: %s",
   async (mode) => {
     const seeded = await world(":")
@@ -420,6 +421,13 @@ it.each(["snapshot", "shared", "advanced", "unsealed"] as const)(
         sealedManifest = readFileSync(proofPath)
       }
     }
+    // The field case (30642): the vault's bead list overflowed spawnSync's buffer, so the protection read threw.
+    const unreadable = "git ls-files (present) failed in /fixture/vault (exit null): spawnSync git ENOBUFS"
+    if (mode === "unreadable") {
+      closed.io.localBranchProtections = async () => {
+        throw new Error(unreadable)
+      }
+    }
     let releaseReads = 0
     if (mode === "unsealed") {
       const prepared = await publicCli.prepareAuthorRelease(author, closed.io)
@@ -446,7 +454,7 @@ it.each(["snapshot", "shared", "advanced", "unsealed"] as const)(
               await componentGit(["update-ref", `refs/heads/${componentBranch}`, advancedTip!, componentTip])
             })
           : await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io)
-      expect(exit, closed.stderr()).toBe(0)
+      expect(exit, closed.stderr()).toBe(mode === "unreadable" ? 1 : 0)
       expect(proofPath).not.toBe("")
       expect(readFileSync(proofPath)).toEqual(sealedManifest)
       const entry = dirname(proofPath)
@@ -465,6 +473,17 @@ it.each(["snapshot", "shared", "advanced", "unsealed"] as const)(
       expect(readFileSync(proofPath)).toEqual(sealedManifest)
     }
     expect(existsSync(author)).toBe(false)
+    if (mode === "unreadable") {
+      expect((await w.git(["rev-parse", `refs/heads/${rootBranch}`])).trim()).toBe(rootTip)
+      expect(JSON.parse(closed.stdout())).toMatchObject({
+        closed: author,
+        retirement: "incomplete",
+        failed: [expect.stringContaining(`${rootBranch}@${rootTip}: `)],
+      })
+      expect(closed.stdout()).toContain(unreadable)
+      expect(closed.stderr()).toContain(`${rootBranch}@${rootTip} retirement failed`)
+      return
+    }
     expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${rootBranch}`])).trim()).toBe("")
     expect((await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")).toContain(
       rootTip,

@@ -822,7 +822,9 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
 async function requireClean(git: Git, path: string, hint = ""): Promise<void> {
   const dirty = (await git(["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"])).trim()
   if (dirty !== "") {
-    throw new Error(`environment ${path} is dirty; preserve or commit these changes before continuing${hint}:\n${dirty}`)
+    throw new Error(
+      `environment ${path} is dirty; preserve or commit these changes before continuing${hint}:\n${dirty}`,
+    )
   }
 }
 
@@ -1406,16 +1408,19 @@ export async function closeEnvironment(
     retirementHandle !== undefined ? await retirementHandle.retireAfterRelease(removalProof) : undefined
   if (removalProof !== undefined) removedProof?.(removalProof)
   const incomplete = retirementOutcome?.retirement === "incomplete"
+  const failed = retirementOutcome?.failed ?? []
   io.stdout(
     options.json === true
       ? `${JSON.stringify({
           closed: path,
           ...(skipped === undefined ? {} : { skipped }),
           ...(incomplete ? { retirement: "incomplete" } : {}),
+          ...(failed.length > 0 ? { failed } : {}),
         })}\n`
-      : `closed environment ${path}\n`,
+      : `closed environment ${path}${failed.length > 0 ? `; branch retirement failed: ${failed.join("; ")}` : ""}\n`,
   )
-  return incomplete && removalProof === undefined ? 1 : 0
+  // The environment is gone either way; a failed retirement left a branch behind, so the close is not a success (30642).
+  return failed.length > 0 || (incomplete && removalProof === undefined) ? 1 : 0
 }
 
 /** The loud refusal a queue-round caller makes when its own census cannot certify. */

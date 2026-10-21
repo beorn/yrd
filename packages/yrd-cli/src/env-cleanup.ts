@@ -432,7 +432,8 @@ async function consumeCloseRequests(
       dropCloseRequest(staged)
       continue
     }
-    if (exit !== 0) {
+    const failed = failedRetirements(output, request.path)
+    if (exit !== 0 && failed === undefined) {
       journal(file, request, request.path, "retired", `native close exited ${exit}: ${output.trim()}`, fingerprint)
       dropCloseRequest(staged)
       continue
@@ -446,7 +447,14 @@ async function consumeCloseRequests(
       continue
     }
     if (typeof parsed === "object" && parsed !== null && "closed" in parsed && parsed.closed === request.path) {
-      journal(file, request, request.path, "closed", `closed at the request of ${request.requester}`, fingerprint)
+      journal(
+        file,
+        request,
+        request.path,
+        "closed",
+        `closed at the request of ${request.requester}${failed === undefined ? "" : `; branch retirement failed: ${failed.join("; ")}`}`,
+        fingerprint,
+      )
       dropCloseRequest(staged)
       closed++
       try {
@@ -491,7 +499,7 @@ async function consumeCloseRequests(
  * DROPPED / issue-ended do not file here; they widen the sweep.
  */
 /** One named class from a refused `env close --json`, or undefined when that refusal names none. */
-function namedCloseRefusal(output: string): string | undefined {
+function closeResult(output: string): Readonly<Record<string, unknown>> | undefined {
   let parsed: unknown
   try {
     parsed = JSON.parse(output)
@@ -503,8 +511,22 @@ function namedCloseRefusal(output: string): string | undefined {
     if (!(cause instanceof SyntaxError)) throw cause
     return undefined
   }
-  if (typeof parsed !== "object" || parsed === null) return undefined
-  const row = parsed as Readonly<{ kept?: unknown; class?: unknown; store?: unknown; command?: unknown }>
+  return typeof parsed === "object" && parsed !== null ? (parsed as Readonly<Record<string, unknown>>) : undefined
+}
+
+/**
+ * A close that removed its environment but failed a branch retirement exits 1 and still reports `closed`, with
+ * each failure in `failed` (30642). The environment is gone, so the caller counts it closed and names the failures.
+ */
+function failedRetirements(output: string, path: string): readonly string[] | undefined {
+  const row = closeResult(output)
+  if (row?.closed !== path || !Array.isArray(row.failed) || row.failed.length === 0) return undefined
+  return row.failed.map(String)
+}
+
+function namedCloseRefusal(output: string): string | undefined {
+  const row = closeResult(output)
+  if (row === undefined) return undefined
   if (typeof row.kept !== "string" || typeof row.class !== "string" || row.class === "") return undefined
   const parts = [`kept: ${row.class}`]
   if (typeof row.store === "string" && row.store !== "") parts.push(`store ${row.store}`)
@@ -1260,7 +1282,8 @@ async function cleanupEnvironments(
             proofs.push(proof)
           },
         )
-        if (exit !== 0) {
+        const failed = failedRetirements(output, row.path)
+        if (exit !== 0 && failed === undefined) {
           // #27120 AC2: a refusal that names a class is still a refusal — the environment stays — but the
           // sweep reports it as one named class with its retire path, never as a per-seat note. A refusal
           // that names nothing still falls through to the loud throw below.
@@ -1276,7 +1299,11 @@ async function cleanupEnvironments(
         if ("closed" in result && result.closed === row.path) {
           closed++
           cache.delete(row.path)
-          record(row.path, "closed", "native retained removal proof accepted")
+          record(
+            row.path,
+            "closed",
+            `native retained removal proof accepted${failed === undefined ? "" : `; branch retirement failed: ${failed.join("; ")}`}`,
+          )
           // Telling never gates the close (29720): the close is already
           // committed, so a telling failure is named here, at the source, and
           // never rethrown into the sweep's keep bookkeeping.

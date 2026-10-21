@@ -1667,6 +1667,8 @@ export type WorktreeRemovalProof = Parameters<
 export type AuthorReleaseOutcome = Readonly<{
   retirement: "complete" | "incomplete"
   reasons: readonly string[]
+  /** Each retirement that failed, naming its branch@tip and cause; a deliberate keep is a reason only (30642). */
+  failed: readonly string[]
 }>
 
 export type AuthorRelease = Readonly<{
@@ -1872,9 +1874,13 @@ async function captureAuthorRelease(
               return {
                 retirement: "incomplete",
                 reasons: [...componentResult.incomplete, ...(rootIncomplete ? [root.detail ?? root.reason] : [])],
+                failed: [
+                  ...componentResult.failed,
+                  ...(rootIncomplete ? [`${branch}@${tip}: ${root.detail ?? root.reason}`] : []),
+                ],
               }
             }
-            return { retirement: "complete", reasons: [] }
+            return { retirement: "complete", reasons: [], failed: [] }
           } catch (cause) {
             const outcome = attempted ? "retirement incomplete; inspect ref and archive" : "kept before retirement"
             input.io.stderr(`yrd: ${branch}@${tip} ${outcome}: ${String(cause)}\n`)
@@ -1891,6 +1897,8 @@ async function captureAuthorRelease(
             return {
               retirement: "incomplete",
               reasons: [`${outcome}: ${String(cause)}`],
+              // Before the attempt the branch was kept on purpose; after it, a throw left the retirement half done.
+              failed: attempted ? [`${branch}@${tip}: ${outcome}: ${String(cause)}`] : [],
             }
           }
         },
@@ -2039,8 +2047,9 @@ export async function retireMergedComponentAuthors(
     queue: string
     proofs?: readonly WorktreeRemovalProof[]
   }>,
-): Promise<Readonly<{ incomplete: readonly string[] }>> {
+): Promise<Readonly<{ incomplete: readonly string[]; failed: readonly string[] }>> {
   const incomplete: string[] = []
+  const failed: string[] = []
   for (const author of input.authors) {
     try {
       const modules = join(author.rootGitDirectory, "modules")
@@ -2164,6 +2173,9 @@ export async function retireMergedComponentAuthors(
       if (result.outcome !== "removed") {
         const reason = `${author.path} ${result.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept"}: ${result.detail ?? result.reason}`
         incomplete.push(reason)
+        if (result.outcome === "failed") {
+          failed.push(`${author.path} ${author.branch}@${author.tip}: ${result.detail ?? result.reason}`)
+        }
         input.io.stderr(
           `yrd: component ${author.path} ${author.branch}@${author.tip} ${result.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept"}: ${result.detail ?? result.reason}\n`,
         )
@@ -2186,7 +2198,7 @@ export async function retireMergedComponentAuthors(
       })
     }
   }
-  return { incomplete }
+  return { incomplete, failed }
 }
 
 type LandingPin = Readonly<{ event: string; path: string; tip: string }>
