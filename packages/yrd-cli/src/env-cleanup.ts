@@ -1084,8 +1084,9 @@ async function cleanupEnvironments(
     // The service may stand in a linked landing. Git's first registration names
     // the persistent primary; the selected remover validates its identity.
     const primary = (await registeredWorktrees(registryGit))[0]
-    if (primary === undefined)
+    if (primary === undefined) {
       throw new Error(`${registry}: native worktree registry has no primary checkout for component custody`)
+    }
     primaryRoot = primary.path
   } catch (cause) {
     for (const row of inventory.rows) preserve(row.path, reasonText(cause))

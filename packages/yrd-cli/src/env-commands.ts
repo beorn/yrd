@@ -1304,11 +1304,16 @@ export async function closeEnvironment(
       (!("oid" in removed.custody) || (typeof removed.custody.oid === "string" && removed.custody.oid.trim() !== ""))
     ) {
       const custody = removed.custody
+      const status = removed.custody.status
+      const component = removed.custody.component
+      const source = removed.custody.source
+      const detail = removed.custody.detail
+      const oid = "oid" in removed.custody && typeof removed.custody.oid === "string" ? removed.custody.oid : undefined
       const kept = { kept: path, reason: "component-custody", custody }
       io.stdout(
         options.json === true
           ? `${JSON.stringify(kept)}\n`
-          : `kept environment ${path}: component custody ${custody.status}: ${custody.component}; source ${custody.source}; ${custody.detail}${"oid" in custody ? `; commit ${custody.oid}` : ""}\n`,
+          : `kept environment ${path}: component custody ${status}: ${component}; source ${source}; ${detail}${oid === undefined ? "" : `; commit ${oid}`}\n`,
       )
       return 0
     }
