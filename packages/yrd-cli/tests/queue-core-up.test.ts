@@ -5326,7 +5326,10 @@ describe("yrd queue list, the table", () => {
     const compact = capture(w.work)
     expect(await coreQueueCommand(w.work, compact.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
     expect(compact.stdout()).not.toContain("→ direct")
-    expect(compact.stdout()).toMatch(/direct target commits were not\s+checked; use --all for full scope/u)
+    // The scope line wraps to the page width, so the phrase is matched with its whitespace normalized.
+    expect(compact.stdout().replace(/\s+/gu, " ")).toContain(
+      "direct target commits were not checked; use --all for full scope",
+    )
 
     const asJson = capture(w.work)
     expect(
