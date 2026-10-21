@@ -5326,7 +5326,8 @@ describe("yrd queue list, the table", () => {
     const compact = capture(w.work)
     expect(await coreQueueCommand(w.work, compact.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
     expect(compact.stdout()).not.toContain("→ direct")
-    expect(compact.stdout()).toMatch(/direct target commits were not\s+checked; use --all for full scope/u)
+    // The printed scope sentence wraps at the table width, so any space in it may be a line break.
+    expect(compact.stdout()).toMatch(/direct\s+target\s+commits\s+were\s+not\s+checked;\s+use\s+--all\s+for\s+full\s+scope/u)
 
     const asJson = capture(w.work)
     expect(
