@@ -65,6 +65,48 @@ export async function readBranchProtections(
 }
 
 /**
+ * Each materialized component of `repo` at HEAD whose own checkout holds refs/heads/<branch>, with its oid (30277).
+ * Yrd resolves its repository from the cwd (30527) and `@in --` moves the cwd to the worktree root, so a component
+ * branch named from there reads as absent in the superproject. Local reads only; a component without a checkout is
+ * skipped.
+ */
+export async function componentsHoldingBranch(
+  repo: string,
+  git: Git,
+  selection: GitSelection,
+  env: NodeJS.ProcessEnv | undefined,
+  branch: string,
+): Promise<readonly Readonly<{ path: string; oid: string }>[]> {
+  const head = (await git(["rev-parse", "HEAD"])).trim()
+  const held: { path: string; oid: string }[] = []
+  for (const child of await readCommitSubmodules(seamProcess(git, repo), repo, head)) {
+    const checkout = join(repo, child.path)
+    if (pathMissing(join(checkout, ".git"))) continue
+    const childGit = gitIn(checkout, undefined, selection, { env })
+    const oid = (await childGit(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()
+    if (oid !== "") held.push({ path: checkout, oid })
+  }
+  return held
+}
+
+/** Names every component holding the branch, each with a command that runs in that component's checkout (30277). */
+export function componentDropHint(
+  io: YrdCliIO,
+  branch: string,
+  held: readonly Readonly<{ path: string; oid: string }>[],
+  argv: readonly string[],
+): string {
+  return (
+    held
+      .map(
+        (row) =>
+          `component ${row.path} holds refs/heads/${branch} at ${row.oid}; retire it there: ${formatYrdCommand(io, argv, row.path)}`,
+      )
+      .join("; ") + "; this command resolved its repository from the cwd (30527)"
+  )
+}
+
+/**
  * Git's admin directory for one linked checkout (`<common>/worktrees/<name>`).
  * This reads that directory's `gitdir` pointer only. It does not open the checkout or its module stores.
  */

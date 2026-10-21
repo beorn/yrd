@@ -48,6 +48,8 @@ import {
   retireIssueBranches,
   readBranchProtections,
   advancedCure,
+  componentDropHint,
+  componentsHoldingBranch,
 } from "./branch-retirement.ts"
 import { sweepRoundOutputInRound } from "./log-retention.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
@@ -1954,6 +1956,40 @@ export async function coreQueueCommand(
       }))
       const heads = await listRefs("refs/heads/", createLocalEventStore(authorRepo, selection))
       if (!heads.has(`refs/heads/${request.branch}`)) {
+        // 30277 (@cto 594bb887): absent here but live in a component is a drop aimed at the wrong repository, not
+        // a no-op, so it names every component holding the branch and fails.
+        const held = await componentsHoldingBranch(authorRepo, authorGit, selection, env, request.branch)
+        if (held.length > 0) {
+          const argv = [
+            "drop",
+            request.branch,
+            "--local",
+            "--tip",
+            request.tip,
+            ...(request.issue === undefined ? [] : ["--issue", request.issue]),
+            ...(request.reason === undefined ? [] : ["--reason", request.reason]),
+            "--submitter",
+            request.by,
+          ]
+          const detail = `refs/heads/${request.branch} is absent in ${authorRepo}; nothing was removed; ${componentDropHint(io, request.branch, held, argv)}`
+          const report = {
+            branch: request.branch,
+            repo: authorRepo,
+            apply: true,
+            mode,
+            examined: heads.size,
+            excluded: 0,
+            eligible: [],
+            removed: [],
+            kept: [],
+            failed: [],
+            components: held,
+            detail,
+          }
+          emit(io, options.json, report, `branch ${request.branch}: ${detail}`)
+          // Like a kept branch (30266): nothing was removed, so the receipt does not report success.
+          return 1
+        }
         // Ruled 2026-10-19 (28385 area 11): when the branch is already absent the requested
         // post-condition holds, so an idempotent retry reports a no-op instead of failing. The
         // exact-tip guard above still runs whenever the ref exists, so a live branch is never
@@ -2134,6 +2170,37 @@ export async function coreQueueCommand(
           const remedy = formatQueueCommand(io, queue, ["drop", request.branch, "--reason", request.reason ?? "<why>"])
           io.stderr(`yrd: ${error.message}; to end and drop this branch now: ${remedy}\n`)
           return 2
+        }
+        if (request.retire !== undefined) {
+          // 30277: say which checkout and origin the retire resolved (`repo` is the queue's state replica), and name
+          // any component of that checkout that holds the branch.
+          const checkout = repositoryHere(io.cwd)
+          const held =
+            checkout === undefined
+              ? []
+              : await componentsHoldingBranch(
+                  checkout,
+                  gitIn(checkout, undefined, selection, { env }),
+                  selection,
+                  env,
+                  request.branch,
+                )
+          const origin = await remoteUrl(git, config.target.remote)
+          const argv = [
+            "drop",
+            request.branch,
+            "--retire",
+            "--tip",
+            request.retire.tip,
+            ...(request.reason === undefined ? [] : ["--reason", request.reason]),
+            "--submitter",
+            request.by,
+          ]
+          throw new Error(
+            `${error instanceof Error ? error.message : String(error)}; resolved repository ${checkout ?? repo}, origin ${origin}` +
+              (held.length === 0 ? "" : `; ${componentDropHint(io, request.branch, held, argv)}`),
+            { cause: error },
+          )
         }
         throw error
       }

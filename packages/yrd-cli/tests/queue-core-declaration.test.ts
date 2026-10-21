@@ -6247,7 +6247,11 @@ describe("exact-tip origin retirement of a draft", () => {
         const droppedEvents = await (await openEvents({ ...store, ref: changesRef("main", branch) })).events()
         expect(droppedEvents.at(-1)).toMatchObject({ type: "cancelled", links: [head] })
       }
-      if (mode === "advanced") expect(output.stderr()).toContain(`expected ${base} at origin, found ${head}`)
+      if (mode === "advanced") {
+        expect(output.stderr()).toContain(`expected ${base} at origin, found ${head}`)
+        // 30277: a custody failure says which repository the retire read.
+        expect(output.stderr()).toContain(`; resolved repository ${repo}`)
+      }
       return
     }
     expect(code, output.stderr()).toBe(0)

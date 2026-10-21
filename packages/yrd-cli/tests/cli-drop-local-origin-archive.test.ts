@@ -4,6 +4,8 @@
  * archive ref is written locally only, and the report still says origin.
  * @level l2 (`runYrdProcess` against a real remote and clone)
  * @consumer yrd drop --local custody message and recovery command.
+ * Also (30277): a drop run in the superproject for a branch only a component holds reports success while
+ * removing nothing; it must name the component, its oid and a command that runs there.
  * @testonly none
  */
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
@@ -186,3 +188,76 @@ it("treats an already-gone branch as a no-op success (28385 area 11, ruled 2026-
   expect(report.removed).toEqual([])
   expect(report.detail).toContain("already gone")
 })
+
+it("names the component that holds a branch absent in the superproject, and fails (30277)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "yrd-drop-local-component-"))
+  roots.push(root)
+  const remote = join(root, "remote.git")
+  const childRemote = join(root, "child.git")
+  const childSeed = join(root, "child-seed")
+  const repo = join(root, "repo")
+  const seed = gitIn(root)
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", childRemote])
+  await seed(["clone", "--quiet", childRemote, childSeed])
+  const childSeedGit = gitIn(childSeed)
+  await childSeedGit(["config", "user.name", "yrd test"])
+  await childSeedGit(["config", "user.email", "yrd@test.invalid"])
+  writeFileSync(join(childSeed, "CHILD.md"), "child\n")
+  await childSeedGit(["add", "CHILD.md"])
+  await childSeedGit(["commit", "--quiet", "-m", "child"])
+  await childSeedGit(["push", "--quiet", "origin", "main"])
+  await seed(["clone", "--quiet", remote, repo])
+  const git = gitIn(repo)
+  await git(["config", "user.name", "yrd test"])
+  await git(["config", "user.email", "yrd@test.invalid"])
+  writeFileSync(join(repo, ".yrd.yml"), 'checks:\n  - verify: {run: "true"}\n')
+  await git(["add", "."])
+  await git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", childRemote, "vendor/child"])
+  await git(["commit", "--quiet", "-m", "queue with a component"])
+  await git(["push", "--quiet", "origin", "main"])
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+  if (config === undefined) throw new Error("fixture lost .yrd.yml")
+  await createEventQueue(
+    createEventStore(repo, "origin", git.selection),
+    "main",
+    target,
+    config,
+    new Date("2020-01-01T00:00:00.000Z"),
+  )
+  // The branch lives only in the component checkout, as a component author's branch does.
+  const child = gitIn(join(repo, "vendor/child"))
+  await child(["config", "user.name", "yrd test"])
+  await child(["config", "user.email", "yrd@test.invalid"])
+  await child(["checkout", "--quiet", "-b", "task/component-only"])
+  writeFileSync(join(repo, "vendor/child", "WORK.md"), "work\n")
+  await child(["add", "WORK.md"])
+  await child(["commit", "--quiet", "-m", "component work"])
+  const tip = (await child(["rev-parse", "HEAD"])).trim()
+  await child(["checkout", "--quiet", "--detach"])
+
+  const misdirected = capture(repo)
+  const code = await runYrdProcess(
+    ["bun", "yrd", "drop", "task/component-only", "--local", "--tip", tip, "--submitter", "fixture", "--json"],
+    misdirected.io,
+  )
+  expect(code, misdirected.stderr()).toBe(1)
+  const report = JSON.parse(misdirected.stdout()) as { removed: unknown[]; components: unknown[]; detail: string }
+  expect(report.removed).toEqual([])
+  expect(report.components).toEqual([{ path: expect.stringMatching(/\/vendor\/child$/u), oid: tip }])
+  expect(report.detail).toContain("refs/heads/task/component-only is absent in ")
+  expect(report.detail).toContain(`vendor/child holds refs/heads/task/component-only at ${tip}; retire it there: `)
+  expect(report.detail).toContain("resolved its repository from the cwd (30527)")
+  expect(report.detail).not.toContain("already gone")
+  expect((await child(["rev-parse", "refs/heads/task/component-only"])).trim()).toBe(tip)
+
+  // Absent in the superproject and in every component: still the ruled idempotent no-op (28385 area 11).
+  const absent = capture(repo)
+  const absentCode = await runYrdProcess(
+    ["bun", "yrd", "drop", "task/nowhere", "--local", "--tip", tip, "--submitter", "fixture", "--json"],
+    absent.io,
+  )
+  expect(absentCode, absent.stderr()).toBe(0)
+  expect((JSON.parse(absent.stdout()) as { detail?: string }).detail).toContain("already gone")
+}, 60_000)
