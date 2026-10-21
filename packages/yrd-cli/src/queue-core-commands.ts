@@ -4543,7 +4543,12 @@ export async function coreQueueCommand(
       if (request.watch !== true) {
         const one = await round(captured, undefined, "omit")
         if (options.json === true) emit(io, true, one.data, "")
-        else io.stdout(`${await page(one)}\n`)
+        else {
+          // The read leaves its garbage (journal text, decoded histories) uncollected, and drawing stacks its own on
+          // top: one full collection here took the peak from 439–459 MB to 396–397 MB at the same CPU (28925).
+          Bun.gc(true)
+          io.stdout(`${await page(one)}\n`)
+        }
         if (one.observation.contract === "root-v1" && one.observation.outcome === "invalid") return 2
         // Exit 0 by default even when the filter matched nothing (AC1 ruling):
         // backward compatible, and reversible with one flag rather than a
