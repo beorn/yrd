@@ -1805,6 +1805,96 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(warm.all.map((row) => row.branch)).not.toContain(branch)
   })
 
+  // @failure 28925: a local list read every ref three times a round. Output is identical either way, so only a count
+  // of the listings catches one coming back.
+  // @level l2; @consumer default queue list from a local status mirror
+  it("lists every ref once per round from a local status store (28925)", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const remoteStore = createEventStore(repo, "origin", git.selection)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, head, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture declaration absent")
+    const now = new Date()
+    const old = new Date(now.getTime() - 2 * READ_HORIZON_MS)
+    const queueTip = await createQueue(repo, "main", head, old)
+    // One chain inside the read horizon and one outside it, so the scoped read omits a chain.
+    for (const [branch, at] of [
+      ["task/recent", now],
+      ["task/old", old],
+    ] as const) {
+      await (
+        await openEvents({ ...remoteStore, ref: changesRef("main", branch), writer: "yrd" })
+      ).append(
+        [
+          changeInput("opened", { queueTip, at, commit: head, by: "yrd" }),
+          changeInput("merged", { queueTip, at, commit: head }),
+        ],
+        { expect: null },
+      )
+    }
+    const mirror = join(dirname(repo), "mirror")
+    await gitIn(dirname(repo))(["clone", "--quiet", "--mirror", join(dirname(repo), "remote.git"), mirror])
+    const backend = remoteStore.backend
+    const list = backend.listRefs
+    if (list === undefined) throw new Error("fixture backend cannot list refs")
+    const listings: string[] = []
+    const counted: typeof backend = {
+      ...backend,
+      listRefs: (repoPath, selection, remote) => {
+        listings.push(typeof selection === "string" ? selection : "<exact names>")
+        return list.call(backend, repoPath, selection, remote)
+      },
+    }
+    const store = { repo: mirror, selection: git.selection, backend: counted }
+    const workdir = await workdirOf(git, { cwd: repo })
+    const listing = await readEventListing(git, config, repo, workdir, head, store, { recent: { env: process.env } })
+    expect(listing.all.map((row) => row.branch)).toEqual(["task/recent"])
+    expect(listings.filter((prefix) => prefix === "refs/")).toEqual(["refs/"])
+  })
+
+  // @failure 28925: the omitted-ref check is skipped only where the listing is the inventory. A listing that takes a
+  // fresh inventory, as a remote store does, must still refuse a ref that vanished after its first listing.
+  // @level l2; @consumer queue list read fresh from the remote
+  it("refuses a ref that vanished between a remote listing and its inventory (28925)", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const remoteStore = createEventStore(repo, "origin", git.selection)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, head, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture declaration absent")
+    const old = new Date(Date.now() - 2 * READ_HORIZON_MS)
+    const queueTip = await createQueue(repo, "main", head, old)
+    const ref = changesRef("main", "task/vanished")
+    await (
+      await openEvents({ ...remoteStore, ref, writer: "yrd" })
+    ).append(
+      [
+        changeInput("opened", { queueTip, at: old, commit: head, by: "yrd" }),
+        changeInput("merged", { queueTip, at: old, commit: head }),
+      ],
+      { expect: null },
+    )
+    const backend = remoteStore.backend
+    const list = backend.listRefs
+    if (list === undefined) throw new Error("fixture backend cannot list refs")
+    let listings = 0
+    const deleting: typeof backend = {
+      ...backend,
+      listRefs: async (repoPath, selection, remote) => {
+        const listed = await list.call(backend, repoPath, selection, remote)
+        // The chain disappears from the remote right after the round's first listing.
+        if (selection === "refs/" && ++listings === 1) await git(["push", "--quiet", "origin", `:${ref}`])
+        return listed
+      },
+    }
+    const store = { ...remoteStore, backend: deleting }
+    const workdir = await workdirOf(git, { cwd: repo })
+    await expect(
+      readEventListing(git, config, repo, workdir, head, store, { recent: { env: process.env } }),
+    ).rejects.toThrow(`${ref} disappeared during event list`)
+  })
+
   // 25655: migrated endings retain their original times. The default list's
   // read horizon must not make their full change histories unshowable.
   it("shows an old ended event change without widening a later default list", async () => {

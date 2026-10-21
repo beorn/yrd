@@ -99,6 +99,7 @@ export {
   issueProviderId,
   readEventQueue,
   readEventOps,
+  readEventOpsWithRefs,
   readEventQueueWithChanges,
   readStatus,
   resetQueueFormatCache,
