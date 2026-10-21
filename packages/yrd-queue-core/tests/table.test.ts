@@ -85,33 +85,55 @@ describe("a packed Check: trailer", () => {
 })
 
 describe("event row overlays", () => {
-  it("keeps an observed merge's event SHA without lending it to an older run", () => {
-    const branch = "task/observed"
-    const head = "a".repeat(40)
-    const merge = "b".repeat(40)
-    const at = new Date("2026-09-28T05:04:24Z")
-    const runs = [
-      journalRun({
-        at,
-        startedAt: at,
-        branch,
-        head,
-        id: "q-2",
-        decision: "merged",
-        reason: `already on target at ${merge}`,
-      }),
-      journalRun({ at, startedAt: at, branch, head, id: "q-1", decision: "checked" }),
-    ]
-    const journals = { dir: "/journal-fixture", malformed: [], runs: new Map([[journalKey(branch, head), runs]]) }
-    const merged: Row = { branch, head, state: "merged", merge }
-    expect(watchRows([merged], { journals, perRun: true }).map(({ row }) => row.merge)).toEqual([merge, undefined])
+  it.each(["merge checks passed", "already on target at " + "b".repeat(40)])(
+    "lends the event SHA only to its named run before its journal catches up (%s)",
+    (reason) => {
+      const branch = "task/observed"
+      const head = "a".repeat(40)
+      const merge = "b".repeat(40)
+      const at = new Date("2026-09-28T05:04:24Z")
+      const runs = [
+        journalRun({
+          at,
+          startedAt: at,
+          branch,
+          head,
+          id: "q-2",
+          decision: "merged",
+          reason,
+        }),
+        journalRun({ at, startedAt: at, branch, head, id: "q-1", decision: "checked" }),
+      ]
+      const journals = { dir: "/journal-fixture", malformed: [], runs: new Map([[journalKey(branch, head), runs]]) }
+      const merged: Row = { branch, head, state: "merged", merge, run: "q-2" }
+      expect(watchRows([merged], { journals, perRun: true }).map(({ row }) => row.merge)).toEqual([merge, undefined])
 
-    const withoutEventSha: Row = { branch, head, state: "merged" }
-    expect(watchRows([withoutEventSha], { journals, perRun: true }).map(({ row }) => row.merge)).toEqual([
-      undefined,
-      undefined,
-    ])
-  })
+      // Even the old on-target reason cannot lend another run's event evidence.
+      for (const run of ["q-other", undefined]) {
+        expect(watchRows([{ ...merged, run }], { journals, perRun: true }).map(({ row }) => row.merge)).toEqual([
+          undefined,
+          undefined,
+        ])
+      }
+
+      const withoutEventSha: Row = { branch, head, state: "merged" }
+      expect(watchRows([withoutEventSha], { journals, perRun: true }).map(({ row }) => row.merge)).toEqual([
+        undefined,
+        undefined,
+      ])
+
+      const caughtUp = {
+        ...journals,
+        runs: new Map([[journalKey(branch, head), [{ ...runs[0]!, merge }, runs[1]!]]]),
+      }
+      expect(watchRows([merged], { journals: caughtUp, perRun: true }).map(({ row }) => row.merge)).toEqual([
+        merge,
+        undefined,
+      ])
+      // A journal's own merge remains authoritative even if the event names another run.
+      expect(watchRows([{ ...merged, run: "q-other" }], { journals: caughtUp, perRun: true })[0]?.row.merge).toBe(merge)
+    },
+  )
 
   it.each([
     ["verifying", true],

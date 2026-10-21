@@ -2151,6 +2151,75 @@ describe("the ending instant the table times a row by (24196)", () => {
 })
 
 /**
+ * @failure JSON list/show erase the merged event's own OID while its run journal has not written merge yet.
+ * @level l2 (real event store and journal writes through both command lenses)
+ * @consumer queue watch polling JSON, list/show readers and the human watch table
+ * The table contract cannot catch command lens selection or raw-journal cache behavior.
+ */
+describe("a merged event before its journal catches up", () => {
+  it("keeps list, show and the human table on the same OID across the later journal write", async () => {
+    const w = await world()
+    const branch = "task/event-before-journal"
+    await change(w, branch, true)
+    const head = (await w.git(["rev-parse", branch])).trim()
+    await w.git(["merge", "--ff-only", branch])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const journal = openLog(join(w.workdir, "logs"))
+    journal.write({ kind: "run", target: "main", queue: "main" })
+    journal.write({ kind: "change", branch, head, decision: "merged", reason: "merge checks passed" })
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const queue = await readEventQueue(store, "main")
+    const chain = await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+    await chain.append(
+      [
+        changeInput("merged", {
+          queueTip: queue.tip,
+          at: new Date(),
+          commit: head,
+          run: journal.id,
+          reason: "merge checks passed",
+        }),
+      ],
+      { expect: await chain.head() },
+    )
+
+    for (const phase of ["event only", "journal caught up"]) {
+      const documents: { command: string; run: unknown; merge: unknown }[] = []
+      for (const request of [
+        { command: "list" as const, terms: [branch] },
+        { command: "show" as const, branch },
+      ]) {
+        const out = capture(w.work)
+        expect(await coreQueueCommand(w.work, out.io, request, { json: true, workdir: w.workdir }), out.stderr()).toBe(
+          0,
+        )
+        const [row] = (JSON.parse(out.stdout()) as { changes: Record<string, unknown>[] }).changes
+        documents.push({ command: request.command, run: row?.["run"], merge: row?.["merge"] })
+      }
+      expect(documents, phase).toEqual([
+        { command: "list", run: journal.id, merge: head },
+        { command: "show", run: journal.id, merge: head },
+      ])
+      const human = capture(w.work)
+      expect(
+        await coreQueueCommand(
+          w.work,
+          human.io,
+          { command: "list", terms: [branch], watch: true },
+          {
+            interactive: true,
+            workdir: w.workdir,
+          },
+        ),
+        human.stderr(),
+      ).toBe(0)
+      expect(renderedSnapshot()?.rows.find(({ row }) => row.branch === branch)?.row.merge, phase).toBe(head)
+      if (phase === "event only") journal.write({ kind: "merge", branch, head, commit: head })
+    }
+  })
+})
+
+/**
  * @failure  A one-row page, which `yrd list <branch>` prints and a plain `yrd watch <branch>` prints every round,
  *           put `Age · Runtime · Wait time` under its row, each on a basis of its own, while the row's own cell
  *           said `waiting` (@i/10-yrd/24196, review finding 3). One word, one basis: the page's timing is the cell's.
