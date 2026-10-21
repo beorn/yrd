@@ -459,6 +459,30 @@ it("reads a fresh queue-owned store without remote Git calls and refreshes once 
   )
 }, 100_000)
 
+// @failure 28925: list no longer asks the remote for the queue format when it reads a local status mirror, so the
+// mirror's own check is the only refusal left for a legacy queue; no other test reaches refuseMissingEventMarker.
+it("refuses a legacy queue from the local status mirror, not the remote (28925)", async () => {
+  const repo = await world("{}\n")
+  const git = gitIn(repo)
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  // The pre-event format: one ref per change, named <branch>@<head>, and no queue ref.
+  const legacy = `refs/yrd/main/task/old@${target}`
+  await git(["push", "--quiet", "origin", `${target}:${legacy}`])
+  const root = dirname(repo)
+  const remote = join(root, "remote.git")
+  const owned = join(root, "owned")
+  await gitIn(root)(["clone", "--quiet", "--no-checkout", remote, owned])
+  const options = {
+    json: true,
+    queue: "main",
+    workdir: join(root, "queue"),
+    localStatusStore: { path: owned, transport: remote },
+  } as const
+  await expect(coreQueueCommand(repo, capture(repo).io, { command: "list" }, options)).rejects.toThrow(
+    `queue status store ${owned} has no event marker ${queueRef("main")}; observed legacy change ref ${legacy}; use --fresh for this reading`,
+  )
+}, 60_000)
+
 it("refreshes local status after an event queue write in the same workdir (25626)", async () => {
   const repo = await world("{}\n")
   const git = gitIn(repo)
