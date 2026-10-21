@@ -1526,7 +1526,7 @@ export async function readEventOpsWithRefs(
   } else if (knownQueue !== undefined && store.remote === undefined) {
     const chain = await openEvents({ ...store, ref: queueRef(queue) })
     projected = await eventQueueFromHistory(store, queue, (await chain.head()) ?? [], chain, knownQueue)
-    acquiredRefs = await listRefs(queueRefPrefix(queue), store)
+    acquiredRefs = listed?.refs ?? (await listRefs(queueRefPrefix(queue), store))
   } else {
     projected = await readEventQueue(store, queue)
   }
@@ -3337,17 +3337,21 @@ function projectChangeHistories(
   return { histories, invalid }
 }
 
-/** Read the validated queue and its change chains concurrently for a listing. */
+/**
+ * Read the validated queue, then its change chains, for a listing. A local listing passes its own `refs/` listing as
+ * `listed`, so the chains are selected from it instead of a second listing of every ref (28925).
+ */
 export async function readEventQueueWithChanges(
   store: QueueReadStore,
   queue: string,
   recent?: RecentEventReadOptions,
+  listed?: ReadonlyMap<string, Oid>,
 ): Promise<Readonly<{ queue: EventQueue } & ChangeHistories>> {
   const prefixes = [`${queueRefPrefix(queue)}/changes/`, archivedChangesPrefix(queue)]
   // One after the other: run together, the whole queue chain and every tip's metadata were live at once, which set
   // the read's high-water mark even with a collection between phases (28925).
   const queueState = await readEventQueue(store, queue)
-  const chains = await readEventChains(prefixes, store, recent)
+  const chains = await readEventChains(prefixes, store, recent, undefined, listed)
   return { queue: queueState, ...projectChangeHistories(chains, prefixes, store.repo) }
 }
 

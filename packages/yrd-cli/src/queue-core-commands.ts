@@ -90,6 +90,7 @@ import {
   readBranchHistory,
   readEventQueue,
   readEventOps,
+  readEventOpsWithRefs,
   readEventQueueWithChanges,
   setBranchIgnored,
   transientPush5xxOf,
@@ -7130,9 +7131,12 @@ export async function readEventListing(
       },
     })
 
-  // 1. Fetch event refs first
+  // 1. Fetch event refs first. A local store keeps this one listing for the round: the chain selection and the ops
+  // read take their refs from it instead of listing all 27k refs twice more (28925).
+  let advertised: ReadonlyMap<string, string> | undefined = await listRefs("refs/", store)
+  const sharesListing = store.remote === undefined
   const listedRefs = new Map(
-    [...(await listRefs("refs/", store))].filter(([ref]) => ref.startsWith(queuePrefix) || ref.startsWith(coldPrefix)),
+    [...advertised].filter(([ref]) => ref.startsWith(queuePrefix) || ref.startsWith(coldPrefix)),
   )
   const runnerTip = listedRefs.get(runnerRefName)
   // A heartbeat moves on its own cadence. It must not invalidate change-state
@@ -7261,7 +7265,8 @@ export async function readEventListing(
   const readingBranch = options.branch
   const acquire =
     readingBranch === undefined
-      ? () => readEventQueueWithChanges(store, config.target.branch, metadataRead)
+      ? () =>
+          readEventQueueWithChanges(store, config.target.branch, metadataRead, sharesListing ? advertised : undefined)
       : () =>
           Promise.all([
             readEventQueue(store, config.target.branch),
@@ -7278,11 +7283,17 @@ export async function readEventListing(
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
   // Keep this acquisition alive across fences. A moving history only needs its
   // own hot+cold read; restarting the listing reacquires every archived chain.
+  // The inventory has selected its chains, so drop the 27k-ref listing: held to the end, it raised the peak that
+  // drawing sets by 17 MB (28925).
+  advertised = undefined
+  // The first pass reads the shared listing's own inventory; a pass after a retry lists fresh.
+  let inventoryShared = sharesListing
   for (;;) {
     try {
-      if (recent !== undefined) {
-        // A scoped read omits old histories, but an advertised ref that vanished
-        // before its second inventory must not become an ordinary empty result.
+      // A scoped read omits old histories, but an advertised ref that vanished
+      // before its second inventory must not become an ordinary empty result.
+      // A shared listing is the chain inventory itself, so there is no second one.
+      if (recent !== undefined && !inventoryShared) {
         const omitted = [...queueRefs].filter(([ref]) => {
           const branch = ref.startsWith(changePrefix)
             ? ref.slice(changePrefix.length)
@@ -7305,6 +7316,7 @@ export async function readEventListing(
       break
     } catch (error) {
       if (!(error instanceof EventListingMoved)) throw error
+      inventoryShared = false
       const branch = error.ref.startsWith(changePrefix)
         ? error.ref.slice(changePrefix.length)
         : error.ref.startsWith(coldPrefix)
@@ -7482,7 +7494,20 @@ export async function readEventListing(
   const all = titled([...selected.table, ...invalidRows, ...directRows])
   const document = titled([...selected.document, ...invalidRows, ...directRows])
   const observation = await observe(queueRefs, branchRefs)
-  const operational = await readEventOps(store, git, config.target.branch, targetOid, { knownQueue: queue })
+  const operational =
+    // The queue and pause refs come from this round's listing, as queueRefs holds them; it is live to the end anyway.
+    (
+      await readEventOpsWithRefs(
+        store,
+        git,
+        config.target.branch,
+        targetOid,
+        sharesListing ? { refs: queueRefs } : undefined,
+        {
+          knownQueue: queue,
+        },
+      )
+    ).ops
   if (operational.queue.tip !== queue.tip) {
     throw new EventRefsMoved(
       [queueRef(config.target.branch)],

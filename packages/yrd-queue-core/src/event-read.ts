@@ -188,13 +188,20 @@ export async function readRetainedEvent(chain: Chain, id: Oid): Promise<Event> {
  */
 export type AlsoRead = Readonly<{ refs: readonly string[]; seen: Map<string, Oid | null> }>
 
-/** Every chain under a prefix, each read to its root in the one shared complete walk. */
+/**
+ * Every chain under a prefix, each read to its root in the one shared complete walk. A local multi-prefix read may
+ * take `listed`, the caller's own `refs/` listing of the same store, as its advertisement instead of listing again.
+ */
 export async function readEventChains(
   prefix: string | readonly string[],
   store: ChainStore,
   recent?: RecentEventReadOptions,
   also?: AlsoRead,
+  listed?: ReadonlyMap<string, Oid>,
 ): Promise<ReadonlyMap<string, Event[]>> {
+  if (listed !== undefined && (typeof prefix === "string" || store.remote !== undefined)) {
+    throw new TypeError("a shared refs/ listing serves only a local multi-prefix event read")
+  }
   if (typeof prefix === "string") {
     if (also !== undefined) throw new TypeError("refs read alongside event chains need named chain refs, not a prefix")
     return chainsUnder(prefix, { ...store, limit: EVENT_READ_LIMIT, complete: true })
@@ -207,7 +214,8 @@ export async function readEventChains(
   // run's listChangeHistories both call this one reader, so the policy lives here once (29386).
   for (let attempt = 1; ; attempt++) {
     try {
-      return await readMultiPrefixInventory(prefix, store, recent, also)
+      // A retry is after a move, so only the first attempt may use the caller's listing.
+      return await readMultiPrefixInventory(prefix, store, recent, also, attempt === 1 ? listed : undefined)
     } catch (error) {
       if (!(error instanceof EventRefsMoved)) throw error
       if (attempt >= EVENT_REFS_ACQUIRE_ATTEMPTS) throw new EventRefsAcquireExhausted(attempt, error.movedRefs)
@@ -221,6 +229,7 @@ async function readMultiPrefixInventory(
   store: ChainStore,
   recent?: RecentEventReadOptions,
   also?: AlsoRead,
+  listed?: ReadonlyMap<string, Oid>,
 ): Promise<ReadonlyMap<string, Event[]>> {
   // One advertisement is the selection boundary. Listing hot and cold separately can miss a chain that
   // atomically moves between them. Fetch only selected event refs, never all advertised branch objects.
@@ -240,7 +249,7 @@ async function readMultiPrefixInventory(
     advertised = await fetch(store.repo, [...prefix, ...(also?.refs ?? [])], store.remote, { absent: "omit" })
     acquiredExact = true
     for (const ref of also?.refs ?? []) also?.seen.set(ref, advertised.get(ref) ?? null)
-  } else advertised = await listRefs("refs/", store)
+  } else advertised = listed ?? (await listRefs("refs/", store))
   let selected = new Map(
     [...advertised].filter(([ref]) =>
       prefix.some((part) => ref === part || (part.endsWith("/") && ref.startsWith(part))),
