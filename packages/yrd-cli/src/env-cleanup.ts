@@ -18,7 +18,7 @@ import {
   type QueueRunOutcome,
 } from "@yrd/queue-core"
 import { createLocalGitProcess } from "git-super/process"
-import { createLocalGitWorktreeStore, PrivateStoreRefusalError } from "git-super/worktree"
+import { assertNoPrivateStore, createLocalGitWorktreeStore, PrivateStoreRefusalError } from "git-super/worktree"
 import { inspectProcessCwds, resolveContainedPath, type ProcessCwdProjection } from "removely"
 import { environmentCwdHolder, processCwdCoverage } from "./env-close-holders.ts"
 import {
@@ -726,6 +726,10 @@ async function proveEnvironmentRemovable(input: {
 }): Promise<void> {
   input.entry.retryRemoteProof = false
   await input.ancestor(input.path, input.head, input.target)
+  // A private store is reported by its own class and retire route (#27120 AC2). Removal inspection refuses an empty
+  // checkout whose store survives as an unknown submodule state (#30563), so the private-store question goes first.
+  const adminDir = (await input.treeGit.at(input.path)(["rev-parse", "--absolute-git-dir"])).trim()
+  await assertNoPrivateStore(createLocalGitProcess(), { adminDir, repository: input.path, head: input.head })
   const inspection = await createLocalGitWorktreeStore({ repo: input.repo, env: input.env }).inspectRemoval(input.path)
   for (const component of inspection.consultedRepositories) {
     if (component.path === ".") continue
