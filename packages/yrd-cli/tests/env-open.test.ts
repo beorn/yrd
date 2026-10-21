@@ -1358,3 +1358,78 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
     })
   })
 })
+
+describe("yrd env open --issue asks the project's issues interface before it writes anything (30516)", () => {
+  const PROVIDER = join(import.meta.dirname, "support", "fake-issues-provider.ts")
+
+  /** Commit `issues.yml` on the world's main and publish it, the way a real project declares its store. */
+  async function declareIssues(w: World, yaml: string): Promise<void> {
+    writeFileSync(join(w.work, "issues.yml"), yaml)
+    await w.git(["add", "issues.yml"])
+    await w.git(["commit", "--quiet", "-m", "declare the issues interface"])
+    await w.git(["push", "--quiet", "origin", "main"])
+  }
+
+  /**
+   * @failure 30516: `yrd env open --issue <ref>` wrote a `Refs: <ref>` bind commit, a branch and a worktree for a
+   *          key no issue has (2026-10-21, a mis-slugged key, bind commit c5687305), because the binding was
+   *          reconciled only against branch and commit bindings and never against the project's issues interface.
+   * @level   l2 (real bare remote, real retained worktree, real provider process)
+   * @consumer every seat opening bead work with `--issue`
+   * @testonly none
+   */
+  it("refuses a key the declared resolve verb cannot resolve, naming the key and where it looked, before any branch, worktree or Refs commit", async () => {
+    const w = await world(":")
+    await declareIssues(w, `resolve: ${JSON.stringify([process.execPath, PROVIDER, "exit3", "<raw>"])}\n`)
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "30516-no-such-issue"], run.io)).not.toBe(0)
+
+    expect(run.stderr()).toContain("--issue 30516-no-such-issue")
+    expect(run.stderr()).toContain("yrd-issues-provider-failed")
+    // The verb and the argv it ran (as declared), and the project root whose declaration it read.
+    expect(run.stderr()).toContain("yrd-issues-provider-failed: resolve ")
+    expect(run.stderr()).toContain(PROVIDER)
+    expect(run.stderr()).toContain("exit3")
+    expect(run.stderr()).toContain(w.work)
+    // The provider's own reason passes through, so the caller reads WHY the store said no.
+    expect(run.stderr()).toContain("fake provider refused")
+    // Nothing was written: no path printed, no branch, no bay, no bind commit to carry a wrong key forward.
+    expect(run.stdout()).toBe("")
+    expect((await w.git(["branch", "--list", "task/30516-no-such-issue"])).trim()).toBe("")
+    expect(existsSync(join(w.work, ".bays", "30516-no-such-issue"))).toBe(false)
+  })
+
+  /**
+   * @failure The check must not refuse where nothing can be asked: a project with no `issues.yml`, or none
+   *          declaring `resolve`, opened silently before and must still open, now saying what it could not check.
+   * @level   l2 (real bare remote and real retained worktree)
+   * @consumer `--issue` callers in a project with a resolvable key, and in a project without an issues store
+   * @testonly none
+   */
+  it("opens as before when the key resolves, and says on stderr when there is no store to ask", async () => {
+    const resolvable = await world(":")
+    await declareIssues(resolvable, `resolve: ${JSON.stringify([process.execPath, PROVIDER, "resolve", "<raw>"])}\n`)
+    const ok = capture(resolvable.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "30516-real"], ok.io)).toBe(0)
+    expect((await resolvable.git(["log", "-1", "--format=%B", "task/30516-real"])).trim()).toContain("Refs: 30516-real")
+    expect(ok.stderr()).toContain("task/30516-real is bound to 30516-real")
+    expect(ok.stderr()).not.toContain("was not checked")
+
+    const undeclared = await world(":")
+    const plain = capture(undeclared.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "30516-undeclared"], plain.io)).toBe(0)
+    expect(plain.stderr()).toContain("--issue 30516-undeclared was not checked against an issues store")
+    expect(plain.stderr()).toContain("yrd-issues-declaration-missing")
+    expect((await undeclared.git(["log", "-1", "--format=%B", "task/30516-undeclared"])).trim()).toContain(
+      "Refs: 30516-undeclared",
+    )
+
+    const viewOnly = await world(":")
+    await declareIssues(viewOnly, `view: ${JSON.stringify([process.execPath, PROVIDER, "json", "<key>"])}\n`)
+    const partial = capture(viewOnly.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "30516-view-only"], partial.io)).toBe(0)
+    expect(partial.stderr()).toContain("--issue 30516-view-only was not checked against an issues store")
+    expect(partial.stderr()).toContain("yrd-issues-verb-unsupported")
+  })
+})

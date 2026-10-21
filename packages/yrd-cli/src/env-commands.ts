@@ -57,6 +57,9 @@ import {
   type PrivateStoreRefusal,
 } from "git-super/worktree"
 import { repositoryHere as findRepository } from "./declaration.ts"
+import { ISSUE_DISPLAY_TIMEOUT_MS } from "./issue-resolver.ts"
+import { ISSUES_CODES } from "./issues/declaration.ts"
+import { runIssuesVerb } from "./issues/run.ts"
 import { originHead } from "./queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
@@ -464,6 +467,37 @@ export function environmentStampUnreadable(name: string): boolean {
 }
 
 /**
+ * 30516: the key `--issue` names is resolved through the project's issues interface BEFORE any bay, branch,
+ * worktree or Refs commit exists, as #28285 reads the identity first. `resolve` is the read post-merge runs on
+ * every Refs trailer, so a key that fails it here would also close nothing at merge (a mis-slugged key bound an
+ * environment and its Refs commit, 2026-10-21). Refusing names the key, the verb, the argv it ran and the
+ * project root, and the provider's own reason passes through on stderr. A project with no `issues.yml`, or
+ * none declaring `resolve`, has no store to ask: that is said on stderr and the open proceeds as before. Yrd
+ * still learns nothing of hh's bead model; it runs the verb the project declared, within the display read's bound.
+ */
+async function requireResolvableIssue(root: string, issue: string, io: YrdCliIO): Promise<void> {
+  const outcome = await runIssuesVerb({
+    verb: "resolve",
+    args: [issue],
+    projectRoot: root,
+    cwd: root,
+    timeoutMs: ISSUE_DISPLAY_TIMEOUT_MS,
+    stderr: (text) => io.stderr(text),
+  })
+  if (outcome.ok) return
+  if (outcome.code === ISSUES_CODES.declarationMissing || outcome.code === ISSUES_CODES.unsupported) {
+    io.stderr(
+      `yrd env open: --issue ${issue} was not checked against an issues store, because ${root} declares none for it: ${outcome.message}\n`,
+    )
+    return
+  }
+  throw new Error(
+    `yrd env open: --issue ${issue} does not resolve to an issue through the issues interface declared by ${root}, ` +
+      `so no environment, branch or Refs commit was created: ${outcome.message}`,
+  )
+}
+
+/**
  * `yrd env open` — open an environment for one branch and keep it. Prints its
  * path on stdout, which is what a caller `cd`s into.
  */
@@ -508,6 +542,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   ).trim()
   if (name === "") throw new Error("yrd: --bay needs a name")
   const branch = commit === undefined ? `task/${name}` : undefined
+  if (options.issue !== undefined) await requireResolvableIssue(root, options.issue, io)
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process, selection)
   const resolvedBase =
