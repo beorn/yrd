@@ -78,12 +78,11 @@ async function recentEventRefs(
     const values = commit.trailers.filter(([name]) => name === key)
     return values.length === 1 ? values[0]?.[1] : undefined
   }
+  // One read per population: Gitomic plans the native batches, so 9,215 tips cost two git processes, not 72 (28925).
   const read = async (ids: readonly Oid[]): Promise<void> => {
-    for (let offset = 0; offset < ids.length; offset += 256) {
-      const commits = await readEventCommitMetadata(repo, ids.slice(offset, offset + 256), options)
-      for (const [id, commit] of commits) {
-        metadata.set(id, { kind: unique(commit, "Event"), time: unique(commit, "Time"), for: unique(commit, "For") })
-      }
+    if (ids.length === 0) return
+    for (const [id, commit] of await readEventCommitMetadata(repo, ids, options)) {
+      metadata.set(id, { kind: unique(commit, "Event"), time: unique(commit, "Time"), for: unique(commit, "For") })
     }
   }
   await read([...new Set(refs.values())])
