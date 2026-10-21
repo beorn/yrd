@@ -151,6 +151,10 @@ it("reads past unreadable head requests and consumes a valid later request in on
   // would fill on them even on the old code and the row would prove nothing.
   expect(listCloseRequests(w.workdir).at(-1), "the valid request is the last sorted entry").toBe(valid)
   await runRound(w, "cleanup-unreadable-head")
+  const manualClose = vi.mocked(closeEnvironment).mock.calls.findLast((call) => call[0] === w.env)
+  expect(manualClose?.[1], "a manual noRehome request has no automatic custody policy").not.toHaveProperty(
+    "componentCustody",
+  )
 
   expect(existsSync(valid), "the valid later request is consumed in one pass").toBe(false)
   for (let index = 0; index < 8; index++) {

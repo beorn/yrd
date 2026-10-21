@@ -18,6 +18,7 @@ import { afterAll, expect, it, vi } from "vitest"
 import type { QueueConfig } from "@yrd/queue-core"
 import { remoteUrl } from "@yrd/queue-core"
 import { createEnvironmentCleanup, type ClosedEnvironment } from "../src/env-cleanup.ts"
+import { closeEnvironment } from "../src/env-commands.ts"
 import { writeCloseRequest } from "../src/env-close-requests.ts"
 import { writeEnvOpenRecord } from "../src/env-open-record.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
@@ -52,9 +53,10 @@ vi.mock("../src/env-commands.ts", async (importOriginal) => {
         callIo: { stdout: (text: string) => void },
         _a?: unknown,
         _b?: unknown,
-        _c?: unknown,
+        beforeRemove?: () => Promise<void>,
         removedProof?: (proof: typeof PROOF) => void,
       ) => {
+        await beforeRemove?.()
         removedProof?.(PROOF)
         callIo.stdout(JSON.stringify({ closed: path }))
         return 0
@@ -150,6 +152,7 @@ async function runRound(
   run: string,
   merged: readonly string[],
   onEnvironmentClosed?: (closed: ClosedEnvironment) => Promise<void>,
+  cwd = w.repo,
 ): Promise<readonly Record<string, unknown>[]> {
   readBranchHistory.mockResolvedValue({
     ref: `refs/yrd/changes/${w.branch}`,
@@ -160,7 +163,7 @@ async function runRound(
     git: w.git,
     config: configFor(w.head),
     workdir: w.workdir,
-    io: { cwd: w.repo, stdout: () => {}, stderr: () => {}, localBranchProtections: null },
+    io: { cwd, stdout: () => {}, stderr: () => {}, localBranchProtections: null },
     selection: w.git.selection,
     outcome: { run, log: join(w.workdir, "journal.jsonl"), merged, target: w.head } as never,
     ...(onEnvironmentClosed === undefined ? {} : { onEnvironmentClosed }),
@@ -176,7 +179,10 @@ it("reports a sweep-closed environment once, with its proof, and never a kept on
     closed.push(entry)
   }
   const w = await world(OLD)
-  const rows = await runRound(w, "tell-sweep", [w.branch], tell)
+  const landing = join(w.repo, "..", "service-landing")
+  await w.git(["worktree", "add", "--quiet", "--detach", landing, "HEAD"])
+  await w.git(["config", "worktree.poolRoot", join(w.repo, ".bays")])
+  const rows = await runRound(w, "tell-sweep", [w.branch], tell, landing)
   expect(
     rows.some((row) => row.result === "closed" && row.path === w.env),
     JSON.stringify(rows),
@@ -186,6 +192,8 @@ it("reports a sweep-closed environment once, with its proof, and never a kept on
   expect(closed[0]?.branch).toBe(w.branch)
   expect(closed[0]?.proof?.manifest).toBe(PROOF.manifest)
   expect(closed[0]?.proof?.retainUntil).toBe(PROOF.retainUntil)
+  const sweepClose = vi.mocked(closeEnvironment).mock.calls.findLast((call) => call[0] === w.env)
+  expect(sweepClose?.[1]).toMatchObject({ componentCustody: { primaryRoot: w.repo, targetBranch: "main" } })
 
   const kept: ClosedEnvironment[] = []
   const fresh = await world(new Date().toISOString())
@@ -196,7 +204,7 @@ it("reports a sweep-closed environment once, with its proof, and never a kept on
   expect(kept, "a kept environment is never reported closed").toEqual([])
 })
 
-it("reports a consumed close request once, with its proof", async () => {
+it.each([true, false])("reports a consumed close request only after its ending validates (%s)", async (valid) => {
   const closed: ClosedEnvironment[] = []
   const w = await world(new Date().toISOString())
   const uid = process.getuid?.()
@@ -210,11 +218,19 @@ it("reports a consumed close request once, with its proof", async () => {
     predicate: "direct-admission",
     options: { noRehome: true },
     head: w.head,
-    ending: { remote: w.remote, queue: "main", branch: w.branch, event: "a".repeat(40) },
+    ending: { remote: w.remote, queue: "main", branch: w.branch, event: (valid ? "b" : "a").repeat(40) },
   })
   const rows = await runRound(w, "tell-request", [w.branch], async (entry) => {
     closed.push(entry)
   })
+  if (!valid) {
+    expect(closed).toEqual([])
+    expect(existsSync(w.env)).toBe(true)
+    expect(rows).toContainEqual(
+      expect.objectContaining({ result: "retired", why: expect.stringContaining("automatic close expected") }),
+    )
+    return
+  }
   expect(
     rows.some((row) => row.result === "closed" && row.path === w.env),
     JSON.stringify(rows),
@@ -223,6 +239,8 @@ it("reports a consumed close request once, with its proof", async () => {
   expect(closed[0]?.branch).toBe(w.branch)
   expect(closed[0]?.head).toBe(w.head)
   expect(closed[0]?.proof?.manifest).toBe(PROOF.manifest)
+  const requestClose = vi.mocked(closeEnvironment).mock.calls.findLast((call) => call[0] === w.env)
+  expect(requestClose?.[1]).toMatchObject({ componentCustody: { primaryRoot: w.repo, targetBranch: "main" } })
 })
 
 it("a throwing tell at a consumed close request is named tell-failed and never undoes the close", async () => {
@@ -238,7 +256,7 @@ it("a throwing tell at a consumed close request is named tell-failed and never u
     predicate: "direct-admission",
     options: { noRehome: true },
     head: w.head,
-    ending: { remote: w.remote, queue: "main", branch: w.branch, event: "a".repeat(40) },
+    ending: { remote: w.remote, queue: "main", branch: w.branch, event: "b".repeat(40) },
   })
   const rows = await runRound(w, "tell-request-throws", [w.branch], async () => {
     throw new Error("fixture request tell boom")

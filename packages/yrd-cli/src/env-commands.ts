@@ -86,6 +86,8 @@ export type EnvCloseOptions = Readonly<{
   json?: boolean
   retain?: string
   noRehome?: boolean
+  /** Internal automatic-cleanup policy; never inferred from manual close flags. */
+  componentCustody?: Readonly<{ primaryRoot: string; targetBranch: string }>
   /**
    * 29073: an abandoned environment whose dirt cannot be committed is snapshotted to the worktree
    * tool's durable custody before the clean gate, and the close then proceeds. A preserve failure
@@ -1241,10 +1243,16 @@ export async function closeEnvironment(
   // 29073 (@cto ruling): with --preserve the no-submodule path takes the SAME git-super worktree
   // remove as the submodule path, so the verified-ref dirt gate has ONE implementation in ONE
   // process and yrd never re-derives it. The cost is an empty or absent modules retention and one
-  // proof line for a tree that declares no .gitmodules. WITHOUT --preserve the plain path is
-  // unchanged: a clean no-submodule close never reaches git-super.
+  // proof line for a tree that declares no .gitmodules. Explicit automatic custody also needs this
+  // selected route even with no submodules; an ordinary manual close keeps the plain path.
   let removalProof: WorktreeRemovalProof | undefined
-  if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true || options.preserve === true) {
+  if (
+    modules.trim() !== "" ||
+    options.retain !== undefined ||
+    options.noRehome === true ||
+    options.preserve === true ||
+    options.componentCustody !== undefined
+  ) {
     const retain = options.retain === undefined ? join(workdir, "retained-modules") : resolve(io.cwd, options.retain)
     let removed: unknown
     try {
@@ -1258,6 +1266,9 @@ export async function closeEnvironment(
           "--retain",
           retain,
           ...(options.noRehome === true ? ["--no-rehome"] : []),
+          ...(options.componentCustody === undefined
+            ? []
+            : ["--component-custody", JSON.stringify(options.componentCustody)]),
           ...preservedRefs.flatMap((ref) => ["--preserved", ref]),
         ]),
       )
@@ -1266,6 +1277,40 @@ export async function closeEnvironment(
         `environment ${path} could not close through git super worktree remove: ${error instanceof Error ? error.message : String(error)}; inspect its registration and retention directory ${retain} before retrying; no plain-git fallback was attempted`,
         { cause: error },
       )
+    }
+    if (
+      typeof removed === "object" &&
+      removed !== null &&
+      "state" in removed &&
+      removed.state === "unchanged" &&
+      "path" in removed &&
+      removed.path === path &&
+      "reason" in removed &&
+      removed.reason === "component-custody" &&
+      "custody" in removed &&
+      typeof removed.custody === "object" &&
+      removed.custody !== null &&
+      "status" in removed.custody &&
+      (removed.custody.status === "blocked" || removed.custody.status === "unknown") &&
+      "component" in removed.custody &&
+      typeof removed.custody.component === "string" &&
+      removed.custody.component.trim() !== "" &&
+      "source" in removed.custody &&
+      typeof removed.custody.source === "string" &&
+      removed.custody.source.trim() !== "" &&
+      "detail" in removed.custody &&
+      typeof removed.custody.detail === "string" &&
+      removed.custody.detail.trim() !== "" &&
+      (!("oid" in removed.custody) || (typeof removed.custody.oid === "string" && removed.custody.oid.trim() !== ""))
+    ) {
+      const custody = removed.custody
+      const kept = { kept: path, reason: "component-custody", custody }
+      io.stdout(
+        options.json === true
+          ? `${JSON.stringify(kept)}\n`
+          : `kept environment ${path}: component custody ${custody.status}: ${custody.component}; source ${custody.source}; ${custody.detail}${"oid" in custody ? `; commit ${custody.oid}` : ""}\n`,
+      )
+      return 0
     }
     if (
       options.noRehome === true &&

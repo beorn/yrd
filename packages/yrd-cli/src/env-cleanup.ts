@@ -157,6 +157,7 @@ async function consumeCloseRequests(
   input: Readonly<{
     workdir: string
     registry: string
+    primaryRoot: string
     worktrees: Git
     io: YrdCliIO
     outcome: Pick<QueueRunOutcome, "run" | "log">
@@ -320,7 +321,13 @@ async function consumeCloseRequests(
     try {
       exit = await closeEnvironment(
         request.path,
-        { ...request.options, json: true },
+        {
+          ...request.options,
+          json: true,
+          ...(ending === undefined
+            ? {}
+            : { componentCustody: { primaryRoot: input.primaryRoot, targetBranch: ending.queue } }),
+        },
         {
           ...io,
           cwd: registry,
@@ -1071,8 +1078,15 @@ async function cleanupEnvironments(
     return proofs
   }
   let snapshot: ProcessCwdProjection
+  let primaryRoot: string
   try {
     snapshot = await census()
+    // The service may stand in a linked landing. Git's first registration names
+    // the persistent primary; the selected remover validates its identity.
+    const primary = (await registeredWorktrees(registryGit))[0]
+    if (primary === undefined)
+      throw new Error(`${registry}: native worktree registry has no primary checkout for component custody`)
+    primaryRoot = primary.path
   } catch (cause) {
     for (const row of inventory.rows) preserve(row.path, reasonText(cause))
     appendFileSync(
@@ -1089,6 +1103,7 @@ async function cleanupEnvironments(
   const requests = await consumeCloseRequests({
     workdir,
     registry,
+    primaryRoot,
     worktrees: registryGit,
     io,
     outcome,
@@ -1218,7 +1233,11 @@ async function cleanupEnvironments(
         let closedProof: WorktreeRemovalProof | undefined
         const exit = await closeEnvironment(
           row.path,
-          { json: true, noRehome: true },
+          {
+            json: true,
+            noRehome: true,
+            componentCustody: { primaryRoot, targetBranch: config.target.branch },
+          },
           {
             ...io,
             cwd: registry,

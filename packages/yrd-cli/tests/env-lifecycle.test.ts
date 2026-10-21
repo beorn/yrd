@@ -865,6 +865,79 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     expect(await w.git(["worktree", "list", "--porcelain"])).toContain(path)
   })
 
+  /** @failure Automatic custody is lost on a plain checkout, its keep is mistaken for a removal,
+   * or manual/no-rehome closes accidentally acquire the automatic policy.
+   * @level l2
+   * @consumer the automatic close caller crossing the selected GitSuper CLI boundary
+   */
+  it.each(["manual", "no-rehome", "blocked", "unknown", "malformed-status", "malformed-detail"] as const)(
+    "forwards explicit automatic component custody through selected Git and handles %s",
+    async (mode) => {
+      const w = await world(":")
+      const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+      const shim = join(dirname(w.work), "custody-git-super")
+      const calls = join(dirname(w.work), "custody-git-super.jsonl")
+      writeFileSync(calls, "")
+      const custody = {
+        status: mode === "malformed-status" ? "unexpected" : mode === "unknown" ? "unknown" : "blocked",
+        component: "component",
+        source: "persistent primary",
+        ...(mode === "malformed-detail" ? {} : { detail: "unproved component commit", oid: "a".repeat(40) }),
+      }
+      writeFileSync(
+        shim,
+        `#!${process.execPath}\nimport {appendFileSync} from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify({args, marker:process.env.YRD_SELECTED_TEST_MARKER})+"\\n");
+console.log(JSON.stringify(args.includes("--component-custody")
+  ? {state:"unchanged",path:args[3],reason:"component-custody",custody:${JSON.stringify(custody)}}
+  : {state:"unchanged",path:args[3],reason:"borrowed",borrowers:["fixture borrower"]}));\n`,
+        { mode: 0o700 },
+      )
+      vi.stubEnv("YRD_GIT_SUPER_BIN", shim)
+      vi.stubEnv("YRD_SELECTED_TEST_MARKER", "custody-forwarding")
+      const automatic = mode !== "manual" && mode !== "no-rehome"
+      const policy = { primaryRoot: w.work, targetBranch: "main" }
+      const closed = capture(w.work)
+      const closing = closeEnvironment(
+        path,
+        {
+          json: true,
+          ...(mode === "no-rehome" ? { noRehome: true } : {}),
+          ...(automatic ? { componentCustody: policy } : {}),
+        },
+        closed.io,
+      )
+      if (mode.startsWith("malformed")) {
+        await expect(closing).rejects.toThrow("malformed git-super removal proof")
+        expect(closed.stdout()).toBe("")
+      } else {
+        expect(await closing, closed.stderr()).toBe(0)
+        expect(JSON.parse(closed.stdout())).toEqual(
+          automatic
+            ? { kept: path, reason: "component-custody", custody }
+            : mode === "no-rehome"
+              ? { kept: path, reason: "borrowed", borrowers: ["fixture borrower"] }
+              : { closed: path },
+        )
+      }
+      expect(existsSync(path)).toBe(mode !== "manual")
+      const removes = readFileSync(calls, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+      expect(removes).toHaveLength(mode === "manual" ? 0 : 1)
+      if (removes[0] !== undefined) {
+        expect(removes[0].marker).toBe("custody-forwarding")
+        const flag = removes[0].args.indexOf("--component-custody")
+        if (automatic) {
+          expect(flag).toBeGreaterThan(-1)
+          expect(JSON.parse(removes[0].args[flag + 1]!)).toEqual(policy)
+        } else expect(flag).toBe(-1)
+      }
+    },
+  )
+
   /**
    * 29073 (@cto shape A): yrd reaches the worktree preserve across the CLI boundary at
    * `${root}/tools/worktree.ts` (never a workspace dependency on bearly). This fixture stands in for
