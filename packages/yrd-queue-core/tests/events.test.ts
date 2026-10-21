@@ -3993,6 +3993,56 @@ describe("the queue-format boundary", () => {
     await expect(readEventQueue(location, "lab")).rejects.toThrow(/merge-fenced.*changed effective ops state/)
   })
 
+  /** @failure A merge fence whose Ops: text differs from the held state by one byte is taken for a repeat and not
+   * decoded, so a changed override enters the queue's effective ops unrefused (28925: only byte-identical text skips).
+   * @level l1 @consumer queue operator and merge runner
+   */
+  it("decodes a merge fence whose Ops: differ from the held state by one byte, and refuses the change", async () => {
+    const { store, location } = remoteMemStore("yrd-event-merge-fence-one-byte")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const created = await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const held: OpsState = {
+      overrides: [
+        {
+          check: "build",
+          state: "active",
+          until: new Date("2026-09-22T15:00:00.000Z"),
+          by: "operator",
+          verified: true,
+          reason: "repair",
+          record: A,
+          setAt: new Date("2026-09-22T14:00:00.000Z"),
+        },
+      ],
+    }
+    const cutover = await seedOpsCutover(location, "lab", held)
+    const text = encodeOps(held)
+    const changed = text.replace('"reason":"repair"', '"reason":"repaid"')
+    expect([changed.length, changed === text]).toEqual([text.length, false])
+    await (
+      await openEvents({ ...store, ref: queueRef("lab"), writer: QUEUE_RUN_WRITER })
+    ).append(
+      [
+        {
+          type: "merge-fenced",
+          keeps: [created],
+          props: [
+            ["Queue", cutover],
+            ["Time", "2026-09-22T14:01:00.000Z"],
+            ["For", created],
+            ["Branch", "task/fenced"],
+            ["Commit", commit],
+            ["Ops", changed],
+          ],
+        },
+      ],
+      { expect: cutover },
+    )
+
+    await expect(readEventQueue(location, "lab")).rejects.toThrow(/merge-fenced.*changed effective ops state/)
+  })
+
   it("records one reminder and one expiration on the queue event ref", async () => {
     const { store, location } = remoteMemStore("yrd-event-ops-clock")
     const target = await open({ ...store, ref: "refs/heads/lab" })

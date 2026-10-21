@@ -1957,6 +1957,12 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   let release: { id: string; reason: string } | undefined
   let opsCutover: string | undefined
   let ops: OpsState | undefined
+  // The held state's encoding, made once per state rather than once per merge fence (28925).
+  let opsText: { of: OpsState; text: string } | undefined
+  const heldOpsText = (held: OpsState): string => {
+    if (opsText === undefined || opsText.of !== held) opsText = { of: held, text: encodeOps(held) }
+    return opsText.text
+  }
   let notifyFloors: EventQueueProjection["notifyFloors"]
   const observed: Record<string, { id: string; branch?: string }> = {}
   const issueEffects: Record<string, { id: string; effect: AppliedIssueEffect }> = {}
@@ -2065,8 +2071,13 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
             eventType: event.type,
           })
         }
-        const next = readOpsEvent(event, ref)
-        if (encodeOps(next) !== encodeOps(ops)) {
+        // A fence repeats the held snapshot: text byte-identical to the held state's encoding IS that state, so it is
+        // not decoded. Any other text is decoded and compared, so a change still refuses. 6,707 of 6,717 live fences
+        // repeat it, and decoding each cost about 100 MB of the fold (28925).
+        const snapshots = event.props.filter(([name]) => name === "Ops")
+        const held = heldOpsText(ops)
+        const next = snapshots.length === 1 && snapshots[0]?.[1] === held ? ops : readOpsEvent(event, ref)
+        if (next !== ops && encodeOps(next) !== held) {
           throw new QueueEventShapeUnreadable(`${ref}: merge-fenced event ${event.id} changed effective ops state`, {
             ref,
             eventId: event.id,
