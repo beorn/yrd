@@ -281,6 +281,25 @@ describe("the git runner", () => {
     const nestedHead = (await nested(["rev-parse", "HEAD"])).trim()
     const nestedBranch = (await nested(["symbolic-ref", "--short", "HEAD"])).trim()
     await nested(["update-ref", `refs/remotes/origin/${nestedBranch}`, nestedHead])
+    // Removing a worktree (the supervised candidate, then the materialized one) reads each module store's remote before destroying it (git-super 30580), through the
+    // ambient environment: give the GitHub-shaped nested URL a local remote that holds the pinned commit.
+    const nestedRemote = join(root, "nested-remote.git")
+    // The runner keeps every object in the explicit public directories, so the remote borrows them.
+    const initialized = spawnSync("git", ["init", "--bare", "--quiet", "--initial-branch", nestedBranch, nestedRemote])
+    if (initialized.status !== 0) throw new Error(`nested remote init failed: ${String(initialized.stderr)}`)
+    writeFileSync(join(nestedRemote, "objects", "info", "alternates"), `${directory}\n${alternate}\n`)
+    const pinned = spawnSync("git", ["-C", nestedRemote, "update-ref", `refs/heads/${nestedBranch}`, nestedHead], {
+      encoding: "utf8",
+    })
+    if (pinned.status !== 0) throw new Error(`nested remote ref failed: ${pinned.stderr}`)
+    vi.stubEnv("GIT_CONFIG_COUNT", "1")
+    vi.stubEnv("GIT_CONFIG_KEY_0", `url.${nestedRemote}.insteadOf`)
+    vi.stubEnv("GIT_CONFIG_VALUE_0", "https://github.com/yrd-context-fixture/nested.git")
+    using _nestedRemote = {
+      [Symbol.dispose]() {
+        vi.unstubAllEnvs()
+      },
+    }
     writeFileSync(
       join(childRoot, ".gitmodules"),
       `[submodule "nested"]\n\tpath = nested\n\turl = https://github.com/yrd-context-fixture/nested.git\n\tbranch = ${nestedBranch}\n`,
