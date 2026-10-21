@@ -143,7 +143,7 @@ describe("yrd queue stats through the process entry", () => {
     expect(ran.exitCode, ran.report).toBe(0)
     const lines = ran.stdout.trimEnd().split("\n")
     expect(lines[0]).toContain("#main · stats at ")
-    expect(lines[0]).toContain("the default seven days")
+    expect(lines[0]).toContain("the default 24 h")
     expect(lines[0]).toContain("by submitter")
     // One change, queued: in line, no verdict yet.
     expect(lines[2]).toMatch(/^queue\s+1\s+1\s+0\s+0\s+0\s+0\s+1\s+0\s+1\s+0\s+0\s+—\s+—$/u)

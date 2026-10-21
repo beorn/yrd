@@ -52,6 +52,7 @@ import {
   readStatus,
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
+  READ_HORIZON_MS,
   watchRows,
   writeQueueEvent,
   pauseRef,
@@ -1758,7 +1759,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const config = await readConfig(git, head, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("fixture declaration absent")
     const now = Date.now()
-    const ended = new Date(now - 7 * 86400000 + 500)
+    const ended = new Date(now - READ_HORIZON_MS + 500)
     const queueTip = await createQueue(repo, "main", head, new Date(ended.getTime() - 60_000))
     const branch = "task/window-boundary"
     await (
@@ -1781,7 +1782,7 @@ describe("a queue is the selected origin branch carrying config", () => {
   })
 
   // 25655: migrated endings retain their original times. The default list's
-  // seven-day window must not make their full change histories unshowable.
+  // read horizon must not make their full change histories unshowable.
   it("shows an old ended event change without widening a later default list", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)

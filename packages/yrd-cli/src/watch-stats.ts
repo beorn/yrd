@@ -199,6 +199,8 @@ export type StatsBucket = Readonly<{
   runMs?: number
   /** Mean same-head retries over the merges in the bucket; absent when nothing merged. */
   retries?: number
+  /** The bucket starts before the reading's horizon, so the rows it would count were not read; `--all` reads them. */
+  unread?: true
 }>
 
 /** The count rows the box shows, in order: PASS beside MERGES as before, DUP just above FAILS (items 21, 22). */
@@ -250,9 +252,15 @@ type StatsWindow = Pick<StatsBucket, "key" | "label" | "kind" | "startMs" | "end
  * TODAY, YSTRDAY, 7DAY, 30DAY, then `hours` hour buckets ending at the current
  * hour, newest first, each with its counts and medians. The day boundary is a
  * fact about the bucket, never a character on its label. 7DAY and 30DAY are
- * the last 7 × 24 h and 30 × 24 h ending now; both end now.
+ * the last 7 × 24 h and 30 × 24 h ending now; both end now. A bucket that
+ * starts before `readSince` is unread: the read left its rows out (28925).
  */
-export function statsBuckets(decisions: readonly RunDecision[], now: Date, hours = 24): readonly StatsBucket[] {
+export function statsBuckets(
+  decisions: readonly RunDecision[],
+  now: Date,
+  hours = 24,
+  readSince?: Date,
+): readonly StatsBucket[] {
   const today = startOfLocalDay(now)
   const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1)
   const windows: StatsWindow[] = [
@@ -306,7 +314,12 @@ export function statsBuckets(decisions: readonly RunDecision[], now: Date, hours
     })
     previousDay = day
   }
-  return windows.map((window) => bucketOf(window, decisions))
+  return windows.map((window) => {
+    const bucket = bucketOf(window, decisions)
+    return readSince !== undefined && bucket.startMs < readSince.getTime()
+      ? { ...bucket, unread: true as const }
+      : bucket
+  })
 }
 
 /** One window's counts and medians over the decisions inside it: the one derivation every STATS number reads. */
@@ -379,6 +392,7 @@ function counted(count: number, noun: string): string {
 
 /** A count as the box prints it: right-aligned by the caller, and never `0` where a blank reads better in a strip of hours. */
 export function countCell(bucket: StatsBucket, key: (typeof STATS_ROWS)[number]["key"]): string {
+  if (bucket.unread === true) return "—"
   const value = bucket[key]
   return bucket.kind === "hour" && value === 0 ? "·" : String(value)
 }
@@ -404,6 +418,7 @@ export function shortDuration(ms: number): string {
  * in the bucket carried the span — no data, said apart from a zero.
  */
 export function timeCell(bucket: StatsBucket, key: (typeof STATS_TIME_ROWS)[number]["key"]): string {
+  if (bucket.unread === true) return "—"
   const value = bucket[key]
   if (value === undefined) return bucket.kind === "hour" ? "·" : "—"
   if (key === "retries") return value.toFixed(1)

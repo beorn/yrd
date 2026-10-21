@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from "vitest"
 import { render } from "silvery/test"
-import type { JournalRun, WatchRow } from "@yrd/queue-core"
+import { READ_HORIZON_MS, type JournalRun, type WatchRow } from "@yrd/queue-core"
 import { StatsBox, statsHoursFor } from "../src/watch-boxes.tsx"
 import { MinuteContext, NowContext } from "../src/watch-clock.ts"
 import {
@@ -81,6 +81,26 @@ describe("statsBuckets", () => {
     expect(hours[2]).toMatchObject({ duplicates: 1, merges: 0 })
     expect(countCell(hours[1]!, "merges")).toBe("·")
     expect(countCell(today!, "merges")).toBe("1")
+  })
+
+  it("says a period that starts before the read horizon is unread, never a short count; --all counts it (28925)", () => {
+    const decisions = [decision(0.5, "merged", "r1"), decision(30, "merged", "r4"), decision(100, "failed", "r5")]
+    const readSince = new Date(NOW.getTime() - READ_HORIZON_MS)
+    const [today, yesterday, day7, day30, ...hours] = statsBuckets(decisions, NOW, 24, readSince)
+    expect(today).toMatchObject({ merges: 1 })
+    expect(today?.unread).toBeUndefined()
+    expect(
+      hours.filter((bucket) => bucket.unread === true),
+      "every hour bucket starts inside 24 h",
+    ).toEqual([])
+    for (const bucket of [yesterday!, day7!, day30!]) {
+      expect(bucket.unread, bucket.label).toBe(true)
+      expect(countCell(bucket, "merges"), bucket.label).toBe("—")
+      expect(timeCell(bucket, "totalMs"), bucket.label).toBe("—")
+    }
+    const [, , everyDay7] = statsBuckets(decisions, NOW, 24)
+    expect(everyDay7).toMatchObject({ fails: 1, merges: 2 })
+    expect(countCell(everyDay7!, "merges")).toBe("2")
   })
 
   it("7DAY and 30DAY read the last 7 and 30 days ending now on the 1st of a month (25716)", () => {

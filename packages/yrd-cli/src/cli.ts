@@ -1044,7 +1044,7 @@ function buildProgram(
   ): T =>
     command
       .option("--latest", "one row per current branch head; default JSON keeps every run of that head")
-      .option("--all", "include ended changes older than seven days on event queues")
+      .option("--all", "include ended changes older than 24 h on event queues")
       .option("--drafts", "include unsubmitted branch heads on event queues")
       .option("--status <state>", "select by state: exactly the same as giving <state> as a filter term")
       .option("--json", "emit stable JSON: result belongs to the run named by run; state is the current change state")

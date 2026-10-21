@@ -43,10 +43,10 @@
  *   `since` (opened) to that row's `at` (merged); median and p90 over them.
  * - the window: a row is inside when its decision (`at`) is at or after
  *   `since`, or when it has none yet (still in line); a draft when its head's
- *   committer date is. Absent `since`, the read's own seven-day horizon.
+ *   committer date is. Absent `since`, the read's own horizon ({@link READ_HORIZON_MS}).
  */
 
-import type { Draft, Row, WatchRow } from "@yrd/queue-core"
+import { READ_HORIZON_MS, type Draft, type Row, type WatchRow } from "@yrd/queue-core"
 import { decisionsOfRows, unclassifiedRows } from "./watch-stats.ts"
 
 export { decisionsOfRows } from "./watch-stats.ts"
@@ -57,21 +57,18 @@ export type StatsBy = "submitter" | "branch"
 export type SinceOrigin = Readonly<{
   /** The `--since` text as given; absent for the default window. */
   asked?: string
-  /** `duration` back from `now`, an `instant` as written, a `commit`'s committer date, or the `default` seven days. */
+  /** `duration` back from `now`, an `instant` as written, a `commit`'s committer date, or the `default` read horizon. */
   kind: "duration" | "instant" | "commit" | "default"
 }>
 
 export type QueueStatsOptions = Readonly<{
   now: Date
-  /** Rows whose decision is before this instant are outside the window, which the drafts were read over too; absent, {@link DEFAULT_WINDOW_MS} back from `now`. */
+  /** Rows whose decision is before this instant are outside the window, which the drafts were read over too; absent, {@link READ_HORIZON_MS} back from `now`, so the stats and the list agree on what is in view. */
   since?: Date
   /** Where `since` came from; the default when `since` is absent. */
   sinceFrom?: SinceOrigin
   by?: StatsBy
 }>
-
-/** The default window: the queue read's own horizon for ended changes (seven days), so the stats and the list agree on what is in view. */
-export const DEFAULT_WINDOW_MS = 7 * 86_400_000
 
 export type LatencyStats = Readonly<{
   /** How many merged changes had both an opening and a merging instant. */
@@ -146,7 +143,7 @@ export type QueueStats = Readonly<{
   since: Date
   /** How `since` was arrived at: the text asked and its kind, so the window can be rederived. */
   sinceFrom: SinceOrigin
-  /** True when nobody asked for a window and the seven-day default stands. */
+  /** True when nobody asked for a window and the read horizon stands. */
   defaultWindow: boolean
   by: StatsBy
   /** The whole queue in the window; its `key` is `queue`. */
@@ -277,7 +274,7 @@ export function queueStats(
   options: QueueStatsOptions,
 ): QueueStats {
   const by = options.by ?? "submitter"
-  const since = options.since ?? new Date(options.now.getTime() - DEFAULT_WINDOW_MS)
+  const since = options.since ?? new Date(options.now.getTime() - READ_HORIZON_MS)
   // A row still in line has no decision instant and is always in view; an ended row is inside by its decision's instant.
   const inside = rows.filter(({ row }) => row.at === undefined || inWindow(row.at, since))
   const grouped = new Map<string, WatchRow[]>()
@@ -323,7 +320,7 @@ export function sinceLine(stats: QueueStats): string {
   const at = stats.since.toISOString()
   switch (stats.sinceFrom.kind) {
     case "default":
-      return `SINCE = ${at}, the default seven days back from ${stats.at.toISOString()} (the read's own horizon)`
+      return `SINCE = ${at}, the default 24 h back from ${stats.at.toISOString()} (the read's own horizon)`
     case "duration":
       return `SINCE = ${at}, from --since ${stats.sinceFrom.asked ?? ""} (a duration back from ${stats.at.toISOString()})`
     case "commit":
@@ -386,7 +383,7 @@ export function formatQueueStats(stats: QueueStats, queue: string): string {
       .join("  ")
       .trimEnd(),
   )
-  const window = `since ${stats.since.toISOString()}${stats.defaultWindow ? " (the default seven days, the read's own horizon)" : ""}`
+  const window = `since ${stats.since.toISOString()}${stats.defaultWindow ? " (the default 24 h, the read's own horizon)" : ""}`
   const d = stats.total.decisions
   const definitions =
     "ROWS = one per run per change · CHANGES = distinct branch@head · MERGED/FAILED/STUCK/IN LINE = changes by the queue's current state; ANCESTRY = of the merged, those no run merged (replaced, or already on the target) · " +

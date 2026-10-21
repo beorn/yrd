@@ -209,6 +209,8 @@ export type WatchSnapshot = Readonly<{
   runner?: RunnerFacts
   /** What the STATS box counts: every decision the run journals on this machine recorded. */
   decisions?: readonly RunDecision[]
+  /** The reading holds no ended row before this instant (the read horizon); absent when `--all` read everything. */
+  readSince?: Date
   /** The instant this reading was made; every age on screen counts from it. */
   at: Date
   /** The stop that stands, as the reading derived it (queue-core `stopFact`); null or absent while the line runs. */
@@ -731,6 +733,7 @@ function QueuesWatchPane({
                         decisions={source.snapshot === undefined ? [] : decisionsOfRows(visibleRows(source.snapshot))}
                         columns={columns - 2}
                         timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
+                        {...(source.snapshot?.readSince === undefined ? {} : { readSince: source.snapshot.readSince })}
                       />
                     ) : null}
                   </Box>
@@ -1388,6 +1391,7 @@ function SingleWatchPane({
             decisions={decisions}
             columns={(isWideSplit ? listColumns : columns) - 2}
             timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
+            {...(shown.readSince === undefined ? {} : { readSince: shown.readSince })}
           />
         ) : null}
       </Box>

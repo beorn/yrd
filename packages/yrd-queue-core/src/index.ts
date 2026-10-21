@@ -173,6 +173,8 @@ export {
   openLog,
   readJournals,
   readJournalProjection,
+  FULL_READ_RUNS_MS,
+  READ_HORIZON_MS,
   readRunLog,
   runDiedInPreamble,
   runId,

@@ -1665,7 +1665,7 @@ exec '${selected.replaceAll("'", "'\\''")}' "$@"
     // What was asked for, where it was looked for, and what the read leaves
     // out — on stderr, not inferred by the reader from an empty table.
     expect(run.stderr()).toContain("no-such-branch")
-    expect(run.stderr()).toContain("seven days")
+    expect(run.stderr()).toContain("older than 24 h are not read; --all reads them")
   })
 
   it("keeps refreshing with no selector, because there is no ending to run to, and stops on the signal", async () => {

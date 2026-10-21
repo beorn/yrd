@@ -54,7 +54,9 @@ import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./ret
 import { runAdmission } from "./admission.ts"
 import {
   CHANGE_REF_DIAGNOSTICS,
+  DRAFT_WINDOW_MS,
   EVENT_TRAILERS,
+  FULL_READ_RUNS_MS,
   trailer,
   archivedChangesPrefix,
   archiveQueue,
@@ -162,6 +164,7 @@ import {
   HEARTBEAT_GRACE_MS,
   HEARTBEAT_INTERVAL_MS,
   QUEUE_HEALTH_DOCUMENT,
+  READ_HORIZON_MS,
   ROUND_BUDGET_MS,
   ROUND_LOCK,
   relaunchStalledHealthDocument,
@@ -253,14 +256,7 @@ import {
 import { runnerOf } from "./watch-runner-reading.ts"
 import { readPublishedRunner, readRunnerLiveness, RunnerPublisher, type RunnerLiveness } from "./runner-publication.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
-import {
-  DEFAULT_WINDOW_MS,
-  formatQueueStats,
-  parseSince,
-  queueStats,
-  type SinceOrigin,
-  type StatsBy,
-} from "./queue-stats.ts"
+import { formatQueueStats, parseSince, queueStats, type SinceOrigin, type StatsBy } from "./queue-stats.ts"
 import { formatQueueLs, queueLs, filterLsRows, LS_FILTER_FIELDS } from "./queue-ls.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { SERVICE } from "./queue-health.ts"
@@ -616,7 +612,7 @@ export type CoreQueueCommand =
        * (exit 2) when a selector matches nothing, which this does not change.
        */
       requireMatch?: boolean
-      /** Show ended event segments beyond the default seven-day window. */
+      /** Show ended event segments beyond the default read horizon. */
       all?: boolean
       /** Include unsubmitted branch heads on event queues. */
       drafts?: boolean
@@ -4247,6 +4243,8 @@ export async function coreQueueCommand(
         runner: RunnerFacts
         /** Every decision the rows carry, one per run per change and unfiltered, for the STATS box. */
         decisions: readonly RunDecision[]
+        /** The rows hold no ending before this instant; absent when --all read everything. */
+        readSince?: Date
         /** The queue read the rows came from, so a detail opened later reads the same tip. */
         eventChanges: ReadonlyMap<string, EventChange>
         eventInvalid: EventListingResult["invalid"]
@@ -4363,7 +4361,7 @@ export async function coreQueueCommand(
         const baseScope =
           reading.acquisition === undefined
             ? `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and ${archivedChangesPrefix(config.target.branch)}, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
-            : `Read ${reading.acquisition.read} of ${reading.acquisition.retained} retained change histories: every nonterminal change and endings within seven days by recorded ending Time. Global history diagnostics and direct target commits were not checked; use --all for full scope. Draft branches and unlinked journals were not read.`
+            : `Read ${reading.acquisition.read} of ${reading.acquisition.retained} retained change histories: every nonterminal change and endings within 24 h by recorded ending Time. Global history diagnostics and direct target commits were not checked; use --all for full scope. Draft branches and unlinked journals were not read.`
         const ignoreScope =
           config.ignore.length === 0
             ? undefined
@@ -4407,6 +4405,7 @@ export async function coreQueueCommand(
           // Every row, per run, whatever the filter: the box counts the queue,
           // not the view, and a change checked twice made two decisions.
           decisions: decisionsOfRows(unfiltered),
+          ...(request.all === true ? {} : { readSince: new Date(Date.now() - READ_HORIZON_MS) }),
           ...(pause === undefined ? {} : { pause: pauseLine(pause) }),
           ...(diagnostics.facts.absent === undefined ? {} : { journalAbsent: diagnostics.facts.absent }),
           ...(scope === undefined ? {} : { scope }),
@@ -4995,11 +4994,14 @@ export async function coreQueueCommand(
           window = { since: committed, sinceFrom: { asked: request.since, kind: "commit" } }
         }
       }
-      // Stats applies its own --since window to the drafts below, so it reads every draft (26014).
+      // Stats applies its own --since window to the drafts below, so it reads every draft (26014), and reads the
+      // run journals of that same window, so a decision inside it is never left uncounted (28925).
+      const statsSince = window?.since ?? new Date(now.getTime() - READ_HORIZON_MS)
       const reading = await readEventListing(git, config, repo, workdir, captured.oid, eventStore, {
         onIssueDiagnosticsUnavailable: (message) => io.stderr("yrd: " + message + "\n"),
         all: true,
         draftWindow: "all",
+        journalSinceMs: now.getTime() - statsSince.getTime(),
       })
       if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") {
         io.stderr(`${reading.observation.message}\n`)
@@ -5017,7 +5019,7 @@ export async function coreQueueCommand(
       // Pushed, never submitted: the drafts (the KPI ruling on 24163), from the
       // one derivation over this same reading and the same window. Nothing is
       // fetched, so a head never read here counts as undated.
-      const draftSince = window?.since ?? new Date(now.getTime() - DEFAULT_WINDOW_MS)
+      const draftSince = statsSince
       const drafts = {
         dated: reading.drafts.dated.filter((draft) => {
           if (draft.committedAt === undefined) {
@@ -6235,7 +6237,7 @@ function selectedNothing(terms: readonly string[] | undefined, rows: readonly Wa
 function missedSelector(terms: readonly string[], queue: string, matched: number): string {
   return (
     `yrd: nothing in ${queue} matches ${terms.join(" or ")}. The queue read holds ${String(matched)} ` +
-    "matching change(s); ended changes older than seven days are not read.\n"
+    "matching change(s); ended changes older than 24 h are not read; --all reads them.\n"
   )
 }
 
@@ -6383,6 +6385,7 @@ async function snapshotOf(
     observation: GitObservation
     runner: RunnerFacts
     decisions: readonly RunDecision[]
+    readSince?: Date
     stopped: StopFact | null
     overrides?: readonly OverrideFact[]
     drafts?: Readonly<{ window: DraftWindow; unread: readonly string[]; older: number }>
@@ -6404,6 +6407,7 @@ async function snapshotOf(
     at: new Date(),
     observation: round.observation,
     decisions: round.decisions,
+    ...(round.readSince === undefined ? {} : { readSince: round.readSince }),
     queue: round.queue,
     queues: round.queues,
     rows: round.rows.map(localDraft),
@@ -6969,6 +6973,8 @@ type EventListingOptions = Readonly<{
   branch?: string
   /** One-shot list omits command detail; watch and show keep eager detail. */
   journalDetail?: "include" | "omit"
+  /** How far back an unwindowed read reads run journals; absent, {@link FULL_READ_RUNS_MS}. */
+  journalSinceMs?: number
 }>
 
 /** Read an event queue through Gitomic and project its change chains and draft branch heads. */
@@ -7031,7 +7037,7 @@ export async function readEventListing(
   const recentWindowExpired =
     recent !== undefined &&
     cache !== undefined &&
-    cache.reading.all.some((row) => row.endedAt !== undefined && row.endedAt.getTime() < nowMs - DEFAULT_WINDOW_MS)
+    cache.reading.all.some((row) => row.endedAt !== undefined && row.endedAt.getTime() < nowMs - READ_HORIZON_MS)
   const selectedRefs =
     options.branch === undefined
       ? undefined
@@ -7044,7 +7050,9 @@ export async function readEventListing(
     const dir = join(workdir, "logs")
     const read = (runTerminal?: (id: string) => boolean): Journals<JournalSummary> => {
       const judged = runTerminal === undefined ? {} : { runTerminal }
-      if (options.branch === undefined && recent === undefined) return readJournals(dir, { detail, ...judged })
+      if (options.branch === undefined && recent === undefined) {
+        return readJournals(dir, { detail, sinceMs: options.journalSinceMs ?? FULL_READ_RUNS_MS, ...judged })
+      }
       const listed = new Set(rows.map((row) => row.branch))
       const segments =
         options.branch === undefined
@@ -7232,7 +7240,7 @@ export async function readEventListing(
           process: createProcess({ cwd: repo, env: recent.env }),
           selection: git.selection,
           env: recent.env,
-          since: nowMs - DEFAULT_WINDOW_MS,
+          since: nowMs - READ_HORIZON_MS,
           maxBytes: 64 * 1024 * 1024,
           timeoutMs: 30_000,
         }
@@ -7344,7 +7352,7 @@ export async function readEventListing(
   const listNow =
     options.now instanceof Date ? options.now : options.now !== undefined ? new Date(options.now) : new Date()
   const heads = new Map([...branchRefs].map(([ref, oid]) => [ref.slice("refs/heads/".length), oid]))
-  const since = draftWindow === "all" ? undefined : new Date(listNow.getTime() - DEFAULT_WINDOW_MS)
+  const since = draftWindow === "all" ? undefined : new Date(listNow.getTime() - DRAFT_WINDOW_MS)
   const drafts =
     recent !== undefined
       ? undefined
@@ -7415,7 +7423,7 @@ export async function readEventListing(
     subject: defect.error,
   }))
   const directRows: Row[] = directMerges
-    .filter((commit) => options.all === true || listNow.getTime() - commit.at.getTime() <= DEFAULT_WINDOW_MS)
+    .filter((commit) => options.all === true || listNow.getTime() - commit.at.getTime() <= READ_HORIZON_MS)
     .map(
       (commit): Row => ({
         at: commit.at,

@@ -69,15 +69,18 @@ export function StatsBox({
   decisions,
   columns,
   timeRows = true,
+  readSince,
 }: {
   decisions: readonly RunDecision[]
   columns: number
   /** Draw the TIME rows under the counts; a short terminal keeps the counts and gives the list the rows instead. */
   timeRows?: boolean
+  /** The reading holds no ended row before this instant; a period starting earlier says `—`. Absent under `--all`. */
+  readSince?: Date
 }) {
   // Hour buckets move on the minute at most; nothing here needs the seconds.
   const minute = useMinute()
-  const buckets = statsBuckets(decisions, minute, statsHoursFor(columns))
+  const buckets = statsBuckets(decisions, minute, statsHoursFor(columns), readSince)
   const periods = buckets.filter((bucket) => bucket.kind === "period")
   const hours = buckets.filter((bucket) => bucket.kind === "hour")
   const cell = (bucket: StatsBucket, text: string, color: string | undefined, bold = false) => (

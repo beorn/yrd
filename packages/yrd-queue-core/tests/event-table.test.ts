@@ -70,14 +70,17 @@ describe("event changes use the shared table row", () => {
     })
   })
 
-  it("keeps the default seven-day table current and JSON historical, with drafts and older endings opt-in", () => {
+  it("keeps the default 24 h table current and JSON historical, with drafts and older endings opt-in", () => {
     const recent = new Date("2026-09-23T14:00:00.000Z")
+    // Three days back: inside the retired seven-day window, outside the 24 h read horizon (28925).
+    const days = new Date("2026-09-21T14:00:00.000Z")
     const old = new Date("2026-09-01T14:00:00.000Z")
     const now = new Date("2026-09-24T14:00:00.000Z")
     const current = { status: "queued" as const, commit: HEAD, since: recent, at: recent }
     const prior = { status: "merged" as const, commit: "c".repeat(40), since: old, at: recent, endedAt: recent }
     const ancient = { status: "failed" as const, commit: "d".repeat(40), since: old, at: old, endedAt: old }
-    const histories = new Map([["task/change", [ancient, prior, current]]])
+    const lastWeek = { status: "failed" as const, commit: "f".repeat(40), since: old, at: days, endedAt: days }
+    const histories = new Map([["task/change", [ancient, lastWeek, prior, current]]])
     const drafts = [
       { branch: "task/draft", head: "e".repeat(40), committedAt: recent, author: "dev", movedSinceSubmit: false },
     ]
@@ -86,7 +89,13 @@ describe("event changes use the shared table row", () => {
     expect(normal.document.map((row) => row.head)).toEqual([HEAD, prior.commit])
     const expanded = eventListRows(histories, drafts, { now, all: true, drafts: true })
     expect(expanded.table.map((row) => row.head)).toEqual([HEAD, drafts[0]!.head])
-    expect(expanded.document.map((row) => row.head)).toEqual([HEAD, prior.commit, ancient.commit, drafts[0]!.head])
+    expect(expanded.document.map((row) => row.head)).toEqual([
+      HEAD,
+      prior.commit,
+      lastWeek.commit,
+      ancient.commit,
+      drafts[0]!.head,
+    ])
   })
   it("folds proven equal merge roots and names both endings and their root (25718)", () => {
     // A re-submit after the merge (25708) opened a second segment on the same

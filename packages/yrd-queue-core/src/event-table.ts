@@ -1,6 +1,7 @@
 /** Event-chain changes in the shared table shape. Status comes only from the event fold. */
 import type { ChangeStatus, EventChange } from "./events.ts"
 import type { Draft } from "./drafts.ts"
+import { READ_HORIZON_MS } from "./log.ts"
 import { revertedPathsNotice } from "./revert-guard.ts"
 import { clocks, type Row } from "./table.ts"
 
@@ -263,7 +264,7 @@ export function eventListRows(
     if (options.all || retained.has(row)) return true
     if (row.position !== undefined) return true
     const at = clocks(row, now).clockAt
-    const recent = (ending: Date) => now.getTime() - ending.getTime() <= 7 * 24 * 60 * 60 * 1000
+    const recent = (ending: Date) => now.getTime() - ending.getTime() <= READ_HORIZON_MS
     // Folded proof can be fresh while its original ending is outside the
     // window. Preserve original and run clocks; inspect every known ending.
     return (

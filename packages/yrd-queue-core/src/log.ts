@@ -599,7 +599,7 @@ export type Journals<Run extends JournalSummary = JournalRun> = Readonly<{
    */
   fallbacks?: JournalProjectionFallbackSummary
   /**
-   * Round journals inside the same seven-day window that this read did NOT
+   * Round journals inside the same window that this read did NOT
    * open, and why: a SELECTION reads only the runs it was given. Present only
    * when that left something behind; a narrowing nobody states is exactly the
    * silent "no results" this reader must not commit.
@@ -980,7 +980,7 @@ function pruneJournalCache(dir: string, windowed: readonly string[]): void {
 }
 
 /**
- * The round journals a directory holds inside the same seven-day window a read
+ * The round journals a directory holds inside the same window a read
  * applies — the set a SELECTION left behind, counted rather than opened.
  *
  * A directory that cannot be listed is NOT "none". The caller is about to state
@@ -1373,11 +1373,21 @@ export function recentPublicationRejected(
     .rejection
 }
 
+/** How far back a default read reaches for ended changes: the rows `list` shows, the runs it reads and `queue stats` (28925). `--all` reads past it. */
+export const READ_HORIZON_MS = 24 * 60 * 60 * 1000
+
+/**
+ * How far back a full read (`--all`, `--drafts`, `queue show --all`) reads run journals when nothing narrower is asked:
+ * the seven days such a read has always covered. Journals are kept forever (log retention prunes raw output only), so
+ * nothing else bounds it; a windowed read names its runs, and `queue stats` reads its own window (28925).
+ */
+export const FULL_READ_RUNS_MS = 7 * 24 * 60 * 60 * 1000
+
 export type ReadJournalsOptions = Readonly<{
   /** Detail is eager by default; a list explicitly asks for row facts only. */
   detail?: "include" | "omit"
   now?: Date
-  /** How far back the runs read reach; the same seven days `list` windows its ended rows by. */
+  /** How far back the runs read reach; absent, {@link READ_HORIZON_MS}, the window `list` reads ended rows over. */
   sinceMs?: number
   /** Explicit event-linked runs, including those outside the global reading's time window. */
   runIds?: readonly string[]
@@ -1406,7 +1416,7 @@ export function readJournals(dir: string, options?: ReadJournalsOptions & { deta
 export function readJournals(dir: string, options: ReadJournalsOptions): Journals<JournalSummary>
 export function readJournals(dir: string, options: ReadJournalsOptions = {}): Journals<JournalSummary> {
   const now = options.now ?? new Date()
-  const sinceMs = options.sinceMs ?? 7 * 24 * 60 * 60 * 1000
+  const sinceMs = options.sinceMs ?? READ_HORIZON_MS
   const selected = new Set(options.runIds ?? [])
   // What a SELECTION leaves behind in the same window, counted ONCE and before
   // any early return can drop the count (@i/10-yrd/28799 finding 2).

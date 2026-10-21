@@ -250,7 +250,7 @@ describe("the real witness: eighteen rows of the live queue", () => {
     const text = formatQueueStats(stats, "github.com/beorn/hh-dev#main")
     const lines = text.split("\n")
     expect(lines[0]).toContain("github.com/beorn/hh-dev#main")
-    expect(lines[0]).toContain("since 2026-08-29T06:36:00.000Z (the default seven days, the read's own horizon)")
+    expect(lines[0]).toContain("since 2026-09-04T06:36:00.000Z (the default 24 h, the read's own horizon)")
     expect(lines[1]).toMatch(
       /^\s+ROWS\s+CHANGES\s+MERGED\s+ANCESTRY\s+FAILED\s+STUCK\s+IN LINE\s+RETRIES\s+BRANCHES\s+RE-PUSHED\s+RE-PUSHES\s+MEDIAN\s+P90$/u,
     )
@@ -335,9 +335,9 @@ describe("the window and the pushed refs", () => {
   it("keeps only the decisions at or after --since, keeps rows still in line, and names the window's origin", () => {
     const all = queueStats(COMPACT, [], { now: NOW })
     expect(all.defaultWindow).toBe(true)
-    expect(all.since.toISOString()).toBe("2026-08-29T06:36:00.000Z")
+    expect(all.since.toISOString()).toBe("2026-09-04T06:36:00.000Z")
     expect(sinceLine(all)).toBe(
-      "SINCE = 2026-08-29T06:36:00.000Z, the default seven days back from 2026-09-05T06:36:00.000Z (the read's own horizon)",
+      "SINCE = 2026-09-04T06:36:00.000Z, the default 24 h back from 2026-09-05T06:36:00.000Z (the read's own horizon)",
     )
 
     const asked = parseSince("3h", NOW)
