@@ -819,10 +819,10 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
 }
 
 /** Refuse before running user teardown; a dirty tree is work, not garbage. */
-async function requireClean(git: Git, path: string): Promise<void> {
+async function requireClean(git: Git, path: string, hint = ""): Promise<void> {
   const dirty = (await git(["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"])).trim()
   if (dirty !== "") {
-    throw new Error(`environment ${path} is dirty; preserve or commit these changes before continuing:\n${dirty}`)
+    throw new Error(`environment ${path} is dirty; preserve or commit these changes before continuing${hint}:\n${dirty}`)
   }
 }
 
@@ -1216,7 +1216,7 @@ export async function closeEnvironment(
         : `yrd: env close --preserve found nothing to preserve in ${path}; the close proceeds${skippedNote}\n`,
     )
   } else {
-    await requireClean(treeGit, path)
+    await requireClean(treeGit, path, " — or re-run with --preserve to keep this exact state in a durable ref first")
   }
   const admission = await admitEnvironmentClose(path, io, censusSource)
   if (admission.kind === "needs-delegation") {
@@ -1254,7 +1254,8 @@ export async function closeEnvironment(
         `environment teardown ${result.result} in preserved environment ${path}: exit ${String(result.exit)}${result.why === undefined ? "" : ` (${result.why})`}\ncommand: ${config.teardown}\n${output}\nlog ${result.log}`,
       )
     }
-    if (options.preserve !== true) await requireClean(treeGit, path)
+    if (options.preserve !== true)
+      await requireClean(treeGit, path, " — or re-run with --preserve to keep this exact state in a durable ref first")
   }
   // 27510: closing an environment retires its own branch's preview custody, root first, before removal; a removal that
   // fails afterwards leaves the retirement standing. A detached environment never submitted, so has none.
