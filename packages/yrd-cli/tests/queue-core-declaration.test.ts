@@ -77,7 +77,7 @@ import { SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { parseQueueAddress, queueDirectory } from "../src/address.ts"
 import { eventHistoryEntries } from "../src/watch-change.ts"
-import type { YrdCliIO } from "../src/types.ts"
+import type { LocalBranchProtectionResult, YrdCliIO } from "../src/types.ts"
 import type { WatchSource } from "../src/watch-pane.tsx"
 import { workdirOf } from "../src/workdir.ts"
 import type { QueueConfig } from "@yrd/queue-core"
@@ -5426,6 +5426,7 @@ describe("component-local retirement without a component queue", () => {
     "protection-error",
     "standalone",
     "missing-protections-reader",
+    "stale-host-array",
     "malformed-declaration",
     "unreadable-declaration",
   ] as const)("retires exact %s component work through the declared root's existing log", async (mode) => {
@@ -5552,6 +5553,8 @@ describe("component-local retirement without a component queue", () => {
     if (ownSelectedOther) unlinkSync(join(child, ".yrd.yml"))
     run.io.localBranchProtections = async () => {
       if (mode === "protection-error") throw new Error("host protection authority unavailable")
+      // A launcher from a checkout older than the { protections, evidence } answer still returns the bare array (30693).
+      if (mode === "stale-host-array") return [] as unknown as LocalBranchProtectionResult
       return {
         protections:
           mode === "held" || mode === "unmerged-held" || mode === "origin-held" ? ["fixture owner hold"] : [],
@@ -5597,6 +5600,7 @@ describe("component-local retirement without a component queue", () => {
     const failure =
       mode === "protection-error" ||
       mode === "missing-protections-reader" ||
+      mode === "stale-host-array" ||
       mode === "malformed-declaration" ||
       mode === "unreadable-declaration" ||
       ownSelectedOther
@@ -5610,6 +5614,11 @@ describe("component-local retirement without a component queue", () => {
       if (mode === "missing-protections-reader") {
         expect(run.stdout() + run.stderr()).toContain(
           "localBranchProtections authority reader is missing; standalone callers must explicitly pass null",
+        )
+      }
+      if (mode === "stale-host-array") {
+        expect(run.stdout() + run.stderr()).toContain(
+          "localBranchProtections returned an array, not { protections, evidence }",
         )
       }
       if (mode === "unreadable-declaration") expect(run.stderr()).toContain("EACCES")
@@ -5769,7 +5778,7 @@ describe("component-local retirement without a component queue", () => {
           record.outcome === "failed",
       )
       expect(failedRecord).toBeDefined()
-      if (mode === "protection-error" || mode === "missing-protections-reader") {
+      if (mode === "protection-error" || mode === "missing-protections-reader" || mode === "stale-host-array") {
         expect(failedRecord).not.toHaveProperty("archive")
       }
     }

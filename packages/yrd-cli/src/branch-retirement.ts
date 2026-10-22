@@ -61,7 +61,22 @@ export async function readBranchProtections(
   if (io.localBranchProtections === undefined) {
     throw new Error("localBranchProtections authority reader is missing; standalone callers must explicitly pass null")
   }
-  return io.localBranchProtections(input)
+  // A host launcher answers from the checkout it ships in while Yrd runs from the landed root, so a launcher from an
+  // older checkout can return an older answer: before { protections, evidence } it was the bare array of holds (30693).
+  const result: unknown = await io.localBranchProtections(input)
+  if (
+    typeof result !== "object" ||
+    result === null ||
+    !Array.isArray((result as { protections?: unknown }).protections) ||
+    !Array.isArray((result as { evidence?: unknown }).evidence)
+  ) {
+    const shape = Array.isArray(result) ? "an array" : result === null ? "null" : typeof result
+    throw new Error(
+      `localBranchProtections returned ${shape}, not { protections, evidence }: the host that wired it is older than ` +
+        "this Yrd (a launcher from an older checkout); run yrd from a current checkout",
+    )
+  }
+  return result as LocalBranchProtectionResult
 }
 
 /**
@@ -1113,7 +1128,7 @@ export async function releaseRetainedCheckouts(
     if (typeof io.localBranchProtections !== "function") {
       throw new Error(RELEASE_CHECKOUT_NEEDS_LAUNCHER)
     }
-    const result = await io.localBranchProtections({
+    const result = await readBranchProtections(io, {
       repo: row.repo,
       branch: row.branch,
       tip: row.head,
