@@ -19,7 +19,6 @@ import {
   gitIn,
   isAncestor,
   keptLinkAdmits,
-  mergeChangesNothing,
   listRefs,
   openLog,
   readBranchHistory,
@@ -833,7 +832,6 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
     ...(config === undefined ? {} : { config: config.blob }),
   })
   const date = new Date().toISOString().slice(0, 10)
-  let attemptedArchive: string | undefined
   let headMove: { before: { symbolic: string; tip: string }; after: { detached: string } } | undefined
   /** 30094: a worktree-less retained store keeps its own HEAD; move it in place at the verified tip
    * with the tip as the expected old value, so the branch ref can be removed without losing custody. */
@@ -855,8 +853,6 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
     headMove = undefined
   }
   try {
-    const archiveRef =
-      findArchiveRefFor(repo, request.branch, request.tip) ?? archiveRefFor(request.branch, request.by, date)
     const observedTip =
       destination === "local"
         ? await refAt(git, `refs/heads/${request.branch}`)
@@ -871,38 +867,8 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
       const protections = async () =>
         (await readBranchProtections(io, { repo, branch: request.branch, tip: request.tip, issue: request.issue }))
           .protections
-      if (!merged && observedTip === request.tip && (await mergeChangesNothing(git, target, request.tip))) {
-        const reasons = await protections()
-        if (reasons.length > 0) {
-          return { removed: [], kept: [{ ...row, reason: "held", detail: reasons.join("; ") }], failed: [] }
-        }
-        attemptedArchive = archiveRef
-        await retireOriginBranch(createEventStore(repo, remote, selection), {
-          branch: request.branch,
-          head: request.tip,
-          authority: { kind: "published-main-content", ref: custody.ref, tip: target, archive: archiveRef },
-          protections,
-        })
-        log.write({
-          kind: "observation",
-          scope: "branch-retirement",
-          branch: request.branch,
-          reason: `${repo}: retired origin ${request.branch}@${request.tip}; archive ${archiveRef} retains its exact tip; merge into ${custody.ref}@${target} changes no content`,
-        })
-        return {
-          removed: [
-            {
-              ...row,
-              reason: "content integrated",
-              archiveRef,
-              custody: { kind: "origin-archive" as const, ref: archiveRef, tip: request.tip },
-              main: { ref: custody.ref, tip: target },
-            },
-          ],
-          kept: [],
-          failed: [],
-        }
-      }
+      // A component store has no chain and no ending event: its branch goes only when its published main
+      // contains the exact head, so content equality alone keeps and reports it (work.md:110, 30683).
       const retire = createLandedBranchRetirement({ repo, git, selection, remote, target, targetRef: custody.ref })
       const result = await retire({
         path: "",
@@ -930,15 +896,9 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
         failed: result.outcome === "failed" ? [output] : [],
       }
     }
-    const protections = async (): Promise<readonly string[]> => {
-      const host = (
-        await readBranchProtections(io, { repo, branch: request.branch, tip: request.tip, issue: request.issue })
-      ).protections
-      if (!merged && (await readRemoteCommit(git, remote, archiveRef)) !== request.tip) {
-        throw new Error(`${repo}: archive custody changed before conditional removal`)
-      }
-      return host
-    }
+    const protections = async (): Promise<readonly string[]> =>
+      (await readBranchProtections(io, { repo, branch: request.branch, tip: request.tip, issue: request.issue }))
+        .protections
     const retirement = {
       repo,
       git,
@@ -949,51 +909,12 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
       reason: request.reason ?? "explicit local branch cleanup",
       date,
       log,
-      disposition: merged
-        ? { kind: "merged" as const, base: target, target }
-        : { kind: "archived" as const, target: request.tip, ref: archiveRef },
+      // An unmerged component branch is kept and reported, with no archive and no delete (work.md:110, 30683).
+      disposition: { kind: "merged" as const, base: target, target },
     }
-    let result: LocalBranchRetirementResult
-    if (!merged) {
-      // The same policy's existing preview checks native and host protections before custody is written.
-      const preview = await retireLocalBranch({
-        ...retirement,
-        dryRun: true,
-        worktreeLess,
-        protections: async () =>
-          (
-            await readBranchProtections(io, {
-              repo,
-              branch: request.branch,
-              tip: request.tip,
-              issue: request.issue,
-            })
-          ).protections,
-      })
-      if (preview.outcome !== "eligible") result = preview
-      else {
-        const archive = ensureArchiveRef(repo, archiveRef, request.tip)
-        if (!archive.ok) throw new Error(archive.reason)
-        attemptedArchive = archiveRef
-        try {
-          await publishRetirementArchive(createEventStore(repo, remote, selection), {
-            branch: request.branch,
-            archive: archiveRef,
-            head: request.tip,
-          })
-        } catch (cause) {
-          throw new Error(`${cause instanceof Error ? cause.message : String(cause)}; local refs kept`, { cause })
-        }
-        // publishRetirementArchive read the archive back from origin before returning (30094 step 3).
-        headMove = await detachStoreHeadAtTip()
-        result = await retireLocalBranch({ ...retirement, protections, worktreeLess })
-        if (result.outcome !== "removed") await restoreStoreHead()
-      }
-    } else {
-      headMove = await detachStoreHeadAtTip()
-      result = await retireLocalBranch({ ...retirement, protections, worktreeLess })
-      if (result.outcome !== "removed") await restoreStoreHead()
-    }
+    if (merged) headMove = await detachStoreHeadAtTip()
+    const result = await retireLocalBranch({ ...retirement, protections, worktreeLess })
+    if (result.outcome !== "removed") await restoreStoreHead()
     const row = {
       branch: request.branch,
       head: observedTip,
@@ -1023,7 +944,6 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
       head: request.tip,
       actor: request.by,
       issue: request.issue,
-      ...(attemptedArchive === undefined ? {} : { archive: attemptedArchive }),
       reason,
       outcome: "failed",
     })
@@ -1034,7 +954,6 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
         {
           branch: request.branch,
           head: request.tip,
-          ...(attemptedArchive === undefined ? {} : { archiveRef: attemptedArchive }),
           reason,
         },
       ],
