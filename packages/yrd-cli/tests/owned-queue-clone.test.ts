@@ -7,11 +7,13 @@
  * @testonly none
  */
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, renameSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { runYrdProcess } from "../src/cli.ts"
 import { ownedQueueClone, resolveQueueLocation } from "../src/queue-location.ts"
+import type { YrdCliIO } from "../src/types.ts"
 import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 
 function git(cwd: string, ...args: string[]): string {
@@ -92,5 +94,89 @@ describe("ownedQueueClone (hh 25626)", () => {
     await expect(ownedQueueClone(clone, offlineEnv({ XDG_STATE_HOME: state }))).resolves.toBe(
       join(state, "yrd", "github.com", "beorn", "hh-dev~main", "repo"),
     )
+  })
+})
+
+describe("container repository with nested dev checkout (hh 30719)", () => {
+  it("refuses unaddressed yrd commands in the container root before cloning or reporting ENOENT health", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-container-root-"))
+    roots.push(root)
+    const state = join(root, "xdg-state")
+    const containerUpstream = join(root, "container-upstream")
+    git(root, "init", "-q", "-b", "main", containerUpstream)
+    git(
+      containerUpstream,
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@t.invalid",
+      "commit",
+      "-q",
+      "--allow-empty",
+      "-m",
+      "state",
+    )
+    const container = join(root, "hh")
+    git(root, "clone", "-q", containerUpstream, container)
+    mkdirSync(join(container, "pm"), { recursive: true })
+
+    const devUpstream = join(root, "dev-upstream")
+    git(root, "init", "-q", "-b", "main", devUpstream)
+    git(devUpstream, "-c", "user.name=t", "-c", "user.email=t@t.invalid", "commit", "-q", "--allow-empty", "-m", "code")
+    const dev = join(container, "dev")
+    git(root, "clone", "-q", devUpstream, dev)
+    git(dev, "remote", "set-url", "origin", "git@github.com:beorn/hh-dev.git")
+    writeFileSync(join(dev, ".yrd.yml"), "target:\n  branch: main\n")
+
+    const previousState = process.env.XDG_STATE_HOME
+    process.env.XDG_STATE_HOME = state
+    try {
+      for (const cwd of [container, join(container, "pm")]) {
+        await expect(resolveQueueLocation(cwd, undefined, offlineEnv({ XDG_STATE_HOME: state }))).rejects.toThrow(
+          new RegExp(
+            `is inside container repository .* \\(no \\.yrd\\.yml\\), not the nested checkout .*; run from .* or use \`@in -- bun yrd \\.\\.\\.\``,
+            "u",
+          ),
+        )
+        await expect(ownedQueueClone(cwd, offlineEnv({ XDG_STATE_HOME: state }))).rejects.toThrow(
+          /run from .* or use `@in -- bun yrd \.\.\.`/u,
+        )
+
+        for (const argv of [
+          ["queue", "health"],
+          ["queue", "list", "--json"],
+          ["env", "list", "--json"],
+          ["issues", "view", "30719"],
+        ]) {
+          let stdout = ""
+          let stderr = ""
+          const io: YrdCliIO = {
+            localBranchProtections: null,
+            color: false,
+            cwd,
+            stdout(text) {
+              stdout += text
+            },
+            stderr(text) {
+              stderr += text
+            },
+          }
+          const exitCode = await runYrdProcess([process.execPath, "/usr/local/bin/yrd", ...argv], io)
+          expect(exitCode, argv.join(" ")).toBe(2)
+          expect(stdout, argv.join(" ")).toBe("")
+          expect(stderr, argv.join(" ")).toContain(`not the nested checkout ${dev}`)
+          expect(stderr, argv.join(" ")).toContain(`run from ${dev} or use \`@in -- bun yrd ...\``)
+        }
+      }
+      // Proves ensureOwnedClone never ran against the container repo's origin.
+      expect(existsSync(state)).toBe(false)
+      // And from the nested dev checkout itself, resolution succeeds.
+      await expect(ownedQueueClone(dev, offlineEnv({ XDG_STATE_HOME: state }))).resolves.toBe(
+        join(state, "yrd", "github.com", "beorn", "hh-dev~main", "repo"),
+      )
+    } finally {
+      if (previousState === undefined) delete process.env.XDG_STATE_HOME
+      else process.env.XDG_STATE_HOME = previousState
+    }
   })
 })

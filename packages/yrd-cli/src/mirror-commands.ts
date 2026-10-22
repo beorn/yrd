@@ -12,7 +12,7 @@
 
 import { configValue, gitIn, refreshDeclaredMirrors, resolveGitSelection } from "@yrd/queue-core"
 import { relative } from "node:path"
-import { repositoryHere } from "./declaration.ts"
+import { assertNotContainerRepository, repositoryHere } from "./declaration.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 
 /** The git setting naming the host's store root. */
@@ -29,6 +29,7 @@ export async function refreshMirrors(options: MirrorRefreshOptions, io: YrdCliIO
     )
     return 1
   }
+  assertNotContainerRepository(repo, cwd)
   const selection = await resolveGitSelection(repo)
   const store = await configValue(gitIn(repo, undefined, selection), MIRROR_STORE_SETTING)
   if (store === undefined) {

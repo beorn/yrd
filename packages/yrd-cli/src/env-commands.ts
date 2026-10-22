@@ -56,7 +56,7 @@ import {
   PrivateStoreRefusalError,
   type PrivateStoreRefusal,
 } from "git-super/worktree"
-import { repositoryHere as findRepository } from "./declaration.ts"
+import { assertNotContainerRepository, repositoryHere as findRepository } from "./declaration.ts"
 import { ISSUE_DISPLAY_TIMEOUT_MS } from "./issue-resolver.ts"
 import { ISSUES_CODES } from "./issues/declaration.ts"
 import { runIssuesVerb } from "./issues/run.ts"
@@ -152,6 +152,7 @@ function requireRepository(io: YrdCliIO): string {
   if (root === undefined) {
     throw new Error(`yrd env needs a repository: no Git clone contains ${cwd}; run it inside a clone`)
   }
+  assertNotContainerRepository(root, cwd)
   return root
 }
 
@@ -1256,8 +1257,9 @@ export async function closeEnvironment(
         `environment teardown ${result.result} in preserved environment ${path}: exit ${String(result.exit)}${result.why === undefined ? "" : ` (${result.why})`}\ncommand: ${config.teardown}\n${output}\nlog ${result.log}`,
       )
     }
-    if (options.preserve !== true)
+    if (options.preserve !== true) {
       await requireClean(treeGit, path, " — or re-run with --preserve to keep this exact state in a durable ref first")
+    }
   }
   // 27510: closing an environment retires its own branch's preview custody, root first, before removal; a removal that
   // fails afterwards leaves the retirement standing. A detached environment never submitted, so has none.
