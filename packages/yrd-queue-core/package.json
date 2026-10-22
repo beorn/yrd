@@ -10,7 +10,7 @@
     "@bearly/durable-file": "0.1.0",
     "@bearly/flock": "0.2.2",
     "@yrd/process": "workspace:*",
-    "git-super": "0.8.0",
+    "git-super": "0.9.0",
     "gitomic": "0.9.0",
     "removely": "0.5.0"
   }
