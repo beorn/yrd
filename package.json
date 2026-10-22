@@ -40,11 +40,11 @@
   },
   "dependencies": {
     "@silvery/ansi": "^0.25.0",
-    "@silvery/commander": "^0.25.0",
+    "@silvery/commander": "0.26.0",
     "@silvery/scope": "^0.25.0",
     "loggily": "github:beorn/loggily#f17cf656142e575bcc81eb19a496bae15439d9aa",
-    "react": "^19.2.0",
-    "silvery": "^0.25.0",
+    "react": "19.3.1",
+    "silvery": "0.26.0",
     "zod": "4.6.5"
   },
   "devDependencies": {

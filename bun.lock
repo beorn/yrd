@@ -6,11 +6,11 @@
       "name": "git-yrd",
       "dependencies": {
         "@silvery/ansi": "^0.25.0",
-        "@silvery/commander": "^0.25.0",
+        "@silvery/commander": "0.26.0",
         "@silvery/scope": "^0.25.0",
         "loggily": "github:beorn/loggily#f17cf656142e575bcc81eb19a496bae15439d9aa",
-        "react": "^19.2.0",
-        "silvery": "^0.25.0",
+        "react": "19.3.1",
+        "silvery": "0.26.0",
         "zod": "4.6.5",
       },
       "devDependencies": {
@@ -36,18 +36,18 @@
       "version": "0.0.1",
       "dependencies": {
         "@bearly/durable-file": "0.1.0",
-        "@bearly/flock": "^0.1.1",
+        "@bearly/flock": "0.2.2",
         "@silvery/ansi": "^0.25.0",
-        "@silvery/commander": "^0.25.0",
+        "@silvery/commander": "0.26.0",
         "@yrd/bay": "workspace:*",
         "@yrd/process": "workspace:*",
         "@yrd/queue-core": "workspace:*",
         "git-super": "0.8.0",
-        "gitomic": "^0.4.0",
-        "loggily": "^0.11.0",
-        "react": "^19.2.0",
-        "removely": "0.4.0",
-        "silvery": "^0.25.0",
+        "gitomic": "0.9.0",
+        "loggily": "0.13.0",
+        "react": "19.3.1",
+        "removely": "0.5.0",
+        "silvery": "0.26.0",
       },
       "devDependencies": {
         "@termless/core": "0.10.2",
@@ -62,11 +62,11 @@
       "dependencies": {
         "@silvery/scope": "^0.25.0",
         "git-super": "0.8.0",
-        "loggily": "^0.11.0",
+        "loggily": "0.13.0",
         "zod": "4.6.5",
       },
       "devDependencies": {
-        "removely": "0.4.0",
+        "removely": "0.5.0",
       },
     },
     "packages/yrd-queue-core": {
@@ -74,11 +74,11 @@
       "version": "0.0.1",
       "dependencies": {
         "@bearly/durable-file": "0.1.0",
-        "@bearly/flock": "^0.1.1",
+        "@bearly/flock": "0.2.2",
         "@yrd/process": "workspace:*",
         "git-super": "0.8.0",
-        "gitomic": "^0.4.0",
-        "removely": "0.4.0",
+        "gitomic": "0.9.0",
+        "removely": "0.5.0",
       },
     },
   },
@@ -92,7 +92,7 @@
 
     "@bearly/durable-file": ["@bearly/durable-file@0.1.0", "", {}, "sha512-mHCRg+rzye+/1OxHbZREcqUjtnABJRvChOjDNBiiC8uvcfstTywxGNsLgH3i48iVoey/ofT3pe9oNyJDTJfzAA=="],
 
-    "@bearly/flock": ["@bearly/flock@0.1.1", "", {}, "sha512-YT4E+eanXhIDIHpHqi971KX36IjcfakkAHsSo81B8Fb8mVNwyIKeb6tXTHoOgHJr/p6fjy59iu4QWeqdu9BQbA=="],
+    "@bearly/flock": ["@bearly/flock@0.2.2", "", { "dependencies": { "koffi": "3.3.2" } }, "sha512-pmQ0SfqqZ1sLLQImQ3NnmfugIKHg/SC9WyAVPKSZNC1PYRw9LRhRaZrOuzzAJG35i931BG7lF5KCXBZ6FPt8Kg=="],
 
     "@bearly/pacing": ["@bearly/pacing@0.1.0", "", {}, "sha512-t5c9YUrcZjETONe+DvjjnRtfqlNzPexR3CgFFe7sdqeWlMCVQ8e41qHl/ACHwm42wpRERRrn9dHRuZFLl9I7cg=="],
 
@@ -256,11 +256,11 @@
 
     "@silvery/command": ["@silvery/command@0.23.2", "", {}, "sha512-/JhPzi2VTlleF+uYREkV5SdZm5CfimGCwq3XoKBTXbozK+p4zOFyoRoFGPBnToqQCYQb6x0R8nGX9ag3HZjfbw=="],
 
-    "@silvery/commander": ["@silvery/commander@0.25.0", "", { "dependencies": { "@silvery/ansi": "0.25.0", "commander": ">=15.0.0", "zod": ">=3.0.0" } }, "sha512-blk0lzrtmRNxXU1bTyDuIWymQ0cQMVBgdI234JajkB1LiIlRUtEGXD2SIQo26+C3gXHkQVW7BsojwtgUz0HQuQ=="],
+    "@silvery/commander": ["@silvery/commander@0.26.0", "", { "dependencies": { "@silvery/ansi": "0.26.0", "commander": ">=15.0.0", "zod": "^3.24.0 || ^4.0.0" } }, "sha512-IUy7MJK7XHZsdb3f3CByHOUEJxcjHsEOLaxvkDqyoaLcPtjKWNh8SJG/mm7GTQKaD2YYfIXkKhhVQAcAdUuDFA=="],
 
     "@silvery/scope": ["@silvery/scope@0.25.0", "", {}, "sha512-KfH/vsTcLjMC19ksnhMMNZYFU7EUj3y3uIRtKbnbrSRkne01SBypxeJ0cUSR/ebfaaPVjr4f5Me2BKysFcPY8g=="],
 
-    "@silvery/syntax": ["@silvery/syntax@0.25.0", "", { "dependencies": { "shiki": "^4.3.1" } }, "sha512-agXF7MkJIFyqnMS5seCTf5fZ2jkz1shHO6h3dh2BbSUFCFMGyj28qUmHirDNChv2YTS5iyMnFqs7mQ04uy0D3g=="],
+    "@silvery/syntax": ["@silvery/syntax@0.26.0", "", { "dependencies": { "shiki": "4.4.3" } }, "sha512-xremTY+kmiwLkC7xKvlIzvkNKNM1tNtcw9onOd5AEuCMq3xisuYdcUEwvF727fD4477yO9VmjSIsQW++tFaL7g=="],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 
@@ -376,7 +376,7 @@
 
     "fdir": ["fdir@6.5.0", "", { "peerDependencies": { "picomatch": "^3 || ^4" }, "optionalPeers": ["picomatch"] }, "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg=="],
 
-    "flexily": ["flexily@0.7.3", "", {}, "sha512-Gfruf5xHPE8R97jLZC6GrUqN2fiFVstu+d490GQIp7vFFjCWkIi540PmJV9ut4Y5BqOCgII7NFpY3cTWGePTdA=="],
+    "flexily": ["flexily@0.8.5", "", { "peerDependencies": { "debug": "^4.4.3", "loggily": "^0.13.0" }, "optionalPeers": ["debug", "loggily"] }, "sha512-LfUnRzGgHvGG6OhGgD6RU7Q33Q40h/8Y8kQybisDnX1yXxcxnslVF14tn+J96Q/c8rlNsuRo3MLlh/3Y/eNZ/w=="],
 
     "fsevents": ["fsevents@2.3.3", "", { "os": "darwin" }, "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw=="],
 
@@ -476,7 +476,7 @@
 
     "regex-utilities": ["regex-utilities@2.3.0", "", {}, "sha512-8VhliFJAWRaUiVvREIiW2NXXTmHs4vMNnSzuJVhscgmGav3g9VDxLrQndI3dZZVVdp0ZO/5v0xmX516/7M9cng=="],
 
-    "removely": ["removely@0.4.0", "", { "dependencies": { "@bearly/process-sources": "^0.1.0" }, "bin": { "removely": "dist/cli.mjs" } }, "sha512-SI7c/u4zwvgKX1VEFADGnF13eZ2lO2PBzJJoRwQhXvO0e5wLWDIJQXtbtt3bT05d01IcJwn8lOeoqG0Xv2InFw=="],
+    "removely": ["removely@0.5.0", "", { "dependencies": { "@bearly/process-sources": "^0.1.0" }, "bin": { "removely": "dist/cli.mjs" } }, "sha512-QIAP0uyXjK8Y3m5hDUqvW6ciyy0c879dwUPZNXSBKFFmZmkEuh4+BA0EUkZIyt9Q3wcaPgfENNKPW2Sf2+2a3w=="],
 
     "rolldown": ["rolldown@1.1.5", "", { "dependencies": { "@oxc-project/types": "=0.139.0", "@rolldown/pluginutils": "^1.0.0" }, "optionalDependencies": { "@rolldown/binding-android-arm64": "1.1.5", "@rolldown/binding-darwin-arm64": "1.1.5", "@rolldown/binding-darwin-x64": "1.1.5", "@rolldown/binding-freebsd-x64": "1.1.5", "@rolldown/binding-linux-arm-gnueabihf": "1.1.5", "@rolldown/binding-linux-arm64-gnu": "1.1.5", "@rolldown/binding-linux-arm64-musl": "1.1.5", "@rolldown/binding-linux-ppc64-gnu": "1.1.5", "@rolldown/binding-linux-s390x-gnu": "1.1.5", "@rolldown/binding-linux-x64-gnu": "1.1.5", "@rolldown/binding-linux-x64-musl": "1.1.5", "@rolldown/binding-openharmony-arm64": "1.1.5", "@rolldown/binding-wasm32-wasi": "1.1.5", "@rolldown/binding-win32-arm64-msvc": "1.1.5", "@rolldown/binding-win32-x64-msvc": "1.1.5" }, "bin": { "rolldown": "./bin/cli.mjs" } }, "sha512-t9z29cJjXf/vxQ8dyhCSpt6H6aSwHTk8cT5I3iy6SMXuFpk5mB6PL6XfC8PCwrPTx93udwKUm9HRteAlTGBLiA=="],
 
@@ -486,9 +486,9 @@
 
     "siginfo": ["siginfo@2.0.0", "", {}, "sha512-ybx0WO1/8bSBLEWXZvEd7gMW3Sn3JFlW3TvX1nREbDLRNQNaeNN8WK0meBwPdAaOI7TtRRRJn/Es1zhrrCHu7g=="],
 
-    "silvery": ["silvery@0.25.0", "", { "dependencies": { "@chenglou/pretext": "^0.0.8", "@silvery/color": "0.25.0", "@silvery/commander": "0.25.0", "@silvery/syntax": "0.25.0", "@termless/core": ">=0.9.1 <1.0.0", "css-select": "^7.0.0", "css-what": "^8.0.0", "flexily": "0.7.3", "loggily": "^0.10.2", "react-reconciler": "^0.33.0", "slice-ansi": "^8.0.0", "string-width": "^8.2.2" }, "peerDependencies": { "@termless/ghostty": ">=0.9.1 <1.0.0", "@termless/ghostty-native": ">=0.9.1 <1.0.0", "@termless/test": ">=0.9.1 <1.0.0", "@termless/xtermjs": ">=0.9.1 <1.0.0", "playwright": ">=1.40.0", "react": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@termless/ghostty", "@termless/ghostty-native", "@termless/test", "@termless/xtermjs", "playwright"], "bin": { "silvery": "dist/bin/silvery.js" } }, "sha512-6srsCixCQ+JbErcrxI44cgySNF2gxa8O/r6hsMMpuhVmfsNl3nLNsk3mPYLyCr4Um2cgi0QhaP1e5J5AJQCCbQ=="],
+    "silvery": ["silvery@0.26.0", "", { "dependencies": { "@chenglou/pretext": "^0.0.8", "@silvery/color": "0.26.0", "@silvery/commander": "0.26.0", "@silvery/syntax": "0.26.0", "@termless/core": ">=0.9.1 <1.0.0", "css-select": "^7.0.0", "css-what": "^8.0.0", "flexily": "^0.8.2", "loggily": "^0.10.2", "react-reconciler": "^0.33.0", "slice-ansi": "^9.0.1", "string-width": "^8.3.0" }, "peerDependencies": { "@termless/ghostty": ">=0.9.1 <1.0.0", "@termless/ghostty-native": ">=0.9.1 <1.0.0", "@termless/test": ">=0.9.1 <1.0.0", "@termless/xtermjs": ">=0.9.1 <1.0.0", "playwright": ">=1.40.0", "react": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@termless/ghostty", "@termless/ghostty-native", "@termless/test", "@termless/xtermjs", "playwright"], "bin": { "silvery": "dist/bin/silvery.js" } }, "sha512-Pt9zLrjL1dSovSXIw0ghtHBdKeJ25gVsraIjIrCkKkxPqVLlpK/eF8GpKCbKvca2B6hL36Fz1VnV/M5FxeAAuw=="],
 
-    "slice-ansi": ["slice-ansi@8.0.0", "", { "dependencies": { "ansi-styles": "^6.2.3", "is-fullwidth-code-point": "^5.1.0" } }, "sha512-stxByr12oeeOyY2BlviTNQlYV5xOj47GirPr4yA1hE9JCtxfQN0+tVbkxwCtYDQWhEKWFHsEK48ORg5jrouCAg=="],
+    "slice-ansi": ["slice-ansi@9.0.1", "", { "dependencies": { "ansi-styles": "^6.2.3", "is-fullwidth-code-point": "^5.1.0" } }, "sha512-aBY19bn/XA+hKOKX0qL7Z0UfdBsbQvc9hn993U8ALUjzxCvDcuZqLoRXjGJrUARWAlwMnsRVD9sw2AFNOYvalA=="],
 
     "source-map-js": ["source-map-js@1.2.1", "", {}, "sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA=="],
 
@@ -546,27 +546,43 @@
 
     "zwitch": ["zwitch@2.0.4", "", {}, "sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A=="],
 
+    "@silvery/commander/@silvery/ansi": ["@silvery/ansi@0.26.0", "", { "dependencies": { "@silvery/color": "0.26.0", "string-width": "8.3.0" } }, "sha512-0ZSUMQXs6Qcul22CHgTa08yafQNKgML2bw68u49nuXtBLNig8FW56cmB/cmdp1eIwot/QMZLZtmRSXuGRwssyQ=="],
+
     "@termless/ghostty/@napi-rs/canvas": ["@napi-rs/canvas@1.0.2", "", { "optionalDependencies": { "@napi-rs/canvas-android-arm64": "1.0.2", "@napi-rs/canvas-darwin-arm64": "1.0.2", "@napi-rs/canvas-darwin-x64": "1.0.2", "@napi-rs/canvas-linux-arm-gnueabihf": "1.0.2", "@napi-rs/canvas-linux-arm64-gnu": "1.0.2", "@napi-rs/canvas-linux-arm64-musl": "1.0.2", "@napi-rs/canvas-linux-riscv64-gnu": "1.0.2", "@napi-rs/canvas-linux-x64-gnu": "1.0.2", "@napi-rs/canvas-linux-x64-musl": "1.0.2", "@napi-rs/canvas-win32-arm64-msvc": "1.0.2", "@napi-rs/canvas-win32-x64-msvc": "1.0.2" } }, "sha512-EYEqlMYaCbpZDz+IgDH5xp9MTd3ui4dmGqbQYryhMLnSRxrhHKq5KQWHHKxFUcEP4Hp8/BWgvqXocX4j7iSbOQ=="],
 
     "@termless/ghostty/@termless/core": ["@termless/core@0.9.1", "", { "optionalDependencies": { "@napi-rs/canvas": "^1.0.2", "@resvg/resvg-js": "^2.6.2", "@twemoji/svg": "^15.0.0", "ghostty-web": "^0.4.0", "gifenc": "^1.0.3", "playwright": "^1.59.0", "upng-js": "^2.1.0" }, "peerDependencies": { "node-pty": ">=1.0.0" }, "optionalPeers": ["node-pty"] }, "sha512-VVJc5aX3WWRtWkfvTe2e/WtItoSbDSdX+lnV/H/Ara4HtUBFY5x5l4nna1N/sdQAKg6IP6Lrk+RqiasdpzoY8Q=="],
 
     "@termless/ghostty-native/@termless/core": ["@termless/core@0.9.1", "", { "optionalDependencies": { "@napi-rs/canvas": "^1.0.2", "@resvg/resvg-js": "^2.6.2", "@twemoji/svg": "^15.0.0", "ghostty-web": "^0.4.0", "gifenc": "^1.0.3", "playwright": "^1.59.0", "upng-js": "^2.1.0" }, "peerDependencies": { "node-pty": ">=1.0.0" }, "optionalPeers": ["node-pty"] }, "sha512-VVJc5aX3WWRtWkfvTe2e/WtItoSbDSdX+lnV/H/Ara4HtUBFY5x5l4nna1N/sdQAKg6IP6Lrk+RqiasdpzoY8Q=="],
 
+    "@yrd/bay/git-super": ["git-super@github:beorn/git-super#629c008", { "dependencies": { "@bearly/flock": "0.2.2", "@bearly/pacing": "^0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "gitomic": "^0.4.0", "loggily": "^0.10.2", "react": "19.3.1", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-629c008", "sha512-EHK4Vct+dguAhbo4Jzd6d9W7VUmETP+jBEGliDWsRP1xoQTXxiKg4wr9CUIONsxAMJI+Wl2sqa/uqny3A//Uxg=="],
+
+    "@yrd/cli/git-super": ["git-super@github:beorn/git-super#629c008", { "dependencies": { "@bearly/flock": "0.2.2", "@bearly/pacing": "^0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "gitomic": "^0.4.0", "loggily": "^0.10.2", "react": "19.3.1", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-629c008", "sha512-EHK4Vct+dguAhbo4Jzd6d9W7VUmETP+jBEGliDWsRP1xoQTXxiKg4wr9CUIONsxAMJI+Wl2sqa/uqny3A//Uxg=="],
+
     "@yrd/cli/loggily": ["loggily@github:beorn/loggily#5e4bcda", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-5e4bcda", "sha512-A5pc88hVoTB6dIg8znEmS6pp/pY7QCRSeip1sb9bmsQD9YjGLEPV/T07OhzAVe0f8x0TvFtrehD0XIkRETOvKQ=="],
+
+    "@yrd/process/git-super": ["git-super@github:beorn/git-super#629c008", { "dependencies": { "@bearly/flock": "0.2.2", "@bearly/pacing": "^0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "gitomic": "^0.4.0", "loggily": "^0.10.2", "react": "19.3.1", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-629c008", "sha512-EHK4Vct+dguAhbo4Jzd6d9W7VUmETP+jBEGliDWsRP1xoQTXxiKg4wr9CUIONsxAMJI+Wl2sqa/uqny3A//Uxg=="],
 
     "@yrd/process/loggily": ["loggily@github:beorn/loggily#5e4bcda", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-5e4bcda", "sha512-A5pc88hVoTB6dIg8znEmS6pp/pY7QCRSeip1sb9bmsQD9YjGLEPV/T07OhzAVe0f8x0TvFtrehD0XIkRETOvKQ=="],
 
-    "git-super/@bearly/flock": ["@bearly/flock@0.2.2", "", { "dependencies": { "koffi": "3.3.2" } }, "sha512-pmQ0SfqqZ1sLLQImQ3NnmfugIKHg/SC9WyAVPKSZNC1PYRw9LRhRaZrOuzzAJG35i931BG7lF5KCXBZ6FPt8Kg=="],
+    "@yrd/queue-core/git-super": ["git-super@github:beorn/git-super#629c008", { "dependencies": { "@bearly/flock": "0.2.2", "@bearly/pacing": "^0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "gitomic": "^0.4.0", "loggily": "^0.10.2", "react": "19.3.1", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-629c008", "sha512-EHK4Vct+dguAhbo4Jzd6d9W7VUmETP+jBEGliDWsRP1xoQTXxiKg4wr9CUIONsxAMJI+Wl2sqa/uqny3A//Uxg=="],
 
     "git-super/@silvery/commander": ["@silvery/commander@0.23.2", "", { "dependencies": { "@silvery/ansi": "0.23.2", "commander": ">=15.0.0", "zod": ">=3.0.0" } }, "sha512-hJz9U6/SuSWgRpne00ES3vxiIM+2PuJLvXgQ4SwfjLPJxwAw/q6bWLKvwIT8WhdeaiPikZuYsxpO3RBU7o2PSQ=="],
 
-    "git-super/loggily": ["loggily@github:beorn/loggily#5e4bcda", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-5e4bcda", "sha512-A5pc88hVoTB6dIg8znEmS6pp/pY7QCRSeip1sb9bmsQD9YjGLEPV/T07OhzAVe0f8x0TvFtrehD0XIkRETOvKQ=="],
+    "git-super/gitomic": ["gitomic@github:beorn/gitomic#8c310ee", { "dependencies": { "@bearly/cli-process": "^0.1.0", "@bearly/flock": "^0.2.2", "@bearly/pacing": "^0.1.0" }, "peerDependencies": { "isomorphic-git": "^1.38.7" }, "optionalPeers": ["isomorphic-git"], "bin": { "gitomic": "./src/bin.ts" } }, "beorn-gitomic-8c310ee", "sha512-lyV1k4b9TSiUm43RCsf7BZHvuVb2hJBxMX+uiGaX39jaWTWjoIb/SPIFVxcXxTosvYAahFh8jVyU0ooAo7jtHw=="],
 
     "git-super/silvery": ["silvery@0.23.2", "", { "dependencies": { "@chenglou/pretext": "^0.0.8", "@silvery/color": "0.23.2", "@silvery/commander": "0.23.2", "@termless/core": "^0.8.1", "css-select": "^7.0.0", "css-what": "^8.0.0", "flexily": "0.7.3", "loggily": "^0.10.2", "react-reconciler": "^0.33.0", "slice-ansi": "^8.0.0", "string-width": "^8.2.2" }, "peerDependencies": { "@termless/ghostty": "^0.8.2", "@termless/ghostty-native": "^0.8.1", "@termless/test": "^0.8.1", "@termless/xtermjs": "^0.8.1", "playwright": ">=1.40.0", "react": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@termless/ghostty", "@termless/ghostty-native", "@termless/test", "@termless/xtermjs", "playwright"] }, "sha512-jAdZJi0PkNJ3iibn6kdlqkXSsjrOi32gPpsNPerUp8ilxfy2WodtZ+FgCQ75CPSbjYbSmwtev+pvL0AHwYw3Vg=="],
 
-    "gitomic/@bearly/flock": ["@bearly/flock@0.2.2", "", { "dependencies": { "koffi": "3.3.2" } }, "sha512-pmQ0SfqqZ1sLLQImQ3NnmfugIKHg/SC9WyAVPKSZNC1PYRw9LRhRaZrOuzzAJG35i931BG7lF5KCXBZ6FPt8Kg=="],
-
     "playwright/fsevents": ["fsevents@2.3.2", "", { "os": "darwin" }, "sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA=="],
+
+    "silvery/@silvery/color": ["@silvery/color@0.26.0", "", {}, "sha512-x4aDwtTM6tmsCG4/5b1F97kD5rpDTG2wrH+EjD5ue5Ub4J12F4x1rdo3oL9Gsno6hJm0RIbZMfxWVp8BU7OPoQ=="],
+
+    "silvery/loggily": ["loggily@github:beorn/loggily#5e4bcda", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-5e4bcda", "sha512-A5pc88hVoTB6dIg8znEmS6pp/pY7QCRSeip1sb9bmsQD9YjGLEPV/T07OhzAVe0f8x0TvFtrehD0XIkRETOvKQ=="],
+
+    "silvery/string-width": ["string-width@8.3.0", "", { "dependencies": { "get-east-asian-width": "^1.5.0", "strip-ansi": "^7.1.2" } }, "sha512-ZbmZM0JCihQN91dWnxoipT2KOEyHqEyfRXUyjuRhW8b/xnqPDoq4gWEVApTVa9db2wN8mmoikgFBbjh71+cGeQ=="],
+
+    "@silvery/commander/@silvery/ansi/@silvery/color": ["@silvery/color@0.26.0", "", {}, "sha512-x4aDwtTM6tmsCG4/5b1F97kD5rpDTG2wrH+EjD5ue5Ub4J12F4x1rdo3oL9Gsno6hJm0RIbZMfxWVp8BU7OPoQ=="],
+
+    "@silvery/commander/@silvery/ansi/string-width": ["string-width@8.3.0", "", { "dependencies": { "get-east-asian-width": "^1.5.0", "strip-ansi": "^7.1.2" } }, "sha512-ZbmZM0JCihQN91dWnxoipT2KOEyHqEyfRXUyjuRhW8b/xnqPDoq4gWEVApTVa9db2wN8mmoikgFBbjh71+cGeQ=="],
 
     "@termless/ghostty-native/@termless/core/@napi-rs/canvas": ["@napi-rs/canvas@1.0.2", "", { "optionalDependencies": { "@napi-rs/canvas-android-arm64": "1.0.2", "@napi-rs/canvas-darwin-arm64": "1.0.2", "@napi-rs/canvas-darwin-x64": "1.0.2", "@napi-rs/canvas-linux-arm-gnueabihf": "1.0.2", "@napi-rs/canvas-linux-arm64-gnu": "1.0.2", "@napi-rs/canvas-linux-arm64-musl": "1.0.2", "@napi-rs/canvas-linux-riscv64-gnu": "1.0.2", "@napi-rs/canvas-linux-x64-gnu": "1.0.2", "@napi-rs/canvas-linux-x64-musl": "1.0.2", "@napi-rs/canvas-win32-arm64-msvc": "1.0.2", "@napi-rs/canvas-win32-x64-msvc": "1.0.2" } }, "sha512-EYEqlMYaCbpZDz+IgDH5xp9MTd3ui4dmGqbQYryhMLnSRxrhHKq5KQWHHKxFUcEP4Hp8/BWgvqXocX4j7iSbOQ=="],
 
@@ -592,13 +608,35 @@
 
     "@termless/ghostty/@napi-rs/canvas/@napi-rs/canvas-win32-x64-msvc": ["@napi-rs/canvas-win32-x64-msvc@1.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-okU8/t2foV6C31n0GtvEMbfD5rOFc70+/6xUNME9Guld29sgSOIGUEDScAWFlcP3k5TYQRl9TNkwJEEjh15w8A=="],
 
+    "@yrd/bay/git-super/@silvery/commander": ["@silvery/commander@0.23.2", "", { "dependencies": { "@silvery/ansi": "0.23.2", "commander": ">=15.0.0", "zod": ">=3.0.0" } }, "sha512-hJz9U6/SuSWgRpne00ES3vxiIM+2PuJLvXgQ4SwfjLPJxwAw/q6bWLKvwIT8WhdeaiPikZuYsxpO3RBU7o2PSQ=="],
+
+    "@yrd/bay/git-super/loggily": ["loggily@github:beorn/loggily#5e4bcda", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-5e4bcda", "sha512-A5pc88hVoTB6dIg8znEmS6pp/pY7QCRSeip1sb9bmsQD9YjGLEPV/T07OhzAVe0f8x0TvFtrehD0XIkRETOvKQ=="],
+
+    "@yrd/bay/git-super/silvery": ["silvery@0.23.2", "", { "dependencies": { "@chenglou/pretext": "^0.0.8", "@silvery/color": "0.23.2", "@silvery/commander": "0.23.2", "@termless/core": "^0.8.1", "css-select": "^7.0.0", "css-what": "^8.0.0", "flexily": "0.7.3", "loggily": "^0.10.2", "react-reconciler": "^0.33.0", "slice-ansi": "^8.0.0", "string-width": "^8.2.2" }, "peerDependencies": { "@termless/ghostty": "^0.8.2", "@termless/ghostty-native": "^0.8.1", "@termless/test": "^0.8.1", "@termless/xtermjs": "^0.8.1", "playwright": ">=1.40.0", "react": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@termless/ghostty", "@termless/ghostty-native", "@termless/test", "@termless/xtermjs", "playwright"] }, "sha512-jAdZJi0PkNJ3iibn6kdlqkXSsjrOi32gPpsNPerUp8ilxfy2WodtZ+FgCQ75CPSbjYbSmwtev+pvL0AHwYw3Vg=="],
+
+    "@yrd/cli/git-super/@silvery/commander": ["@silvery/commander@0.23.2", "", { "dependencies": { "@silvery/ansi": "0.23.2", "commander": ">=15.0.0", "zod": ">=3.0.0" } }, "sha512-hJz9U6/SuSWgRpne00ES3vxiIM+2PuJLvXgQ4SwfjLPJxwAw/q6bWLKvwIT8WhdeaiPikZuYsxpO3RBU7o2PSQ=="],
+
+    "@yrd/cli/git-super/silvery": ["silvery@0.23.2", "", { "dependencies": { "@chenglou/pretext": "^0.0.8", "@silvery/color": "0.23.2", "@silvery/commander": "0.23.2", "@termless/core": "^0.8.1", "css-select": "^7.0.0", "css-what": "^8.0.0", "flexily": "0.7.3", "loggily": "^0.10.2", "react-reconciler": "^0.33.0", "slice-ansi": "^8.0.0", "string-width": "^8.2.2" }, "peerDependencies": { "@termless/ghostty": "^0.8.2", "@termless/ghostty-native": "^0.8.1", "@termless/test": "^0.8.1", "@termless/xtermjs": "^0.8.1", "playwright": ">=1.40.0", "react": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@termless/ghostty", "@termless/ghostty-native", "@termless/test", "@termless/xtermjs", "playwright"] }, "sha512-jAdZJi0PkNJ3iibn6kdlqkXSsjrOi32gPpsNPerUp8ilxfy2WodtZ+FgCQ75CPSbjYbSmwtev+pvL0AHwYw3Vg=="],
+
+    "@yrd/process/git-super/@silvery/commander": ["@silvery/commander@0.23.2", "", { "dependencies": { "@silvery/ansi": "0.23.2", "commander": ">=15.0.0", "zod": ">=3.0.0" } }, "sha512-hJz9U6/SuSWgRpne00ES3vxiIM+2PuJLvXgQ4SwfjLPJxwAw/q6bWLKvwIT8WhdeaiPikZuYsxpO3RBU7o2PSQ=="],
+
+    "@yrd/process/git-super/silvery": ["silvery@0.23.2", "", { "dependencies": { "@chenglou/pretext": "^0.0.8", "@silvery/color": "0.23.2", "@silvery/commander": "0.23.2", "@termless/core": "^0.8.1", "css-select": "^7.0.0", "css-what": "^8.0.0", "flexily": "0.7.3", "loggily": "^0.10.2", "react-reconciler": "^0.33.0", "slice-ansi": "^8.0.0", "string-width": "^8.2.2" }, "peerDependencies": { "@termless/ghostty": "^0.8.2", "@termless/ghostty-native": "^0.8.1", "@termless/test": "^0.8.1", "@termless/xtermjs": "^0.8.1", "playwright": ">=1.40.0", "react": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@termless/ghostty", "@termless/ghostty-native", "@termless/test", "@termless/xtermjs", "playwright"] }, "sha512-jAdZJi0PkNJ3iibn6kdlqkXSsjrOi32gPpsNPerUp8ilxfy2WodtZ+FgCQ75CPSbjYbSmwtev+pvL0AHwYw3Vg=="],
+
+    "@yrd/queue-core/git-super/@silvery/commander": ["@silvery/commander@0.23.2", "", { "dependencies": { "@silvery/ansi": "0.23.2", "commander": ">=15.0.0", "zod": ">=3.0.0" } }, "sha512-hJz9U6/SuSWgRpne00ES3vxiIM+2PuJLvXgQ4SwfjLPJxwAw/q6bWLKvwIT8WhdeaiPikZuYsxpO3RBU7o2PSQ=="],
+
+    "@yrd/queue-core/git-super/loggily": ["loggily@github:beorn/loggily#5e4bcda", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-5e4bcda", "sha512-A5pc88hVoTB6dIg8znEmS6pp/pY7QCRSeip1sb9bmsQD9YjGLEPV/T07OhzAVe0f8x0TvFtrehD0XIkRETOvKQ=="],
+
+    "@yrd/queue-core/git-super/silvery": ["silvery@0.23.2", "", { "dependencies": { "@chenglou/pretext": "^0.0.8", "@silvery/color": "0.23.2", "@silvery/commander": "0.23.2", "@termless/core": "^0.8.1", "css-select": "^7.0.0", "css-what": "^8.0.0", "flexily": "0.7.3", "loggily": "^0.10.2", "react-reconciler": "^0.33.0", "slice-ansi": "^8.0.0", "string-width": "^8.2.2" }, "peerDependencies": { "@termless/ghostty": "^0.8.2", "@termless/ghostty-native": "^0.8.1", "@termless/test": "^0.8.1", "@termless/xtermjs": "^0.8.1", "playwright": ">=1.40.0", "react": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@termless/ghostty", "@termless/ghostty-native", "@termless/test", "@termless/xtermjs", "playwright"] }, "sha512-jAdZJi0PkNJ3iibn6kdlqkXSsjrOi32gPpsNPerUp8ilxfy2WodtZ+FgCQ75CPSbjYbSmwtev+pvL0AHwYw3Vg=="],
+
     "git-super/@silvery/commander/@silvery/ansi": ["@silvery/ansi@0.23.2", "", { "dependencies": { "@silvery/color": "0.23.2", "string-width": "^8.2.2" } }, "sha512-RyJpPi9zO39pmDVDqn7QcWs6eHfX8HlCrR3pPW0T7ug7PRlGXwZzNSyNWah8nrM/rtYSnDaoIOXRgj2+74Zk6A=="],
 
     "git-super/silvery/@silvery/color": ["@silvery/color@0.23.2", "", {}, "sha512-MiqmdlODFLHDRVcSB4uaCBBe6GcoWCA1V/ZA9IfJXTwSyI8Dhhvi9olzMto4St2JXnVjirREwu6K+6C68m3OGA=="],
 
     "git-super/silvery/@termless/core": ["@termless/core@0.8.4", "", { "optionalDependencies": { "@napi-rs/canvas": "^1.0.2", "@resvg/resvg-js": "^2.6.2", "@twemoji/svg": "^15.0.0", "ghostty-web": "^0.4.0", "gifenc": "^1.0.3", "playwright": "^1.59.0", "upng-js": "^2.1.0" }, "peerDependencies": { "node-pty": ">=1.0.0" }, "optionalPeers": ["node-pty"] }, "sha512-iYMUDDGjvT3YCuLXqGr8cuU37DqQjbPNviXUML2ERnXjO/JTxQIKNOY5nCLFQa54f0RCUqJYKLPGus3PAidfpg=="],
 
-    "git-super/silvery/loggily": ["loggily@github:beorn/loggily#5e4bcda", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-5e4bcda", "sha512-A5pc88hVoTB6dIg8znEmS6pp/pY7QCRSeip1sb9bmsQD9YjGLEPV/T07OhzAVe0f8x0TvFtrehD0XIkRETOvKQ=="],
+    "git-super/silvery/flexily": ["flexily@0.7.3", "", {}, "sha512-Gfruf5xHPE8R97jLZC6GrUqN2fiFVstu+d490GQIp7vFFjCWkIi540PmJV9ut4Y5BqOCgII7NFpY3cTWGePTdA=="],
+
+    "git-super/silvery/slice-ansi": ["slice-ansi@8.0.0", "", { "dependencies": { "ansi-styles": "^6.2.3", "is-fullwidth-code-point": "^5.1.0" } }, "sha512-stxByr12oeeOyY2BlviTNQlYV5xOj47GirPr4yA1hE9JCtxfQN0+tVbkxwCtYDQWhEKWFHsEK48ORg5jrouCAg=="],
 
     "@termless/ghostty-native/@termless/core/@napi-rs/canvas/@napi-rs/canvas-android-arm64": ["@napi-rs/canvas-android-arm64@1.0.2", "", { "os": "android", "cpu": "arm64" }, "sha512-IMXKVQod0ol4vt3gmClUfXz4JAgHYESGPCUqmH3lQxBoL0K/2greJaQE1HVBVxWWFKfLc4OLZVdxg7kXVyXv+g=="],
 
@@ -622,9 +660,73 @@
 
     "@termless/ghostty-native/@termless/core/@napi-rs/canvas/@napi-rs/canvas-win32-x64-msvc": ["@napi-rs/canvas-win32-x64-msvc@1.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-okU8/t2foV6C31n0GtvEMbfD5rOFc70+/6xUNME9Guld29sgSOIGUEDScAWFlcP3k5TYQRl9TNkwJEEjh15w8A=="],
 
+    "@yrd/bay/git-super/@silvery/commander/@silvery/ansi": ["@silvery/ansi@0.23.2", "", { "dependencies": { "@silvery/color": "0.23.2", "string-width": "^8.2.2" } }, "sha512-RyJpPi9zO39pmDVDqn7QcWs6eHfX8HlCrR3pPW0T7ug7PRlGXwZzNSyNWah8nrM/rtYSnDaoIOXRgj2+74Zk6A=="],
+
+    "@yrd/bay/git-super/silvery/@silvery/color": ["@silvery/color@0.23.2", "", {}, "sha512-MiqmdlODFLHDRVcSB4uaCBBe6GcoWCA1V/ZA9IfJXTwSyI8Dhhvi9olzMto4St2JXnVjirREwu6K+6C68m3OGA=="],
+
+    "@yrd/bay/git-super/silvery/@termless/core": ["@termless/core@0.8.4", "", { "optionalDependencies": { "@napi-rs/canvas": "^1.0.2", "@resvg/resvg-js": "^2.6.2", "@twemoji/svg": "^15.0.0", "ghostty-web": "^0.4.0", "gifenc": "^1.0.3", "playwright": "^1.59.0", "upng-js": "^2.1.0" }, "peerDependencies": { "node-pty": ">=1.0.0" }, "optionalPeers": ["node-pty"] }, "sha512-iYMUDDGjvT3YCuLXqGr8cuU37DqQjbPNviXUML2ERnXjO/JTxQIKNOY5nCLFQa54f0RCUqJYKLPGus3PAidfpg=="],
+
+    "@yrd/bay/git-super/silvery/flexily": ["flexily@0.7.3", "", {}, "sha512-Gfruf5xHPE8R97jLZC6GrUqN2fiFVstu+d490GQIp7vFFjCWkIi540PmJV9ut4Y5BqOCgII7NFpY3cTWGePTdA=="],
+
+    "@yrd/bay/git-super/silvery/loggily": ["loggily@github:beorn/loggily#5e4bcda", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-5e4bcda", "sha512-A5pc88hVoTB6dIg8znEmS6pp/pY7QCRSeip1sb9bmsQD9YjGLEPV/T07OhzAVe0f8x0TvFtrehD0XIkRETOvKQ=="],
+
+    "@yrd/bay/git-super/silvery/slice-ansi": ["slice-ansi@8.0.0", "", { "dependencies": { "ansi-styles": "^6.2.3", "is-fullwidth-code-point": "^5.1.0" } }, "sha512-stxByr12oeeOyY2BlviTNQlYV5xOj47GirPr4yA1hE9JCtxfQN0+tVbkxwCtYDQWhEKWFHsEK48ORg5jrouCAg=="],
+
+    "@yrd/cli/git-super/@silvery/commander/@silvery/ansi": ["@silvery/ansi@0.23.2", "", { "dependencies": { "@silvery/color": "0.23.2", "string-width": "^8.2.2" } }, "sha512-RyJpPi9zO39pmDVDqn7QcWs6eHfX8HlCrR3pPW0T7ug7PRlGXwZzNSyNWah8nrM/rtYSnDaoIOXRgj2+74Zk6A=="],
+
+    "@yrd/cli/git-super/silvery/@silvery/color": ["@silvery/color@0.23.2", "", {}, "sha512-MiqmdlODFLHDRVcSB4uaCBBe6GcoWCA1V/ZA9IfJXTwSyI8Dhhvi9olzMto4St2JXnVjirREwu6K+6C68m3OGA=="],
+
+    "@yrd/cli/git-super/silvery/@termless/core": ["@termless/core@0.8.4", "", { "optionalDependencies": { "@napi-rs/canvas": "^1.0.2", "@resvg/resvg-js": "^2.6.2", "@twemoji/svg": "^15.0.0", "ghostty-web": "^0.4.0", "gifenc": "^1.0.3", "playwright": "^1.59.0", "upng-js": "^2.1.0" }, "peerDependencies": { "node-pty": ">=1.0.0" }, "optionalPeers": ["node-pty"] }, "sha512-iYMUDDGjvT3YCuLXqGr8cuU37DqQjbPNviXUML2ERnXjO/JTxQIKNOY5nCLFQa54f0RCUqJYKLPGus3PAidfpg=="],
+
+    "@yrd/cli/git-super/silvery/flexily": ["flexily@0.7.3", "", {}, "sha512-Gfruf5xHPE8R97jLZC6GrUqN2fiFVstu+d490GQIp7vFFjCWkIi540PmJV9ut4Y5BqOCgII7NFpY3cTWGePTdA=="],
+
+    "@yrd/cli/git-super/silvery/loggily": ["loggily@github:beorn/loggily#5e4bcda", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-5e4bcda", "sha512-A5pc88hVoTB6dIg8znEmS6pp/pY7QCRSeip1sb9bmsQD9YjGLEPV/T07OhzAVe0f8x0TvFtrehD0XIkRETOvKQ=="],
+
+    "@yrd/cli/git-super/silvery/slice-ansi": ["slice-ansi@8.0.0", "", { "dependencies": { "ansi-styles": "^6.2.3", "is-fullwidth-code-point": "^5.1.0" } }, "sha512-stxByr12oeeOyY2BlviTNQlYV5xOj47GirPr4yA1hE9JCtxfQN0+tVbkxwCtYDQWhEKWFHsEK48ORg5jrouCAg=="],
+
+    "@yrd/process/git-super/@silvery/commander/@silvery/ansi": ["@silvery/ansi@0.23.2", "", { "dependencies": { "@silvery/color": "0.23.2", "string-width": "^8.2.2" } }, "sha512-RyJpPi9zO39pmDVDqn7QcWs6eHfX8HlCrR3pPW0T7ug7PRlGXwZzNSyNWah8nrM/rtYSnDaoIOXRgj2+74Zk6A=="],
+
+    "@yrd/process/git-super/silvery/@silvery/color": ["@silvery/color@0.23.2", "", {}, "sha512-MiqmdlODFLHDRVcSB4uaCBBe6GcoWCA1V/ZA9IfJXTwSyI8Dhhvi9olzMto4St2JXnVjirREwu6K+6C68m3OGA=="],
+
+    "@yrd/process/git-super/silvery/@termless/core": ["@termless/core@0.8.4", "", { "optionalDependencies": { "@napi-rs/canvas": "^1.0.2", "@resvg/resvg-js": "^2.6.2", "@twemoji/svg": "^15.0.0", "ghostty-web": "^0.4.0", "gifenc": "^1.0.3", "playwright": "^1.59.0", "upng-js": "^2.1.0" }, "peerDependencies": { "node-pty": ">=1.0.0" }, "optionalPeers": ["node-pty"] }, "sha512-iYMUDDGjvT3YCuLXqGr8cuU37DqQjbPNviXUML2ERnXjO/JTxQIKNOY5nCLFQa54f0RCUqJYKLPGus3PAidfpg=="],
+
+    "@yrd/process/git-super/silvery/flexily": ["flexily@0.7.3", "", {}, "sha512-Gfruf5xHPE8R97jLZC6GrUqN2fiFVstu+d490GQIp7vFFjCWkIi540PmJV9ut4Y5BqOCgII7NFpY3cTWGePTdA=="],
+
+    "@yrd/process/git-super/silvery/loggily": ["loggily@github:beorn/loggily#5e4bcda", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-5e4bcda", "sha512-A5pc88hVoTB6dIg8znEmS6pp/pY7QCRSeip1sb9bmsQD9YjGLEPV/T07OhzAVe0f8x0TvFtrehD0XIkRETOvKQ=="],
+
+    "@yrd/process/git-super/silvery/slice-ansi": ["slice-ansi@8.0.0", "", { "dependencies": { "ansi-styles": "^6.2.3", "is-fullwidth-code-point": "^5.1.0" } }, "sha512-stxByr12oeeOyY2BlviTNQlYV5xOj47GirPr4yA1hE9JCtxfQN0+tVbkxwCtYDQWhEKWFHsEK48ORg5jrouCAg=="],
+
+    "@yrd/queue-core/git-super/@silvery/commander/@silvery/ansi": ["@silvery/ansi@0.23.2", "", { "dependencies": { "@silvery/color": "0.23.2", "string-width": "^8.2.2" } }, "sha512-RyJpPi9zO39pmDVDqn7QcWs6eHfX8HlCrR3pPW0T7ug7PRlGXwZzNSyNWah8nrM/rtYSnDaoIOXRgj2+74Zk6A=="],
+
+    "@yrd/queue-core/git-super/silvery/@silvery/color": ["@silvery/color@0.23.2", "", {}, "sha512-MiqmdlODFLHDRVcSB4uaCBBe6GcoWCA1V/ZA9IfJXTwSyI8Dhhvi9olzMto4St2JXnVjirREwu6K+6C68m3OGA=="],
+
+    "@yrd/queue-core/git-super/silvery/@termless/core": ["@termless/core@0.8.4", "", { "optionalDependencies": { "@napi-rs/canvas": "^1.0.2", "@resvg/resvg-js": "^2.6.2", "@twemoji/svg": "^15.0.0", "ghostty-web": "^0.4.0", "gifenc": "^1.0.3", "playwright": "^1.59.0", "upng-js": "^2.1.0" }, "peerDependencies": { "node-pty": ">=1.0.0" }, "optionalPeers": ["node-pty"] }, "sha512-iYMUDDGjvT3YCuLXqGr8cuU37DqQjbPNviXUML2ERnXjO/JTxQIKNOY5nCLFQa54f0RCUqJYKLPGus3PAidfpg=="],
+
+    "@yrd/queue-core/git-super/silvery/flexily": ["flexily@0.7.3", "", {}, "sha512-Gfruf5xHPE8R97jLZC6GrUqN2fiFVstu+d490GQIp7vFFjCWkIi540PmJV9ut4Y5BqOCgII7NFpY3cTWGePTdA=="],
+
+    "@yrd/queue-core/git-super/silvery/loggily": ["loggily@github:beorn/loggily#5e4bcda", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-5e4bcda", "sha512-A5pc88hVoTB6dIg8znEmS6pp/pY7QCRSeip1sb9bmsQD9YjGLEPV/T07OhzAVe0f8x0TvFtrehD0XIkRETOvKQ=="],
+
+    "@yrd/queue-core/git-super/silvery/slice-ansi": ["slice-ansi@8.0.0", "", { "dependencies": { "ansi-styles": "^6.2.3", "is-fullwidth-code-point": "^5.1.0" } }, "sha512-stxByr12oeeOyY2BlviTNQlYV5xOj47GirPr4yA1hE9JCtxfQN0+tVbkxwCtYDQWhEKWFHsEK48ORg5jrouCAg=="],
+
     "git-super/@silvery/commander/@silvery/ansi/@silvery/color": ["@silvery/color@0.23.2", "", {}, "sha512-MiqmdlODFLHDRVcSB4uaCBBe6GcoWCA1V/ZA9IfJXTwSyI8Dhhvi9olzMto4St2JXnVjirREwu6K+6C68m3OGA=="],
 
     "git-super/silvery/@termless/core/@napi-rs/canvas": ["@napi-rs/canvas@1.0.2", "", { "optionalDependencies": { "@napi-rs/canvas-android-arm64": "1.0.2", "@napi-rs/canvas-darwin-arm64": "1.0.2", "@napi-rs/canvas-darwin-x64": "1.0.2", "@napi-rs/canvas-linux-arm-gnueabihf": "1.0.2", "@napi-rs/canvas-linux-arm64-gnu": "1.0.2", "@napi-rs/canvas-linux-arm64-musl": "1.0.2", "@napi-rs/canvas-linux-riscv64-gnu": "1.0.2", "@napi-rs/canvas-linux-x64-gnu": "1.0.2", "@napi-rs/canvas-linux-x64-musl": "1.0.2", "@napi-rs/canvas-win32-arm64-msvc": "1.0.2", "@napi-rs/canvas-win32-x64-msvc": "1.0.2" } }, "sha512-EYEqlMYaCbpZDz+IgDH5xp9MTd3ui4dmGqbQYryhMLnSRxrhHKq5KQWHHKxFUcEP4Hp8/BWgvqXocX4j7iSbOQ=="],
+
+    "@yrd/bay/git-super/@silvery/commander/@silvery/ansi/@silvery/color": ["@silvery/color@0.23.2", "", {}, "sha512-MiqmdlODFLHDRVcSB4uaCBBe6GcoWCA1V/ZA9IfJXTwSyI8Dhhvi9olzMto4St2JXnVjirREwu6K+6C68m3OGA=="],
+
+    "@yrd/bay/git-super/silvery/@termless/core/@napi-rs/canvas": ["@napi-rs/canvas@1.0.2", "", { "optionalDependencies": { "@napi-rs/canvas-android-arm64": "1.0.2", "@napi-rs/canvas-darwin-arm64": "1.0.2", "@napi-rs/canvas-darwin-x64": "1.0.2", "@napi-rs/canvas-linux-arm-gnueabihf": "1.0.2", "@napi-rs/canvas-linux-arm64-gnu": "1.0.2", "@napi-rs/canvas-linux-arm64-musl": "1.0.2", "@napi-rs/canvas-linux-riscv64-gnu": "1.0.2", "@napi-rs/canvas-linux-x64-gnu": "1.0.2", "@napi-rs/canvas-linux-x64-musl": "1.0.2", "@napi-rs/canvas-win32-arm64-msvc": "1.0.2", "@napi-rs/canvas-win32-x64-msvc": "1.0.2" } }, "sha512-EYEqlMYaCbpZDz+IgDH5xp9MTd3ui4dmGqbQYryhMLnSRxrhHKq5KQWHHKxFUcEP4Hp8/BWgvqXocX4j7iSbOQ=="],
+
+    "@yrd/cli/git-super/@silvery/commander/@silvery/ansi/@silvery/color": ["@silvery/color@0.23.2", "", {}, "sha512-MiqmdlODFLHDRVcSB4uaCBBe6GcoWCA1V/ZA9IfJXTwSyI8Dhhvi9olzMto4St2JXnVjirREwu6K+6C68m3OGA=="],
+
+    "@yrd/cli/git-super/silvery/@termless/core/@napi-rs/canvas": ["@napi-rs/canvas@1.0.2", "", { "optionalDependencies": { "@napi-rs/canvas-android-arm64": "1.0.2", "@napi-rs/canvas-darwin-arm64": "1.0.2", "@napi-rs/canvas-darwin-x64": "1.0.2", "@napi-rs/canvas-linux-arm-gnueabihf": "1.0.2", "@napi-rs/canvas-linux-arm64-gnu": "1.0.2", "@napi-rs/canvas-linux-arm64-musl": "1.0.2", "@napi-rs/canvas-linux-riscv64-gnu": "1.0.2", "@napi-rs/canvas-linux-x64-gnu": "1.0.2", "@napi-rs/canvas-linux-x64-musl": "1.0.2", "@napi-rs/canvas-win32-arm64-msvc": "1.0.2", "@napi-rs/canvas-win32-x64-msvc": "1.0.2" } }, "sha512-EYEqlMYaCbpZDz+IgDH5xp9MTd3ui4dmGqbQYryhMLnSRxrhHKq5KQWHHKxFUcEP4Hp8/BWgvqXocX4j7iSbOQ=="],
+
+    "@yrd/process/git-super/@silvery/commander/@silvery/ansi/@silvery/color": ["@silvery/color@0.23.2", "", {}, "sha512-MiqmdlODFLHDRVcSB4uaCBBe6GcoWCA1V/ZA9IfJXTwSyI8Dhhvi9olzMto4St2JXnVjirREwu6K+6C68m3OGA=="],
+
+    "@yrd/process/git-super/silvery/@termless/core/@napi-rs/canvas": ["@napi-rs/canvas@1.0.2", "", { "optionalDependencies": { "@napi-rs/canvas-android-arm64": "1.0.2", "@napi-rs/canvas-darwin-arm64": "1.0.2", "@napi-rs/canvas-darwin-x64": "1.0.2", "@napi-rs/canvas-linux-arm-gnueabihf": "1.0.2", "@napi-rs/canvas-linux-arm64-gnu": "1.0.2", "@napi-rs/canvas-linux-arm64-musl": "1.0.2", "@napi-rs/canvas-linux-riscv64-gnu": "1.0.2", "@napi-rs/canvas-linux-x64-gnu": "1.0.2", "@napi-rs/canvas-linux-x64-musl": "1.0.2", "@napi-rs/canvas-win32-arm64-msvc": "1.0.2", "@napi-rs/canvas-win32-x64-msvc": "1.0.2" } }, "sha512-EYEqlMYaCbpZDz+IgDH5xp9MTd3ui4dmGqbQYryhMLnSRxrhHKq5KQWHHKxFUcEP4Hp8/BWgvqXocX4j7iSbOQ=="],
+
+    "@yrd/queue-core/git-super/@silvery/commander/@silvery/ansi/@silvery/color": ["@silvery/color@0.23.2", "", {}, "sha512-MiqmdlODFLHDRVcSB4uaCBBe6GcoWCA1V/ZA9IfJXTwSyI8Dhhvi9olzMto4St2JXnVjirREwu6K+6C68m3OGA=="],
+
+    "@yrd/queue-core/git-super/silvery/@termless/core/@napi-rs/canvas": ["@napi-rs/canvas@1.0.2", "", { "optionalDependencies": { "@napi-rs/canvas-android-arm64": "1.0.2", "@napi-rs/canvas-darwin-arm64": "1.0.2", "@napi-rs/canvas-darwin-x64": "1.0.2", "@napi-rs/canvas-linux-arm-gnueabihf": "1.0.2", "@napi-rs/canvas-linux-arm64-gnu": "1.0.2", "@napi-rs/canvas-linux-arm64-musl": "1.0.2", "@napi-rs/canvas-linux-riscv64-gnu": "1.0.2", "@napi-rs/canvas-linux-x64-gnu": "1.0.2", "@napi-rs/canvas-linux-x64-musl": "1.0.2", "@napi-rs/canvas-win32-arm64-msvc": "1.0.2", "@napi-rs/canvas-win32-x64-msvc": "1.0.2" } }, "sha512-EYEqlMYaCbpZDz+IgDH5xp9MTd3ui4dmGqbQYryhMLnSRxrhHKq5KQWHHKxFUcEP4Hp8/BWgvqXocX4j7iSbOQ=="],
 
     "git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-android-arm64": ["@napi-rs/canvas-android-arm64@1.0.2", "", { "os": "android", "cpu": "arm64" }, "sha512-IMXKVQod0ol4vt3gmClUfXz4JAgHYESGPCUqmH3lQxBoL0K/2greJaQE1HVBVxWWFKfLc4OLZVdxg7kXVyXv+g=="],
 
@@ -647,5 +749,93 @@
     "git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-win32-arm64-msvc": ["@napi-rs/canvas-win32-arm64-msvc@1.0.2", "", { "os": "win32", "cpu": "arm64" }, "sha512-yE0koHCFF4PIbMc2o2SEALhnipz7WBISh5glLvQiomtIoCcW0np3H4Lw93ceJAfJttTTeIIWFbwH84F7EVzjMQ=="],
 
     "git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-win32-x64-msvc": ["@napi-rs/canvas-win32-x64-msvc@1.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-okU8/t2foV6C31n0GtvEMbfD5rOFc70+/6xUNME9Guld29sgSOIGUEDScAWFlcP3k5TYQRl9TNkwJEEjh15w8A=="],
+
+    "@yrd/bay/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-android-arm64": ["@napi-rs/canvas-android-arm64@1.0.2", "", { "os": "android", "cpu": "arm64" }, "sha512-IMXKVQod0ol4vt3gmClUfXz4JAgHYESGPCUqmH3lQxBoL0K/2greJaQE1HVBVxWWFKfLc4OLZVdxg7kXVyXv+g=="],
+
+    "@yrd/bay/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-darwin-arm64": ["@napi-rs/canvas-darwin-arm64@1.0.2", "", { "os": "darwin", "cpu": "arm64" }, "sha512-Sc8tPi6cF+5lqOzCCKFALJHhDiRwyMzTPYm3bbhdXsOunU0lQO5f05ucyOzN2r55I23Hg5bsjH63uSCvWp3EgQ=="],
+
+    "@yrd/bay/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-darwin-x64": ["@napi-rs/canvas-darwin-x64@1.0.2", "", { "os": "darwin", "cpu": "x64" }, "sha512-niDXZ9LhKB1zLrUdYB64RHQFDGz9rr0eGx061qtJJU3U20EMMIx28ADF5fVYbhtOgkWQrBjFicfaye1yM0U62A=="],
+
+    "@yrd/bay/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-arm-gnueabihf": ["@napi-rs/canvas-linux-arm-gnueabihf@1.0.2", "", { "os": "linux", "cpu": "arm" }, "sha512-sgatQL9JxGRH/Amzcvu0P3t8Am3duou74CisfuJ41Dwt8cWy723z/9KZ8LlgmxfypEwEZxSTNFJtU8d281lmhQ=="],
+
+    "@yrd/bay/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-arm64-gnu": ["@napi-rs/canvas-linux-arm64-gnu@1.0.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-dgKuX0peF3xwY6ZF5QxGS4wbfDqpoFAJYXiLSp+guZKARQUKMkRqZSDrXKj7nfrec3UCMzC0PFCPte0ES98AiA=="],
+
+    "@yrd/bay/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-arm64-musl": ["@napi-rs/canvas-linux-arm64-musl@1.0.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-qwROoDIC9upfvDoRLuPn2aNg9CGW1x0Ygr4k2Or+8paA9d0qBLwk87U+g8KQpoOviKoPoiwl97kvBYuYD7qZoA=="],
+
+    "@yrd/bay/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-riscv64-gnu": ["@napi-rs/canvas-linux-riscv64-gnu@1.0.2", "", { "os": "linux", "cpu": "none" }, "sha512-fXRjnPihdnbO6qy1QQOgxAonb68A0TCEG7rj1x7v7rxNElsE8EVIKIEUTvyDtU+sthYSbX+8e7g3oZiLGnOmxw=="],
+
+    "@yrd/bay/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-x64-gnu": ["@napi-rs/canvas-linux-x64-gnu@1.0.2", "", { "os": "linux", "cpu": "x64" }, "sha512-nPR97DXhbWIAy7yazF3jc06kEPMqYMLmPzFOVNlwKPfIoSChnI+x7dc0hTLaihz3jxrjL6j4BbA7earxfx4X3g=="],
+
+    "@yrd/bay/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-x64-musl": ["@napi-rs/canvas-linux-x64-musl@1.0.2", "", { "os": "linux", "cpu": "x64" }, "sha512-l7zZY5+jL5qnBZtDz7CoBtY6p7EkHu422g/0zWwrOrzIwWyWxZFRfZZORY1UG7YApymPLx+UbOkN206xXn/c1Q=="],
+
+    "@yrd/bay/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-win32-arm64-msvc": ["@napi-rs/canvas-win32-arm64-msvc@1.0.2", "", { "os": "win32", "cpu": "arm64" }, "sha512-yE0koHCFF4PIbMc2o2SEALhnipz7WBISh5glLvQiomtIoCcW0np3H4Lw93ceJAfJttTTeIIWFbwH84F7EVzjMQ=="],
+
+    "@yrd/bay/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-win32-x64-msvc": ["@napi-rs/canvas-win32-x64-msvc@1.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-okU8/t2foV6C31n0GtvEMbfD5rOFc70+/6xUNME9Guld29sgSOIGUEDScAWFlcP3k5TYQRl9TNkwJEEjh15w8A=="],
+
+    "@yrd/cli/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-android-arm64": ["@napi-rs/canvas-android-arm64@1.0.2", "", { "os": "android", "cpu": "arm64" }, "sha512-IMXKVQod0ol4vt3gmClUfXz4JAgHYESGPCUqmH3lQxBoL0K/2greJaQE1HVBVxWWFKfLc4OLZVdxg7kXVyXv+g=="],
+
+    "@yrd/cli/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-darwin-arm64": ["@napi-rs/canvas-darwin-arm64@1.0.2", "", { "os": "darwin", "cpu": "arm64" }, "sha512-Sc8tPi6cF+5lqOzCCKFALJHhDiRwyMzTPYm3bbhdXsOunU0lQO5f05ucyOzN2r55I23Hg5bsjH63uSCvWp3EgQ=="],
+
+    "@yrd/cli/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-darwin-x64": ["@napi-rs/canvas-darwin-x64@1.0.2", "", { "os": "darwin", "cpu": "x64" }, "sha512-niDXZ9LhKB1zLrUdYB64RHQFDGz9rr0eGx061qtJJU3U20EMMIx28ADF5fVYbhtOgkWQrBjFicfaye1yM0U62A=="],
+
+    "@yrd/cli/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-arm-gnueabihf": ["@napi-rs/canvas-linux-arm-gnueabihf@1.0.2", "", { "os": "linux", "cpu": "arm" }, "sha512-sgatQL9JxGRH/Amzcvu0P3t8Am3duou74CisfuJ41Dwt8cWy723z/9KZ8LlgmxfypEwEZxSTNFJtU8d281lmhQ=="],
+
+    "@yrd/cli/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-arm64-gnu": ["@napi-rs/canvas-linux-arm64-gnu@1.0.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-dgKuX0peF3xwY6ZF5QxGS4wbfDqpoFAJYXiLSp+guZKARQUKMkRqZSDrXKj7nfrec3UCMzC0PFCPte0ES98AiA=="],
+
+    "@yrd/cli/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-arm64-musl": ["@napi-rs/canvas-linux-arm64-musl@1.0.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-qwROoDIC9upfvDoRLuPn2aNg9CGW1x0Ygr4k2Or+8paA9d0qBLwk87U+g8KQpoOviKoPoiwl97kvBYuYD7qZoA=="],
+
+    "@yrd/cli/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-riscv64-gnu": ["@napi-rs/canvas-linux-riscv64-gnu@1.0.2", "", { "os": "linux", "cpu": "none" }, "sha512-fXRjnPihdnbO6qy1QQOgxAonb68A0TCEG7rj1x7v7rxNElsE8EVIKIEUTvyDtU+sthYSbX+8e7g3oZiLGnOmxw=="],
+
+    "@yrd/cli/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-x64-gnu": ["@napi-rs/canvas-linux-x64-gnu@1.0.2", "", { "os": "linux", "cpu": "x64" }, "sha512-nPR97DXhbWIAy7yazF3jc06kEPMqYMLmPzFOVNlwKPfIoSChnI+x7dc0hTLaihz3jxrjL6j4BbA7earxfx4X3g=="],
+
+    "@yrd/cli/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-x64-musl": ["@napi-rs/canvas-linux-x64-musl@1.0.2", "", { "os": "linux", "cpu": "x64" }, "sha512-l7zZY5+jL5qnBZtDz7CoBtY6p7EkHu422g/0zWwrOrzIwWyWxZFRfZZORY1UG7YApymPLx+UbOkN206xXn/c1Q=="],
+
+    "@yrd/cli/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-win32-arm64-msvc": ["@napi-rs/canvas-win32-arm64-msvc@1.0.2", "", { "os": "win32", "cpu": "arm64" }, "sha512-yE0koHCFF4PIbMc2o2SEALhnipz7WBISh5glLvQiomtIoCcW0np3H4Lw93ceJAfJttTTeIIWFbwH84F7EVzjMQ=="],
+
+    "@yrd/cli/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-win32-x64-msvc": ["@napi-rs/canvas-win32-x64-msvc@1.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-okU8/t2foV6C31n0GtvEMbfD5rOFc70+/6xUNME9Guld29sgSOIGUEDScAWFlcP3k5TYQRl9TNkwJEEjh15w8A=="],
+
+    "@yrd/process/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-android-arm64": ["@napi-rs/canvas-android-arm64@1.0.2", "", { "os": "android", "cpu": "arm64" }, "sha512-IMXKVQod0ol4vt3gmClUfXz4JAgHYESGPCUqmH3lQxBoL0K/2greJaQE1HVBVxWWFKfLc4OLZVdxg7kXVyXv+g=="],
+
+    "@yrd/process/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-darwin-arm64": ["@napi-rs/canvas-darwin-arm64@1.0.2", "", { "os": "darwin", "cpu": "arm64" }, "sha512-Sc8tPi6cF+5lqOzCCKFALJHhDiRwyMzTPYm3bbhdXsOunU0lQO5f05ucyOzN2r55I23Hg5bsjH63uSCvWp3EgQ=="],
+
+    "@yrd/process/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-darwin-x64": ["@napi-rs/canvas-darwin-x64@1.0.2", "", { "os": "darwin", "cpu": "x64" }, "sha512-niDXZ9LhKB1zLrUdYB64RHQFDGz9rr0eGx061qtJJU3U20EMMIx28ADF5fVYbhtOgkWQrBjFicfaye1yM0U62A=="],
+
+    "@yrd/process/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-arm-gnueabihf": ["@napi-rs/canvas-linux-arm-gnueabihf@1.0.2", "", { "os": "linux", "cpu": "arm" }, "sha512-sgatQL9JxGRH/Amzcvu0P3t8Am3duou74CisfuJ41Dwt8cWy723z/9KZ8LlgmxfypEwEZxSTNFJtU8d281lmhQ=="],
+
+    "@yrd/process/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-arm64-gnu": ["@napi-rs/canvas-linux-arm64-gnu@1.0.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-dgKuX0peF3xwY6ZF5QxGS4wbfDqpoFAJYXiLSp+guZKARQUKMkRqZSDrXKj7nfrec3UCMzC0PFCPte0ES98AiA=="],
+
+    "@yrd/process/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-arm64-musl": ["@napi-rs/canvas-linux-arm64-musl@1.0.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-qwROoDIC9upfvDoRLuPn2aNg9CGW1x0Ygr4k2Or+8paA9d0qBLwk87U+g8KQpoOviKoPoiwl97kvBYuYD7qZoA=="],
+
+    "@yrd/process/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-riscv64-gnu": ["@napi-rs/canvas-linux-riscv64-gnu@1.0.2", "", { "os": "linux", "cpu": "none" }, "sha512-fXRjnPihdnbO6qy1QQOgxAonb68A0TCEG7rj1x7v7rxNElsE8EVIKIEUTvyDtU+sthYSbX+8e7g3oZiLGnOmxw=="],
+
+    "@yrd/process/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-x64-gnu": ["@napi-rs/canvas-linux-x64-gnu@1.0.2", "", { "os": "linux", "cpu": "x64" }, "sha512-nPR97DXhbWIAy7yazF3jc06kEPMqYMLmPzFOVNlwKPfIoSChnI+x7dc0hTLaihz3jxrjL6j4BbA7earxfx4X3g=="],
+
+    "@yrd/process/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-x64-musl": ["@napi-rs/canvas-linux-x64-musl@1.0.2", "", { "os": "linux", "cpu": "x64" }, "sha512-l7zZY5+jL5qnBZtDz7CoBtY6p7EkHu422g/0zWwrOrzIwWyWxZFRfZZORY1UG7YApymPLx+UbOkN206xXn/c1Q=="],
+
+    "@yrd/process/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-win32-arm64-msvc": ["@napi-rs/canvas-win32-arm64-msvc@1.0.2", "", { "os": "win32", "cpu": "arm64" }, "sha512-yE0koHCFF4PIbMc2o2SEALhnipz7WBISh5glLvQiomtIoCcW0np3H4Lw93ceJAfJttTTeIIWFbwH84F7EVzjMQ=="],
+
+    "@yrd/process/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-win32-x64-msvc": ["@napi-rs/canvas-win32-x64-msvc@1.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-okU8/t2foV6C31n0GtvEMbfD5rOFc70+/6xUNME9Guld29sgSOIGUEDScAWFlcP3k5TYQRl9TNkwJEEjh15w8A=="],
+
+    "@yrd/queue-core/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-android-arm64": ["@napi-rs/canvas-android-arm64@1.0.2", "", { "os": "android", "cpu": "arm64" }, "sha512-IMXKVQod0ol4vt3gmClUfXz4JAgHYESGPCUqmH3lQxBoL0K/2greJaQE1HVBVxWWFKfLc4OLZVdxg7kXVyXv+g=="],
+
+    "@yrd/queue-core/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-darwin-arm64": ["@napi-rs/canvas-darwin-arm64@1.0.2", "", { "os": "darwin", "cpu": "arm64" }, "sha512-Sc8tPi6cF+5lqOzCCKFALJHhDiRwyMzTPYm3bbhdXsOunU0lQO5f05ucyOzN2r55I23Hg5bsjH63uSCvWp3EgQ=="],
+
+    "@yrd/queue-core/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-darwin-x64": ["@napi-rs/canvas-darwin-x64@1.0.2", "", { "os": "darwin", "cpu": "x64" }, "sha512-niDXZ9LhKB1zLrUdYB64RHQFDGz9rr0eGx061qtJJU3U20EMMIx28ADF5fVYbhtOgkWQrBjFicfaye1yM0U62A=="],
+
+    "@yrd/queue-core/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-arm-gnueabihf": ["@napi-rs/canvas-linux-arm-gnueabihf@1.0.2", "", { "os": "linux", "cpu": "arm" }, "sha512-sgatQL9JxGRH/Amzcvu0P3t8Am3duou74CisfuJ41Dwt8cWy723z/9KZ8LlgmxfypEwEZxSTNFJtU8d281lmhQ=="],
+
+    "@yrd/queue-core/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-arm64-gnu": ["@napi-rs/canvas-linux-arm64-gnu@1.0.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-dgKuX0peF3xwY6ZF5QxGS4wbfDqpoFAJYXiLSp+guZKARQUKMkRqZSDrXKj7nfrec3UCMzC0PFCPte0ES98AiA=="],
+
+    "@yrd/queue-core/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-arm64-musl": ["@napi-rs/canvas-linux-arm64-musl@1.0.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-qwROoDIC9upfvDoRLuPn2aNg9CGW1x0Ygr4k2Or+8paA9d0qBLwk87U+g8KQpoOviKoPoiwl97kvBYuYD7qZoA=="],
+
+    "@yrd/queue-core/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-riscv64-gnu": ["@napi-rs/canvas-linux-riscv64-gnu@1.0.2", "", { "os": "linux", "cpu": "none" }, "sha512-fXRjnPihdnbO6qy1QQOgxAonb68A0TCEG7rj1x7v7rxNElsE8EVIKIEUTvyDtU+sthYSbX+8e7g3oZiLGnOmxw=="],
+
+    "@yrd/queue-core/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-x64-gnu": ["@napi-rs/canvas-linux-x64-gnu@1.0.2", "", { "os": "linux", "cpu": "x64" }, "sha512-nPR97DXhbWIAy7yazF3jc06kEPMqYMLmPzFOVNlwKPfIoSChnI+x7dc0hTLaihz3jxrjL6j4BbA7earxfx4X3g=="],
+
+    "@yrd/queue-core/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-linux-x64-musl": ["@napi-rs/canvas-linux-x64-musl@1.0.2", "", { "os": "linux", "cpu": "x64" }, "sha512-l7zZY5+jL5qnBZtDz7CoBtY6p7EkHu422g/0zWwrOrzIwWyWxZFRfZZORY1UG7YApymPLx+UbOkN206xXn/c1Q=="],
+
+    "@yrd/queue-core/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-win32-arm64-msvc": ["@napi-rs/canvas-win32-arm64-msvc@1.0.2", "", { "os": "win32", "cpu": "arm64" }, "sha512-yE0koHCFF4PIbMc2o2SEALhnipz7WBISh5glLvQiomtIoCcW0np3H4Lw93ceJAfJttTTeIIWFbwH84F7EVzjMQ=="],
+
+    "@yrd/queue-core/git-super/silvery/@termless/core/@napi-rs/canvas/@napi-rs/canvas-win32-x64-msvc": ["@napi-rs/canvas-win32-x64-msvc@1.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-okU8/t2foV6C31n0GtvEMbfD5rOFc70+/6xUNME9Guld29sgSOIGUEDScAWFlcP3k5TYQRl9TNkwJEEjh15w8A=="],
   }
 }
