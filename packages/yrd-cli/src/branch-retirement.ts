@@ -1,6 +1,6 @@
 import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs"
 import { createHash } from "node:crypto"
-import { archiveRefFor, ensureArchiveRef, findArchiveRefFor, readArchiveRows } from "git-super/archive-ref"
+import { findArchiveRefFor } from "git-super/archive-ref"
 import { readCommitSubmodules } from "git-super/commit-graph"
 import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
 import { shellQuote } from "git-super/shell-command"
@@ -34,7 +34,6 @@ import {
   registeredWorktrees,
   retireLocalBranch,
   retireOriginBranch,
-  publishRetirementArchive,
   remoteHead,
   remoteUrl,
   type Git,
@@ -994,7 +993,8 @@ function readerPrivilegeFacts(): string {
 }
 
 /** Explicit exact-tip drop retaining the checkout and its private bytes.
- * The root event owns the environment receipt; each repository owns its archive.
+ * The root's dropped event keeps its tip and owns the environment receipt. A component row goes only when
+ * its fresh published main contains the exact head; otherwise it is kept and reported (work.md:110, 30683).
  */
 export async function releaseRetainedCheckouts(
   input: Readonly<{
@@ -1027,22 +1027,19 @@ export async function releaseRetainedCheckouts(
     path: string
     branch: string
     head: string
-    archiveRef?: string
     remote: string
     reason: string
     detail?: string
   }
-  type ArchivedRow = Row & { archiveRef: string }
-  const eligible: ArchivedRow[] = [],
-    removed: ArchivedRow[] = [],
-    alreadyRetired: ArchivedRow[] = [],
+  const eligible: Row[] = [],
+    removed: Row[] = [],
+    alreadyRetired: Row[] = [],
     kept: Row[] = [],
     failed: Row[] = []
   const excluded: { repo: string; path: string; reason: string }[] = []
   const evidence: LocalBranchProtectionResult["evidence"][number][] = []
   const identity = input.issueIdentity
   const date = new Date().toISOString().slice(0, 10)
-  const rootArchiveRef = archiveRefFor(request.branch, request.by, date)
   const rootRow: Row = {
     repo: input.repo,
     path: "",
@@ -1053,7 +1050,8 @@ export async function releaseRetainedCheckouts(
   }
   type Candidate = {
     row: Row
-    archiveRef: string
+    /** What keeps the exact head once its name goes: the root's dropped event, or a component's published main. */
+    disposition: LocalBranchRetirement["disposition"]
     remote: string
     checkout: string
     git: Git
@@ -1204,6 +1202,9 @@ export async function releaseRetainedCheckouts(
     }
     const bound = await readBranchHistory(rootStore, input.queue, request.branch)
     if (bound.history?.state.diagnostic !== undefined) throw new Error(bound.history.state.diagnostic)
+    const rootMain = await readRemoteCommit(input.git, rootStore.remote, `refs/heads/${input.queue}`)
+    if (rootMain === undefined) throw new Error(`published ${input.queue} is absent at ${rootStore.remote}`)
+    const rootKept = bound.history?.events.some((event) => event.links.includes(request.tip)) === true
     if (bound.history?.state.issue !== undefined && identity(bound.history.state.issue) !== identity(request.issue)) {
       throw new Error(`recorded issue ${bound.history.state.issue} differs from requested ${request.issue}`)
     }
@@ -1241,21 +1242,17 @@ export async function releaseRetainedCheckouts(
           : io.branchIssue === undefined
             ? undefined
             : io.branchIssue({ branch: attached.branch })
-      const archives = readArchiveRows(repository)
-      const recovery =
-        attached !== undefined && attached.branch === undefined
-          ? archives.filter((archive) => {
-              const issue = io.branchIssue === undefined ? undefined : io.branchIssue({ branch: archive.branch })
-              return branch === undefined
-                ? issue !== undefined && identity(issue) === identity(request.issue)
-                : archive.branch === branch
-            })
-          : []
-      if (recovery.length > 1) {
-        throw new Error(`${repository}: ambiguous archive custody: ${recovery.map((row) => row.ref).join(", ")}`)
-      }
+      // An interrupted release leaves a checkout detached at its pin. Its task branch carries the root's name:
+      // it is that row while it still holds the pin, or once the root's event keeps the root tip (30683).
+      const resumed =
+        attached !== undefined &&
+        attached.branch === undefined &&
+        branch === undefined &&
+        (rootKept || (await refAt(git, `refs/heads/${request.branch}`)) === commit)
+          ? request.branch
+          : undefined
       const detachedBranches: string[] = []
-      if (attached !== undefined && attached.branch === undefined && branch === undefined && recovery.length === 0) {
+      if (attached !== undefined && attached.branch === undefined && branch === undefined && resumed === undefined) {
         for (const [ref] of await listRefs("refs/heads/", createLocalEventStore(repository, input.selection))) {
           const name = ref.slice("refs/heads/".length)
           const issue = io.branchIssue?.({ branch: name })
@@ -1267,26 +1264,24 @@ export async function releaseRetainedCheckouts(
       }
       if (
         branch !== undefined ||
-        recovery.length > 0 ||
+        resumed !== undefined ||
         detachedBranches.length > 0 ||
         (mappedIssue !== undefined && identity(mappedIssue) === identity(request.issue))
       ) {
-        const selectedBranch = branch ?? attached?.branch ?? recovery[0]?.branch ?? detachedBranches[0]
+        const selectedBranch = branch ?? attached?.branch ?? resumed ?? detachedBranches[0]
         if (selectedBranch === undefined) throw new Error(`${repository}: selected attached branch became unreadable`)
-        const custody = archives.filter((archive) => archive.branch === selectedBranch)
-        if (custody.length > 1) {
-          throw new Error(`${repository}: ambiguous archive custody: ${custody.map((row) => row.ref).join(", ")}`)
-        }
-        const archive = custody[0]
-        if (archive !== undefined && archive.tip !== commit) {
-          throw new Error(`${repository}: archive ${archive.ref} holds ${archive.tip}, not pinned tip ${commit}`)
-        }
         const current = await refAt(git, `refs/heads/${selectedBranch}`)
-        const retired =
-          attached !== undefined && attached.branch === undefined && current === undefined && archive !== undefined
         const remote = path === "" ? rootStore.remote : await remoteUrl(git, "origin")
-        const prospectiveArchive =
-          archive?.ref ?? (path === "" ? rootArchiveRef : archiveRefFor(selectedBranch, request.by, date))
+        // A component store has no chain, so only its fresh published main keeps its head.
+        const main =
+          path === "" ? rootMain : await readRemoteCommit(git, remote, `refs/heads/${await remoteHead(git, "origin")}`)
+        if (main === undefined) throw new Error(`${repository}: published main is absent at ${publicText(remote)}`)
+        const onMain = await isAncestor(git, commit, main)
+        const retired =
+          attached !== undefined &&
+          attached.branch === undefined &&
+          current === undefined &&
+          (onMain || (path === "" && rootKept))
         const row: Row =
           path === ""
             ? rootRow
@@ -1298,7 +1293,6 @@ export async function releaseRetainedCheckouts(
                 remote: publicText(remote),
                 reason: publicText(request.reason),
               }
-        if (archive !== undefined) row.archiveRef = archive.ref
         if (
           attached?.head !== commit ||
           (!retired && ((attached.branch !== undefined && attached.branch !== selectedBranch) || current !== commit))
@@ -1306,15 +1300,21 @@ export async function releaseRetainedCheckouts(
           kept.push({
             ...row,
             reason: "moved",
-            detail: `attached checkout does not match exact recorded pin ${commit}${row.archiveRef === undefined ? "; not archived" : ""}`,
+            detail: `attached checkout does not match exact recorded pin ${commit}; not archived`,
+          })
+        } else if (path !== "" && !onMain) {
+          kept.push({
+            ...row,
+            reason: "unreached",
+            detail: `exact branch head ${commit} is not an ancestor of its published main ${main}; kept for owner review (30683, 30704)`,
           })
         } else {
-          if (retired && (await readRemoteCommit(git, remote, prospectiveArchive)) !== commit) {
-            throw new Error(`${repository}: archive ${prospectiveArchive} lacks exact remote custody at ${commit}`)
-          }
           candidates.push({
             row,
-            archiveRef: prospectiveArchive,
+            disposition:
+              path === ""
+                ? { kind: "closed", target: main, store: rootStore, queue: input.queue }
+                : { kind: "merged", base: main, target: main },
             remote,
             checkout: realpathSync(repository),
             git,
@@ -1376,57 +1376,31 @@ export async function releaseRetainedCheckouts(
         kept.push({
           ...candidate.row,
           reason: "held",
-          detail: candidate.row.archiveRef === undefined ? `${heldDetail}; not archived` : heldDetail,
+          detail: `${heldDetail}; not archived`,
         })
       }
     }
     if (kept.length > 0 || failed.length > 0) return report
     if (!request.apply) {
-      eligible.push(
-        ...candidates
-          .filter((candidate) => !candidate.retired)
-          .map((candidate) => ({ ...candidate.row, archiveRef: candidate.archiveRef })),
-      )
-      alreadyRetired.push(
-        ...candidates
-          .filter((candidate) => candidate.retired)
-          .map((candidate) => ({ ...candidate.row, archiveRef: candidate.archiveRef })),
-      )
+      eligible.push(...candidates.filter((candidate) => !candidate.retired).map((candidate) => candidate.row))
+      alreadyRetired.push(...candidates.filter((candidate) => candidate.retired).map((candidate) => candidate.row))
       return report
     }
     const content = [
       publicText(request.reason),
       ...[...candidates]
         .sort((a, b) => a.row.path.localeCompare(b.row.path))
-        .map(
-          ({ row, archiveRef }) =>
-            `repository ${row.repo}; path ${row.path || "."}; old tip ${row.head}; archive ${archiveRef}; remote ${row.remote}`,
-        ),
+        .map(({ row }) => `repository ${row.repo}; path ${row.path || "."}; old tip ${row.head}; remote ${row.remote}`),
     ].join("\n")
     const endingId = bound.history?.state.ending?.id
     if (endingId !== undefined && candidates.every((candidate) => candidate.retired)) {
-      alreadyRetired.push(...candidates.map((candidate) => ({ ...candidate.row, archiveRef: candidate.archiveRef })))
+      alreadyRetired.push(...candidates.map((candidate) => candidate.row))
       return report
-    }
-    for (const candidate of candidates) {
-      const { row, remote, archiveRef } = candidate
-      const archive = ensureArchiveRef(row.repo, archiveRef, row.head)
-      if (!archive.ok) throw new Error(archive.reason)
-      row.archiveRef = archiveRef
-      try {
-        await publishRetirementArchive(createEventStore(row.repo, remote, input.selection), {
-          branch: row.branch,
-          archive: archiveRef,
-          head: row.head,
-        })
-      } catch (cause) {
-        throw new Error(`${cause instanceof Error ? cause.message : String(cause)}; local refs kept`, { cause })
-      }
     }
     for (const candidate of candidates) {
       const { row } = candidate
       if (candidate.retired) {
-        alreadyRetired.push({ ...row, archiveRef: candidate.archiveRef })
+        alreadyRetired.push(row)
         continue
       }
       const before = snapshots.get(candidate)
@@ -1461,6 +1435,18 @@ export async function releaseRetainedCheckouts(
           kept.push({ ...row, reason: "held", detail: publicText(reasons.join("; ")) })
           break
         }
+        if (row.path === "" && endingId === undefined) {
+          // Descendants are gone by now; the dropped event keeps the root tip and carries the receipt
+          // before the root name goes (30683).
+          await drop(rootStore, {
+            queue: input.queue,
+            branch: request.branch,
+            by: request.by,
+            issue: request.issue,
+            note: content,
+            local: { tip: request.tip },
+          })
+        }
         const store = createGitWorktreeStore({ repo: row.repo, gitProcess: seamProcess(candidate.git, row.repo) })
         if (!candidate.detached) {
           original = await store.detachAt(candidate.checkout, row.head, `refs/heads/${row.branch}`)
@@ -1477,13 +1463,10 @@ export async function releaseRetainedCheckouts(
           log: input.log,
           protections: async () => {
             const reasons = await protect(candidate)
-            if ((await readRemoteCommit(candidate.git, candidate.remote, candidate.archiveRef)) !== row.head) {
-              return [...reasons, "origin archive custody changed"]
-            }
             await verify(candidate, before)
             return reasons
           },
-          disposition: { kind: "archived", target: row.head, ref: candidate.archiveRef },
+          disposition: candidate.disposition,
         })
         if (result.outcome !== "removed") {
           try {
@@ -1499,7 +1482,7 @@ export async function releaseRetainedCheckouts(
           })
         } else {
           original = undefined
-          removed.push({ ...row, archiveRef: candidate.archiveRef })
+          removed.push(row)
         }
         await verify(candidate, before)
       } catch (cause) {
@@ -1512,16 +1495,6 @@ export async function releaseRetainedCheckouts(
         failed.push({ ...row, reason: "failed", detail: publicText(detail) })
       }
       if (kept.length > 0 || failed.length > 0) break
-    }
-    if (kept.length === 0 && failed.length === 0 && endingId === undefined) {
-      await drop(rootStore, {
-        queue: input.queue,
-        branch: request.branch,
-        by: request.by,
-        issue: request.issue,
-        note: content,
-        local: { tip: request.tip },
-      })
     }
   } catch (cause) {
     failed.push({ ...rootRow, reason: "failed", detail: publicText(String(cause)) })

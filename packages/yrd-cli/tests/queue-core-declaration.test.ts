@@ -5896,7 +5896,7 @@ describe("drop --local --release-checkout", () => {
     return output
   }
   type ReleaseReport = Awaited<ReturnType<typeof releaseRetainedCheckouts>>
-  async function releaseWorld(component = false) {
+  async function releaseWorld(component = false, unmergedChild = false) {
     const repo = await world("{}\n")
     const git = gitIn(repo)
     const branch = "task/29600-retained"
@@ -5921,6 +5921,24 @@ describe("drop --local --release-checkout", () => {
     const target = (await git(["rev-parse", "HEAD"])).trim()
     await createQueue(repo, "main", target, new Date())
     await git(["checkout", "--quiet", "-b", branch])
+    if (unmergedChild && child !== undefined) {
+      // The root tip pins a child commit that the child's published main lacks.
+      writeFileSync(join(child, "unmerged.txt"), "unmerged component work\n")
+      await gitIn(child)(["add", "unmerged.txt"])
+      await gitIn(child)([
+        "-c",
+        "user.name=fixture",
+        "-c",
+        "user.email=fixture@test.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "unmerged component work",
+      ])
+      // Published on its task branch, as component work is, and absent from the child's main.
+      await gitIn(child)(["push", "--quiet", "origin", branch])
+      await git(["add", "modules/child"])
+    }
     writeFileSync(join(repo, "payload.txt"), "private committed work\n")
     await git(["add", "payload.txt"])
     await git(["commit", "--quiet", "-m", "unpublished author work"])
@@ -6208,12 +6226,6 @@ describe("drop --local --release-checkout", () => {
         const git = gitIn(repo)
         const tip = (await git(["rev-parse", "HEAD"])).trim()
         await git(["update-ref", "--no-deref", "HEAD", tip, tip])
-        if (kind === "child") {
-          const ambiguous = releaseCapture(fixture.repo)
-          expect(await runYrdProcess(fixture.argv, ambiguous.io)).toBe(1)
-          expect((JSON.parse(ambiguous.stdout()) as ReleaseReport).failed[0]?.detail).toContain("ambiguous")
-          await git(["branch", "-m", "task/29600-unselected", "task/29601-unselected"])
-        }
         const preview = releaseCapture(fixture.repo)
         expect(await runYrdProcess(fixture.argv, preview.io), preview.stdout() + preview.stderr()).toBe(0)
         expect((JSON.parse(preview.stdout()) as ReleaseReport).eligible).toHaveLength(kind === "child" ? 2 : 1)
@@ -6225,6 +6237,8 @@ describe("drop --local --release-checkout", () => {
         expect((JSON.parse(applied.stdout()) as ReleaseReport).removed).toHaveLength(kind === "child" ? 2 : 1)
         expect((await git(["rev-parse", "HEAD"])).trim()).toBe(tip)
         expect(await git(["for-each-ref", `refs/heads/${fixture.branch}`])).toBe("")
+        // The root's name selects the detached child's branch; another issue branch at its pin stays (30683).
+        if (kind === "child") expect((await git(["rev-parse", "refs/heads/task/29600-unselected"])).trim()).toBe(tip)
       } finally {
         spy.mockRestore()
       }
@@ -6283,9 +6297,9 @@ describe("drop --local --release-checkout", () => {
     },
     30_000,
   )
-  // Root deletion can finish before event publication fails. The archive, rather
-  // than a live branch or a premature ending event, must make that retry possible.
-  it("publishes exactly one ending when retrying after root retirement", async () => {
+  // The root's ending is published before its name goes (30683): when publication fails the root
+  // branch stays, and the retry publishes exactly one ending, then removes the name.
+  it("keeps the root name when its ending cannot publish, then publishes exactly one ending on retry", async () => {
     const fixture = await releaseWorld()
     fixture.argv.push("--queue", `${fixture.repo}#main`)
     await credentialOrigin(fixture.repo)
@@ -6298,16 +6312,17 @@ describe("drop --local --release-checkout", () => {
       const partial = JSON.parse(first.stdout()) as ReleaseReport
       expect(first.stdout()).not.toContain("fixture-secret")
       expect(first.stdout()).not.toContain("fixture-user")
-      expect(partial.removed).toHaveLength(1)
+      expect(partial.removed).toEqual([])
       expect(partial.failed).toHaveLength(1)
-      expect(await fixture.git(["for-each-ref", `refs/heads/${fixture.branch}`])).toBe("")
+      expect((await fixture.git(["rev-parse", `refs/heads/${fixture.branch}`])).trim()).toBe(fixture.tip)
       expect(await remote(["for-each-ref", `refs/yrd/main/changes/${fixture.branch}`])).toBe("")
       await remote(["config", "--unset", "receive.hideRefs"])
       const retry = releaseCapture(fixture.repo)
       expect(await runYrdProcess([...fixture.argv, "--apply"], retry.io), retry.stdout() + retry.stderr()).toBe(0)
       const completed = JSON.parse(retry.stdout()) as ReleaseReport
-      expect(completed.alreadyRetired).toHaveLength(1)
-      expect(completed.removed).toEqual([])
+      expect(completed.alreadyRetired).toEqual([])
+      expect(completed.removed).toHaveLength(1)
+      expect(await fixture.git(["for-each-ref", `refs/heads/${fixture.branch}`])).toBe("")
       const history = (
         await readEventQueueWithChanges(createEventStore(fixture.repo, "origin", fixture.git.selection), "main")
       ).histories.get(fixture.branch)!
@@ -6316,7 +6331,7 @@ describe("drop --local --release-checkout", () => {
       spy.mockRestore()
     }
   }, 30_000)
-  it.each(["child", "root", "wrong archive", "ambiguous archive"])(
+  it.each(["child", "root"])(
     "resumes after %s deletion fails and completed replay writes nothing",
     async (failedRepo) => {
       const fixture = await releaseWorld(true)
@@ -6341,34 +6356,12 @@ describe("drop --local --release-checkout", () => {
         expect(partial.removed).toHaveLength(failedRepo === "root" ? 1 : 0)
         expect((await fixture.git(["rev-parse", `refs/heads/${fixture.branch}`])).trim()).toBe(fixture.tip)
         const store = createEventStore(fixture.repo, "origin", fixture.git.selection)
-        expect((await listChanges(store, "main")).size).toBe(0)
+        // The root's ending precedes the root's removal and follows its descendants' (30683).
+        expect((await listChanges(store, "main")).size).toBe(failedRepo === "root" ? 1 : 0)
         expect(lock).toBeTypeOf("string")
         unlinkSync(lock!)
-        if (failedRepo === "wrong archive" || failedRepo === "ambiguous archive") {
-          const childGit = gitIn(fixture.child!)
-          const archive = (await childGit(["for-each-ref", "--format=%(refname)", "refs/archive/"])).trim()
-          const archivedTip = (await childGit(["rev-parse", archive])).trim()
-          const wrong = (
-            await childGit(["commit-tree", "HEAD^{tree}", "-p", archivedTip, "-m", "different custody"])
-          ).trim()
-          const extra = `refs/archive/2000-01-01/fixture/${fixture.branch}`
-          await childGit([
-            "update-ref",
-            failedRepo === "wrong archive" ? archive : extra,
-            failedRepo === "wrong archive" ? wrong : archivedTip,
-          ])
-          const refused = releaseCapture(fixture.repo)
-          expect(
-            await runYrdProcess([...fixture.argv, "--apply"], refused.io),
-            refused.stdout() + refused.stderr(),
-          ).toBe(1)
-          expect((JSON.parse(refused.stdout()) as ReleaseReport).failed[0]?.detail).toMatch(/archive.*(pinned|custody)/)
-          expect((await fixture.git(["rev-parse", `refs/heads/${fixture.branch}`])).trim()).toBe(fixture.tip)
-          if (failedRepo === "wrong archive") await childGit(["update-ref", archive, archivedTip, wrong])
-          else await childGit(["update-ref", "-d", extra, archivedTip])
-        }
         const retry = releaseCapture(fixture.repo)
-        expect(await runYrdProcess([...fixture.argv, "--apply"], retry.io), retry.stderr()).toBe(0)
+        expect(await runYrdProcess([...fixture.argv, "--apply"], retry.io), retry.stdout() + retry.stderr()).toBe(0)
         const completed = JSON.parse(retry.stdout()) as ReleaseReport
         expect(completed.failed).toEqual([])
         expect(completed.kept).toEqual([])
@@ -6415,7 +6408,7 @@ describe("drop --local --release-checkout", () => {
     },
     60_000,
   )
-  it("previews by default, then retains dirty/private/index/lease/lock bytes with own-remote custody and one root ending", async () => {
+  it("previews by default, then retains dirty/private/index/lease/lock bytes with the root's event custody, the child's main custody and one root ending", async () => {
     const fixture = await releaseWorld(true)
     fixture.argv.push("--queue", `${fixture.repo}#main`)
     const { spy } = await permitCensus()
@@ -6449,13 +6442,16 @@ describe("drop --local --release-checkout", () => {
       const applied = releaseCapture(fixture.repo)
       applied.io.localBranchProtections = async ({ repo, branch, tip, retainedCheckout }) => {
         expect(retainedCheckout).toBe(repo)
-        // Archive custody precedes deletion; the one root ending follows the complete release.
-        if ((await gitIn(repo)(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")) === "") {
-          expect(
-            (await listChanges(createEventStore(fixture.repo, "origin", fixture.git.selection), "main")).size,
-          ).toBe(0)
-          const remote = (await gitIn(repo)(["remote", "get-url", "origin"])).trim()
-          expect(await gitIn(repo)(["ls-remote", remote, `refs/archive/*/*/${branch}`])).toContain(tip)
+        // The root's dropped event keeps its tip before the root name goes; the child's published main
+        // keeps the child's head, and nothing is archived (30683).
+        if (
+          repo === fixture.repo &&
+          (await gitIn(repo)(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")) === ""
+        ) {
+          const history = (
+            await readEventQueueWithChanges(createEventStore(fixture.repo, "origin", fixture.git.selection), "main")
+          ).histories.get(branch)
+          expect(history?.events.some((event) => event.type === "cancelled" && event.links.includes(tip))).toBe(true)
         }
         return {
           protections: [],
@@ -6492,7 +6488,7 @@ describe("drop --local --release-checkout", () => {
         expect(readFileSync(join(row.repo, "private.bin"))).toEqual(Buffer.from([0, 255, 12, 8]))
         const files = fixture.checkoutFiles.get(row.repo)!
         expect([readFileSync(files.lease), readFileSync(files.lock), readFileSync(files.index)]).toEqual(files.bytes)
-        expect(await read(["ls-remote", "origin", row.archiveRef])).toContain(`${row.head}\t${row.archiveRef}`)
+        expect(await read(["ls-remote", "origin", "refs/archive/*"])).toBe("")
       }
       expect(await gitIn(fixture.child!)(["rev-parse", "refs/heads/task/29600-unselected"])).not.toBe("")
       const events = (
@@ -6502,9 +6498,33 @@ describe("drop --local --release-checkout", () => {
       const ending = events.find((event) => event.type === "cancelled")!
       expect(ending.content).not.toContain("fixture-secret")
       expect(ending.content).not.toContain("fixture-user")
+      expect(ending.links).toContain(fixture.tip)
       for (const row of report.removed) {
-        for (const value of [row.repo, row.head, row.archiveRef, row.remote]) expect(ending.content).toContain(value)
+        for (const value of [row.repo, row.head, row.remote]) expect(ending.content).toContain(value)
       }
+    } finally {
+      spy.mockRestore()
+    }
+  }, 60_000)
+  // @failure An unmerged component branch released with --submodules is deleted with no custody (30683).
+  it("keeps and reports an unmerged component branch and releases nothing", async () => {
+    const fixture = await releaseWorld(true, true)
+    fixture.argv.push("--queue", `${fixture.repo}#main`)
+    const { spy } = await permitCensus()
+    try {
+      const applied = releaseCapture(fixture.repo)
+      // A kept row is reported, not failed.
+      expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(0)
+      const report = JSON.parse(applied.stdout()) as ReleaseReport
+      expect(report.removed).toEqual([])
+      expect(report.kept).toEqual([
+        expect.objectContaining({ path: "modules/child", branch: fixture.branch, reason: "unreached" }),
+      ])
+      expect((await gitIn(fixture.child!)(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+      expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+      expect(await gitIn(fixture.child!)(["ls-remote", "origin", "refs/archive/*"])).toBe("")
+      expect(await fixture.git(["ls-remote", "origin", "refs/archive/*"])).toBe("")
+      expect((await listChanges(createEventStore(fixture.repo, "origin", fixture.git.selection), "main")).size).toBe(0)
     } finally {
       spy.mockRestore()
     }
@@ -6530,7 +6550,7 @@ describe("drop --local --release-checkout", () => {
           for (const row of report.removed) {
             const git = gitIn(row.repo)
             expect(await git(["for-each-ref", `refs/heads/${row.branch}`])).toBe("")
-            expect(await git(["ls-remote", "origin", row.archiveRef])).toContain(`${row.head}\t${row.archiveRef}`)
+            expect(await git(["ls-remote", "origin", "refs/archive/*"])).toBe("")
           }
         } else {
           expect(report.removed).toEqual([])
@@ -6614,14 +6634,10 @@ describe("drop --local --release-checkout", () => {
         expect(failed ? report.failed : report.kept).toHaveLength(1)
         expect(failed ? report.kept : report.failed).toEqual([])
         const outcomeRow = (failed ? report.failed : report.kept)[0]
-        const beforeArchive =
+        expect(outcomeRow).not.toHaveProperty("archiveRef")
+        const beforeApply =
           kind === "moved" || kind === "cwd" || kind === "delegation" || kind === "host" || kind === "preview host"
-        if (beforeArchive) {
-          expect(outcomeRow).not.toHaveProperty("archiveRef")
-          if (!failed) expect(outcomeRow?.detail).toContain("; not archived")
-        } else {
-          expect(outcomeRow?.archiveRef).toMatch(/^refs\/archive\//u)
-        }
+        if (beforeApply && !failed) expect(outcomeRow?.detail).toContain("; not archived")
         expect(outcomeRow?.detail).toMatch(
           kind === "moved"
             ? /tip|moved/
