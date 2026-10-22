@@ -4438,6 +4438,39 @@ it("uses an existing observed merged event as the direct boundary", async () => 
   expect(await remoteTarget(w)).toBe(head)
 })
 
+/** @failure The publication proof skips children unchanged from the candidate's first parent (30645). That holds
+ * only while main reaches the candidate from that parent alone; a merge leased on a first parent main has left
+ * would land children nobody proved.
+ * @level l3 @consumer queue publication proof
+ */
+it("refuses to move main from a first parent the remote main has left (30645)", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const firstParent = await remoteTarget(w)
+  const head = await submitCommit(w, "task/left-parent", "one.txt")
+  const change = await readStatus(store, "main", "task/left-parent")
+  if (change.tip === undefined) throw new Error("submitted event has no tip")
+  // A rival moves main after the candidate was composed on firstParent.
+  writeFileSync(join(w.work, "rival.txt"), "rival\n")
+  await w.git(["add", "rival.txt"])
+  await w.git(["commit", "--quiet", "-m", "rival"])
+  await w.git(["push", "--quiet", "origin", "main"])
+  const rival = await remoteTarget(w)
+  expect(rival).not.toBe(firstParent)
+
+  await expect(
+    appendPublishedMerge(store, "main", "task/left-parent", change.tip, {
+      at: new Date(),
+      commit: head,
+      targetExpect: firstParent,
+      queueTip: (await readEventQueue(store, "main")).tip,
+    }),
+  ).rejects.toThrow(`lease lost, nothing published: refs/heads/main is at ${rival}, not ${firstParent}`)
+  expect(await remoteTarget(w)).toBe(rival)
+  expect((await readStatus(store, "main", "task/left-parent")).status).not.toBe("merged")
+})
+
 /** @failure A submitted head merged around the queue stayed open and its direct merge was reported forever.
  * @level l3 @consumer queue operator and submitter
  */

@@ -14,10 +14,11 @@
 
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { basename, dirname, join } from "node:path"
 import { afterAll, beforeEach, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import type { Process } from "@yrd/process"
+import { encodePushIntent } from "git-super/push-intent"
 import * as gitomic from "gitomic"
 import type { RefUpdate } from "gitomic"
 import {
@@ -423,6 +424,156 @@ it("refuses a changed gitlink with no frozen intent row before pushing any child
     else process.env.YRD_GIT_SUPER_SHA = priorSha
   }
 }, 60_000)
+
+/** @failure The remote half of the publication proof read every child the frozen intent names, moved or not
+ * (30645): 17 serial ssh reads per merge that moved one component, and an unchanged child's remote could refuse a
+ * merge that never touched it.
+ * @level l2 (`publishCheckedChildren` against real bare child remotes; git-super stubbed)
+ * @consumer queue publication proof and G1i, git time per merge
+ * A child is read when its own or an ancestor root gitlink changed against the first parent, so nested
+ * km/apps/maddoc is read with km. A remote that must not be read points at a missing repository: reading it refuses.
+ */
+it.each([
+  { name: "km and nested maddoc moved: both are read, never the unmoved child", change: "km", maddoc: "agrees" },
+  { name: "km and nested maddoc moved: a disagreeing maddoc refuses", change: "km", maddoc: "disagrees" },
+  { name: "km unmoved reads neither km nor maddoc", change: "other", maddoc: "unread" },
+  { name: "a removal expects nothing", change: "remove-other", maddoc: "unread" },
+] as const)(
+  "publication proof: $name (30645)",
+  async ({ change, maddoc }) => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-core-moved-proof-"))
+    roots.push(root)
+    const git = gitIn(root)
+    await git(["init", "--quiet", "--initial-branch=main"])
+    await git(["config", "user.email", "queue@yrd.test"])
+    await git(["config", "user.name", "yrd"])
+    // Each child is a real bare remote with two commits; its main is set per case below.
+    const child = async (name: string) => {
+      const work = join(root, `${name}-work`)
+      const bare = join(root, `${name}.git`)
+      await git(["init", "--quiet", "--initial-branch=main", work])
+      await git(["init", "--quiet", "--bare", "--initial-branch=main", bare])
+      const cg = gitIn(work)
+      await cg(["config", "user.email", "queue@yrd.test"])
+      await cg(["config", "user.name", "yrd"])
+      const tips: string[] = []
+      for (const file of ["one", "two"]) {
+        writeFileSync(join(work, `${file}.txt`), `${file}\n`)
+        await cg(["add", "--all"])
+        await cg(["commit", "--quiet", "-m", file])
+        tips.push((await cg(["rev-parse", "HEAD"])).trim())
+      }
+      await cg(["push", "--quiet", bare, "main"])
+      const remote = `git@github.com:yrd-test/${name}.git`
+      return { bare, remote, before: tips[0]!, after: tips[1]! }
+    }
+    const km = await child("km")
+    const nested = await child("maddoc")
+    const other = await child("other")
+    const read = async (row: { bare: string; remote: string }, main: string | "unread") => {
+      if (main === "unread") {
+        await git(["config", `url.${join(root, "missing", basename(row.bare))}.insteadOf`, row.remote])
+        return
+      }
+      await git(["config", `url.${row.bare}.insteadOf`, row.remote])
+      await gitIn(row.bare)(["update-ref", "refs/heads/main", main])
+    }
+
+    writeFileSync(join(root, "root.txt"), "root\n")
+    await git(["add", "--all"])
+    await git(["commit", "--quiet", "-m", "root"])
+    await git(["update-index", "--add", "--cacheinfo", `160000,${km.before},km`])
+    await git(["update-index", "--add", "--cacheinfo", `160000,${other.before},other`])
+    await git(["commit", "--quiet", "-m", "declare km and other"])
+    const base = (await git(["rev-parse", "HEAD"])).trim()
+    const side = (await git(["commit-tree", `${base}^{tree}`, "-p", base, "-m", "side"])).trim()
+    if (change === "km") await git(["update-index", "--cacheinfo", `160000,${km.after},km`])
+    if (change === "other") await git(["update-index", "--cacheinfo", `160000,${other.after},other`])
+    if (change === "remove-other") await git(["update-index", "--force-remove", "other"])
+    const tree = (await git(["write-tree"])).trim()
+    const kmPin = change === "km" ? km.after : km.before
+    // When km moves, its nested maddoc pin moves with it; the root diff sees only km.
+    const nestedPin = change === "km" ? nested.after : nested.before
+    const otherPin = change === "other" ? other.after : other.before
+    const row = (path: string, remote: string, pin: string, expected: string) => ({
+      path,
+      remote,
+      pin,
+      publication: {
+        destination: "refs/heads/main",
+        source: pin,
+        expectedDestination: { state: "oid" as const, oid: expected },
+      },
+    })
+    // The frozen trailer is the merge's snapshot: a row for every hosted child, nested first, moved or not.
+    const intent = encodePushIntent({
+      version: 1,
+      rootRemote: "git@github.com:yrd-test/root.git",
+      children: [
+        row("km/apps/maddoc", nested.remote, nestedPin, nested.before),
+        row("km", km.remote, kmPin, km.before),
+        ...(change === "remove-other" ? [] : [row("other", other.remote, otherPin, other.before)]),
+      ],
+    })
+    const candidate = (
+      await git(["commit-tree", tree, "-p", base, "-p", side, "-m", `merge\n\nGit-Super-Push: ${intent}`])
+    ).trim()
+    const markerTip = (await git(["commit-tree", tree, "-p", candidate, "-m", "publication marker"])).trim()
+    const origin = join(root, "origin.git")
+    await git(["init", "--quiet", "--bare", "--initial-branch=main", origin])
+    await git(["remote", "add", "origin", origin])
+    const markerRef = "refs/yrd/main/changes/task/landing"
+    await git(["push", "--quiet", "origin", `${markerTip}:${markerRef}`])
+
+    // Remotes: what the proof must read holds its frozen source; what it must not read is missing.
+    await read(km, change === "km" ? km.after : "unread")
+    await read(nested, maddoc === "agrees" ? nested.after : maddoc === "disagrees" ? nested.before : "unread")
+    await read(other, change === "other" ? other.after : "unread")
+
+    const stub = join(root, "updated-git-super")
+    writeFileSync(
+      stub,
+      [
+        "#!/usr/bin/env bun",
+        'if (process.argv.includes("push")) {',
+        '  process.stdout.write(JSON.stringify({ state: "updated", partial: false, repositories: [] }))',
+        "  process.exit(0)",
+        "}",
+        "process.exit(1)",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    )
+    chmodSync(stub, 0o755)
+    const priorBin = process.env.YRD_GIT_SUPER_BIN
+    const priorSha = process.env.YRD_GIT_SUPER_SHA
+    process.env.YRD_GIT_SUPER_BIN = stub
+    process.env.YRD_GIT_SUPER_SHA = "0".repeat(40)
+    try {
+      const published = await publishCheckedChildren({
+        git,
+        cwd: root,
+        candidate,
+        remote: "origin",
+        branch: "main",
+        marker: { ref: markerRef, tip: markerTip },
+      })
+
+      if (maddoc === "disagrees") {
+        expect(published.state, published.evidence).toBe("refused")
+        expect(published.evidence).toContain(
+          `km/apps/maddoc refs/heads/main: expected ${nested.after.slice(0, 12)}, found ${nested.before.slice(0, 12)}`,
+        )
+      } else expect(published.state, published.evidence).toBe("published")
+    } finally {
+      if (priorBin === undefined) delete process.env.YRD_GIT_SUPER_BIN
+      else process.env.YRD_GIT_SUPER_BIN = priorBin
+      if (priorSha === undefined) delete process.env.YRD_GIT_SUPER_SHA
+      else process.env.YRD_GIT_SUPER_SHA = priorSha
+    }
+  },
+  60_000,
+)
 
 /** @failure A queue round omits bounded reuse and refreshes every component despite a warm Equal observation (26263).
  * @level l3 @consumer queue operator's component refresh budget

@@ -136,16 +136,26 @@ export async function publishCheckedChildren(
 type ExpectedChildRef = Readonly<{ destination: string; path: string; remote: string; source: string }>
 
 /**
- * The LOCAL half of the independent publication proof (27098 step 4). The expected child
- * destinations come from the candidate's OWN frozen push intent joined with the root gitlinks it
- * changed against its first parent — never from git-super's success JSON. It reads only the
- * candidate commit, so the caller runs it BEFORE git-super pushes anything: a candidate whose
- * changed gitlinks disagree with its own frozen intent is refused with no child branch moved
- * (28734), instead of after a component has already landed.
+ * The LOCAL half of the independent publication proof (27098 step 4), read from the candidate's
+ * OWN frozen push intent and the root gitlinks it changed against its first parent — never from
+ * git-super's success JSON. It reads only the candidate commit, so the caller runs it BEFORE
+ * git-super pushes anything: a root gitlink the candidate changed with no frozen intent row is
+ * refused with no child branch moved (28734), instead of after a component has already landed.
+ *
+ * Expected on the remote (30645): every child with a publication row whose own path, or an
+ * ancestor path, is a root gitlink the candidate changed. The trailer is the merge's snapshot and
+ * carries a row for every hosted child, moved or not; the work list is the change, as git-super's
+ * own push rules (25303). A nested pin (km/apps/maddoc) moves only through its ancestor's pin, so
+ * the ancestor test is a deliberate superset of git-super's recursive changedRowPaths; that
+ * recursion is not ported. The first parent is the base this skips against because it is the
+ * only base main can leave for the candidate: the merge event moves the target ref with
+ * expect = first parent (event-run.ts targetExpect, events.ts appendPublishedMerge), and every
+ * child it pins was proven when it was published.
  *
  * Only a gitlink the candidate STILL declares is a publication. A path the candidate takes out
  * (`newMode` 000000) pushes nothing, so it can never have a frozen push intent row, and demanding
- * one refuses every removal (28734). Same filter pin-carrier.ts applies to its own rows.
+ * one refuses every removal (28734); a removal expects nothing. Same filter pin-carrier.ts
+ * applies to its own rows.
  */
 async function readFrozenPublicationPlan(
   options: Readonly<{ git: Git; cwd: string; candidate: string; env?: NodeJS.ProcessEnv }>,
@@ -172,9 +182,10 @@ async function readFrozenPublicationPlan(
       expected: [],
     }
   }
+  const moved = (path: string) => changed.some((root) => path === root || path.startsWith(`${root}/`))
   return {
     expected: children.flatMap((child) =>
-      child.publication === undefined
+      child.publication === undefined || !moved(child.path)
         ? []
         : [
             {
