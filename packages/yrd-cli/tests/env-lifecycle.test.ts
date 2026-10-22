@@ -2183,6 +2183,9 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       })
       expect(run.stderr()).toContain("cannot certify the close")
       expect(run.stderr()).toContain("queued request")
+      expect(run.stderr()).toContain("exit 4 means queued, not closed yet")
+      expect(run.stderr()).toContain(`unlinks ${file} when consumed`)
+      expect(run.stderr()).toContain(join(workdir, "logs", "post-merge"))
       expect(readCloseRequest(file)).toMatchObject({
         name: basename(path),
         path,
@@ -2201,6 +2204,11 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], again.io), again.stderr()).toBe(4)
       expect(JSON.parse(again.stdout())).toMatchObject({ queued: path, alreadyQueued: true })
       expect(readCloseRequest(file)).toEqual(standing)
+      const human = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path], human.io), human.stderr()).toBe(4)
+      expect(human.stdout()).toContain("exit 4 means queued, not closed yet")
+      expect(human.stdout()).toContain(`unlink ${file} when consumed`)
+      expect(human.stdout()).toContain(join(workdir, "logs", "post-merge"))
       // A request for the same path with DIFFERENT options is a conflict, named
       // with the standing requester, never overwritten.
       const conflict = capture(w.work)

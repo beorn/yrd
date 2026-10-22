@@ -1466,9 +1466,10 @@ function queueDelegatedClose(
     head,
   }
   const { file, alreadyStood } = writeCloseRequest(workdir, request)
+  const journalDir = join(workdir, "logs", "post-merge")
   io.stderr(
     `yrd: env close ${path}: ${admission.refusal}; this caller cannot certify the close; ` +
-      `queued request ${file} for the queue's own round, which reads every same-UID pid and journals the outcome\n`,
+      `queued request ${file} (exit 4 means queued, not closed yet) for the queue's own round, which reads every same-UID pid, unlinks ${file} when consumed, and journals the outcome under ${journalDir}\n`,
   )
   io.stdout(
     options.json === true
@@ -1479,7 +1480,7 @@ function queueDelegatedClose(
           census: admission.census,
           ...(alreadyStood ? { alreadyQueued: true } : {}),
         })}\n`
-      : `queued environment close for ${path}: ${admission.refusal}; a context that can read every same-UID pid will close it; request ${file}\n`,
+      : `queued environment close for ${path} (exit 4 means queued, not closed yet): ${admission.refusal}; a context that can read every same-UID pid will close it, unlink ${file} when consumed, and journal the outcome under ${journalDir}; request ${file}\n`,
   )
   return ENV_CLOSE_QUEUED_EXIT
 }
