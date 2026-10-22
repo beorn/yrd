@@ -187,7 +187,7 @@ describe("automatic retirement is licensed by exact-head ancestry", () => {
     expect(out.stderr()).toContain("owner review")
   })
 
-  it("archives a targeted ancestor and keeps targeted unmerged or graph-only heads", async () => {
+  it("removes a targeted ancestor and keeps targeted unmerged or graph-only heads", async () => {
     const repo = await world()
     const merged = await branchFor(repo, "task/29100-merged", "opaque-key")
     await recordChange(repo, "task/29100-merged", merged, "opaque-key", "merged")
@@ -207,13 +207,10 @@ describe("automatic retirement is licensed by exact-head ancestry", () => {
     for (const branch of ["task/29101-unmerged", "task/29267-graph-only"]) {
       expect((await retire(repo, branch, idle)).result).toMatchObject({ outcome: "kept", reason: "unreached" })
     }
-    const archive = landed.result.archiveRef
-    expect(archive).toBeTruthy()
-    expect((await git(["rev-parse", archive!])).trim()).toBe(merged)
     expect((await git(["for-each-ref", "--format=%(objectname)", "refs/heads/task/29100-merged"])).trim()).toBe("")
     expect((await git(["rev-parse", "refs/heads/task/29267-graph-only"])).trim()).toBe(graph)
   })
-  it("keeps explicit holds and a branch advanced after its archive", async () => {
+  it("keeps explicit holds and a branch advanced before its removal", async () => {
     const repo = await world()
     const branch = "task/29100-held"
     const head = await branchFor(repo, branch, "opaque")
@@ -228,15 +225,11 @@ describe("automatic retirement is licensed by exact-head ancestry", () => {
     const advanced = (await git(["commit-tree", head + "^{tree}", "-p", head], "advanced\n")).trim()
     let protectionReads = 0
     const raced = await retire(repo, branch, async () => {
-      if (++protectionReads === 2) {
-        expect((await git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim()).toBe(head)
-        await git(["update-ref", "refs/heads/" + branch, advanced, head])
-      }
+      if (++protectionReads === 2) await git(["update-ref", "refs/heads/" + branch, advanced, head])
       return { protections: [], evidence: [] }
     })
     expect(protectionReads).toBe(2)
     expect(raced.result.outcome).toBe("kept")
-    expect((await git(["rev-parse", raced.result.archiveRef!])).trim()).toBe(head)
     expect(raced.result.detail).toContain("branch moved")
     expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(advanced)
   })

@@ -1059,10 +1059,9 @@ process.exit(result.exitCode)
         },
       ),
     ).resolves.toBe(0)
-    const result = JSON.parse(run.stdout()) as { removed: [{ archiveRef: string }] }
+    const result: unknown = JSON.parse(run.stdout())
     expect(result).toMatchObject({ removed: [{ branch, head: tip }], kept: [], failed: [] })
     expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe("")
-    expect((await w.git(["rev-parse", result.removed[0].archiveRef])).trim()).toBe(tip)
     expect((await w.git(["rev-parse", "task/unrelated"])).trim()).toBe(otherTip)
     expect(moving.moved()).toBe(0)
   })

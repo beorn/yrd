@@ -44,7 +44,6 @@ import * as gitomic from "gitomic"
 import * as removely from "removely"
 import * as gitSuperWorktree from "git-super/worktree"
 import { openEvents } from "gitomic/events"
-import { findArchiveRefFor } from "git-super/archive-ref"
 import {
   appendChangeEvent,
   changeInput,
@@ -4900,9 +4899,6 @@ describe("yrd queue up, the service", () => {
       const successorInventory = await environmentInventory(w.work, gitIn(w.work), w.workdir)
       for (const author of closed) {
         expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${author.branch}`])).trim()).toBe("")
-        const archive = findArchiveRefFor(w.work, author.branch, author.head)
-        expect(archive).toBeTypeOf("string")
-        expect((await w.git(["rev-parse", archive!])).trim()).toBe(author.head)
       }
       for (const author of remaining) {
         expect(successorInventory.rows).toContainEqual(
@@ -5052,9 +5048,6 @@ describe("yrd queue up, the service", () => {
         (await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${noRow.branch}`])).trim(),
         "the no-row merged branch retires whole after stop",
       ).toBe("")
-      const noRowArchive = findArchiveRefFor(w.work, noRow.branch, noRow.head)
-      expect(noRowArchive).toBeTypeOf("string")
-      expect((await w.git(["rev-parse", noRowArchive!])).trim()).toBe(noRow.head)
       expect(existsSync(rowHeld.path!), "the row-holding round branch stays recoverable").toBe(true)
       expect(readFileSync(join(rowHeld.gitDir!, "yrd-open.json"), "utf8")).toBe(rowHeld.opening)
       expect((await w.git(["rev-parse", `refs/heads/${rowHeld.branch}`])).trim()).toBe(rowHeld.head)
@@ -5111,9 +5104,6 @@ describe("yrd queue up, the service", () => {
         recovered.stderr(),
       ).toBe(0)
       expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${rowHeld.branch}`])).trim()).toBe("")
-      const recoveredArchive = findArchiveRefFor(w.work, rowHeld.branch, rowHeld.head)
-      expect(recoveredArchive).toBeTypeOf("string")
-      expect((await w.git(["rev-parse", recoveredArchive!])).trim()).toBe(rowHeld.head)
     } finally {
       releaseCleanup()
       releaseEnvironment?.()
@@ -8700,17 +8690,9 @@ describe("yrd queue run --tier long", () => {
         run.stderr(),
       ).toBe(0)
       expect(merged.length, "the real queue merges a submitted source").toBeGreaterThan(0)
-      const archives = (await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/archive/"]))
-        .trim()
-        .split("\n")
-        .map((line) => line.split(" "))
       for (const branch of merged) {
         const head = submittedHeads.get(branch)
         expect(head, "the merged source has its recorded native submitted tip").toBeDefined()
-        expect(
-          archives.some(([ref, tip]) => ref?.endsWith(`/${branch}`) && tip === head),
-          "targeted cleanup archives the exact submitted source tip",
-        ).toBe(true)
         expect(
           (await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim(),
           "targeted cleanup retires the merged local source ref",

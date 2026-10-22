@@ -58,8 +58,9 @@ class RetirementKept extends Error {
 }
 
 /** One policy for local retirement; git-super owns archive/ref mechanics.
- * Unmerged closed work first publishes its archive and ending to origin; a
- * closed tip already in the target is archived locally without a queue write.
+ * Unmerged closed work first publishes its archive and ending to origin. A tip
+ * proven merged into the target needs no custody of its own (ADR-0018 amendment,
+ * line 69), so it is removed with no archive ref and no queue write (30683).
  * Remote branch deletion and worktree removal are deliberately outside this operation.
  */
 export async function retireLocalBranch(input: LocalBranchRetirement): Promise<LocalBranchRetirementResult> {
@@ -69,8 +70,16 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
   const store = createGitWorktreeStore({ repo, gitProcess: seamProcess(git, repo) })
   let firstProtectionRead = true
   let completedArchive: string | undefined
+  // A tip proven in its target writes no archive (30683): reachability() proves it for a merged disposition and a
+  // landed one proven by ancestry, and a closed one joins once alreadyMerged reads its ancestry. A landing proof
+  // names the tip itself as its target, so it proves no ancestry and keeps its archive until slice 2.
+  const provenOnTarget =
+    disposition.kind === "merged" || (disposition.kind === "landed" && disposition.proof.kind === "ancestry")
+  // A proven tip writes no archive, so a rerun after its removal finds only the target holding it.
+  let completedOnTarget = false
   let writtenArchive: string | undefined
   let archiveLocation: "local" | "origin" | undefined
+  let onTarget = provenOnTarget
   const protection = async (): Promise<Kept | undefined> => {
     const firstRead = firstProtectionRead
     firstProtectionRead = false
@@ -80,7 +89,9 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       (await refAt(git, `refs/heads/${branch}`)) === undefined
     ) {
       completedArchive = findArchiveRefFor(repo, branch, tip)
-      if (completedArchive !== undefined && (await refAt(git, completedArchive)) === tip) {
+      if (completedArchive === undefined) {
+        completedOnTarget = provenOnTarget
+      } else if ((await refAt(git, completedArchive)) === tip) {
         writtenArchive = completedArchive
         archiveLocation = "local"
       }
@@ -88,7 +99,9 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     const reasons = await input.protections()
     if (reasons.length > 0) return { code: "held", detail: reasons.join("; ") }
     const saw = await refAt(git, `refs/heads/${branch}`)
-    if (completedArchive === undefined) {
+    if (completedOnTarget) {
+      if (saw !== undefined) return { code: "moved", detail: `branch reappeared at ${saw} after completed retirement` }
+    } else if (completedArchive === undefined) {
       if (saw !== tip) return { code: "moved", detail: `branch moved: expected ${tip}, found ${saw ?? "absent"}` }
     } else {
       if (saw !== undefined) return { code: "moved", detail: `branch reappeared at ${saw} after completed retirement` }
@@ -169,17 +182,17 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     }
     let kept = await protection()
     if (kept === undefined) kept = await reachability()
-    // A landed tip is archived locally only, never written to origin (29949).
     const alreadyMerged =
       kept === undefined && disposition.kind === "closed" && (await isAncestor(git, tip, disposition.target))
-    if (kept === undefined && !input.dryRun && completedArchive === undefined) {
+    if (alreadyMerged) onTarget = true
+    if (kept === undefined && !input.dryRun && completedArchive === undefined && !completedOnTarget && !onTarget) {
       const custody = ensureArchiveRef(repo, archiveRef, tip)
       if (!custody.ok) throw new Error(custody.reason)
       writtenArchive = archiveRef
       // The ref written by ensureArchiveRef is LOCAL. Origin custody is claimed only
       // after a push reads back at the remote (30247).
       archiveLocation = "local"
-      if (disposition.kind === "closed" && !alreadyMerged) {
+      if (disposition.kind === "closed") {
         // prepareRetirementArchive.publish verifies the exact head at the remote.
         await publishRetirementArchive(disposition.store, { branch, archive: archiveRef, head: tip })
         archiveLocation = "origin"
@@ -201,11 +214,18 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       archiveLocation = "origin"
     }
     if (kept === undefined) kept = await protection()
-    if (kept === undefined && completedArchive !== undefined) kept = await reachability()
+    if (kept === undefined && (completedArchive !== undefined || completedOnTarget)) kept = await reachability()
     if (kept !== undefined) {
       result = formatKept(kept)
     } else if (input.dryRun) {
-      result = { outcome: "eligible", archiveRef: completedArchive ?? archiveRef, reason }
+      const wouldArchive = completedArchive ?? (onTarget ? undefined : archiveRef)
+      result = { outcome: "eligible", ...(wouldArchive === undefined ? {} : { archiveRef: wouldArchive }), reason }
+    } else if (completedOnTarget) {
+      result = {
+        outcome: "removed",
+        reason,
+        detail: `already retired: ${disposition.target} holds ${tip} and the branch is absent; this run deleted no ref`,
+      }
     } else if (completedArchive !== undefined) {
       result = {
         outcome: "removed",
@@ -215,10 +235,10 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
         detail: `already retired: ${completedArchive} holds ${tip}; this run deleted no ref`,
       }
     } else {
-      await store.removeArchivedBranch({
+      await store.removeBranch({
         branch,
         tip,
-        archiveRef,
+        ...(onTarget ? {} : { verify: { ref: archiveRef, oid: tip } }),
         beforeRemove: async () => {
           const held = await protection()
           if (held !== undefined) throw new RetirementKept(held)
@@ -226,7 +246,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       })
       result = {
         outcome: "removed",
-        archiveRef,
+        ...(onTarget ? {} : { archiveRef }),
         ...(archiveLocation === undefined ? {} : { archiveLocation }),
         reason,
       }
