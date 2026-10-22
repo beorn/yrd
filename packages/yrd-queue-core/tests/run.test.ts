@@ -508,9 +508,11 @@ it("keeps and reports a local branch whose chain no longer keeps its tip", async
     },
   })
   expect(reads).toBe(3)
+  // A closed disposition reports its code; the readback names the moved chain in detail.
   expect(result).toMatchObject({
     outcome: "kept",
-    reason: expect.stringContaining(`expected ${chainRef} to hold event`),
+    reason: "moved",
+    detail: expect.stringContaining(`expected ${chainRef} to hold event`),
   })
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(unmergedTip)
   expect((await w.git(["for-each-ref", "--format=%(refname)", "refs/archive"])).trim()).toBe("")

@@ -90,7 +90,6 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
   let writtenArchive: string | undefined
   let archiveLocation: "local" | "origin" | undefined
   let custody: Dropped | undefined
-  let onTarget = provenOnTarget
   const protection = async (): Promise<Kept | undefined> => {
     const firstRead = firstProtectionRead
     firstProtectionRead = false
@@ -181,7 +180,6 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     if (kept === undefined) kept = await reachability()
     const alreadyMerged =
       kept === undefined && disposition.kind === "closed" && (await isAncestor(git, tip, disposition.target))
-    if (alreadyMerged) onTarget = true
     if (kept === undefined && !input.dryRun && disposition.kind === "closed" && !alreadyMerged) {
       // The event that keeps the exact tip is on origin's chain before the local name can go (30683).
       const advanced = disposition.advanced

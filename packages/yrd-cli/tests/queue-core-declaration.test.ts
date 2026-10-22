@@ -58,7 +58,6 @@ import {
   pauseRef,
 } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
-import { retireLocalBranch } from "../../yrd-queue-core/src/local-branch-retirement.ts"
 import { GitExit } from "../../yrd-queue-core/src/git.ts"
 import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 import { openEvents } from "gitomic/events"
