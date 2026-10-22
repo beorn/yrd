@@ -25,7 +25,17 @@ import { fileURLToPath } from "node:url"
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import * as removely from "removely"
 import { inspectCheckoutGitMetadata, verifyRetainedEntry, worktreeHomeRoot } from "git-super"
-import { createEventStore, freshWorktree, previewCloneKey, previewSubjectPrefix } from "@yrd/queue-core"
+import {
+  changeInput,
+  changesRef,
+  createEventStore,
+  freshWorktree,
+  previewCloneKey,
+  previewSubjectPrefix,
+  readEventQueue,
+  readStatus,
+} from "@yrd/queue-core"
+import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
@@ -241,7 +251,7 @@ async function world(setup: string, teardown?: string): Promise<World> {
  * @level l3 @consumer yrd env close after a standing author environment survives its landing round
  * Exact young jobs now close at landing (29367); a standing environment preserves the later native-release probe.
  */
-it.each(["released", "held", "advanced", "failed"] as const)(
+it.each(["released", "notified", "reopened", "resubmitted", "held", "advanced", "failed"] as const)(
   "retries a held merged author branch after native close: %s",
   async (mode) => {
     const w = await world(":")
@@ -285,13 +295,66 @@ it.each(["released", "held", "advanced", "failed"] as const)(
         .mockResolvedValueOnce(permitted)
         .mockResolvedValueOnce({ ...permitted, coverage: { ...permitted.coverage, complete: false } })
     }
-    expect(await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io), closed.stderr()).toBe(
-      mode === "failed" ? 2 : 0,
-    )
+    let releaseReads = 0
+    const exit =
+      mode === "notified" || mode === "reopened" || mode === "resubmitted"
+        ? await closeEnvironment(author, { json: true }, closed.io, undefined, "delegate", async () => {
+            if (++releaseReads !== 2) return
+            const store = createEventStore(w.work, "origin", w.git.selection)
+            const queueTip = (await readEventQueue(store, "main")).tip
+            if (queueTip === null) throw new Error("fixture queue has no tip")
+            const merged = await readStatus(store, "main", branch)
+            if (merged.tip === undefined || merged.ending === undefined) {
+              throw new Error("fixture merged change has no event tip or ending")
+            }
+            const chain = await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+            const at = new Date()
+            if (mode === "notified") {
+              await chain.append(
+                [
+                  changeInput("notified", {
+                    queueTip,
+                    at,
+                    notice: {
+                      for: merged.ending.id,
+                      to: "@dev/4",
+                      result: "delivered",
+                      key: `${merged.ending.id}:@dev/4`,
+                    },
+                  }),
+                ],
+                { expect: merged.tip },
+              )
+            } else if (mode === "reopened") {
+              await chain.append(
+                [
+                  changeInput("opened", { queueTip, at, commit: head, by: "yrd", issue: "@example/29340-release" }),
+                  changeInput("merged", { queueTip, at, commit: head }),
+                ],
+                { expect: merged.tip },
+              )
+            } else {
+              const nextHead = (
+                await w.git(["commit-tree", `${head}^{tree}`, "-p", head, "-m", "new submission at another head"])
+              ).trim()
+              await chain.append(
+                [changeInput("opened", { queueTip, at, commit: nextHead, by: "yrd", issue: "@example/29340-release" })],
+                { expect: merged.tip },
+              )
+            }
+          })
+        : await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io)
+    expect(exit, closed.stderr()).toBe(mode === "failed" ? 2 : mode === "reopened" || mode === "resubmitted" ? 1 : 0)
     expect(existsSync(author)).toBe(mode === "failed")
     expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe(
-      mode === "released" ? "" : expectedHead,
+      mode === "released" || mode === "notified" ? "" : expectedHead,
     )
+    if (mode === "notified") {
+      expect(closed.stderr()).not.toContain("terminal history changed or reopened before root retirement")
+    }
+    if (mode === "reopened" || mode === "resubmitted") {
+      expect(closed.stderr()).toContain(`${branch}: terminal history changed or reopened before root retirement`)
+    }
     const archives = (await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")
     // A released merged root author is removed with no archive ref (30683); the other modes never archive.
     expect(archives).not.toContain(head)

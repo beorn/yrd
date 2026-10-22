@@ -1625,6 +1625,22 @@ export async function releaseRetainedCheckouts(
   return report
 }
 
+/** Post-merge notification appends `notified` receipts after the terminal event without changing or reopening it (30717). */
+async function notifiedOnlySince(
+  store: QueueLocation,
+  queue: string,
+  branch: string,
+  sinceTip: string | undefined,
+  currentTip: string | undefined,
+): Promise<boolean> {
+  if (sinceTip === undefined || currentTip === undefined) return false
+  if (currentTip === sinceTip) return true
+  const events = (await readBranchHistory(store, queue, branch)).history?.events
+  if (events === undefined || events.at(-1)?.id !== currentTip) return false
+  const index = events.findIndex((event) => event.id === sinceTip)
+  return index !== -1 && events.slice(index + 1).every((event) => event.type === "notified")
+}
+
 /** Both landing and successful native release use the same root retirement caller. */
 export async function retireMergedRootAuthor(
   input: Readonly<{
@@ -1703,7 +1719,7 @@ export async function retireMergedRootAuthor(
         current.status !== change.status ||
         current.reason !== change.reason ||
         current.commit !== tip ||
-        current.tip !== change.tip
+        !(await notifiedOnlySince(input.store, input.queue, branch, change.tip, current.tip))
       ) {
         throw new Error(`${branch}: terminal history changed or reopened before root retirement`)
       }
@@ -2205,7 +2221,11 @@ export async function retireMergedComponentAuthors(
           }
           await activeAuthorCheckout(author, input.selection, input.env)
           const state = await readStatus(input.store, input.queue, author.rootBranch)
-          if (state.status !== "merged" || state.commit !== author.rootTip || state.tip !== author.rootEventTip) {
+          if (
+            state.status !== "merged" ||
+            state.commit !== author.rootTip ||
+            !(await notifiedOnlySince(input.store, input.queue, author.rootBranch, author.rootEventTip, state.tip))
+          ) {
             throw new Error(`root change ${author.rootBranch} changed or reopened since author capture`)
           }
           const rootGit = gitIn(author.rootCommonDirectory, undefined, input.selection, { env: input.env })
