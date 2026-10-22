@@ -52,7 +52,7 @@
     "@types/react": "19.3.0",
     "@yrd/queue-core": "workspace:*",
     "git-super": "0.9.0",
-    "typescript": "^6.0.3",
+    "typescript": "6.0.3",
     "vitest": "4.1.10"
   },
   "overrides": {
