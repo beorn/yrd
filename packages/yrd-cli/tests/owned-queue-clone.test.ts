@@ -97,7 +97,7 @@ describe("ownedQueueClone (hh 25626)", () => {
   })
 })
 
-describe("container repository with nested dev checkout (hh 30719)", () => {
+describe("container repository with nested checkout (hh 30719)", () => {
   it("refuses unaddressed yrd commands in the container root before cloning or reporting ENOENT health", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-container-root-"))
     roots.push(root)
@@ -134,12 +134,12 @@ describe("container repository with nested dev checkout (hh 30719)", () => {
       for (const cwd of [container, join(container, "pm")]) {
         await expect(resolveQueueLocation(cwd, undefined, offlineEnv({ XDG_STATE_HOME: state }))).rejects.toThrow(
           new RegExp(
-            `is inside container repository .* \\(no \\.yrd\\.yml\\), not the nested checkout .*; run from .* or use \`@in -- bun yrd \\.\\.\\.\``,
+            `is inside container repository .* \\(no \\.yrd\\.yml\\), not the nested checkout .*; run from .*, or address the queue with --queue <repo>#<branch>`,
             "u",
           ),
         )
         await expect(ownedQueueClone(cwd, offlineEnv({ XDG_STATE_HOME: state }))).rejects.toThrow(
-          /run from .* or use `@in -- bun yrd \.\.\.`/u,
+          /run from .*, or address the queue with --queue <repo>#<branch>/u,
         )
 
         for (const argv of [
@@ -165,7 +165,7 @@ describe("container repository with nested dev checkout (hh 30719)", () => {
           expect(exitCode, argv.join(" ")).toBe(2)
           expect(stdout, argv.join(" ")).toBe("")
           expect(stderr, argv.join(" ")).toContain(`not the nested checkout ${dev}`)
-          expect(stderr, argv.join(" ")).toContain(`run from ${dev} or use \`@in -- bun yrd ...\``)
+          expect(stderr, argv.join(" ")).toContain(`run from ${dev}, or address the queue with --queue <repo>#<branch>`)
         }
       }
       // Proves ensureOwnedClone never ran against the container repo's origin.
@@ -178,5 +178,22 @@ describe("container repository with nested dev checkout (hh 30719)", () => {
       if (previousState === undefined) delete process.env.XDG_STATE_HOME
       else process.env.XDG_STATE_HOME = previousState
     }
+  })
+
+  it("discovers any immediate child checkout with .git and .yrd.yml without hardcoding dev", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-container-generic-"))
+    roots.push(root)
+    const state = join(root, "xdg-state")
+    const container = join(root, "workspace")
+    git(root, "init", "-q", "-b", "main", container)
+
+    const nested = join(container, "code-repo")
+    git(root, "init", "-q", "-b", "main", nested)
+    writeFileSync(join(nested, ".yrd.yml"), "target:\n  branch: main\n")
+
+    await expect(resolveQueueLocation(container, undefined, offlineEnv({ XDG_STATE_HOME: state }))).rejects.toThrow(
+      `${container} is inside container repository ${container} (no .yrd.yml), not the nested checkout ${nested}; run from ${nested}, or address the queue with --queue <repo>#<branch>`,
+    )
+    expect(existsSync(state)).toBe(false)
   })
 })

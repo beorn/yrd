@@ -49,7 +49,7 @@ import type { CoreQueueCommand } from "./queue-core-commands.ts"
 import { closeEnvironment, listEnvironments, openEnvironment } from "./env-commands.ts"
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
-import { assertNotContainerRepository, repositoryHere } from "./declaration.ts"
+import { repositoryHere, unaddressedRepository } from "./declaration.ts"
 import { appendRetentionObservation, pruneRoundOutput, retentionHumanLines } from "./log-retention.ts"
 import {
   hostWorkdirHere,
@@ -1523,10 +1523,8 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (names, options) => {
       const json = (options as { json?: boolean }).json
-      const inside = repositoryHere(cwd())
-      if (inside !== undefined) assertNotContainerRepository(inside, cwd())
       const taken = await coreQueueCommand(
-        inside ?? cwd(),
+        unaddressedRepository(cwd()) ?? cwd(),
         io,
         { command: "check", names: names as readonly string[] },
         { json, env, log: log() },
@@ -1742,10 +1740,7 @@ function buildProgram(
     command.action(async (...received: unknown[]) => {
       const args = received.slice(0, operands.length) as string[]
       const options = received[operands.length] as Readonly<{ projectRoot?: string; id?: string; timeoutMs?: number }>
-      if (options.projectRoot === undefined) {
-        const inside = repositoryHere(cwd())
-        if (inside !== undefined) assertNotContainerRepository(inside, cwd())
-      }
+      if (options.projectRoot === undefined) unaddressedRepository(cwd())
       const { runIssuesVerb } = await import("./issues/run.ts")
       const outcome = await runIssuesVerb({
         verb,

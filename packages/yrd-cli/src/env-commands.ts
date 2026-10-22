@@ -56,7 +56,7 @@ import {
   PrivateStoreRefusalError,
   type PrivateStoreRefusal,
 } from "git-super/worktree"
-import { assertNotContainerRepository, repositoryHere as findRepository } from "./declaration.ts"
+import { unaddressedRepository as findRepository } from "./declaration.ts"
 import { ISSUE_DISPLAY_TIMEOUT_MS } from "./issue-resolver.ts"
 import { ISSUES_CODES } from "./issues/declaration.ts"
 import { runIssuesVerb } from "./issues/run.ts"
@@ -152,7 +152,6 @@ function requireRepository(io: YrdCliIO): string {
   if (root === undefined) {
     throw new Error(`yrd env needs a repository: no Git clone contains ${cwd}; run it inside a clone`)
   }
-  assertNotContainerRepository(root, cwd)
   return root
 }
 

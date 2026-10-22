@@ -24,7 +24,7 @@ import {
   queueRoot,
   type QueueAddress,
 } from "./address.ts"
-import { assertNotContainerRepository, repositoryHere } from "./declaration.ts"
+import { repositoryHere, unaddressedRepository } from "./declaration.ts"
 
 /**
  * A cold component store: a bare Git directory kept for custody (a retained module
@@ -77,9 +77,7 @@ export async function resolveDeclaredQueueLocations(
   declarations: readonly DeclaredQueue[],
   env: NodeJS.ProcessEnv,
 ): Promise<readonly DeclaredQueueLocation[]> {
-  const inside = repositoryHere(cwd)
-  if (inside !== undefined) assertNotContainerRepository(inside, cwd)
-  const base = inside ?? resolve(cwd)
+  const base = unaddressedRepository(cwd) ?? resolve(cwd)
   const locations: DeclaredQueueLocation[] = []
   for (const declaration of declarations) {
     try {
@@ -235,9 +233,8 @@ async function originQueueAddress(git: Git, branch: string): Promise<QueueAddres
  * so, unlike the queue's own default, it does not fall back to asking the remote (`originHead`).
  */
 export async function ownedQueueClone(cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
-  const inside = repositoryHere(cwd)
+  const inside = unaddressedRepository(cwd)
   if (inside === undefined) throw new Error(`${cwd} is not inside a repository, so the queue it serves has no name`)
-  assertNotContainerRepository(inside, cwd)
   const selection = await resolveGitSelection(cwd, { env })
   const git = gitIn(inside, undefined, selection, { env })
   const recorded = (await git(["for-each-ref", "--format=%(symref)", "refs/remotes/origin/HEAD"])).trim()
@@ -257,7 +254,13 @@ export async function resolveQueueLocation(
   env: NodeJS.ProcessEnv,
   context: "queue" | "reader" | "submit" = "queue",
 ): Promise<QueueLocation> {
-  const inside = repositoryHere(cwd)
+  const addressed =
+    value !== undefined &&
+    (value.includes("#") ||
+      hasHumanQueueBranch(value) ||
+      value.startsWith("/") ||
+      /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value))
+  const inside = addressed ? repositoryHere(cwd) : unaddressedRepository(cwd)
   if (inside === undefined && context !== "queue") {
     throw new Error(
       `${context === "submit" ? "submit" : "queue list/show/watch"} at ${cwd} needs a repository; run inside a clone${context === "submit" ? " containing the branch to submit" : " or the queue-owned clone"}`,
@@ -265,15 +268,8 @@ export async function resolveQueueLocation(
   }
   const selection = await resolveGitSelection(cwd, { env })
   const git = gitIn(inside ?? cwd, undefined, selection, { env })
-  const addressed =
-    value !== undefined &&
-    (value.includes("#") ||
-      hasHumanQueueBranch(value) ||
-      value.startsWith("/") ||
-      /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value))
   let address: QueueAddress
   if (inside !== undefined && !addressed) {
-    assertNotContainerRepository(inside, cwd)
     address = await originQueueAddress(git, value ?? (await originHead(git)))
   } else {
     if (value === undefined || !addressed) {
