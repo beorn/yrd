@@ -13,7 +13,6 @@ import type { Event, EventInput } from "gitomic/events"
 import { listRefs, openEvents } from "gitomic/events"
 import { createMemBackend } from "gitomic/mem"
 import { Conflict, open, PublicationRejected } from "gitomic"
-import { archiveRefFor } from "git-super/archive-ref"
 import type { GitomicBackend, RefUpdate } from "gitomic"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
@@ -1563,6 +1562,41 @@ describe("ADR-0016 event fold", () => {
     expect(evolve(dropped, event("merged", "d".repeat(40), [["Commit", A]], [A])).status).toBe("merged")
   })
 
+  // 30683 (b): the owner's drop of an advanced head records its tip, how many commits its target lacks, and that target.
+  it("writes, folds and reads back an advanced drop's Tip:, Unique-Commits: and Target:", () => {
+    const advanced = { tip: B, uniqueCommits: 2, target: { ref: "refs/heads/main", tip: "e".repeat(40) } }
+    const details = {
+      queueTip: A,
+      at: new Date("2026-10-22T09:00:00.000Z"),
+      commit: A,
+      reason: "dropped",
+      by: "@dev/7",
+      content: "superseded by 30704",
+      advanced,
+    }
+    const written = changeInput("cancelled", details)
+    expect(written.keeps).toEqual([A, B])
+    expect(written.content).toBe("superseded by 30704")
+    const opened = evolve(initial, event("opened", "1".repeat(40), [["Commit", A]], [A]))
+    const props = written.props ?? []
+    const dropped = evolve(opened, event(written.type, "2".repeat(40), props, [...(written.keeps ?? [])]))
+    expect(dropped).toMatchObject({ status: "cancelled", reason: "dropped", commit: A, advancedDrop: advanced })
+    // A new change on the branch does not inherit it.
+    expect(evolve(dropped, event("opened", "3".repeat(40), [["Commit", B]], [B])).advancedDrop).toBeUndefined()
+    // The three trailers go together, on a dropped event that keeps both commits.
+    const without = (key: string) => props.filter(([name]) => name !== key)
+    expect(() => evolve(opened, event("cancelled", "4".repeat(40), without("Unique-Commits"), [A, B]))).toThrow(
+      /advanced drop/,
+    )
+    expect(() => evolve(opened, event("cancelled", "4".repeat(40), props, [A]))).toThrow(/advanced drop/)
+    // The owner's reason is the content, and only a dropped event carries the record.
+    expect(() => changeInput("cancelled", { ...details, content: " " })).toThrow(/reason/)
+    expect(() => changeInput("cancelled", { ...details, reason: "withdrawn" })).toThrow(/dropped/)
+    expect(() => changeInput("cancelled", { ...details, advanced: { ...advanced, uniqueCommits: 0 } })).toThrow(
+      /Unique-Commits/,
+    )
+  })
+
   // @failure a malformed drop event after a landing turns a merged change into cancelled (26223).
   it("refuses a dropped ending after merge without changing the merged projection", () => {
     const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
@@ -1847,11 +1881,11 @@ describe("the queue-format boundary", () => {
     }
   })
 
-  // @failure Local retirement deletes the remote branch or has no origin archive/event custody (28791).
+  // @failure Local retirement deletes the remote branch or ends without an event on its chain that keeps the tip (28791, 30683).
   // @level l1
   // @consumer Yrd local branch retirement; positional drop continues to delete the remote branch.
-  it.each(["draft", "submitted", "ended-publication-refused"] as const)(
-    "archives a %s local retirement without deleting the remote branch",
+  it.each(["draft", "submitted", "publication-refused"] as const)(
+    "keeps a %s local retirement's tip on its chain without deleting the remote branch",
     async (state) => {
       const { store, location, beforeNextPublish } = remoteMemStore(`yrd-local-retirement-${state}`)
       const target = await open({ ...store, ref: "refs/heads/lab" })
@@ -1876,20 +1910,29 @@ describe("the queue-format boundary", () => {
           { expect: null },
         )
       }
-      const archiveRef = "refs/archive/2026-10-12/dev-2/task/local-drop"
       const request = {
         queue: "lab",
         branch,
         by: "@dev/2",
         issue: "28791",
         note: "issue closed",
-        localArchive: { ref: archiveRef, tip: head },
+        local: { tip: head },
+      }
+      if (state === "publication-refused") {
+        beforeNextPublish(async () => {
+          throw new Error("fixture refused event publication")
+        })
+        await expect(drop(location, request)).rejects.toThrow(/fixture refused event publication.*local refs kept/)
+        const refused = await listRefs("refs/", store)
+        expect(refused.get(`refs/heads/${branch}`)).toBe(head)
+        expect(refused.has(changesRef("lab", branch))).toBe(false)
       }
       const result = await drop(location, request)
       const refs = await listRefs("refs/", store)
       expect(refs.get(`refs/heads/${branch}`)).toBe(head)
-      expect(refs.get(archiveRef)).toBe(head)
+      expect([...refs.keys()].filter((name) => name.startsWith("refs/archive/"))).toEqual([])
       const history = await (await openEvents({ ...store, ref: changesRef("lab", branch) })).events()
+      expect(result.ref).toBe(changesRef("lab", branch))
       expect(history.at(-1)).toMatchObject({ id: result.event, type: "cancelled", links: [head] })
       expect(await readStatus(location, "lab", branch)).toMatchObject({
         status: "cancelled",
@@ -1898,18 +1941,6 @@ describe("the queue-format boundary", () => {
       })
       expect(await drop(location, request)).toEqual(result)
       expect((await listRefs("refs/", store)).get(`refs/heads/${branch}`)).toBe(head)
-      if (state === "ended-publication-refused") {
-        beforeNextPublish(async () => {
-          throw new Error("fixture refused archive publication")
-        })
-        await expect(drop(location, request)).rejects.toThrow(
-          "archive publication failed: fixture refused archive publication",
-        )
-        const retained = await listRefs("refs/", store)
-        expect(retained.get(`refs/heads/${branch}`)).toBe(head)
-        expect(retained.get(archiveRef)).toBe(head)
-        expect(retained.get(changesRef("lab", branch))).toBe(result.event)
-      }
     },
   )
 
@@ -2105,7 +2136,6 @@ describe("the queue-format boundary", () => {
     }
     // The previous branch-absence assertion missed missing custody and skipped
     // host protections on hot/cold ended changes (29399).
-    const archive = archiveRefFor("task/merged", "@dev/2", new Date().toISOString().slice(0, 10))
     await expect(
       drop(location, {
         queue: "lab",
@@ -2116,7 +2146,6 @@ describe("the queue-format boundary", () => {
         protections: async () => ["author environment is held"],
       }),
     ).rejects.toThrow(/author environment is held/)
-    expect((await listRefs(archive, store)).size).toBe(0)
     expect(await branch.head()).toBe(head)
     let checks = 0
     const dropped = await drop(location, {
@@ -2125,14 +2154,12 @@ describe("the queue-format boundary", () => {
       by: "@dev/2",
       protections: async () => {
         checks++
-        expect((await listRefs(archive, store)).get(archive)).toBe(checks === 1 ? undefined : head)
         expect(await branch.head()).toBe(head)
         return []
       },
     })
     expect(checks).toBe(2)
-    expect(dropped.archive).toBe(archive)
-    expect((await listRefs(archive, store)).get(archive)).toBe(head)
+    expect(dropped).toMatchObject({ head, event: merged.head })
     await expect(
       drop(location, {
         queue: "lab",
@@ -2141,7 +2168,7 @@ describe("the queue-format boundary", () => {
         retire: { tip: head },
         note: "already retired",
       }),
-    ).resolves.toMatchObject({ archive, head, event: merged.head })
+    ).resolves.toMatchObject({ head, event: merged.head })
     expect((await listRefs(ref, store)).get(ref)).toBe(merged.head)
     if (custody === "cold") expect(await chain.head()).toBeNull()
     expect((await listRefs("refs/heads/task/merged", store)).size).toBe(0)
@@ -2186,7 +2213,6 @@ describe("the queue-format boundary", () => {
       }
       const dropped = await drop(location, request)
       expect(dropped).toMatchObject({ head, event: merged.head, main: { ref: "refs/heads/lab", tip: head } })
-      expect(dropped.archive).toBeUndefined()
       expect(await archives()).toEqual([])
       expect((await listRefs("refs/heads/task/landed", store)).size).toBe(0)
       expect((await listRefs(changesRef("lab", "task/landed"), store)).get(changesRef("lab", "task/landed"))).toBe(
@@ -2269,40 +2295,18 @@ describe("the queue-format boundary", () => {
           "origin",
         )
       }
-      const archive = archiveRefFor(branch, "@dev/3", new Date().toISOString().slice(0, 10))
       const publish = git.backend.publish
       if (publish === undefined) throw new Error("fixture lacks publication")
-      const beforeArchive = await readBranchHistory(location, "lab", branch)
-      const prematureRetirement = await drop(location, {
-        queue: "lab",
-        branch,
-        by: "@dev/3",
-        note: "retain the exact divergent head",
-        retire: { tip: extra },
-      }).then(
-        () => undefined,
-        (error: unknown) => error,
-      )
-      expect(prematureRetirement).toBeInstanceOf(Error)
-      expect((await git(["ls-remote", "origin", branchRef])).trim()).toBe(`${extra}\t${branchRef}`)
-      expect((await listRefs(branchRef, location)).get(branchRef)).toBe(extra)
-      expect((await listRefs(archive, location)).get(archive)).toBeUndefined()
-      const afterPrematureRetirement = await readBranchHistory(location, "lab", branch)
-      expect(afterPrematureRetirement.history).toEqual(beforeArchive.history)
-      expect(afterPrematureRetirement.history?.events.some((item) => item.type === "retained")).toBe(false)
-      await publish(root, [{ ref: archive, expect: "0".repeat(40), oid: extra }], "origin")
       const refTipBefore = (await listRefs(selectedRef, location)).get(selectedRef)
       const ordinaryDrop = await drop(location, { queue: "lab", branch, by: "@dev/3" }).then(
         () => undefined,
         (error: unknown) => String(error),
       )
       expect(ordinaryDrop).toContain("kept-link retirement, 25671")
-      expect(ordinaryDrop).toContain(`preserve ${extra} at origin:${archive}`)
       expect(ordinaryDrop).toContain(`--retire --tip ${extra} --reason <why>`)
       expect(ordinaryDrop).toContain("30432")
       expect((await listRefs(branchRef, location)).get(branchRef)).toBe(extra)
       expect((await listRefs(selectedRef, location)).get(selectedRef)).toBe(refTipBefore)
-      expect((await listRefs(archive, location)).get(archive)).toBe(extra)
 
       let racedSelectedTip: string | undefined
       const staleSelectedTip = await drop(location, {
@@ -2379,7 +2383,6 @@ describe("the queue-format boundary", () => {
         const selected = await readBranchHistory(location, "lab", branch)
         expect(selected.history?.events.some((item) => item.type === "retained")).toBe(false)
         expect(selected.history?.state).toEqual(before)
-        expect((await listRefs(archive, location)).get(archive)).toBe(extra)
         return []
       }
       const readbackFailure = await drop(
@@ -2422,7 +2425,6 @@ describe("the queue-format boundary", () => {
         protectionChecks++
         const selected = await readBranchHistory(flakyLocation, "lab", branch)
         const retainedEvent = selected.history?.events.find((item) => item.type === "retained")
-        expect((await listRefs(archive, flakyLocation)).get(archive)).toBe(extra)
         expect((await listRefs(branchRef, flakyLocation)).get(branchRef)).toBe(extra)
         expect(retainedEvent?.links).toContain(extra)
         expect(selected.ref).toBe(selectedRef)
@@ -2449,7 +2451,7 @@ describe("the queue-format boundary", () => {
         custody === "hot"
           ? await drop(location, { queue: "lab", branch, by: "@dev/3", protections })
           : await drop(location, request)
-      expect(retry).toMatchObject({ archive, head: extra, event: merged.head })
+      expect(retry).toMatchObject({ head: extra, event: merged.head })
       const afterRetry = await readBranchHistory(location, "lab", branch)
       expect(afterRetry.history?.events.filter((item) => item.type === "retained")).toHaveLength(1)
       expect(afterRetry.history?.state).toEqual(beforeDeleteRetry)
@@ -2476,19 +2478,12 @@ describe("the queue-format boundary", () => {
   it.each([
     "open",
     "wrong-tip",
-    "collision",
     "unreadable",
     "held-later",
     "branch-moved",
     "ending-hot",
     "ending-cold",
-    "archive-removed",
-    "archive-moved",
-    "custody-readback",
-    "final-readback",
     "ending-final",
-    "absent",
-    "other-archive",
   ] as const)("keeps exact retirement custody loud on %s", async (fault) => {
     const { store, location, afterNextPublish } = remoteMemStore(`retire-${fault}`)
     const branchName = "task/retire"
@@ -2518,24 +2513,8 @@ describe("the queue-format boundary", () => {
         { ref: hot, expect: ending, oid: null },
       ])
     }
-    const archive = archiveRefFor(branchName, "@dev/2", new Date().toISOString().slice(0, 10))
-    if (fault === "collision") await publish(store.repo, [{ ref: archive, expect: "0".repeat(40), oid: base }])
-    if (fault === "custody-readback") {
-      afterNextPublish(async () => {
-        await publish(store.repo, [{ ref: archive, expect: head, oid: null }])
-      })
-    }
     let checks = 0
     let expectedBranch: string | null = head
-    if (fault === "absent" || fault === "other-archive") {
-      await publish(store.repo, [{ ref: branchRef, expect: head, oid: null }])
-      expectedBranch = null
-      if (fault === "other-archive") {
-        await publish(store.repo, [
-          { ref: archiveRefFor(branchName, "@dev/other", "2000-01-01"), expect: "0".repeat(40), oid: head },
-        ])
-      }
-    }
     const action = drop(location, {
       queue: "lab",
       branch: branchName,
@@ -2559,15 +2538,6 @@ describe("the queue-format boundary", () => {
             })
           ).head
         }
-        if (fault === "archive-removed" || fault === "archive-moved") {
-          await publish(store.repo, [{ ref: archive, expect: head, oid: fault === "archive-removed" ? null : base }])
-        }
-        if (fault === "final-readback") {
-          expectedBranch = null
-          afterNextPublish(async () => {
-            await publish(store.repo, [{ ref: archive, expect: head, oid: null }])
-          })
-        }
         if (fault === "ending-final") {
           expectedBranch = null
           afterNextPublish(async () => {
@@ -2588,116 +2558,13 @@ describe("the queue-format boundary", () => {
       (error: unknown) => error,
     )
     expect(refusal).toBeInstanceOf(Error)
-    if (fault === "final-readback") {
-      expect(String(refusal)).toContain(`retaining event ${ref}@${ending} keeps ${head}`)
-    }
     if (fault === "ending-final") {
       expect(String(refusal)).toContain("change moved during retirement")
-      expect(String(refusal)).toContain(archive)
       expect(String(refusal)).toContain(`git -C 'retire-ending-final' branch '${branchName}' '${head}'`)
-    }
-    if (fault === "absent" || fault === "other-archive") {
-      expect(String(refusal)).toContain(archive)
-      expect(String(refusal)).toContain("another date or actor is not accepted as proof")
     }
     expect((await listRefs(branchRef, store)).get(branchRef) ?? null).toBe(expectedBranch)
     expect((await listRefs(ref, store)).get(ref)).toBe(ending)
-    if (["open", "wrong-tip", "unreadable"].includes(fault)) expect((await listRefs(archive, store)).size).toBe(0)
   })
-
-  // @failure Content equality cannot retain a nonancestor's exact commit (30396).
-  // Event/ancestry cases above do not exercise the required archive on content authority.
-  it.each(["missing-archive", "main-moved", "archive-collision", "archive-readback-lost"] as const)(
-    "keeps content retirement custody loud on %s",
-    async (fault) => {
-      const root = mkdtempSync(join(tmpdir(), "yrd-content-retire-"))
-      const origin = mkdtempSync(join(tmpdir(), "yrd-content-retire-origin-"))
-      const git = gitIn(root)
-      await git(["init", "--quiet", "-b", "main"])
-      await git(["init", "--bare", "--quiet", origin])
-      await git(["remote", "add", "origin", origin])
-      await git(["config", "user.name", "fixture"])
-      await git(["config", "user.email", "fixture@yrd.test"])
-      writeFileSync(join(root, "base"), "base\n")
-      await git(["add", "base"])
-      await git(["commit", "--quiet", "-m", "base"])
-      const base = (await git(["rev-parse", "HEAD"])).trim()
-      const branch = "task/content-retire"
-      const branchRef = `refs/heads/${branch}`
-      await git(["checkout", "--quiet", "-b", branch])
-      writeFileSync(join(root, "work"), "integrated content\n")
-      await git(["add", "work"])
-      await git(["commit", "--quiet", "-m", "author work"])
-      const head = (await git(["rev-parse", "HEAD"])).trim()
-      await git(["checkout", "--quiet", "main"])
-      writeFileSync(join(root, "work"), "integrated content\n")
-      writeFileSync(join(root, "later"), "later main work\n")
-      await git(["add", "work", "later"])
-      await git(["commit", "--quiet", "-m", "independent integration"])
-      const main = (await git(["rev-parse", "HEAD"])).trim()
-      await git(["push", "--quiet", "origin", "main", branch])
-      const archive = archiveRefFor(branch, "fixture", "2000-01-01")
-      if (fault === "archive-collision") await git(["push", "--quiet", "origin", `${base}:${archive}`])
-      const publish = git.backend.publish
-      if (publish === undefined) throw new Error("native fixture lacks publication")
-      let deleted = false
-      const backend: GitomicBackend = {
-        ...git.backend,
-        publish: async (repo, updates, remote) => {
-          const result = await publish(repo, updates, remote)
-          if (updates.some((update) => update.ref === branchRef && update.oid === null)) {
-            deleted = true
-            if (fault === "archive-readback-lost") {
-              await publish(repo, [{ ref: archive, expect: head, oid: null }], remote)
-            }
-          }
-          return result
-        },
-      }
-      const authority = {
-        kind: "published-main-content" as const,
-        ref: "refs/heads/main",
-        tip: fault === "main-moved" ? base : main,
-        ...(fault === "missing-archive" ? {} : { archive }),
-      }
-      const refusal = await retireOriginBranch(
-        { repo: root, remote: "origin", backend, selection: git.selection },
-        {
-          branch,
-          head,
-          // Exercise the destructive boundary's runtime check for an untyped caller.
-          authority: authority as Parameters<typeof retireOriginBranch>[1]["authority"],
-        },
-      ).then(
-        () => undefined,
-        (error: unknown) => error,
-      )
-      expect(refusal).toBeInstanceOf(Error)
-      const expected = {
-        "missing-archive": "requires an exact-tip archive",
-        "main-moved": "published main moved",
-        "archive-collision": "never overwritten",
-        "archive-readback-lost": "retirement failed after conditional removal",
-      }[fault]
-      expect(String(refusal)).toContain(expected)
-      expect(deleted).toBe(fault === "archive-readback-lost")
-      expect((await git(["ls-remote", "origin", branchRef])).trim()).toBe(deleted ? "" : `${head}\t${branchRef}`)
-      if (fault === "archive-readback-lost") {
-        expect(String(refusal)).toContain(`${branchRef}=absent`)
-        expect(String(refusal)).toContain(`${archive}=absent`)
-        expect(String(refusal)).toContain(`refs/heads/main=${main}`)
-        expect(String(refusal)).not.toContain(`keeps ${head}`)
-        const recovery = /(git -C .+)$/u.exec(String(refusal))?.[1]
-        if (recovery === undefined) throw new Error("content retirement supplied no recovery recipe")
-        const result = spawnSync("/bin/sh", ["-c", recovery], { cwd: outsideRepositoryRoot(), encoding: "utf8" })
-        expect(result.status, result.stderr).toBe(0)
-        expect(result.stdout.trim()).toBe(`${head} ${branchRef}`)
-      }
-      if (fault === "archive-collision") {
-        expect((await git(["ls-remote", "origin", archive])).trim()).toBe(`${base}\t${archive}`)
-      }
-    },
-  )
 
   // @failure a rival branch move after an ended drop publishes would retire work the event did not keep (26223).
   it("leaves an ended change untouched when its branch-delete lease loses", async () => {
@@ -2815,16 +2682,7 @@ describe("the queue-format boundary", () => {
           return result
         },
       }
-      const archive = kind === "event" ? archiveRefFor(branch, "fixture", "2000-01-01") : undefined
-      const refusal = await retireOriginBranch(
-        { ...location, backend },
-        {
-          branch,
-          head: kept,
-          authority,
-          ...(archive === undefined ? {} : { archive }),
-        },
-      ).then(
+      const refusal = await retireOriginBranch({ ...location, backend }, { branch, head: kept, authority }).then(
         () => undefined,
         (error: unknown) => error,
       )
@@ -2845,40 +2703,40 @@ describe("the queue-format boundary", () => {
     }
 
     // Neither surviving-branch row proves recovery when only origin keeps the
-    // payload. Clear this disposable clone's custody after real remote deletion.
-    const archivedBranch = "task/race'archive-absent"
-    const archivedBranchRef = `refs/heads/${archivedBranch}`
-    await git(["checkout", "--quiet", "-b", archivedBranch, advanced])
-    writeFileSync(join(root, "archive-only"), "unique remote custody\n")
-    await git(["add", "archive-only"])
-    await git(["commit", "--quiet", "-m", "archive-only payload"])
-    const archivedHead = (await git(["rev-parse", "HEAD"])).trim()
-    await git(["push", "--quiet", "origin", archivedBranchRef])
+    // payload, here through the change's event chain alone: no archive is
+    // written (30683). Clear this disposable clone's custody after real remote deletion.
+    const originOnlyBranch = "task/race'origin-only"
+    const originOnlyRef = `refs/heads/${originOnlyBranch}`
+    await git(["checkout", "--quiet", "-b", originOnlyBranch, advanced])
+    writeFileSync(join(root, "origin-only"), "unique remote custody\n")
+    await git(["add", "origin-only"])
+    await git(["commit", "--quiet", "-m", "origin-only payload"])
+    const originOnlyHead = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["push", "--quiet", "origin", originOnlyRef])
     await git(["checkout", "--quiet", "--detach", advanced])
-    const archivedEventRef = changesRef("lab", archivedBranch)
-    const archivedChain = await openEvents({ ...location, ref: archivedEventRef })
-    const archivedStart = await archivedChain.append(
-      [changeInput("opened", { queueTip, at: new Date(), commit: archivedHead, by: "fixture" })],
+    const originOnlyEventRef = changesRef("lab", originOnlyBranch)
+    const originOnlyChain = await openEvents({ ...location, ref: originOnlyEventRef })
+    const originOnlyStart = await originOnlyChain.append(
+      [changeInput("opened", { queueTip, at: new Date(), commit: originOnlyHead, by: "fixture" })],
       { expect: null },
     )
-    const archivedEnd = await archivedChain.append(
-      [changeInput("failed", { queueTip, at: new Date(), reason: "archive-only ending" })],
-      { expect: archivedStart.head },
+    const originOnlyEnd = await originOnlyChain.append(
+      [changeInput("failed", { queueTip, at: new Date(), reason: "origin-only ending" })],
+      { expect: originOnlyStart.head },
     )
-    const archivedStartTip = archivedStart.head
-    const archivedEndTip = archivedEnd.head
-    if (archivedStartTip === null || archivedEndTip === null) {
-      throw new Error("archive-only fixture lacks its event tips")
+    const originOnlyStartTip = originOnlyStart.head
+    const originOnlyEndTip = originOnlyEnd.head
+    if (originOnlyStartTip === null || originOnlyEndTip === null) {
+      throw new Error("origin-only fixture lacks its event tips")
     }
-    const archive = archiveRefFor(archivedBranch, "fixture", "2000-01-01")
-    const archiveBackend: GitomicBackend = {
+    const originOnlyBackend: GitomicBackend = {
       ...git.backend,
       publish: async (repo, updates, remote) => {
         const result = await publish(repo, updates, remote)
-        if (!updates.some((update) => update.ref === archivedBranchRef && update.oid === null)) return result
-        await publish(repo, [{ ref: archivedEventRef, expect: archivedEndTip, oid: archivedStartTip }], remote)
+        if (!updates.some((update) => update.ref === originOnlyRef && update.oid === null)) return result
+        await publish(repo, [{ ref: originOnlyEventRef, expect: originOnlyEndTip, oid: originOnlyStartTip }], remote)
         const localCustody = (
-          await git(["for-each-ref", `--contains=${archivedHead}`, "--format=%(refname) %(objectname)"])
+          await git(["for-each-ref", `--contains=${originOnlyHead}`, "--format=%(refname) %(objectname)"])
         )
           .trim()
           .split("\n")
@@ -2896,42 +2754,45 @@ describe("the queue-format boundary", () => {
         return result
       },
     }
-    const archiveRefusal = await retireOriginBranch(
-      { ...location, backend: archiveBackend },
+    const originOnlyRefusal = await retireOriginBranch(
+      { ...location, backend: originOnlyBackend },
       {
-        branch: archivedBranch,
-        head: archivedHead,
-        archive,
-        authority: { kind: "event", ref: archivedEventRef, tip: archivedEndTip },
+        branch: originOnlyBranch,
+        head: originOnlyHead,
+        authority: { kind: "event", ref: originOnlyEventRef, tip: originOnlyEndTip },
       },
     ).then(
       () => undefined,
       (error: unknown) => error,
     )
-    expect(String(archiveRefusal)).toContain("change moved during retirement")
-    const absentObject = spawnSync("git", ["-C", root, "cat-file", "-e", archivedHead], { encoding: "utf8" })
+    expect(String(originOnlyRefusal)).toContain("change moved during retirement")
+    const absentObject = spawnSync("git", ["-C", root, "cat-file", "-e", originOnlyHead], { encoding: "utf8" })
     expect([1, 128]).toContain(absentObject.status)
-    expect((await git(["for-each-ref", "--format=%(refname)", archivedBranchRef])).trim()).toBe("")
-    expect((await git(["ls-remote", "origin", archive])).trim()).toBe(`${archivedHead}\t${archive}`)
-    const withoutFetch = spawnSync("git", ["-C", root, "branch", archivedBranch, archivedHead], {
+    expect((await git(["for-each-ref", "--format=%(refname)", originOnlyRef])).trim()).toBe("")
+    // The moved chain still reaches the opened event that keeps the head.
+    expect((await git(["ls-remote", "origin", originOnlyEventRef])).trim()).toBe(
+      `${originOnlyStartTip}\t${originOnlyEventRef}`,
+    )
+    expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim()).toBe("")
+    const withoutFetch = spawnSync("git", ["-C", root, "branch", originOnlyBranch, originOnlyHead], {
       cwd: outside,
       encoding: "utf8",
     })
     expect(withoutFetch.status, withoutFetch.stderr).toBe(128)
-    const recovery = /(git -C .+)$/u.exec(String(archiveRefusal))?.[1]
-    if (recovery === undefined) throw new Error("archive retirement supplied no recovery recipe")
+    const recovery = /(git -C .+)$/u.exec(String(originOnlyRefusal))?.[1]
+    if (recovery === undefined) throw new Error("event retirement supplied no recovery recipe")
     const beforeRecovery = await git(["ls-remote", "origin"])
     const recovered = spawnSync("/bin/sh", ["-c", recovery], { cwd: outside, encoding: "utf8" })
     expect(recovered.status, recovered.stderr).toBe(0)
-    expect((await git(["rev-parse", archivedBranchRef])).trim()).toBe(archivedHead)
+    expect((await git(["rev-parse", originOnlyRef])).trim()).toBe(originOnlyHead)
     expect(await git(["ls-remote", "origin"])).toBe(beforeRecovery)
   })
 
-  /** @failure Losing the generated archive during deletion leaves a divergent merged head without event custody.
+  /** @failure Removing the branch name leaves a divergent merged head without event custody once GC runs (30432, 30683).
    * @level l2 @consumer origin branch retirement, Git GC, and a fresh event-only consumer
-   * Existing archive-loss coverage proves archive recovery for a failed ending, not retained custody for a merged head.
+   * No archive ref exists: the retained event is the only custody the head has after its branch goes.
    */
-  it("30432: retained event alone preserves a divergent head through archive loss and fresh fetch", async () => {
+  it("30432: retained event alone preserves a divergent head through branch removal, GC and fresh fetch", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-30432-archive-loss-"))
     const origin = mkdtempSync(join(tmpdir(), "yrd-30432-archive-loss-origin-"))
     const git = gitIn(root)
@@ -2981,18 +2842,15 @@ describe("the queue-format boundary", () => {
       { expect: opened.head },
     )
     const before = await readStatus(location, "lab", branch)
-    const archive = archiveRefFor(branch, "@dev/3", new Date().toISOString().slice(0, 10))
     const publish = git.backend.publish
     if (publish === undefined) throw new Error("native fixture lacks publication")
-    await publish(root, [{ ref: archive, expect: "0".repeat(40), oid: extra }], "origin")
-    let archiveLost = false
+    let collected = false
     const backend: GitomicBackend = {
       ...git.backend,
       publish: async (repo, updates, remote) => {
         const result = await publish(repo, updates, remote)
-        if (!archiveLost && updates.some((update) => update.ref === branchRef && update.oid === null)) {
-          archiveLost = true
-          await publish(repo, [{ ref: archive, expect: extra, oid: null }], remote)
+        if (!collected && updates.some((update) => update.ref === branchRef && update.oid === null)) {
+          collected = true
           const localCustody = (await git(["for-each-ref", `--contains=${extra}`, "--format=%(refname)"]))
             .trim()
             .split("\n")
@@ -3013,7 +2871,7 @@ describe("the queue-format boundary", () => {
         return result
       },
     }
-    const failure = await drop(
+    const dropped = await drop(
       { ...location, backend },
       {
         queue: "lab",
@@ -3022,14 +2880,11 @@ describe("the queue-format boundary", () => {
         note: "retain the divergent exact head",
         retire: { tip: extra },
       },
-    ).then(
-      () => undefined,
-      (error: unknown) => error,
     )
-    expect(String(failure)).toMatch(/archive .* no longer holds .* retaining event/u)
-    expect(archiveLost).toBe(true)
+    expect(dropped).toMatchObject({ head: extra, ref: eventRef })
+    expect(collected).toBe(true)
     expect((await git(["ls-remote", "origin", branchRef])).trim()).toBe("")
-    expect((await git(["ls-remote", "origin", archive])).trim()).toBe("")
+    expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim()).toBe("")
     const retained = await readBranchHistory(location, "lab", branch)
     expect(retained.ref).toBe(eventRef)
     expect(retained.history?.events.at(-1)).toMatchObject({ type: "retained", links: [extra] })

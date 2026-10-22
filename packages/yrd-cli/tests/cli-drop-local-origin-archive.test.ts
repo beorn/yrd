@@ -1,7 +1,7 @@
 /**
  * @reach fs-walk <fixture-only: temporary origin and clone>
- * @failure yrd drop --local reports an origin archive it never pushed: the
- * archive ref is written locally only, and the report still says origin.
+ * @failure yrd drop --local deletes a never-submitted branch before an event on its chain at origin keeps
+ * the tip, or still writes a refs/archive shadow ref (30683).
  * @level l2 (`runYrdProcess` against a real remote and clone)
  * @consumer yrd drop --local custody message and recovery command.
  * Also (30277): a drop run in the superproject for a branch only a component holds reports success while
@@ -12,7 +12,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, expect, it } from "vitest"
-import { createEventQueue, createEventStore, readConfig } from "@yrd/queue-core"
+import { createEventQueue, createEventStore, readBranchHistory, readConfig } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -39,7 +39,7 @@ function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout
   }
 }
 
-it("pushes the archive ref to origin and reads it back before reporting success", async () => {
+it("30683: a never-submitted branch's dropped event starts its chain at origin and keeps the tip; no archive ref", async () => {
   const root = mkdtempSync(join(tmpdir(), "yrd-drop-local-archive-"))
   roots.push(root)
   const remote = join(root, "remote.git")
@@ -82,16 +82,24 @@ it("pushes the archive ref to origin and reads it back before reporting success"
     removed: { branch: string; archiveRef?: string; recovery?: string }[]
   }
   expect(report.removed).toEqual([expect.objectContaining({ branch: "task/never-submitted" })])
-  const archiveRef = report.removed[0]?.archiveRef
-  expect(archiveRef).toBeDefined()
-  // The origin really holds the archive, not just the local store.
-  const atOrigin = (await git(["ls-remote", "origin", archiveRef!])).trim()
-  expect(atOrigin.split("\t")[0]).toBe(tip)
-  // And the reported recovery command is the origin one, because that is where custody lives.
-  expect(report.removed[0]?.recovery).toContain("fetch")
+  expect(report.removed[0]?.archiveRef).toBeUndefined()
+  // No archive ref anywhere: the dropped event that starts the branch's chain at origin keeps the tip (30683).
+  expect((await git(["for-each-ref", "--format=%(refname)", "refs/archive/"])).trim()).toBe("")
+  expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim()).toBe("")
+  const { history } = await readBranchHistory(
+    createEventStore(repo, "origin", git.selection),
+    "main",
+    "task/never-submitted",
+  )
+  expect(history?.state).toMatchObject({ status: "cancelled", reason: "dropped", commit: tip })
+  expect(history?.events.at(-1)?.links).toContain(tip)
+  expect((await git(["for-each-ref", "refs/heads/task/never-submitted"])).trim()).toBe("")
+  // The recovery command reads the tip back from that chain.
+  expect(report.removed[0]?.recovery).toContain("refs/yrd/main/changes/task/never-submitted")
+  expect(report.removed[0]?.recovery).toContain(tip)
 })
 
-it("refuses loudly and keeps the branch when origin will not take the archive", async () => {
+it("refuses loudly and keeps the branch when origin will not take the dropped event", async () => {
   const root = mkdtempSync(join(tmpdir(), "yrd-drop-local-refuse-"))
   roots.push(root)
   const remote = join(root, "remote.git")
@@ -101,7 +109,7 @@ it("refuses loudly and keeps the branch when origin will not take the archive", 
   const hook = join(remote, "hooks", "pre-receive")
   writeFileSync(
     hook,
-    "#!/bin/sh\nwhile read old new ref; do case \"$ref\" in refs/archive/*) echo 'archive refs are read-only here' >&2; exit 1;; esac; done\nexit 0\n",
+    "#!/bin/sh\nwhile read old new ref; do case \"$ref\" in refs/yrd/main/changes/task/never-submitted) echo 'this chain is read-only here' >&2; exit 1;; esac; done\nexit 0\n",
   )
   chmodSync(hook, 0o755)
   await seed(["clone", "--quiet", remote, repo])
@@ -134,10 +142,11 @@ it("refuses loudly and keeps the branch when origin will not take the archive", 
     ["bun", "yrd", "drop", "task/never-submitted", "--local", "--tip", tip, "--submitter", "fixture", "--json"],
     observed.io,
   )
-  // The archive could not reach origin, so the drop must not claim success or delete the branch.
+  // The dropped event could not reach origin, so the drop must not claim success or delete the branch.
   expect(code).not.toBe(0)
-  expect(observed.stdout() + observed.stderr()).toContain("refs/archive/")
+  expect(observed.stdout() + observed.stderr()).toContain("refs/yrd/main/changes/task/never-submitted")
   expect((await git(["rev-parse", "refs/heads/task/never-submitted"])).trim()).toBe(tip)
+  expect((await git(["for-each-ref", "--format=%(refname)", "refs/archive/"])).trim()).toBe("")
 })
 
 it("treats an already-gone branch as a no-op success (28385 area 11, ruled 2026-10-19)", async () => {
@@ -236,6 +245,8 @@ it("names the component that holds a branch absent in the superproject, and fail
   await child(["commit", "--quiet", "-m", "component work"])
   const tip = (await child(["rev-parse", "HEAD"])).trim()
   await child(["checkout", "--quiet", "--detach"])
+  // The work landed on the component's main, so that published main keeps the exact tip (30683).
+  await child(["push", "--quiet", "origin", `${tip}:refs/heads/main`])
 
   const misdirected = capture(repo)
   const code = await runYrdProcess(
@@ -252,7 +263,8 @@ it("names the component that holds a branch absent in the superproject, and fail
   expect(report.detail).not.toContain("already gone")
   expect((await child(["rev-parse", "refs/heads/task/component-only"])).trim()).toBe(tip)
 
-  // The hint is a cure: the printed command, run as printed in the component, retires the branch with custody.
+  // The hint is a cure: the printed command, run as printed in the component, retires the branch its published
+  // main keeps, and writes no archive (30683).
   const printed = report.detail.split("retire it there: ")[1]!.split("; this command resolved")[0]!
   const [cd, command] = printed.split(" && ")
   const cwd = [...cd!.matchAll(/'([^']*)'/gu)].map((match) => match[1]!)[0]!
@@ -262,8 +274,7 @@ it("names the component that holds a branch absent in the superproject, and fail
   const cureCode = await runYrdProcess(["bun", "yrd", ...argv], cure.io)
   expect(cureCode, cure.stderr()).toBe(0)
   expect((await child(["for-each-ref", "refs/heads/task/component-only"])).trim()).toBe("")
-  const archived = await seed(["ls-remote", childRemote, "refs/archive/*/task/component-only"])
-  expect(archived, cure.stdout()).toContain(`${tip}\trefs/archive/`)
+  expect(await seed(["ls-remote", childRemote, "refs/archive/*"]), cure.stdout()).toBe("")
 
   // A ref nested under the name is not the named branch: absent everywhere, still the no-op.
   await child(["branch", "task/parent/leaf", tip])

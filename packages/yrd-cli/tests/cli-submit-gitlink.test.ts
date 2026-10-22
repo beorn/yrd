@@ -193,7 +193,7 @@ const remoteHead = async (remote: string, branch: string): Promise<string> =>
  * @failure A native root landing leaves a topic author behind, deletes an unrelated equal-tip ref,
  *          or retires a component target/default branch after its checkout detaches.
  * @level l3
- * @consumer automatic archive-first component retirement after ordinary submit
+ * @consumer automatic custody-first component retirement after ordinary submit
  * Existing pin-only carriers have no attached author ref; manual component drop does not exercise the landing call.
  */
 it.each(["topic", "main", "default", "new-default"] as const)(

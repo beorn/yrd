@@ -1,7 +1,8 @@
 /**
  * @reach fs-walk <fixture-only: bare component stores under a temporary root>
  * @failure yrd drop --local aimed at a cold retained module store resolves the
- * shared root instead, reports the branch absent there, and never retires it.
+ * shared root instead, reports the branch absent there, and never retires it; or retires an unmerged branch
+ * there, or writes an archive, instead of keeping and reporting it (30683).
  * @level l2 (`runYrdProcess` against a real bare component store and its origin)
  * @consumer yrd drop cleanup of retained/cold component stores.
  * @testonly none
@@ -46,8 +47,10 @@ type World = Readonly<{
   legacyArchiveRef: string
 }>
 
-/** A cold retained component store: a bare repository with its own origin, and a branch held only there. */
-async function retainedWorld(options: Readonly<{ withOrigin: boolean }>): Promise<World> {
+/** A cold retained component store: a bare repository with its own origin, and a branch held only there.
+ * By default its origin main has landed the branch, so its published main keeps the exact tip (30683).
+ */
+async function retainedWorld(options: Readonly<{ withOrigin: boolean; merged?: boolean }>): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-drop-retained-"))
   roots.push(root)
   const origin = join(root, "component-origin.git")
@@ -69,6 +72,7 @@ async function retainedWorld(options: Readonly<{ withOrigin: boolean }>): Promis
   await git(["commit", "--quiet", "-m", "held branch"])
   const tip = (await git(["rev-parse", "HEAD"])).trim()
   await git(["push", "--quiet", "origin", branch])
+  if (options.merged !== false) await git(["push", "--quiet", "origin", `${branch}:main`])
 
   const store = join(root, "retained-modules", "demo", "modules", "ag")
   mkdirSync(dirname(store), { recursive: true })
@@ -105,11 +109,9 @@ it("retires a branch held in a cold retained module store and leaves the shared 
   // The shared root store never held or lost anything.
   expect((await gitIn(world.sharedRoot)(["for-each-ref"])).trim()).toBe(sharedRefsBefore)
   await expect(gitIn(world.sharedRoot)(["rev-parse", "--verify", `refs/heads/${world.branch}`])).rejects.toThrow()
-  // It was archived at that store's origin before removal.
-  const archived = report.removed[0]?.archiveRef
-  expect(archived).toBeDefined()
-  const archivedTip = (await gitIn(world.origin)(["rev-parse", archived!])).trim()
-  expect(archivedTip).toBe(world.tip)
+  // Its origin's published main keeps the tip, so nothing was archived (30683).
+  expect(report.removed[0]).not.toHaveProperty("archiveRef")
+  expect(await gitIn(world.root)(["ls-remote", world.origin, "refs/archive/*"])).toBe("")
   // The unrelated legacy custody is evidence, so the drop neither read it as branch custody nor removed it.
   expect((await gitIn(world.store)(["rev-parse", world.legacyArchiveRef])).trim()).toBe(world.tip)
 })
@@ -132,8 +134,8 @@ it("refuses loudly and names the store when the cold store has no origin", async
  * now finds the enclosing repository first, which is how a retained module
  * store under /hh resolved to STATE instead of itself (30094 counterexample).
  */
-async function nestedRetainedWorld(): Promise<World & { enclosing: string }> {
-  const world = await retainedWorld({ withOrigin: true })
+async function nestedRetainedWorld(merged = true): Promise<World & { enclosing: string }> {
+  const world = await retainedWorld({ withOrigin: true, merged })
   const enclosing = join(world.root, "enclosing-root")
   mkdirSync(enclosing, { recursive: true })
   const enclosingGit = gitIn(enclosing)
@@ -163,7 +165,7 @@ it("retires a branch in a retained store nested inside a Git root and leaves tha
 })
 
 it("exits 1 when a nested retained store keeps the branch", async () => {
-  const world = await nestedRetainedWorld()
+  const world = await nestedRetainedWorld(false)
   const mainTip = (await gitIn(world.origin)(["rev-parse", "refs/heads/main"])).trim()
   const observed = capture(world.store)
   const code = await runYrdProcess(
@@ -208,7 +210,7 @@ it("names the store, never the enclosing root, when --release-checkout aims at a
 })
 
 it("a refused retirement reattaches the store HEAD to the branch it found", async () => {
-  const world = await nestedRetainedWorld()
+  const world = await nestedRetainedWorld(false)
   const storeGit = gitIn(world.store)
   await storeGit(["symbolic-ref", "HEAD", `refs/heads/${world.branch}`])
   const mainTip = (await gitIn(world.origin)(["rev-parse", "refs/heads/main"])).trim()
@@ -245,20 +247,30 @@ it("detaches a retained store's attached HEAD in place at the verified tip and r
   await expect(storeGit(["rev-parse", "--verify", `refs/heads/${world.branch}`])).rejects.toThrow()
 })
 
-it("an archive that reads back at a different commit leaves HEAD attached and the branch in place", async () => {
-  const world = await nestedRetainedWorld()
+it("keeps and reports an unmerged branch in a retained store with HEAD attached, writing no archive (30683)", async () => {
+  const world = await nestedRetainedWorld(false)
   const storeGit = gitIn(world.store)
   await storeGit(["symbolic-ref", "HEAD", `refs/heads/${world.branch}`])
-  const date = new Date().toISOString().slice(0, 10)
-  const archiveRef = `refs/archive/${date}/fixture/${world.branch}`
-  const other = (await gitIn(world.origin)(["rev-parse", "refs/heads/main"])).trim()
-  await gitIn(world.origin)(["update-ref", archiveRef, other])
   const observed = capture(world.store)
   const code = await runYrdProcess(
     ["bun", "yrd", "drop", world.branch, "--local", "--tip", world.tip, "--submitter", "fixture", "--json"],
     observed.io,
   )
   expect(code, observed.stderr() + observed.stdout()).toBe(1)
+  const report = JSON.parse(observed.stdout()) as {
+    removed: unknown[]
+    kept: { branch: string; head: string; detail?: string }[]
+  }
+  expect(report.removed).toEqual([])
+  expect(report.kept).toEqual([
+    expect.objectContaining({
+      branch: world.branch,
+      head: world.tip,
+      detail: expect.stringContaining("is not merged"),
+    }),
+  ])
   expect((await storeGit(["symbolic-ref", "-q", "HEAD"])).trim()).toBe(`refs/heads/${world.branch}`)
   expect((await storeGit(["rev-parse", `refs/heads/${world.branch}`])).trim()).toBe(world.tip)
+  expect(await gitIn(world.root)(["ls-remote", world.origin, "refs/archive/*"])).toBe("")
+  expect((await storeGit(["for-each-ref", "--format=%(refname)", "refs/archive/"])).trim()).toBe(world.legacyArchiveRef)
 })

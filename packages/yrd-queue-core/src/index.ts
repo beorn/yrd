@@ -110,6 +110,7 @@ export {
 export { Conflict } from "./git.ts"
 export type { Event } from "./git.ts"
 export type {
+  AdvancedDrop,
   AppliedIssueEffect,
   CancellationReason,
   ChangeEventType,
@@ -399,6 +400,6 @@ export {
 export { yrdQueueRunnerDeclarations } from "./runner-declarations.ts"
 export type { YrdQueueRunnerDeclaration } from "./runner-declarations.ts"
 export { retireLocalBranch } from "./local-branch-retirement.ts"
-export { retireOriginBranch, publishRetirementArchive } from "./origin-branch-retirement.ts"
+export { retireOriginBranch } from "./origin-branch-retirement.ts"
 export type { OriginRetirementAuthority } from "./origin-branch-retirement.ts"
 export type { LocalBranchRetirement, LocalBranchRetirementResult } from "./local-branch-retirement.ts"

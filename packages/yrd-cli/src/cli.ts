@@ -314,7 +314,7 @@ function buildProgram(
       }
       if (options.json) argv.push("--json")
       throw new Error(
-        "drop --local has no preview; it archives at origin, then deletes the local branch.\n" +
+        "drop --local has no preview; it writes the event that keeps the tip at origin, then deletes the local branch.\n" +
           `To apply: ${formatYrdCommand(io, argv, io.cwd)}`,
       )
     }
@@ -387,7 +387,7 @@ function buildProgram(
       const remotes = (await gitIn(retainedStore, undefined, selection, { env })(["remote"])).split("\n")
       if (!remotes.includes("origin")) {
         throw new Error(
-          `${retainedStore}: cold component store has no origin remote, so its branches cannot be archived; nothing was removed`,
+          `${retainedStore}: cold component store has no origin remote, so no published main can prove its branches; nothing was removed`,
         )
       }
     }
@@ -1486,15 +1486,15 @@ function buildProgram(
         "--submodules",
         "compatibility flag for issue cleanup; every registered component store is included by default",
       )
-      .option("--dry-run", "preview issue cleanup without archiving or deleting branches")
+      .option("--dry-run", "preview issue cleanup without writing events or deleting branches")
       .option("--apply", "compatibility flag for issue cleanup; it applies unless --dry-run previews"),
   )
     .addHelpText(
       "after",
       "\nFor a component branch, run from its component author checkout:\n" +
         "  yrd drop <branch> --local --tip <full-oid>\n" +
-        "Plain --local has no preview: it archives at origin, then deletes the local branch.\n" +
-        "To archive at origin and detach the branch while keeping checkout bytes: yrd drop <branch> --local --release-checkout --tip <full-oid> --issue <id> --reason <why> [--apply]\n" +
+        "Plain --local has no preview: it writes the event that keeps the tip at origin, then deletes the local branch.\n" +
+        "To keep the tip with that event and detach the branch while keeping checkout bytes: yrd drop <branch> --local --release-checkout --tip <full-oid> --issue <id> --reason <why> [--apply]\n" +
         "For a queue-backed draft, --retire writes an ending event that keeps the exact tip as a Git parent; it creates no separate branch archive under refs/archive/. The event chain is retained, including after a manual move to refs/yrd-archive.\n",
     )
     .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))

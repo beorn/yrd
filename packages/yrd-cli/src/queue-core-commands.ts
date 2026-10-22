@@ -14,7 +14,6 @@
  */
 
 import { shellQuote } from "git-super/shell-command"
-import { findArchiveRefFor } from "git-super/archive-ref"
 import {
   existsSync,
   appendFileSync,
@@ -47,7 +46,8 @@ import {
   retireComponentBranch,
   retireIssueBranches,
   readBranchProtections,
-  advancedCure,
+  advancedDrop,
+  type AdvancedRecord,
   componentDropHint,
   componentsHoldingBranch,
 } from "./branch-retirement.ts"
@@ -1841,7 +1841,7 @@ export async function coreQueueCommand(
       const mode =
         request.command === "drop-issue"
           ? "Issue cleanup inspects the author store and its own component checkouts, plus any other component this issue names. Another worktree's copy is not searched; yrd env close retires an environment's own branches. --dry-run previews. --apply and --submodules are accepted compatibility flags."
-          : "Local branch cleanup archives the exact tip before deleting its local name."
+          : "Local branch cleanup keeps the exact tip in an event or on the target before deleting its local name."
       const branchIssue = (branch: string, recordedIssue?: string): string | undefined => {
         const mapped = io.branchIssue === undefined ? recordedIssue : io.branchIssue({ branch, recordedIssue })
         return mapped === undefined ? undefined : issueIdentity(mapped)
@@ -2069,21 +2069,36 @@ export async function coreQueueCommand(
             })
             continue
           }
-          const existingArchive = change?.ending === undefined ? undefined : findArchiveRefFor(authorRepo, branch, head)
+          // An archive ref is not custody: only an event that keeps the tip retires it (30683).
+          let advanced: AdvancedRecord | undefined
+          const history = reading.histories.get(branch)
           if (
+            history !== undefined &&
             change?.commit !== undefined &&
             change.commit !== head &&
-            existingArchive === undefined &&
             !(await acceptsMergedLocalRetirement(authorGit, { local: true, head, change }))
           ) {
-            kept.push({
-              ...row,
-              reason: "advanced",
-              detail:
-                `current tip ${head} differs from recorded change tip ${change.commit}` +
-                (await advancedCure(authorGit, authorRepo, branch, head, change.commit, target, targetLabel, true)),
+            // The owner may drop it with a reason; the dropped event then keeps both commits (30683).
+            const unlocked = await advancedDrop(authorGit, {
+              repo: authorRepo,
+              branch,
+              head,
+              history,
+              queue: config.target.branch,
+              target,
+              targetLabel,
+              by: request.by,
+              ...(request.reason === undefined ? {} : { reason: request.reason }),
             })
-            continue
+            if ("detail" in unlocked) {
+              kept.push({
+                ...row,
+                reason: "advanced",
+                detail: `current tip ${head} differs from recorded change tip ${change.commit}${unlocked.detail}`,
+              })
+              continue
+            }
+            advanced = unlocked.advanced
           }
           const result = await retireLocalBranch({
             repo: authorRepo,
@@ -2094,24 +2109,29 @@ export async function coreQueueCommand(
             owner: change?.submitter,
             issue: bound,
             reason: request.reason ?? "explicit local branch cleanup",
-            date: new Date().toISOString().slice(0, 10),
             dryRun: false,
             log,
             protections: async () =>
               (await readBranchProtections(io, { repo: authorRepo, branch, tip: head, issue: bound })).protections,
-            disposition: { kind: "closed", store: eventStore, queue: config.target.branch, target },
+            disposition: {
+              kind: "closed",
+              store: eventStore,
+              queue: config.target.branch,
+              target,
+              ...(advanced === undefined ? {} : { advanced }),
+            },
           })
           const output = {
             ...row,
             reason: result.reason,
             ...(result.detail === undefined ? {} : { detail: result.detail }),
             ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
-            ...(result.outcome === "removed" && result.archiveRef !== undefined
+            // The event that keeps the tip lives on the change chain at origin (30683).
+            ...(result.outcome === "removed" && result.event !== undefined
               ? {
                   recovery:
-                    result.archiveLocation === "origin"
-                      ? `git -C ${shellQuote(authorRepo)} fetch ${shellQuote(eventStore.remote)} ${shellQuote(`${result.archiveRef}:refs/heads/${branch}`)}`
-                      : `git -C ${shellQuote(authorRepo)} branch ${shellQuote(branch)} ${shellQuote(result.archiveRef)}`,
+                    `git -C ${shellQuote(authorRepo)} fetch ${shellQuote(eventStore.remote)} ${shellQuote(result.event.ref)}` +
+                    ` && git -C ${shellQuote(authorRepo)} branch ${shellQuote(branch)} ${shellQuote(head)}`,
                 }
               : {}),
           }
@@ -2209,7 +2229,6 @@ export async function coreQueueCommand(
         options.json,
         dropped,
         `dropped ${request.branch} at ${dropped.head.slice(0, 12)}; ending ${dropped.event.slice(0, 12)} kept its commit` +
-          (dropped.archive === undefined ? "" : `; origin archive ${dropped.archive}`) +
           (dropped.main === undefined ? "" : `; published main ${dropped.main.ref}@${dropped.main.tip}`),
       )
       return 0
@@ -2427,7 +2446,6 @@ export async function coreQueueCommand(
               (one) =>
                 `withdrew ${changeName({ branch: one.branch, head: one.head })} from ${taken.queue}` +
                 ` (record ${one.record.slice(0, 12)}); remote branch ${one.remoteRemoved ? "removed" : "not proven removed"}` +
-                (one.archive === undefined ? "" : `; archive ${one.archive}`) +
                 (one.recovery === undefined ? "" : `; recover locally: ${one.recovery}`),
             )
             .join("\n"),
