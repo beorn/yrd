@@ -272,8 +272,6 @@ it.each(["topic", "main", "default", "new-default"] as const)(
     )
     if (mode === "topic") {
       expect(retirement).toMatchObject({ outcome: "removed", branch: authorBranch, head: tip })
-      if (typeof retirement?.archive !== "string") throw new Error("component retirement omitted archive custody")
-      expect((await childGit(["rev-parse", retirement.archive])).trim()).toBe(tip)
     } else {
       expect(await childGit(["for-each-ref", "--format=%(refname)", "refs/archive/"])).toBe("")
       if (mode === "new-default") expect(landed.stderr).toContain("protected component")

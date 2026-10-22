@@ -357,7 +357,7 @@ it("local retirement keeps protected tips and preserves custody before removing 
   let protectionReads = 0
   expect(
     await retireLocalBranch({ ...input, protections: async () => (++protectionReads <= 2 ? [] : ["lease acquired"]) }),
-  ).toMatchObject({ outcome: "kept", reason: "lease acquired" })
+  ).toMatchObject({ outcome: "kept", reason: expect.stringContaining("lease acquired") })
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(w.target)
   protectionReads = 0
   expect(
@@ -386,12 +386,15 @@ it("local retirement keeps protected tips and preserves custody before removing 
   })
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
   protections = ["held after release"]
-  expect(await retireLocalBranch(input)).toMatchObject({ outcome: "kept", reason: "held after release" })
+  expect(await retireLocalBranch(input)).toMatchObject({
+    outcome: "kept",
+    reason: expect.stringContaining("held after release"),
+  })
   protections = []
   protectionReads = 0
   expect(
     await retireLocalBranch({ ...input, protections: async () => (++protectionReads === 1 ? [] : ["late lease"]) }),
-  ).toMatchObject({ outcome: "kept", reason: "late lease" })
+  ).toMatchObject({ outcome: "kept", reason: expect.stringContaining("late lease") })
 
   const head = await submitCommit(w, branch, "one.txt")
   expect(await retireLocalBranch(input)).toMatchObject({ outcome: "kept", reason: expect.stringContaining("moved") })

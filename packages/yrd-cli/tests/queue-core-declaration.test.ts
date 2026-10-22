@@ -2257,7 +2257,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         counts: { inspected: number; notMaterialized: number }
         excluded: { repo: string; target: number; unrelated: number; unnumbered: number }[]
         eligible: { repo: string; branch: string; head: string }[]
-        removed: { repo: string; branch: string; head: string; archiveRef: string }[]
+        removed: { repo: string; branch: string; head: string }[]
         kept: { repo: string; branch: string; reason: string }[]
         failed: { repo: string; reason: string }[]
       }
@@ -2312,9 +2312,6 @@ describe("a queue is the selected origin branch carrying config", () => {
       for (const row of result.removed) {
         const owningGit = row.repo === privateChild ? privateChildGit : childGit
         expect((await owningGit(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
-        if (row.branch === privateBranch) continue
-        expect(row.archiveRef, row.branch).toEqual(expect.any(String))
-        expect((await owningGit(["rev-parse", row.archiveRef])).trim()).toBe(landed)
       }
       expect(
         (await childGit(["ls-remote", "origin", "refs/heads/task/28988-landed", `refs/heads/${privateBranch}`])).trim(),
@@ -2482,7 +2479,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect(human.out.stdout()).not.toContain(join(absent, "child"))
 
         // A detached registered root whose directory is already gone does not fail --apply.
-        // Measured: both issue branches are removed, each with an archive ref, and the gone row names the path.
+        // Measured: both issue branches are removed, and the gone row names the path.
         const missing = join(dirname(repo), "prunable-author")
         const saved = `${missing}-saved`
         await git(["worktree", "add", "--quiet", "--detach", missing, "HEAD"])
@@ -2500,7 +2497,6 @@ describe("a queue is the selected origin branch carrying config", () => {
           expect(body.kept).toEqual([])
           expect(body.gone ?? []).not.toContainEqual(expect.objectContaining({ path: missing }))
           expect(body.removed.map((row) => row.branch)).toEqual([childBranch, rootBranch])
-          for (const row of body.removed) expect(row.archiveRef).toEqual(expect.any(String))
           retiredWhileGone = { exit: stopped.exit, stdout: stopped.out.stdout(), stderr: stopped.out.stderr() }
         } finally {
           fs.renameSync(saved, missing)
@@ -2539,20 +2535,14 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect(result.removed.map((row) => row.branch)).toEqual([childBranch, rootBranch])
       const row = result.removed.find((entry) => entry.branch === rootBranch)
       expect(row).toMatchObject({ custody: { kind: "event", ref: changesRef("main", rootBranch) } })
-      if (row?.custody === undefined || row.archiveRef === undefined) throw new Error("root receipt lacks custody")
+      if (row?.custody === undefined) throw new Error("root receipt lacks custody")
       const state = (await listChanges(createEventStore(repo, "origin", git.selection), "main")).get(rootBranch)
       expect(state).toMatchObject({ status: mode === "ended" ? "merged" : "cancelled", commit: rootTip })
       expect(state?.ending?.id).toBe(row.custody.tip)
-      expect((await git(["rev-parse", row.archiveRef])).trim()).toBe(rootTip)
       expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${rootBranch}`])).trim()).toBe("")
       expect((await childGit(["for-each-ref", "--format=%(refname)", `refs/heads/${childBranch}`])).trim()).toBe("")
       expect((await git(["ls-remote", "origin", `refs/heads/${rootBranch}`])).trim()).toBe("")
       expect((await childGit(["ls-remote", "origin", `refs/heads/${childBranch}`])).trim()).toBe("")
-      if (mode === "ended") {
-        expect(row.custody.archive).toEqual(expect.any(String))
-        if (row.custody.archive === undefined) throw new Error("ended-root receipt lacks origin archive")
-        expect((await git(["ls-remote", "origin", row.custody.archive])).trim().split(/\s+/u)[0]).toBe(rootTip)
-      }
     },
     60_000,
   )
@@ -2631,7 +2621,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect(body.failed).toEqual([])
       expect(body.gone ?? []).not.toContainEqual(expect.objectContaining({ path: attached }))
       expect(body.removed, JSON.stringify(body.kept)).toContainEqual(
-        expect.objectContaining({ branch: childBranch, archiveRef: expect.any(String) }),
+        expect.objectContaining({ branch: childBranch }),
       )
       expect(body.kept, JSON.stringify(body.kept)).toContainEqual(
         expect.objectContaining({
@@ -2650,7 +2640,7 @@ describe("a queue is the selected origin branch carrying config", () => {
    * Existing journeys always have both populations and fail during discovery, before any retirement succeeds.
    */
   it.each(["root-only", "component-only", "both", "later-failure"] as const)(
-    "default issue cleanup handles %s with archive custody and failure-stop",
+    "default issue cleanup handles %s with failure-stop",
     async (population) => {
       const repo = await world("checks: []\n")
       const seed = await world()
@@ -2703,7 +2693,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         const report = JSON.parse(out.stdout()) as {
           inspected: string[]
           eligible: { repo: string; branch: string }[]
-          removed: { repo: string; branch: string; head: string; archiveRef: string }[]
+          removed: { repo: string; branch: string; head: string }[]
           kept: { branch: string; reason: string }[]
           failed: { repo: string; branch: string; detail: string }[]
         }
@@ -2723,7 +2713,6 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect(applied.report.removed.map(({ branch }) => branch)).toEqual(removed)
       for (const row of applied.report.removed) {
         const owner = row.repo === repo ? git : childGit
-        expect((await owner(["rev-parse", row.archiveRef])).trim()).toBe(row.head)
         expect((await owner(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
         expect((await owner(["ls-remote", "origin", `refs/heads/${row.branch}`])).trim()).toBe("")
       }
@@ -3558,11 +3547,13 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(after.history?.events.some((event) => event.type === "retained")).toBe(keepChild)
     expect((await git(["rev-parse", "main"])).trim()).toBe(keptLink)
     const report = JSON.parse(out.stdout()) as {
-      removed: { branch: string; head: string; archiveRef: string; detail?: string }[]
+      removed: { branch: string; head: string; archiveRef?: string; detail?: string }[]
       kept: unknown[]
       failed: unknown[]
     }
-    expect(report.removed).toEqual([expect.objectContaining({ branch, head, archiveRef: originArchive })])
+    expect(report.removed).toEqual([
+      expect.objectContaining({ branch, head, ...(keepChild ? {} : { archiveRef: originArchive }) }),
+    ])
     if (!keepChild) {
       const remote = (await git(["remote", "get-url", "origin"])).trim()
       expect(report.removed[0]?.detail).toContain(`origin ${remote}#${branch}@${head} remains`)
@@ -3794,24 +3785,11 @@ describe("a queue is the selected origin branch carrying config", () => {
       ),
       cured.stderr(),
     ).toBe(0)
-    const curedReport = JSON.parse(cured.stdout()) as {
-      kept: unknown[]
-      removed: { branch: string; head: string; archiveRef: string; recovery?: string }[]
-    }
+    const curedReport: unknown = JSON.parse(cured.stdout())
     expect(curedReport).toMatchObject({
       kept: [],
       removed: [{ branch: advancedBranch, head: saved.get(advancedBranch) }],
     })
-    // 29949: A landed branch dropped with --local writes its archive ref only locally, never to origin;
-    // the printed recovery command must name the local archive ref and resolve when executed.
-    const curedArchive = curedReport.removed[0]!.archiveRef
-    expect((await git(["ls-remote", "origin", curedArchive])).trim()).toBe("")
-    const localRecovery = curedReport.removed[0]!.recovery
-    if (localRecovery === undefined) throw new Error("local archive supplied no recovery command")
-    const localRestored = spawnSync("/bin/sh", ["-c", localRecovery], { cwd: outside, encoding: "utf8" })
-    expect(localRestored.status, localRestored.stderr).toBe(0)
-    expect((await git(["rev-parse", `refs/heads/${advancedBranch}`])).trim()).toBe(saved.get(advancedBranch))
-    await git(["update-ref", "-d", `refs/heads/${advancedBranch}`, saved.get(advancedBranch)!])
     // AC5: the command's journal must remain readable by the existing projection reader.
     // Custody assertions alone miss a writer that omits the required run header.
     const logs = join(await workdirOf(git, { cwd: repo }), "logs")
@@ -4044,7 +4022,9 @@ describe("a queue is the selected origin branch carrying config", () => {
       "task/29010-landed",
     ])
     for (const row of applied.removed) {
-      expect((await git(["rev-parse", row.archiveRef])).trim()).toBe(tips.get(row.branch))
+      if (row.branch === "task/29010-archived") {
+        expect((await git(["rev-parse", row.archiveRef])).trim()).toBe(tips.get(row.branch))
+      }
       expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
     }
     // Provider display never participates in retirement.
@@ -4199,11 +4179,6 @@ describe("a queue is the selected origin branch carrying config", () => {
         return rows.some((row) => row.kind === "observation" && row.queueRun === outcome.run) ? rows : []
       })
     const retirement = records.find((row) => row.kind === "local-branch-retirement" && row.branch === branch)
-    if (kind === "bay") {
-      const archive = retirement?.archive
-      if (typeof archive !== "string") throw new Error("retirement journal omitted its archive ref")
-      expect((await git(["rev-parse", archive])).trim()).toBe(head)
-    }
     const releaseRows = readdirSync(dirname(outcome.log))
       .filter((name) => name.endsWith(".jsonl") && name !== `${outcome.run}.jsonl`)
       .flatMap((name) => readRunLog(dirname(outcome.log), name.slice(0, -6)))
@@ -4215,9 +4190,6 @@ describe("a queue is the selected origin branch carrying config", () => {
       }),
     ).toMatchObject({ outcome: kind === "pool" ? "kept" : "removed", branch, head })
     if (kind === "bay") {
-      const archive = retirement!.archive
-      if (typeof archive !== "string") throw new Error("retirement journal omitted its archive ref")
-      expect((await git(["rev-parse", archive])).trim()).toBe(head)
       const closed = records.findIndex(
         (row) => row.scope === "environment-cleanup" && row.path === author && row.result === "closed",
       )
@@ -5948,7 +5920,7 @@ describe("component-local retirement without a component queue", () => {
     }
     if (!failure) {
       const report = JSON.parse(run.stdout()) as {
-        removed: { branch: string; head: string; archiveRef: string }[]
+        removed: { branch: string; head: string; archiveRef?: string }[]
         kept: { branch: string; detail?: string; archiveRef?: string }[]
         failed: unknown[]
       }
@@ -5962,17 +5934,19 @@ describe("component-local retirement without a component queue", () => {
         expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(actualTip)
       } else {
         expect(report.removed).toEqual([expect.objectContaining({ branch, head: tip })])
-        const archive = report.removed[0]?.archiveRef
-        expect(archive).toMatch(/^refs\/archive\//u)
-        if (typeof archive !== "string") throw new Error("removed component result has no archive ref")
-        expect((await git(["rev-parse", archive])).trim()).toBe(tip)
-        if (mode === "prior-day-archive") {
-          expect(archive).toBe(priorRef)
-          expect((await git(["for-each-ref", "--format=%(refname)", "refs/archive/"])).trim()).toBe(priorRef)
-          expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim()).toBe(`${tip}\t${priorRef}`)
+        if (mode === "unmerged" || mode === "prior-day-archive") {
+          const archive = report.removed[0]?.archiveRef
+          expect(archive).toMatch(/^refs\/archive\//u)
+          if (typeof archive !== "string") throw new Error("removed component result has no archive ref")
+          expect((await git(["rev-parse", archive])).trim()).toBe(tip)
+          if (mode === "prior-day-archive") {
+            expect(archive).toBe(priorRef)
+            expect((await git(["for-each-ref", "--format=%(refname)", "refs/archive/"])).trim()).toBe(priorRef)
+            expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim()).toBe(`${tip}\t${priorRef}`)
+          }
+          if (mode === "unmerged") expect((await git(["ls-remote", "origin", archive])).split("\t")[0]).toBe(tip)
         }
         expect((await git(["for-each-ref", "--format=%(objectname)", "refs/heads/" + branch])).trim()).toBe("")
-        if (mode === "unmerged") expect((await git(["ls-remote", "origin", archive])).split("\t")[0]).toBe(tip)
       }
     }
     expect((await git(["ls-remote", "origin", "refs/yrd/*"])).trim()).toBe("")

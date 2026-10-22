@@ -139,7 +139,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     return undefined
   }
   const formatKept = (kept: Kept): LocalBranchRetirementResult => {
-    const detail = writtenArchive === undefined && !onTarget ? `${kept.detail}; not archived` : kept.detail
+    const detail = writtenArchive === undefined ? `${kept.detail}; not archived` : kept.detail
     return {
       outcome: "kept",
       ...(writtenArchive === undefined ? {} : { archiveRef: writtenArchive }),

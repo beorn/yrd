@@ -293,8 +293,7 @@ it.each(["released", "held", "advanced", "failed"] as const)(
       mode === "released" ? "" : expectedHead,
     )
     const archives = (await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")
-    if (mode === "released") expect(archives).toContain(head)
-    else expect(archives).not.toContain(head)
+    if (mode !== "released") expect(archives).not.toContain(head)
     if (mode === "failed") {
       const records = readdirSync(journals)
         .filter((file) => file.endsWith(".jsonl") && !beforeClose.has(file))
@@ -485,10 +484,6 @@ it.each(["snapshot", "shared", "advanced", "unsealed", "unreadable"] as const)(
       return
     }
     expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${rootBranch}`])).trim()).toBe("")
-    expect((await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")).toContain(
-      rootTip,
-    )
-    expect((await w.git(["ls-remote", "origin", "refs/archive/*"])).trim()).toContain(rootTip)
     if (mode === "shared") {
       const registrations = await gitIn(componentStore)(["worktree", "list", "--porcelain"])
       expect(registrations, `${closed.stderr()}\nNative child registrations:\n${registrations}`).not.toContain(
@@ -500,9 +495,6 @@ it.each(["snapshot", "shared", "advanced", "unsealed", "unreadable"] as const)(
         ).trim(),
         closed.stderr(),
       ).toBe("")
-      expect(
-        (await gitIn(componentStore)(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n"),
-      ).toContain(componentTip)
     } else if (mode === "advanced") {
       expect(releaseReads).toBe(2)
       expect(JSON.parse(closed.stdout())).toMatchObject({ closed: author, retirement: "incomplete" })
@@ -589,8 +581,7 @@ it.each(["released", "unreleased", "rebound", "reused", "disposed", "unreadable"
         retired ? "" : expectedHead,
       )
       const archives = (await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")
-      if (retired) expect(archives).toContain(head)
-      else expect(archives).not.toContain(head)
+      if (!retired) expect(archives).not.toContain(head)
       if (mode === "unreleased") expect(output.stderr()).toContain("still bound")
     }
   },

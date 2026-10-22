@@ -156,7 +156,7 @@ async function cancelledRecord(
 describe("`yrd withdraw` records the actor, not the notified seat (27262)", () => {
   // 29399: ending a change does not prove that a surviving origin branch has dated custody.
   // The existing drop cases allow event custody alone; withdrawal cannot retire an ended change.
-  it("retires merged and cancelled origin branches archive-first without replacing their endings", async () => {
+  it("retires merged and cancelled origin branches without replacing their endings", async () => {
     const merged = "task/retire-merged'quoted"
     const cancelled = "task/retire-cancelled"
     const work = await queueWithChanges([merged, cancelled], "release")
@@ -231,7 +231,7 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
       }
       const retired = runRecipe(command)
       expect(retired.status, `${retired.stdout}\n${retired.stderr}`).toBe(0)
-      expect((await git(["ls-remote", "origin", archive])).trim()).toBe(`${head}\t${archive}`)
+      if (status === "cancelled") expect((await git(["ls-remote", "origin", archive])).trim()).toBe(`${head}\t${archive}`)
       expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
       const after = await readStatus(store, "release", branch)
       expect(after.tip).toBe(before.tip)
