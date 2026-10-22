@@ -2620,9 +2620,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect(exit, JSON.stringify(brief)).toBe(0)
       expect(body.failed).toEqual([])
       expect(body.gone ?? []).not.toContainEqual(expect.objectContaining({ path: attached }))
-      expect(body.removed, JSON.stringify(body.kept)).toContainEqual(
-        expect.objectContaining({ branch: childBranch }),
-      )
+      expect(body.removed, JSON.stringify(body.kept)).toContainEqual(expect.objectContaining({ branch: childBranch }))
       expect(body.kept, JSON.stringify(body.kept)).toContainEqual(
         expect.objectContaining({
           branch: rootBranch,

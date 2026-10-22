@@ -231,7 +231,9 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
       }
       const retired = runRecipe(command)
       expect(retired.status, `${retired.stdout}\n${retired.stderr}`).toBe(0)
-      if (status === "cancelled") expect((await git(["ls-remote", "origin", archive])).trim()).toBe(`${head}\t${archive}`)
+      if (status === "cancelled") {
+        expect((await git(["ls-remote", "origin", archive])).trim()).toBe(`${head}\t${archive}`)
+      }
       expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
       const after = await readStatus(store, "release", branch)
       expect(after.tip).toBe(before.tip)

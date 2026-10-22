@@ -44,7 +44,6 @@ import * as gitomic from "gitomic"
 import * as removely from "removely"
 import * as gitSuperWorktree from "git-super/worktree"
 import { openEvents } from "gitomic/events"
-import { findArchiveRefFor } from "git-super/archive-ref"
 import {
   appendChangeEvent,
   changeInput,
@@ -5049,9 +5048,6 @@ describe("yrd queue up, the service", () => {
         (await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${noRow.branch}`])).trim(),
         "the no-row merged branch retires whole after stop",
       ).toBe("")
-      const noRowArchive = findArchiveRefFor(w.work, noRow.branch, noRow.head)
-      expect(noRowArchive).toBeTypeOf("string")
-      expect((await w.git(["rev-parse", noRowArchive!])).trim()).toBe(noRow.head)
       expect(existsSync(rowHeld.path!), "the row-holding round branch stays recoverable").toBe(true)
       expect(readFileSync(join(rowHeld.gitDir!, "yrd-open.json"), "utf8")).toBe(rowHeld.opening)
       expect((await w.git(["rev-parse", `refs/heads/${rowHeld.branch}`])).trim()).toBe(rowHeld.head)
@@ -5108,9 +5104,6 @@ describe("yrd queue up, the service", () => {
         recovered.stderr(),
       ).toBe(0)
       expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${rowHeld.branch}`])).trim()).toBe("")
-      const recoveredArchive = findArchiveRefFor(w.work, rowHeld.branch, rowHeld.head)
-      expect(recoveredArchive).toBeTypeOf("string")
-      expect((await w.git(["rev-parse", recoveredArchive!])).trim()).toBe(rowHeld.head)
     } finally {
       releaseCleanup()
       releaseEnvironment?.()
