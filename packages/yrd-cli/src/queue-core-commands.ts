@@ -2106,12 +2106,12 @@ export async function coreQueueCommand(
             reason: result.reason,
             ...(result.detail === undefined ? {} : { detail: result.detail }),
             ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
-            ...(result.outcome === "removed" && result.archiveRef !== undefined
+            // The event that keeps the tip lives on the change chain at origin (30683).
+            ...(result.outcome === "removed" && result.event !== undefined
               ? {
                   recovery:
-                    result.archiveLocation === "origin"
-                      ? `git -C ${shellQuote(authorRepo)} fetch ${shellQuote(eventStore.remote)} ${shellQuote(`${result.archiveRef}:refs/heads/${branch}`)}`
-                      : `git -C ${shellQuote(authorRepo)} branch ${shellQuote(branch)} ${shellQuote(result.archiveRef)}`,
+                    `git -C ${shellQuote(authorRepo)} fetch ${shellQuote(eventStore.remote)} ${shellQuote(result.event.ref)}` +
+                    ` && git -C ${shellQuote(authorRepo)} branch ${shellQuote(branch)} ${shellQuote(head)}`,
                 }
               : {}),
           }
@@ -2209,7 +2209,6 @@ export async function coreQueueCommand(
         options.json,
         dropped,
         `dropped ${request.branch} at ${dropped.head.slice(0, 12)}; ending ${dropped.event.slice(0, 12)} kept its commit` +
-          (dropped.archive === undefined ? "" : `; origin archive ${dropped.archive}`) +
           (dropped.main === undefined ? "" : `; published main ${dropped.main.ref}@${dropped.main.tip}`),
       )
       return 0

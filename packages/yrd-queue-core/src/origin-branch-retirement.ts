@@ -170,12 +170,18 @@ export async function retireOriginBranch(
         ? `local branch ${branch} still points to ${localHead}; inspect it: ${git} show-ref --verify ${shellQuote(branchRef)}`
         : archive !== undefined
           ? `restore branch ${branch} from that custody: ${git} fetch ${shellQuote(store.remote)} ${shellQuote(archive)} && ${git} branch ${shellQuote(branch)} ${shellQuote(head)}`
-          : authority.kind === "published-main"
-            ? `restore branch ${branch} from the published main fetched before retirement: ${git} branch ${shellQuote(branch)} ${shellQuote(head)}`
-            : `obtain ${head} from the caller's published-main custody in ${store.repo} before restoring local branch ${branch}`
+          : authority.kind === "event"
+            ? `restore branch ${branch} from the event that keeps it: ${git} fetch ${shellQuote(store.remote)} ${shellQuote(authority.ref)} && ${git} branch ${shellQuote(branch)} ${shellQuote(head)}`
+            : authority.kind === "published-main"
+              ? `restore branch ${branch} from the published main fetched before retirement: ${git} branch ${shellQuote(branch)} ${shellQuote(head)}`
+              : `obtain ${head} from the caller's published-main custody in ${store.repo} before restoring local branch ${branch}`
     throw new Error(
       `${subject}: ${authority.kind === "event" ? "change" : "published main"} moved during retirement; ${authority.ref} expected ${authority.tip}, found ${authorities.get(authority.ref) ?? "absent"}; ` +
-        (archive === undefined ? "caller established published-main custody; " : `archive ${archive} holds ${head}; `) +
+        (archive !== undefined
+          ? `archive ${archive} holds ${head}; `
+          : authority.kind === "event"
+            ? `event ${authority.tip} keeps ${head}; `
+            : "caller established published-main custody; ") +
         recovery,
     )
   }

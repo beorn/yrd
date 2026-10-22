@@ -1601,7 +1601,7 @@ export async function releaseRetainedCheckouts(
         by: request.by,
         issue: request.issue,
         note: content,
-        localArchive: { ref: rootRow.archiveRef ?? rootArchiveRef, tip: request.tip },
+        local: { tip: request.tip },
       })
     }
   } catch (cause) {
@@ -2279,7 +2279,7 @@ export function createLandedBranchRetirement(
       archiveRef?: string
       /** What held the tip when it was removed: main (ancestry), a recorded landing, or the origin archive (closed). */
       custody?: "main" | "landing" | "origin" | "event"
-      event?: Readonly<{ ref: string; tip: string; archive?: string }>
+      event?: Readonly<{ ref: string; tip: string }>
     }
   > => {
     const { repo, git, target } = store
@@ -2344,7 +2344,7 @@ export function createLandedBranchRetirement(
         reason:
           ending === undefined
             ? `${repo}: retired origin ${candidate.branch}@${candidate.tip}; ${store.targetRef}@${target} contains its exact tip`
-            : `${repo}: retired origin ${candidate.branch}@${candidate.tip}; ending ${ending.event}${ending.archive === undefined ? "" : `; archive ${ending.archive}`}`,
+            : `${repo}: retired origin ${candidate.branch}@${candidate.tip}; ending ${ending.event}`,
       })
     }
     return {
@@ -2356,11 +2356,7 @@ export function createLandedBranchRetirement(
       ...(ending === undefined || store.queue === undefined
         ? {}
         : {
-            event: {
-              ref: changesRef(store.queue, candidate.branch),
-              tip: ending.event,
-              ...(ending.archive === undefined ? {} : { archive: ending.archive }),
-            },
+            event: { ref: changesRef(store.queue, candidate.branch), tip: ending.event },
           }),
     }
   }
