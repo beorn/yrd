@@ -6844,7 +6844,7 @@ function narrateJournalReading(
     ...(journals.unread === undefined || journals.unread === 0
       ? []
       : [
-          `${String(journals.unread)} round(s) in the same window were not read: a selection opens only the runs its rows name, and the rest are counted here rather than read`,
+          `${String(journals.unread)} round(s) in the same window were not read: a selection opens only the runs its rows name, and the rest are counted here rather than read (normal selection scoping — pass 'yrd queue show <branch>' or 'yrd queue show --all' to read other rounds)`,
         ]),
   ]
   if (parts.length > 0) {

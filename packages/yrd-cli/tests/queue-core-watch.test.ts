@@ -328,9 +328,18 @@ describe("event queue observation refusals", () => {
     // The first read rebuilt the facts and persisted the projection (28908),
     // so every read after it finds the projection present: no notice, in
     // either format, however often a watch refreshes.
+    const unlinkedJournal = join(
+      logs,
+      `q-${new Date(Date.now() - 60_000).toISOString().replaceAll(/[-:.]/gu, "")}-unlinked.jsonl`,
+    )
+    writeFileSync(unlinkedJournal, "")
     const human = capture(w.work)
     expect(await coreQueueCommand(w.work, human.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
     expect(human.stderr()).not.toContain("the projection was missing")
+    expect(human.stderr()).toContain(
+      "normal selection scoping — pass 'yrd queue show <branch>' or 'yrd queue show --all' to read other rounds",
+    )
+    rmSync(unlinkedJournal)
     expect(fs.existsSync(artifact)).toBe(true)
     const watched = capture(w.work)
     rendered.onWait = async () => {
