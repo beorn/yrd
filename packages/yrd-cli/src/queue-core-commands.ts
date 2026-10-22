@@ -14,7 +14,6 @@
  */
 
 import { shellQuote } from "git-super/shell-command"
-import { findArchiveRefFor } from "git-super/archive-ref"
 import {
   existsSync,
   appendFileSync,
@@ -2069,11 +2068,10 @@ export async function coreQueueCommand(
             })
             continue
           }
-          const existingArchive = change?.ending === undefined ? undefined : findArchiveRefFor(authorRepo, branch, head)
+          // An archive ref is not custody: only an event that keeps the tip retires it (30683).
           if (
             change?.commit !== undefined &&
             change.commit !== head &&
-            existingArchive === undefined &&
             !(await acceptsMergedLocalRetirement(authorGit, { local: true, head, change }))
           ) {
             kept.push({
@@ -2426,7 +2424,6 @@ export async function coreQueueCommand(
               (one) =>
                 `withdrew ${changeName({ branch: one.branch, head: one.head })} from ${taken.queue}` +
                 ` (record ${one.record.slice(0, 12)}); remote branch ${one.remoteRemoved ? "removed" : "not proven removed"}` +
-                (one.archive === undefined ? "" : `; archive ${one.archive}`) +
                 (one.recovery === undefined ? "" : `; recover locally: ${one.recovery}`),
             )
             .join("\n"),

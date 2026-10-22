@@ -1658,18 +1658,10 @@ export async function retireMergedRootAuthor(
       ? { kind: "merged", base: input.base, target: input.target }
       : { kind: "landed", target: input.target, proof: { kind: "ancestry" } }
   if (withdrawn) {
-    if (await isAncestor(git, tip, input.target)) {
-      disposition = { kind: "landed", target: input.target, proof: { kind: "ancestry" } }
-    } else {
-      const archives = await listRefs("refs/archive/", input.store)
-      const archive = [...archives].find(
-        ([ref, head]) => head === tip && /^refs\/archive\/[^/]+\/[^/]+\/(.+)$/u.exec(ref)?.[1] === branch,
-      )
-      if (archive === undefined || (await readRemoteCommit(git, input.store.remote, archive[0])) !== tip) {
-        throw new Error(`${branch}@${tip}: withdrawn author has no exact same-branch origin archive; local ref kept`)
-      }
-      disposition = { kind: "archived", target: tip, ref: archive[0] }
-    }
+    disposition = (await isAncestor(git, tip, input.target))
+      ? { kind: "landed", target: input.target, proof: { kind: "ancestry" } }
+      : // The withdrawal event keeps the exact tip as a Git parent; its chain is the custody (30683).
+        { kind: "closed", target: input.target, store: input.store, queue: input.queue }
   }
   return retireLocalBranch({
     repo,
@@ -1691,12 +1683,6 @@ export async function retireMergedRootAuthor(
         current.tip !== change.tip
       ) {
         throw new Error(`${branch}: terminal history changed or reopened before root retirement`)
-      }
-      if (
-        disposition.kind === "archived" &&
-        (await readRemoteCommit(git, input.store.remote, disposition.ref)) !== tip
-      ) {
-        throw new Error(`${branch}@${tip}: origin archive custody changed before root retirement`)
       }
       return (await readBranchProtections(input.io, { repo, branch, tip, issue: change.issue })).protections
     },
@@ -1908,9 +1894,6 @@ async function captureAuthorRelease(
               proofs: proof === undefined ? [] : [proof],
             })
             const root = await retireMergedRootAuthor({ ...captured, target: freshTarget, actor })
-            if (root.outcome === "removed" && root.archiveRef !== undefined) {
-              await publishRetirementArchive(store, { branch, archive: root.archiveRef, head: tip })
-            }
             if (root.outcome !== "removed" && !(root.outcome === "kept" && root.reason === "unreached")) {
               input.io.stderr(
                 `yrd: ${branch}@${tip} ${root.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept after release"}: ${root.detail ?? root.reason}\n`,

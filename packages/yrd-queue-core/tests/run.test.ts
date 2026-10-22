@@ -413,7 +413,6 @@ it("local retirement keeps protected tips and preserves custody before removing 
   })
   expect(unavailableOrigin).toMatchObject({ outcome: "failed", reason: expect.stringContaining("missing-origin") })
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(head)
-  expect(await refAt(w.git, unavailableOrigin.archiveRef!)).toBe(head)
   const closed = await retireLocalBranch({
     ...input,
     tip: head,
@@ -429,7 +428,11 @@ it("local retirement keeps protected tips and preserves custody before removing 
   expect(closed.outcome).toBe("removed")
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
   const origin = gitIn(w.remote)
-  expect(await refAt(origin, closed.archiveRef!)).toBe(head)
+  // 30683: the event on origin's chain, not an archive ref, keeps the removed tip.
+  expect(closed.archiveRef).toBeUndefined()
+  expect(closed.event?.ref).toBe(changesRef("main", branch))
+  expect(await refAt(origin, closed.event!.ref)).toBe(closed.event?.tip)
+  expect((await origin(["rev-list", "--parents", "-n", "1", closed.event!.tip])).trim().split(" ")).toContain(head)
   expect(await refAt(origin, `refs/heads/${branch}`)).toBe(head)
   const mergedBranch = "task/closed-but-merged"
   await w.git(["branch", mergedBranch, w.target])
@@ -475,19 +478,18 @@ it("local retirement keeps protected tips and preserves custody before removing 
   })
 })
 
-/** @failure A conflicting archive ref is treated as a durable protection, leaving cleanup with exit 0.
+/** @failure Local retirement removes a branch whose chain stopped keeping its tip, or reports that as removed (30683).
  * @level l2 @consumer the local-retirement journal reader and cleanup caller
- * A closed, unmerged tip still archives; a tip its target holds writes no archive (30683).
+ * The shared chain readback runs last, inside beforeRemove; a mismatch keeps the branch and reports it.
  */
-it("classifies archive custody conflicts as failed while preserving the local branch", async () => {
+it("keeps and reports a local branch whose chain no longer keeps its tip", async () => {
   const w = await world()
   await createWorldEventQueue(w)
-  const branch = "task/archive-conflict"
+  const branch = "task/chain-moved"
   const unmergedTip = await submitCommit(w, branch, "unmerged.txt")
-  const conflictingTip = await submitCommit(w, "task/archive-other", "other.txt")
-  const archiveRef = `refs/archive/2026-10-15/dev-2/${branch}`
-  await w.git(["update-ref", archiveRef, conflictingTip])
-  const log = openLog(join(w.workdir, "retirement-conflict"))
+  const chainRef = changesRef("main", branch)
+  const log = openLog(join(w.workdir, "retirement-chain-moved"))
+  let reads = 0
   const result = await retireLocalBranch({
     repo: w.work,
     git: w.git,
@@ -498,7 +500,11 @@ it("classifies archive custody conflicts as failed while preserving the local br
     date: "2026-10-15",
     issue: "@i/10-yrd/1",
     log,
-    protections: async () => [],
+    protections: async () => {
+      // The third read is beforeRemove's, just ahead of the chain readback.
+      if (++reads === 3) await gitIn(w.remote)(["update-ref", "-d", chainRef])
+      return []
+    },
     disposition: {
       kind: "closed",
       target: w.target,
@@ -506,10 +512,15 @@ it("classifies archive custody conflicts as failed while preserving the local br
       store: createEventStore(w.work, "origin", gitIn(w.work).selection),
     },
   })
-  expect(result).toMatchObject({ outcome: "failed", reason: expect.stringContaining("already holds") })
+  expect(reads).toBe(3)
+  expect(result).toMatchObject({
+    outcome: "kept",
+    reason: expect.stringContaining(`expected ${chainRef} to hold event`),
+  })
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(unmergedTip)
+  expect((await w.git(["for-each-ref", "--format=%(refname)", "refs/archive"])).trim()).toBe("")
   expect(readRunLog(dirname(log.path), log.id)).toContainEqual(
-    expect.objectContaining({ kind: "local-branch-retirement", outcome: "failed", branch, head: unmergedTip }),
+    expect.objectContaining({ kind: "local-branch-retirement", outcome: "kept", branch, head: unmergedTip }),
   )
 })
 
