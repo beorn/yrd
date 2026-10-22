@@ -79,7 +79,7 @@ A change normally goes `draft` → `submitted` → `checking` → `pending` → 
 ```
 yrd submit [branch]             verify the branch against the queue branch, push it, and put it in line
 yrd merge <branch>              check and merge one branch now, ahead of the line, even on a stopped line
-yrd queue withdraw <branch>     take a change out of the line; unmerged work is archived first
+yrd queue withdraw <branch>     take a change out of the line; its ending event keeps the commit
 yrd queue list                  the line, printed once (also `yrd list`)
 yrd watch                       the line, live in the terminal; `?` shows the keys
 yrd queue show <branch>         one branch's changes, newest first, each with its events and ending
@@ -89,7 +89,7 @@ yrd queue up                    a round every 15 seconds; run this under your su
 yrd queue pause | resume        stop or restart checking and merging; submits still wait in line
 yrd check <name...>             run named checks here, now, in a fresh checkout of HEAD
 yrd env open | list | close     a separate checkout of one branch to work in
-yrd drop <branch>               retire a branch whose work is already merged or archived
+yrd drop <branch>               retire a branch whose tip is kept by main or a queue event
 ```
 
 Every command takes `--json` and `--help`, and `yrd <command> --help` lists every option. The details, including queue addresses, submitting submodule commits, and branch cleanup, are in [docs/commands.md](docs/commands.md).

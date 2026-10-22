@@ -21,7 +21,7 @@ yrd queue pause --maintenance <reason> [--notify <name>]
 yrd queue resume [--reason <text>] [--notify <name>]
     lift a pause or a stuck stop; work resumes on the next round
 yrd queue withdraw <branch> [--reason <text>] [--notify <name>]
-    end the open change, archive unmerged work, then delete the unchanged remote branch
+    end the open change, keep its commit in the ending event, then delete the unchanged remote branch
 yrd queue list [filter...] [--latest] [--watch]     the line, once; plain text when piped; also `yrd list`
 yrd watch [filter...]                               the live view: click selects, wheel scrolls, Enter opens detail, `w` shows every draft, `?` shows the keys
 yrd queue stats [--since 3h|<time>|<sha>] [--by submitter|branch]
@@ -34,7 +34,7 @@ yrd env open ([commit] | --bay <name> | --issue <ref>) [--hold [reason]]
     keep a commit checked out, or open a task branch; prints the path
 yrd env list                                        this repository's environments
 yrd env close <path> [--retain <directory>]         run teardown and remove a clean, unlocked environment
-yrd drop ...                                        retire branches whose work is merged or archived; see below
+yrd drop ...                                        retire branches whose tips main or an event keeps; see below
 ```
 
 Every command takes `--json`. `yrd submit` refuses the queue branch itself, since it is not a change. `yrd check` checks out HEAD afresh, so it does not see uncommitted changes. `--notify` on `submit` is a deprecated alias for `--submitter` and prints a warning.
@@ -93,22 +93,23 @@ A change can name an issue, from `--issue` or from a trailer in the branch's com
 
 `yrd queue withdraw fix-login --reason <text>` ends the open change and takes it out of the line.
 
-- Work not already on the published queue branch is first archived at the remote, in a new ref that is read back before the remote branch is deleted.
-- The command prints the archive and a one-line command that restores the branch. Submitting it again re-opens the change.
-- If archiving or deleting fails, the withdrawal still stands and the error is named.
+- The ending event keeps the submitted commit as a Git parent before the unchanged remote branch is deleted. Withdrawal writes no `refs/archive/*` ref.
+- For unmerged work, the command prints a recovery command that fetches the event chain and restores the branch. Submitting it again re-opens the change.
+- If retirement fails after the ending event is published, the withdrawal still stands and the error is named.
 - A withdrawal sends no cancellation notice. `--notify <name>` only records a recipient on the cancellation.
 
 ## Cleaning up branches: `yrd drop`
 
-Cleanup deletes a branch name only when its work is provably kept: on the published queue branch, in a merged queue history, or in an archive ref. Active changes, moved tips and protected branches stay.
+Cleanup deletes a branch name only when its tip is provably kept by the published queue branch or a queue event. It writes no `refs/archive/*` ref. Existing archive refs remain readable. Protected branches and unproven tips stay; an owner can explicitly abandon an advanced local branch as described below.
 
 - `yrd drop --issue <id> --dry-run --json` previews cleanup for one issue, in the root repository and in each submodule checkout the issue names. Leave out `--dry-run` to apply.
 - Selection uses only recorded issue bindings, or a branch-to-issue mapping supplied by a program that embeds Yrd. It never asks an issue tracker and never scans commit messages.
 - A submodule branch qualifies when its exact head is already contained in the submodule's freshly fetched default branch. Child branches go first; a child that is held or fails keeps the root branch for a retry. Submodules with their own queue keep their branches.
 - Reports name the repositories inspected, what was excluded, what was selected, and any store that could not be read. An unreadable store stops retirement.
-- For an already-ended change: `yrd drop fix-login --retire --tip <full-sha> --reason <why>`. It keeps the ending and the exact remote head, then deletes the name. A merged change's unkept head also qualifies when its exact origin archive already exists for this actor and UTC date: Yrd appends a `retained` event and reads back its kept commit before deleting the branch. The original merged ending stays unchanged; this does not claim the extra work was integrated. A failed deletion leaves the retained commit available for retry. Retrying an absent branch still requires the exact archive for the same actor and UTC date. Readers must support `retained` before this writer is used. It also accepts a never-submitted draft whose tip is already on the remote's `main`, or whose merge into `main` would change nothing.
-- From a submodule checkout with no queue of its own, `yrd drop fix-login --retire --tip <full-sha> --reason <why>` uses the superproject's history and the submodule's default branch. An ancestor needs no extra event or origin archive. A nonancestor also qualifies when its conflict-free merge into fresh origin main leaves main's tree unchanged. Yrd archives and reads back that exact commit at origin before removing the branch name; the receipt reports archive custody separately from the main content proof. Content equality does not retain the original commit. Changed tips, conflicts, unintegrated content and current protections keep the branch; custody failures report observed refs and the available recovery source. Retrying an absent ancestor name reports its existing main custody. Issue-selected and automatic cleanup retain their ancestry requirement.
-- To abandon unmerged local work: `yrd drop fix-login --local --tip <full-sha> --reason <why>`. It archives the tip before deleting the local name. Plain `--local` has no preview. Archiving a root commit does not archive its submodule refs. Restore with `git branch fix-login <full-sha>`.
+- For an already-ended change: `yrd drop fix-login --retire --tip <full-sha> --reason <why>`. It keeps the ending and exact remote head before deleting the name. If a merged change's head is not already kept, Yrd appends a `retained` event and reads back its kept commit first. The merged ending stays unchanged; this does not claim the extra work was integrated. A failed deletion leaves that commit available for retry. No archive ref is required. It also accepts a never-submitted draft whose tip is already on the remote's `main`, or whose merge into `main` would change nothing.
+- From a submodule checkout with no queue of its own, `yrd drop fix-login --retire --tip <full-sha> --reason <why>` removes the branch only when the submodule's freshly fetched default branch contains its exact head. Equal content alone does not qualify. Unmerged component branches stay and are reported; a root event cannot keep a commit in another repository.
+- To abandon unmerged local work: `yrd drop fix-login --local --tip <full-sha> --reason <why>`. Its event keeps the tip before the local name goes; a never-submitted branch gets a new event chain. The remote branch stays. Plain `--local` has no preview. The printed recovery command fetches the chain and restores the local branch.
+- If the local tip advanced past a cancelled change, the change's submitter or ending actor, or the declared queue owner, can drop it with a nonempty reason. The event keeps both commits and records the dropped tip, the number of commits missing from the target, and the target ref and commit. A different actor, a missing reason or unreadable ancestry leaves the branch in place. This exception applies only to `--local`.
 - `--apply` and `--submodules` are still accepted and change nothing.
 
 ## Environments: `yrd env`
