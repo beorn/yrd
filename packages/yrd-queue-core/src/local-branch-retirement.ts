@@ -70,13 +70,16 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
   const store = createGitWorktreeStore({ repo, gitProcess: seamProcess(git, repo) })
   let firstProtectionRead = true
   let completedArchive: string | undefined
-  // A merged or landed tip writes no archive (30683), so a rerun after its removal finds only the target holding it.
+  // A tip proven in its target writes no archive (30683): reachability() proves it for a merged disposition and a
+  // landed one proven by ancestry, and a closed one joins once alreadyMerged reads its ancestry. A landing proof
+  // names the tip itself as its target, so it proves no ancestry and keeps its archive until slice 2.
+  const provenOnTarget =
+    disposition.kind === "merged" || (disposition.kind === "landed" && disposition.proof.kind === "ancestry")
+  // A proven tip writes no archive, so a rerun after its removal finds only the target holding it.
   let completedOnTarget = false
   let writtenArchive: string | undefined
   let archiveLocation: "local" | "origin" | undefined
-  // A tip in its target writes no archive (30683): reachability() proves it for merged and
-  // landed dispositions, and a closed one joins once alreadyMerged reads its ancestry.
-  let onTarget = disposition.kind === "merged" || disposition.kind === "landed"
+  let onTarget = provenOnTarget
   const protection = async (): Promise<Kept | undefined> => {
     const firstRead = firstProtectionRead
     firstProtectionRead = false
@@ -87,7 +90,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     ) {
       completedArchive = findArchiveRefFor(repo, branch, tip)
       if (completedArchive === undefined) {
-        completedOnTarget = true
+        completedOnTarget = provenOnTarget
       } else if ((await refAt(git, completedArchive)) === tip) {
         writtenArchive = completedArchive
         archiveLocation = "local"

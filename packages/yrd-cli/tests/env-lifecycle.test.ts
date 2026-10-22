@@ -293,7 +293,8 @@ it.each(["released", "held", "advanced", "failed"] as const)(
       mode === "released" ? "" : expectedHead,
     )
     const archives = (await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")
-    if (mode !== "released") expect(archives).not.toContain(head)
+    // A released merged root author is removed with no archive ref (30683); the other modes never archive.
+    expect(archives).not.toContain(head)
     if (mode === "failed") {
       const records = readdirSync(journals)
         .filter((file) => file.endsWith(".jsonl") && !beforeClose.has(file))
@@ -581,7 +582,8 @@ it.each(["released", "unreleased", "rebound", "reused", "disposed", "unreadable"
         retired ? "" : expectedHead,
       )
       const archives = (await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")
-      if (!retired) expect(archives).not.toContain(head)
+      // A retired merged root author is removed with no archive ref (30683); an unretired one never archives.
+      expect(archives).not.toContain(head)
       if (mode === "unreleased") expect(output.stderr()).toContain("still bound")
     }
   },

@@ -4020,9 +4020,8 @@ describe("a queue is the selected origin branch carrying config", () => {
       "task/29010-landed",
     ])
     for (const row of applied.removed) {
-      if (row.branch === "task/29010-archived") {
-        expect((await git(["rev-parse", row.archiveRef])).trim()).toBe(tips.get(row.branch))
-      }
+      // A landing proof names the tip itself as its target, so it proves no ancestry and keeps its archive (30683).
+      expect((await git(["rev-parse", row.archiveRef])).trim()).toBe(tips.get(row.branch))
       expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
     }
     // Provider display never participates in retirement.
