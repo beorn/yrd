@@ -110,6 +110,7 @@ export {
 export { Conflict } from "./git.ts"
 export type { Event } from "./git.ts"
 export type {
+  AdvancedDrop,
   AppliedIssueEffect,
   CancellationReason,
   ChangeEventType,

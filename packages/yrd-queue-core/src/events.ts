@@ -88,6 +88,9 @@ export const EVENT_TRAILERS = {
   gitlinks: "Gitlinks",
   componentAuthors: "Component-Authors",
   issueEffect: "Issue-Effect",
+  tip: "Tip",
+  uniqueCommits: "Unique-Commits",
+  target: "Target",
 } as const
 const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 /** Only the run path that atomically publishes the target may write merged with this producer. */
@@ -202,6 +205,8 @@ export type EventChange = Readonly<{
     reason: string
   }>
   ignored?: Readonly<{ reason: string; by: string }>
+  /** The owner's drop of a head past its recorded commit, as the ending that dropped it records it (30683). */
+  advancedDrop?: AdvancedDrop
   deferred?: Readonly<{
     id: string
     check: string
@@ -293,7 +298,49 @@ type ChangeInputDetails = Readonly<{
   run?: string
   landedGitlinks?: readonly CommitGitlink[]
   componentAuthors?: readonly ComponentAuthor[]
+  advanced?: AdvancedDrop
 }>
+
+/**
+ * The owner's drop of a head that advanced past its recorded commit (30683): that head, how many of its commits
+ * the target lacked, and the target ref at the commit that was read. The owner's reason is the event's content.
+ */
+export type AdvancedDrop = Readonly<{
+  tip: string
+  uniqueCommits: number
+  target: Readonly<{ ref: string; tip: string }>
+}>
+
+/** An advanced drop's three trailers go together, on a dropped event that keeps both its commits (30683). */
+function readAdvancedDrop(event: EventShape): AdvancedDrop | undefined {
+  const tip = prop(event, EVENT_TRAILERS.tip)
+  const count = prop(event, EVENT_TRAILERS.uniqueCommits)
+  const target = prop(event, EVENT_TRAILERS.target)
+  if (tip === undefined && count === undefined && target === undefined) return undefined
+  const at = target?.lastIndexOf("@") ?? -1
+  const ref = target?.slice(0, Math.max(at, 0))
+  const targetTip = target?.slice(at + 1)
+  if (
+    event.type !== "cancelled" ||
+    prop(event, EVENT_TRAILERS.reason) !== "dropped" ||
+    tip === undefined ||
+    !COMMIT_OID.test(tip) ||
+    !event.links.includes(tip) ||
+    tip === keptCommit(event) ||
+    count === undefined ||
+    !/^[1-9][0-9]{0,15}$/u.test(count) ||
+    ref === undefined ||
+    !ref.startsWith("refs/") ||
+    targetTip === undefined ||
+    !COMMIT_OID.test(targetTip)
+  ) {
+    throw new Error(
+      `event ${event.id} has an invalid advanced drop: Tip:, Unique-Commits: and Target: <ref>@<sha> go together ` +
+        `on a dropped cancelled event that keeps both Commit: and Tip:`,
+    )
+  }
+  return { tip, uniqueCommits: Number(count), target: { ref, tip: targetTip } }
+}
 
 /** Landing proof is deletion authority, so malformed persisted pins must never become an empty list. */
 function checkedLandedGitlinks(value: unknown): readonly CommitGitlink[] {
@@ -513,6 +560,24 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   if (details.warningKind !== undefined && type !== "admission-warning") {
     throw new TypeError("Warning-Kind: belongs on admission-warning")
   }
+  if (details.advanced !== undefined) {
+    const { tip, uniqueCommits, target } = details.advanced
+    if (type !== "cancelled" || details.reason !== "dropped") {
+      throw new TypeError("Tip: belongs on a dropped cancelled event")
+    }
+    if (details.commit === undefined || !COMMIT_OID.test(tip) || tip === details.commit) {
+      throw new TypeError("Tip: must name the advanced head beside a different Commit:")
+    }
+    if (!Number.isSafeInteger(uniqueCommits) || uniqueCommits < 1) {
+      throw new TypeError("Unique-Commits: must count at least one commit the target lacks")
+    }
+    if (!target.ref.startsWith("refs/") || !COMMIT_OID.test(target.tip)) {
+      throw new TypeError("Target: must name <ref>@<commit oid>")
+    }
+    if (details.content === undefined || details.content.trim() === "") {
+      throw new TypeError("an advanced drop needs the owner's reason as its content")
+    }
+  }
   const props: [string, string][] = [
     [EVENT_TRAILERS.queue, details.queueTip],
     [EVENT_TRAILERS.time, details.at.toISOString()],
@@ -537,6 +602,14 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   }
   if (details.warningKind !== undefined) props.push([EVENT_TRAILERS.warningKind, details.warningKind])
   if (details.run !== undefined) props.push([EVENT_TRAILERS.run, details.run])
+  if (details.advanced !== undefined) {
+    const { tip, uniqueCommits, target } = details.advanced
+    props.push(
+      [EVENT_TRAILERS.tip, tip],
+      [EVENT_TRAILERS.uniqueCommits, String(uniqueCommits)],
+      [EVENT_TRAILERS.target, `${target.ref}@${target.tip}`],
+    )
+  }
   if (details.landedGitlinks !== undefined) {
     if (type !== "merged") throw new TypeError("Gitlinks: belongs on merged")
     props.push([EVENT_TRAILERS.gitlinks, JSON.stringify(checkedLandedGitlinks(details.landedGitlinks))])
@@ -549,7 +622,10 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   return {
     type,
     props,
-    ...(details.commit === undefined ? {} : { keeps: [details.commit] }),
+    // An advanced drop keeps the recorded commit and the advanced head (30683).
+    ...(details.commit === undefined
+      ? {}
+      : { keeps: details.advanced === undefined ? [details.commit] : [details.commit, details.advanced.tip] }),
     ...(details.title === undefined ? {} : { title: details.title }),
     ...(details.content === undefined ? {} : { content: details.content }),
   }
@@ -952,6 +1028,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         run: _previousRun,
         landedGitlinks: _previousGitlinks,
         componentAuthors: _previousComponentAuthors,
+        advancedDrop: _previousAdvancedDrop,
         ...fresh
       } = next
       return {
@@ -1043,13 +1120,17 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
     case "failed":
     case "cancelled": {
       const reason = prop(event, "Reason")
+      // An advanced drop describes only the ending that records it (30683).
+      const advancedDrop = readAdvancedDrop(event)
+      const { advancedDrop: _previousAdvancedDrop, ...ended } = next
+      const advancedRecord = advancedDrop === undefined ? {} : { advancedDrop }
       // Dropping a branch records the last head being deleted even when no
       // change was open. This is also the first event for an unsubmitted branch.
       if (!isOpen(state.status) && event.type === "cancelled" && reason === "dropped") {
         // A branch cleanup cannot turn a landed change back into cancelled.
         if (state.status === "merged") return endingRefusal(state, event)
         return {
-          ...next,
+          ...ended,
           status: "cancelled",
           commit: state.commit ?? keptCommit(event),
           issue: undefined,
@@ -1059,6 +1140,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
           lastNotifiable: { kind: "cancelled", id: event.id },
           endedAt: at,
           reason,
+          ...advancedRecord,
         }
       }
       if (!isOpen(state.status)) return endingRefusal(state, event)
@@ -1094,12 +1176,13 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         if (reason === "dropped" || reason === "deleted") keptCommit(event)
       }
       return {
-        ...next,
+        ...ended,
         status: event.type,
         ending: { kind: event.type, id: event.id },
         lastNotifiable: { kind: event.type, id: event.id },
         endedAt: at,
         reason,
+        ...advancedRecord,
         ...(prop(event, EVENT_TRAILERS.run) !== undefined
           ? { run: prop(event, EVENT_TRAILERS.run) }
           : state.run !== undefined
@@ -1257,8 +1340,9 @@ export type DropRequest = Readonly<{
   recipient?: string
   issue?: string
   /** Local retirement of this exact tip: an event on origin's chain keeps it; the remote branch and
-   * candidate refs stay intact (30683). */
-  local?: Readonly<{ tip: string }>
+   * candidate refs stay intact (30683). `advanced` is the owner's drop of a tip past the recorded
+   * commit: its dropped event keeps both commits and records what the target lacks. */
+  local?: Readonly<{ tip: string; advanced?: Omit<AdvancedDrop, "tip"> }>
   /** Retire this exact origin tip without changing an already-terminal history. */
   retire?: Readonly<{ tip: string }>
   /** Optional host policy; absence means a standalone caller with no host policy. */
@@ -2854,6 +2938,15 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
   if (local !== undefined && !COMMIT_OID.test(local.tip)) {
     throw new TypeError(`local retirement ${branch}: expected a full commit oid, received ${JSON.stringify(local.tip)}`)
   }
+  const advanced = local?.advanced
+  if (
+    advanced !== undefined &&
+    (state.commit === undefined || state.commit === local?.tip || state.status === "merged" || !request.note?.trim())
+  ) {
+    throw new Error(
+      `${branch}: an advanced drop needs an unmerged change whose recorded commit differs from ${local?.tip}, and a nonempty --reason`,
+    )
+  }
   const fetchRefs = store.backend.fetchRefs
   if (fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs for dropped branch commit")
   const mainRef = `refs/heads/${queue}`
@@ -2910,6 +3003,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
     const merged = state.status === "merged" && state.ending.kind === "merged"
     if (
       !keptByLink &&
+      advanced === undefined &&
       !(merged && request.retire !== undefined) &&
       !(await acceptsMergedLocalRetirement(git, { local: local !== undefined, head, change: state }))
     ) {
@@ -3026,7 +3120,8 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
     return { queue, branch, head, ref, event: state.ending.id, ...(await retire(selectedTip, head)) }
   }
   const at = new Date()
-  const keptHead = retiringEnded && local === undefined ? state.commit : head
+  // An advanced drop's Commit: stays the recorded commit; its Tip: is the head it also keeps (30683).
+  const keptHead = advanced !== undefined || (retiringEnded && local === undefined) ? state.commit : head
   if (keptHead === undefined) throw new Error(`${ref} in ${store.repo}: dropped change has no kept head`)
   const input = changeInput("cancelled", {
     queueTip,
@@ -3037,6 +3132,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
     ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
     title: `dropped ${branch}`,
     ...(note === undefined ? {} : { content: note }),
+    ...(advanced === undefined || head === undefined ? {} : { advanced: { ...advanced, tip: head } }),
   })
   const planned =
     selectedTip === null
@@ -3066,7 +3162,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
   })
   const written = result.events.findLast((event) => event.type === "cancelled")?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: dropped event was not written`)
-  if (local !== undefined) return { queue, branch, ref, event: written, head: keptHead }
+  if (local !== undefined) return { queue, branch, ref, event: written, head: local.tip }
   if (retiringEnded && head !== undefined) {
     return { queue, branch, ref, event: written, head: keptHead, ...(await retire(written, head)) }
   }

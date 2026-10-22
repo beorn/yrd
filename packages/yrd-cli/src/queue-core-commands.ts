@@ -46,7 +46,8 @@ import {
   retireComponentBranch,
   retireIssueBranches,
   readBranchProtections,
-  advancedCure,
+  advancedDrop,
+  type AdvancedRecord,
   componentDropHint,
   componentsHoldingBranch,
 } from "./branch-retirement.ts"
@@ -2069,19 +2070,35 @@ export async function coreQueueCommand(
             continue
           }
           // An archive ref is not custody: only an event that keeps the tip retires it (30683).
+          let advanced: AdvancedRecord | undefined
+          const history = reading.histories.get(branch)
           if (
+            history !== undefined &&
             change?.commit !== undefined &&
             change.commit !== head &&
             !(await acceptsMergedLocalRetirement(authorGit, { local: true, head, change }))
           ) {
-            kept.push({
-              ...row,
-              reason: "advanced",
-              detail:
-                `current tip ${head} differs from recorded change tip ${change.commit}` +
-                (await advancedCure(authorGit, authorRepo, branch, head, change.commit, target, targetLabel, true)),
+            // The owner may drop it with a reason; the dropped event then keeps both commits (30683).
+            const unlocked = await advancedDrop(authorGit, {
+              repo: authorRepo,
+              branch,
+              head,
+              history,
+              queue: config.target.branch,
+              target,
+              targetLabel,
+              by: request.by,
+              ...(request.reason === undefined ? {} : { reason: request.reason }),
             })
-            continue
+            if ("detail" in unlocked) {
+              kept.push({
+                ...row,
+                reason: "advanced",
+                detail: `current tip ${head} differs from recorded change tip ${change.commit}${unlocked.detail}`,
+              })
+              continue
+            }
+            advanced = unlocked.advanced
           }
           const result = await retireLocalBranch({
             repo: authorRepo,
@@ -2097,7 +2114,13 @@ export async function coreQueueCommand(
             log,
             protections: async () =>
               (await readBranchProtections(io, { repo: authorRepo, branch, tip: head, issue: bound })).protections,
-            disposition: { kind: "closed", store: eventStore, queue: config.target.branch, target },
+            disposition: {
+              kind: "closed",
+              store: eventStore,
+              queue: config.target.branch,
+              target,
+              ...(advanced === undefined ? {} : { advanced }),
+            },
           })
           const output = {
             ...row,

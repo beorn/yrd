@@ -1563,6 +1563,41 @@ describe("ADR-0016 event fold", () => {
     expect(evolve(dropped, event("merged", "d".repeat(40), [["Commit", A]], [A])).status).toBe("merged")
   })
 
+  // 30683 (b): the owner's drop of an advanced head records its tip, how many commits its target lacks, and that target.
+  it("writes, folds and reads back an advanced drop's Tip:, Unique-Commits: and Target:", () => {
+    const advanced = { tip: B, uniqueCommits: 2, target: { ref: "refs/heads/main", tip: "e".repeat(40) } }
+    const details = {
+      queueTip: A,
+      at: new Date("2026-10-22T09:00:00.000Z"),
+      commit: A,
+      reason: "dropped",
+      by: "@dev/7",
+      content: "superseded by 30704",
+      advanced,
+    }
+    const written = changeInput("cancelled", details)
+    expect(written.keeps).toEqual([A, B])
+    expect(written.content).toBe("superseded by 30704")
+    const opened = evolve(initial, event("opened", "1".repeat(40), [["Commit", A]], [A]))
+    const props = written.props ?? []
+    const dropped = evolve(opened, event(written.type, "2".repeat(40), props, [...(written.keeps ?? [])]))
+    expect(dropped).toMatchObject({ status: "cancelled", reason: "dropped", commit: A, advancedDrop: advanced })
+    // A new change on the branch does not inherit it.
+    expect(evolve(dropped, event("opened", "3".repeat(40), [["Commit", B]], [B])).advancedDrop).toBeUndefined()
+    // The three trailers go together, on a dropped event that keeps both commits.
+    const without = (key: string) => props.filter(([name]) => name !== key)
+    expect(() => evolve(opened, event("cancelled", "4".repeat(40), without("Unique-Commits"), [A, B]))).toThrow(
+      /advanced drop/,
+    )
+    expect(() => evolve(opened, event("cancelled", "4".repeat(40), props, [A]))).toThrow(/advanced drop/)
+    // The owner's reason is the content, and only a dropped event carries the record.
+    expect(() => changeInput("cancelled", { ...details, content: " " })).toThrow(/reason/)
+    expect(() => changeInput("cancelled", { ...details, reason: "withdrawn" })).toThrow(/dropped/)
+    expect(() => changeInput("cancelled", { ...details, advanced: { ...advanced, uniqueCommits: 0 } })).toThrow(
+      /Unique-Commits/,
+    )
+  })
+
   // @failure a malformed drop event after a landing turns a merged change into cancelled (26223).
   it("refuses a dropped ending after merge without changing the merged projection", () => {
     const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))

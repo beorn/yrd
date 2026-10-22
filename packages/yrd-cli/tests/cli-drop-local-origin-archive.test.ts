@@ -245,6 +245,8 @@ it("names the component that holds a branch absent in the superproject, and fail
   await child(["commit", "--quiet", "-m", "component work"])
   const tip = (await child(["rev-parse", "HEAD"])).trim()
   await child(["checkout", "--quiet", "--detach"])
+  // The work landed on the component's main, so that published main keeps the exact tip (30683).
+  await child(["push", "--quiet", "origin", `${tip}:refs/heads/main`])
 
   const misdirected = capture(repo)
   const code = await runYrdProcess(
@@ -261,7 +263,8 @@ it("names the component that holds a branch absent in the superproject, and fail
   expect(report.detail).not.toContain("already gone")
   expect((await child(["rev-parse", "refs/heads/task/component-only"])).trim()).toBe(tip)
 
-  // The hint is a cure: the printed command, run as printed in the component, retires the branch with custody.
+  // The hint is a cure: the printed command, run as printed in the component, retires the branch its published
+  // main keeps, and writes no archive (30683).
   const printed = report.detail.split("retire it there: ")[1]!.split("; this command resolved")[0]!
   const [cd, command] = printed.split(" && ")
   const cwd = [...cd!.matchAll(/'([^']*)'/gu)].map((match) => match[1]!)[0]!
@@ -271,8 +274,7 @@ it("names the component that holds a branch absent in the superproject, and fail
   const cureCode = await runYrdProcess(["bun", "yrd", ...argv], cure.io)
   expect(cureCode, cure.stderr()).toBe(0)
   expect((await child(["for-each-ref", "refs/heads/task/component-only"])).trim()).toBe("")
-  const archived = await seed(["ls-remote", childRemote, "refs/archive/*/task/component-only"])
-  expect(archived, cure.stdout()).toContain(`${tip}\trefs/archive/`)
+  expect(await seed(["ls-remote", childRemote, "refs/archive/*"]), cure.stdout()).toBe("")
 
   // A ref nested under the name is not the named branch: absent everywhere, still the no-op.
   await child(["branch", "task/parent/leaf", tip])

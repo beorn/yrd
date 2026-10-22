@@ -36,6 +36,8 @@ import {
   retireOriginBranch,
   remoteHead,
   remoteUrl,
+  yrdQueueRunnerDeclarations,
+  type AdvancedDrop,
   type Git,
   type GitSelection,
   type LocalBranchRetirement,
@@ -618,24 +620,19 @@ export async function retireIssueBranches(
             ([ref, tip]) => tip === head && /^refs\/archive\/[^/]+\/[^/]+\/(.+)$/u.exec(ref)?.[1] === branch,
           )
           let disposition: LocalBranchRetirement["disposition"] | undefined
-          if (landing !== undefined) {
-            const ending = landing.state.ending
-            if (ending === undefined) {
-              failed.push({
-                ...row,
-                reason: "unreadable",
-                detail: `merged segment ${landing.opened} has no ending event`,
-              })
-              continue
-            }
-            disposition = {
-              kind: "landed",
-              target: head,
-              proof: { kind: "landing", event: ending.id, path: "", tip: head },
-            }
-          } else if (archive !== undefined) {
-            disposition = { kind: "archived", target: head, ref: archive[0] }
-          } else if (existingArchive !== undefined) {
+          if (landing !== undefined && landing.state.ending === undefined) {
+            failed.push({
+              ...row,
+              reason: "unreadable",
+              detail: `merged segment ${landing.opened} has no ending event`,
+            })
+            continue
+          }
+          // A landed head keeps its report label; a head an earlier version archived is now kept like any closed one.
+          const label = landing === undefined ? "closed" : "landed"
+          if (landing !== undefined || archive !== undefined || existingArchive !== undefined) {
+            // An event on origin's chain keeps the exact head before the local name goes: a landed head's
+            // retained event, or the dropped event of a head already archived (30683).
             disposition = { kind: "closed", target: custody.target, store: eventStore, queue: config.target.branch }
           } else if (!(await isAncestor(candidate.git, head, custody.target))) {
             kept.push({
@@ -654,7 +651,7 @@ export async function retireIssueBranches(
               actor: request.by,
               owner: change?.submitter,
               issue,
-              reason: request.reason ?? disposition.kind,
+              reason: request.reason ?? label,
               date: new Date().toISOString().slice(0, 10),
               dryRun: !request.apply,
               log,
@@ -665,12 +662,12 @@ export async function retireIssueBranches(
             const detail = origin
               ? `origin ${candidate.remote}#${branch}@${candidate.originHead} remains; this custody path selects only the local name${result.detail === undefined ? "" : `; ${result.detail}`}` +
                 (needsExplicitRetention
-                  ? `; retire origin explicitly with ${formatYrdCommand(io, ["drop", branch, "--retire", "--tip", head, "--reason", "<why>", "--submitter", request.by], repo)} after preserving the exact head in its generated origin archive`
+                  ? `; retire origin explicitly with ${formatYrdCommand(io, ["drop", branch, "--retire", "--tip", head, "--reason", "<why>", "--submitter", request.by], repo)}; the retained event keeps the exact head`
                   : "")
               : result.detail
             const output = {
               ...row,
-              reason: result.outcome === "removed" || result.outcome === "eligible" ? disposition.kind : result.reason,
+              reason: result.outcome === "removed" || result.outcome === "eligible" ? label : result.reason,
               ...(detail === undefined ? {} : { detail }),
               ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
             }
@@ -2266,4 +2263,79 @@ export async function advancedCure(
     `git -C ${shellQuote(repo)} update-ref ${shellQuote(`refs/heads/${branch}`)} ${shellQuote(recorded)} ${shellQuote(head)}, then ` +
     (local ? `rerun with --tip ${recorded}` : "rerun this drop")
   )
+}
+
+/** What the owner's advanced drop records beside the head it keeps: the recorded commit, the count and the target. */
+export type AdvancedRecord = Readonly<{ recorded: string } & Omit<AdvancedDrop, "tip">>
+
+/**
+ * The owner's local drop of a branch that advanced past its recorded change tip (30683). Only the change's
+ * submitter, the seat that ended it, or the seat that owns its queue may drop it, with a nonempty reason, and only
+ * when the target provably lacks commits the tip holds. Anything else keeps the advanced refusal and its cure, and
+ * an unknown ancestry or count refuses by name.
+ */
+export async function advancedDrop(
+  git: Git,
+  input: Readonly<{
+    repo: string
+    branch: string
+    head: string
+    history: Readonly<{
+      state: EventChange
+      events: readonly Readonly<{ id: string; props: readonly (readonly [string, string])[] }>[]
+    }>
+    queue: string
+    target: string
+    targetLabel: string
+    by: string
+    reason?: string
+  }>,
+): Promise<Readonly<{ advanced: AdvancedRecord }> | Readonly<{ detail: string }>> {
+  const { state, events } = input.history
+  const recorded = state.commit
+  if (recorded === undefined) throw new Error(`${input.branch}: an advanced drop needs a recorded change tip`)
+  const refusal = async (): Promise<Readonly<{ detail: string }>> => ({
+    detail: await advancedCure(
+      git,
+      input.repo,
+      input.branch,
+      input.head,
+      recorded,
+      input.target,
+      input.targetLabel,
+      true,
+    ),
+  })
+  let held: boolean
+  try {
+    held = await isAncestor(git, input.head, input.target)
+  } catch {
+    return refusal()
+  }
+  const ending = events.find((event) => event.id === state.ending?.id)
+  const owners = [
+    state.submitter,
+    ending?.props.find(([key]) => key === "By")?.[1],
+    ...yrdQueueRunnerDeclarations.filter((row) => row.queue.base === input.queue).map((row) => row.owner),
+  ]
+  if (held || state.status === "merged" || !owners.includes(input.by)) return refusal()
+  if (input.reason === undefined || input.reason.trim() === "") {
+    return {
+      detail: `${(await refusal()).detail}; or, as its owner, drop it with --reason <why>, which its dropped event records`,
+    }
+  }
+  let uniqueCommits: number
+  try {
+    uniqueCommits = Number((await git(["rev-list", "--count", `${input.target}..${input.head}`])).trim())
+  } catch (error) {
+    return {
+      detail: `; how many commits ${input.targetLabel} lacks is unknown (${error instanceof Error ? error.message : String(error)})`,
+    }
+  }
+  if (!Number.isSafeInteger(uniqueCommits) || uniqueCommits < 1) {
+    return { detail: `; ${input.targetLabel} does not hold ${input.head}, yet counts no commit it lacks` }
+  }
+  return {
+    advanced: { recorded, uniqueCommits, target: { ref: `refs/heads/${input.queue}`, tip: input.target } },
+  }
 }
