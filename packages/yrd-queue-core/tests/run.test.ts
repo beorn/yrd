@@ -370,22 +370,21 @@ it("local retirement keeps protected tips and preserves custody before removing 
     }),
   ).toMatchObject({ outcome: "failed", reason: "lease authority unreadable under lock" })
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(w.target)
+  const archives = async (): Promise<string> =>
+    (await w.git(["for-each-ref", "--format=%(refname)", "refs/archive"])).trim()
   const merged = await retireLocalBranch(input)
   expect(merged.outcome).toBe("removed")
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
-  expect(await refAt(w.git, merged.archiveRef!)).toBe(w.target)
+  // 30683: a tip its target holds is removed with no archive ref.
+  expect(merged.archiveRef).toBeUndefined()
+  expect(await archives()).toBe("")
 
   // Native release and queue cleanup can observe the same completed retirement.
   expect(await retireLocalBranch({ ...input, actor: "@dev/9", date: "2026-10-15" })).toMatchObject({
     outcome: "removed",
-    archiveRef: merged.archiveRef,
-    detail: `already retired: ${merged.archiveRef} holds ${w.target}; this run deleted no ref`,
+    detail: `already retired: ${w.target} holds ${w.target} and the branch is absent; this run deleted no ref`,
   })
-  expect(await refAt(w.git, merged.archiveRef!)).toBe(w.target)
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
-  expect(await retireLocalBranch({ ...input, branch: "task/absent-without-custody" })).toMatchObject({
-    outcome: "kept",
-  })
   protections = ["held after release"]
   expect(await retireLocalBranch(input)).toMatchObject({ outcome: "kept", reason: "held after release" })
   protections = []
@@ -442,14 +441,13 @@ it("local retirement keeps protected tips and preserves custody before removing 
     disposition: { kind: "closed", target: w.target, queue: "main", store: queueStore },
   })
   expect(localOnly.outcome).toBe("removed")
-  expect(await refAt(w.git, localOnly.archiveRef!)).toBe(w.target)
-  expect(await refAt(origin, localOnly.archiveRef!)).toBeUndefined()
+  expect(localOnly.archiveRef).toBeUndefined()
+  expect(await archives()).not.toContain(mergedBranch)
   expect(await refAt(origin, queueRef("main"))).toBe(queueBefore)
   const rows = readRunLog(dirname(log.path), log.id)
   expect(rows.find((row) => row.kind === "local-branch-retirement" && row.actor === "@dev/9")).toMatchObject({
     outcome: "removed",
-    archive: merged.archiveRef,
-    detail: `already retired: ${merged.archiveRef} holds ${w.target}; this run deleted no ref`,
+    detail: `already retired: ${w.target} holds ${w.target} and the branch is absent; this run deleted no ref`,
   })
   expect(rows.filter((row) => row.kind === "local-branch-retirement").map((row) => row.outcome)).toEqual([
     "kept",
@@ -457,7 +455,6 @@ it("local retirement keeps protected tips and preserves custody before removing 
     "failed",
     "removed",
     "removed",
-    "kept",
     "kept",
     "kept",
     "kept",
@@ -477,13 +474,14 @@ it("local retirement keeps protected tips and preserves custody before removing 
 
 /** @failure A conflicting archive ref is treated as a durable protection, leaving cleanup with exit 0.
  * @level l2 @consumer the local-retirement journal reader and cleanup caller
+ * A closed, unmerged tip still archives; a tip its target holds writes no archive (30683).
  */
 it("classifies archive custody conflicts as failed while preserving the local branch", async () => {
   const w = await world()
   await createWorldEventQueue(w)
   const branch = "task/archive-conflict"
+  const unmergedTip = await submitCommit(w, branch, "unmerged.txt")
   const conflictingTip = await submitCommit(w, "task/archive-other", "other.txt")
-  await w.git(["branch", branch, w.target])
   const archiveRef = `refs/archive/2026-10-15/dev-2/${branch}`
   await w.git(["update-ref", archiveRef, conflictingTip])
   const log = openLog(join(w.workdir, "retirement-conflict"))
@@ -491,19 +489,24 @@ it("classifies archive custody conflicts as failed while preserving the local br
     repo: w.work,
     git: w.git,
     branch,
-    tip: w.target,
+    tip: unmergedTip,
     actor: "@dev/2",
-    reason: "merged",
+    reason: "issue closed",
     date: "2026-10-15",
     issue: "@i/10-yrd/1",
     log,
     protections: async () => [],
-    disposition: { kind: "merged", base: w.target, target: w.target },
+    disposition: {
+      kind: "closed",
+      target: w.target,
+      queue: "main",
+      store: createEventStore(w.work, "origin", gitIn(w.work).selection),
+    },
   })
   expect(result).toMatchObject({ outcome: "failed", reason: expect.stringContaining("already holds") })
-  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(w.target)
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(unmergedTip)
   expect(readRunLog(dirname(log.path), log.id)).toContainEqual(
-    expect.objectContaining({ kind: "local-branch-retirement", outcome: "failed", branch, head: w.target }),
+    expect.objectContaining({ kind: "local-branch-retirement", outcome: "failed", branch, head: unmergedTip }),
   )
 })
 

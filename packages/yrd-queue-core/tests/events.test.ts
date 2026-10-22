@@ -2148,6 +2148,62 @@ describe("the queue-format boundary", () => {
     expect((await readStatus(location, "lab", "task/merged")).status).toBe("merged")
   })
 
+  /** @failure A merged head that published main already holds still gets an archive ref, or a retry after its removal fails (30683).
+   * @level l2 @consumer public drop and drop --retire of a merged change, and retirement retry
+   * ADR-0018's amendment (line 69): a tip proven an ancestor of fresh published main needs neither an event nor an archive.
+   */
+  it.each(["drop", "retire"] as const)(
+    "30683: %s of a merged head that published main holds writes no archive ref",
+    async (mode) => {
+      const { store, location } = remoteMemStore(`yrd-30683-${mode}`)
+      const target = await open({ ...store, ref: "refs/heads/lab" })
+      const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+      const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+      const branch = await open({ ...store, ref: "refs/heads/task/landed" })
+      const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
+      const chain = await openEvents({ ...store, ref: changesRef("lab", "task/landed") })
+      const opened = await chain.append(
+        [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "@dev/2" })],
+        { expect: null },
+      )
+      const merged = await chain.append(
+        [changeInput("merged", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), commit: head })],
+        { expect: opened.head },
+      )
+      if (store.backend.publish === undefined || store.backend.listRefs === undefined) {
+        throw new Error("fixture lacks ref publication")
+      }
+      await store.backend.publish(store.repo, [{ ref: "refs/heads/lab", expect: base, oid: head }])
+      const archives = async (): Promise<string[]> => [
+        ...(await store.backend.listRefs!(store.repo, "refs/archive/")).keys(),
+      ]
+      const request = {
+        queue: "lab",
+        branch: "task/landed",
+        by: "@dev/2",
+        protections: async () => [],
+        ...(mode === "retire" ? { retire: { tip: head }, note: "retire merged work" } : {}),
+      }
+      const dropped = await drop(location, request)
+      expect(dropped).toMatchObject({ head, event: merged.head, main: { ref: "refs/heads/lab", tip: head } })
+      expect(dropped.archive).toBeUndefined()
+      expect(await archives()).toEqual([])
+      expect((await listRefs("refs/heads/task/landed", store)).size).toBe(0)
+      expect((await listRefs(changesRef("lab", "task/landed"), store)).get(changesRef("lab", "task/landed"))).toBe(
+        merged.head,
+      )
+      expect((await readStatus(location, "lab", "task/landed")).status).toBe("merged")
+      if (mode === "retire") {
+        await expect(drop(location, { ...request, note: "retry" })).resolves.toMatchObject({
+          head,
+          event: merged.head,
+          main: { ref: "refs/heads/lab", tip: head },
+        })
+        expect(await archives()).toEqual([])
+      }
+    },
+  )
+
   /** @failure Explicit merged retirement loses an unlinked divergent head, duplicates retention on retry, or rewrites merge facts.
    * @level l2 @consumer public drop against native hot/cold Git refs, and retirement retry
    * Existing retained-reader fixtures append the event directly; the retirement fixture uses a head already kept by the merge.
