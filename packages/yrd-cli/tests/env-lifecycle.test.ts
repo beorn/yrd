@@ -442,7 +442,7 @@ it.each(["snapshot", "shared", "advanced", "unsealed", "unreadable"] as const)(
         retirement: "incomplete",
         reasons: [expect.stringContaining("root-owned component store kept: no sealed proof")],
       })
-      expect(closed.stderr()).toContain("retirement incomplete; inspect ref and archive")
+      expect(closed.stderr()).toContain("retirement incomplete; inspect ref and custody")
       expect(closed.stderr()).toContain("root-owned component store kept: no sealed proof")
     } else {
       const exit =

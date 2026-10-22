@@ -14,9 +14,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os"
 import { delimiter, dirname, join, resolve } from "node:path"
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
-import { createEventStore, readStatus, submit, writeQueueEvent } from "@yrd/queue-core"
+import { changesRef, createEventStore, readBranchHistory, readStatus, submit, writeQueueEvent } from "@yrd/queue-core"
 import * as removely from "removely"
-import { archiveRefFor } from "git-super/archive-ref"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
@@ -191,8 +190,6 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
       const store = createEventStore(work, "origin", git.selection, git.backend)
       const before = await readStatus(store, "release", branch)
       expect(before.status).toBe(status)
-      const archive = `refs/archive/${new Date().toISOString().slice(0, 10)}/dev-retirer/${branch}`
-      expect((await git(["ls-remote", "origin", archive])).trim()).toBe("")
       // 29721: copying the hint must preserve standalone authority, cwd and shell
       // arguments. The previous direct argv call could not detect a broken recipe.
       const ended = await yrd(work, "withdraw", branch, "--queue", "release")
@@ -231,9 +228,8 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
       }
       const retired = runRecipe(command)
       expect(retired.status, `${retired.stdout}\n${retired.stderr}`).toBe(0)
-      if (status === "cancelled") {
-        expect((await git(["ls-remote", "origin", archive])).trim()).toBe(`${head}\t${archive}`)
-      }
+      // 30683: the ending event keeps the head; retirement writes no archive ref.
+      expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim()).toBe("")
       expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
       const after = await readStatus(store, "release", branch)
       expect(after.tip).toBe(before.tip)
@@ -284,7 +280,7 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     // AC2: recovery must preserve the original change name, including shell quotes.
     // The former generic git/head assertions accepted a newly named change instead.
     const branch = "task/one'quoted"
-    const work = await queueWithChanges([branch, "task/on-main", "task/archive-collision"])
+    const work = await queueWithChanges([branch, "task/on-main"])
     const git = gitIn(work)
     const head = (await git(["rev-parse", `refs/heads/${branch}`])).trim()
     // AC2: the public ending must release its exact job, not only its remote ref.
@@ -313,16 +309,20 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     expect(record.by, ran.report).not.toBe("@dev/notified")
     // AC2: ending attribution alone missed the branch and unique work left behind.
     expect(record.reason, ran.report).toBe("withdrawn")
-    const archives = (await git(["ls-remote", "origin", "refs/archive/*"])).trim().split("\n").filter(Boolean)
-    expect(archives, ran.report).toHaveLength(1)
-    const [archivedHead, archiveRef] = archives[0]!.split(/\s+/u)
-    expect(archivedHead).toBe(head)
+    // 30683: the withdrawal event keeps the head as a Git parent; no archive ref is written.
+    expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim(), ran.report).toBe("")
+    const store = createEventStore(work, "origin", git.selection, git.backend)
+    const withdrawal = (await readBranchHistory(store, "main", branch)).history?.events.at(-1)
+    expect(withdrawal?.type).toBe("cancelled")
+    expect(withdrawal?.links).toContain(head)
     expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
     const receipt = JSON.parse(ran.stdout) as {
       withdrawn: readonly { archive?: string; recovery?: string; remoteRemoved: boolean }[]
     }
-    expect(receipt.withdrawn[0]?.archive).toBe(archiveRef)
+    expect(receipt.withdrawn[0]).not.toHaveProperty("archive")
     const recovery = receipt.withdrawn[0]?.recovery
+    // The branch name's quote is shell-escaped inside the command; the executed recovery below proves it whole.
+    expect(recovery).toContain(changesRef("main", "task/one"))
     if (recovery === undefined) throw new Error("withdrawn work supplied no recovery command")
     const outside = outsideRepositoryRoot()
     roots.push(outside)
@@ -344,30 +344,14 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     expect(existsSync(environment.path), cleanup).toBe(false)
     expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).trim()).toBe("")
 
-    // Published-main custody needs no extra archive ref.
+    // Published-main custody needs no recovery and writes no archive ref either.
     await git(["merge", "--quiet", "--ff-only", "task/on-main"])
     await git(["push", "--quiet", "origin", "main"])
     const onMain = await yrd(work, "withdraw", "task/on-main", "--submitter", "@dev/actor", "--json")
     expect(onMain.exitCode, onMain.report).toBe(0)
-    expect((JSON.parse(onMain.stdout) as typeof receipt).withdrawn[0]?.archive).toBeUndefined()
-    expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim().split("\n")).toHaveLength(1)
+    expect((JSON.parse(onMain.stdout) as typeof receipt).withdrawn[0]?.recovery).toBeUndefined()
+    expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim()).toBe("")
     expect((await git(["ls-remote", "origin", "refs/heads/task/on-main"])).trim()).toBe("")
-
-    // A custody collision keeps the branch while the explicit withdrawal still succeeds.
-    const collisionHead = (await git(["rev-parse", "refs/heads/task/archive-collision"])).trim()
-    const collisionArchive = archiveRefFor(
-      "task/archive-collision",
-      "@dev/actor",
-      new Date().toISOString().slice(0, 10),
-    )
-    await git(["push", "--quiet", "origin", `main:${collisionArchive}`])
-    const collision = await yrd(work, "withdraw", "task/archive-collision", "--submitter", "@dev/actor", "--json")
-    expect(collision.exitCode, collision.report).toBe(0)
-    expect((await cancelledRecord(work, "task/archive-collision")).reason).toBe("withdrawn")
-    expect((await git(["ls-remote", "origin", "refs/heads/task/archive-collision"])).trim()).toContain(collisionHead)
-    expect(collision.stderr).toContain(collisionArchive)
-    expect(collision.stderr).toContain(collisionHead)
-    expect((JSON.parse(collision.stdout) as typeof receipt).withdrawn[0]?.remoteRemoved).toBe(false)
   })
 
   // @cto 5753a5ce: the separate fact is the optional `Recipient:` trailer, a

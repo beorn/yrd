@@ -1,10 +1,16 @@
 import { resolve } from "node:path"
 
-import { archiveRefFor, ensureArchiveRef, findArchiveRefFor } from "git-super/archive-ref"
+import { findArchiveRefFor } from "git-super/archive-ref"
 import { changedCommitGitlinks } from "git-super/commit-graph"
 import { createGitWorktreeStore, worktreeOperationBranch } from "git-super/worktree"
-import { drop, type QueueLocation } from "./events.ts"
-import { publishRetirementArchive } from "./origin-branch-retirement.ts"
+import {
+  ChainCustodyMismatch,
+  drop,
+  readKeptCustody,
+  type AdvancedDrop,
+  type Dropped,
+  type QueueLocation,
+} from "./events.ts"
 import { isAncestor, refAt, seamProcess, type Git } from "./git.ts"
 import type { QueueRunLog } from "./log.ts"
 
@@ -17,7 +23,6 @@ export type LocalBranchRetirement = Readonly<{
   owner?: string
   issue?: string
   reason: string
-  date: string
   /** Read the same eligibility and protections without writing custody or deleting a ref. */
   dryRun?: boolean
   /** A proven worktree-less retained store: its own attached HEAD is not a live checkout (30094). */
@@ -29,14 +34,20 @@ export type LocalBranchRetirement = Readonly<{
    */
   protections(): Promise<readonly string[]>
   disposition:
-    | Readonly<{ kind: "archived"; target: string; ref: string }>
     | Readonly<{ kind: "merged"; base: string; target: string }>
-    | Readonly<{ kind: "closed"; target: string; store: QueueLocation; queue: string }>
+    | Readonly<{
+        kind: "closed"
+        target: string
+        store: QueueLocation
+        queue: string
+        /** The owner's drop of a tip past `recorded`: the event keeps both and records what the target lacks (30683). */
+        advanced?: Readonly<{ recorded: string } & Omit<AdvancedDrop, "tip">>
+      }>
     | Readonly<{
         kind: "landed"
         /** Observed origin commit retaining this tip; a root gitlink alone is not custody. */
         target: string
-        proof: { kind: "ancestry" } | { kind: "landing"; event: string; path: string; tip: string }
+        proof: { kind: "ancestry" }
       }>
 }>
 
@@ -44,11 +55,13 @@ export type LocalBranchRetirementResult = Readonly<{
   outcome: "removed" | "kept" | "failed" | "eligible"
   archiveRef?: string
   archiveLocation?: "local" | "origin"
+  /** The change chain at origin and the event on it (`tip`) that keeps the removed tip (30683). */
+  event?: Readonly<{ ref: string; tip: string }>
   reason: string
   detail?: string
 }>
 
-type Kept = { code: "held" | "moved" | "unreached" | "advanced"; detail: string }
+type Kept = { code: "held" | "moved" | "unreached"; detail: string }
 
 /** An observed protection is a kept result; unreadable authority still fails. */
 class RetirementKept extends Error {
@@ -58,28 +71,25 @@ class RetirementKept extends Error {
 }
 
 /** One policy for local retirement; git-super owns archive/ref mechanics.
- * Unmerged closed work first publishes its archive and ending to origin. A tip
+ * Unmerged closed work first writes the event that keeps its exact tip to origin's chain (30683). A tip
  * proven merged into the target needs no custody of its own (ADR-0018 amendment,
  * line 69), so it is removed with no archive ref and no queue write (30683).
  * Remote branch deletion and worktree removal are deliberately outside this operation.
  */
 export async function retireLocalBranch(input: LocalBranchRetirement): Promise<LocalBranchRetirementResult> {
-  const { repo, git, branch, tip, actor, issue, reason, date, disposition } = input
-  let archiveRef = disposition.kind === "archived" ? disposition.ref : archiveRefFor(branch, actor, date)
-  let existingArchive: string | undefined
+  const { repo, git, branch, tip, actor, issue, reason, disposition } = input
   const store = createGitWorktreeStore({ repo, gitProcess: seamProcess(git, repo) })
   let firstProtectionRead = true
   let completedArchive: string | undefined
-  // A tip proven in its target writes no archive (30683): reachability() proves it for a merged disposition and a
-  // landed one proven by ancestry, and a closed one joins once alreadyMerged reads its ancestry. A landing proof
-  // names the tip itself as its target, so it proves no ancestry and keeps its archive until slice 2.
-  const provenOnTarget =
-    disposition.kind === "merged" || (disposition.kind === "landed" && disposition.proof.kind === "ancestry")
+  // A tip proven in its target needs no custody of its own (30683): reachability() proves it for a merged or
+  // landed disposition, and a closed one joins once alreadyMerged reads its ancestry. Nothing here writes an
+  // archive; an archive an earlier version left is still read as a completed retirement.
+  const provenOnTarget = disposition.kind === "merged" || disposition.kind === "landed"
   // A proven tip writes no archive, so a rerun after its removal finds only the target holding it.
   let completedOnTarget = false
   let writtenArchive: string | undefined
   let archiveLocation: "local" | "origin" | undefined
-  let onTarget = provenOnTarget
+  let custody: Dropped | undefined
   const protection = async (): Promise<Kept | undefined> => {
     const firstRead = firstProtectionRead
     firstProtectionRead = false
@@ -133,12 +143,6 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     if (disposition.kind !== "closed" && !(await isAncestor(git, tip, disposition.target))) {
       return { code: "unreached", detail: `tip ${tip} is not merged into ${disposition.target}` }
     }
-    if (disposition.kind === "landed" && disposition.proof.kind === "landing" && disposition.proof.tip !== tip) {
-      return {
-        code: "advanced",
-        detail: `tip ${tip} differs from landing event ${disposition.proof.event}'s gitlink ${disposition.proof.tip}`,
-      }
-    }
     return undefined
   }
   const formatKept = (kept: Kept): LocalBranchRetirementResult => {
@@ -146,7 +150,8 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     return {
       outcome: "kept",
       ...(writtenArchive === undefined ? {} : { archiveRef: writtenArchive }),
-      reason: disposition.kind === "landed" || disposition.kind === "archived" ? kept.code : detail,
+      // The closed disposition now carries the callers that once used landed and archived, so it reports the code too.
+      reason: disposition.kind === "merged" ? detail : kept.code,
       detail,
     }
   }
@@ -154,15 +159,6 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
   try {
     if (actor.trim() === "" || reason.trim() === "") throw new Error("retirement requires an actor and reason")
     await git(["check-ref-format", "--branch", branch])
-    if (disposition.kind === "closed") {
-      existingArchive = findArchiveRefFor(repo, branch, tip)
-      archiveRef = existingArchive ?? archiveRef
-    }
-    await git(["check-ref-format", archiveRef])
-    if (disposition.kind === "archived" && (await refAt(git, disposition.ref)) === tip) {
-      writtenArchive = disposition.ref
-      archiveLocation = "origin"
-    }
     if (disposition.kind === "merged") {
       const mergeBase = (await git(["merge-base", disposition.base, tip])).trim()
       if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(mergeBase)) {
@@ -184,42 +180,33 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     if (kept === undefined) kept = await reachability()
     const alreadyMerged =
       kept === undefined && disposition.kind === "closed" && (await isAncestor(git, tip, disposition.target))
-    if (alreadyMerged) onTarget = true
-    if (kept === undefined && !input.dryRun && completedArchive === undefined && !completedOnTarget && !onTarget) {
-      const custody = ensureArchiveRef(repo, archiveRef, tip)
-      if (!custody.ok) throw new Error(custody.reason)
-      writtenArchive = archiveRef
-      // The ref written by ensureArchiveRef is LOCAL. Origin custody is claimed only
-      // after a push reads back at the remote (30247).
-      archiveLocation = "local"
-      if (disposition.kind === "closed") {
-        // prepareRetirementArchive.publish verifies the exact head at the remote.
-        await publishRetirementArchive(disposition.store, { branch, archive: archiveRef, head: tip })
-        archiveLocation = "origin"
-      } else if (disposition.kind === "archived") {
-        // The archived disposition carries no store; its caller published and read it
-        // back at that origin before calling here (retireComponentBranch).
-        archiveLocation = "origin"
-      }
-    }
     if (kept === undefined && !input.dryRun && disposition.kind === "closed" && !alreadyMerged) {
-      await drop(disposition.store, {
+      // The event that keeps the exact tip is on origin's chain before the local name can go (30683).
+      const advanced = disposition.advanced
+      custody = await drop(disposition.store, {
         queue: disposition.queue,
         branch,
         by: actor,
         issue,
         note: reason,
-        localArchive: { ref: archiveRef, tip },
+        local: {
+          tip,
+          ...(advanced === undefined
+            ? {}
+            : { advanced: { uniqueCommits: advanced.uniqueCommits, target: advanced.target } }),
+        },
       })
-      archiveLocation = "origin"
     }
     if (kept === undefined) kept = await protection()
     if (kept === undefined && (completedArchive !== undefined || completedOnTarget)) kept = await reachability()
     if (kept !== undefined) {
       result = formatKept(kept)
     } else if (input.dryRun) {
-      const wouldArchive = completedArchive ?? (onTarget ? undefined : archiveRef)
-      result = { outcome: "eligible", ...(wouldArchive === undefined ? {} : { archiveRef: wouldArchive }), reason }
+      result = {
+        outcome: "eligible",
+        ...(completedArchive === undefined ? {} : { archiveRef: completedArchive }),
+        reason,
+      }
     } else if (completedOnTarget) {
       result = {
         outcome: "removed",
@@ -238,15 +225,28 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       await store.removeBranch({
         branch,
         tip,
-        ...(onTarget ? {} : { verify: { ref: archiveRef, oid: tip } }),
         beforeRemove: async () => {
           const held = await protection()
           if (held !== undefined) throw new RetirementKept(held)
+          if (custody === undefined || disposition.kind !== "closed") return
+          // The shared chain readback: a chain that no longer keeps the tip keeps the branch (30683).
+          await readKeptCustody(disposition.store, {
+            queue: disposition.queue,
+            branch,
+            ref: custody.ref,
+            event: custody.event,
+            keeps: disposition.advanced === undefined ? [tip] : [disposition.advanced.recorded, tip],
+          }).catch((cause: unknown) => {
+            if (cause instanceof ChainCustodyMismatch) {
+              throw new RetirementKept({ code: "moved", detail: cause.message })
+            }
+            throw cause
+          })
         },
       })
       result = {
         outcome: "removed",
-        ...(onTarget ? {} : { archiveRef }),
+        ...(custody === undefined ? {} : { event: { ref: custody.ref, tip: custody.event } }),
         ...(archiveLocation === undefined ? {} : { archiveLocation }),
         reason,
       }

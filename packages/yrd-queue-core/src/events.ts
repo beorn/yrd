@@ -3,8 +3,7 @@ import { createHash } from "node:crypto"
 
 import { shellQuote } from "git-super/shell-command"
 import { Conflict, RetriesExhausted } from "./git.ts"
-import { ARCHIVE_REF_PREFIX, archiveRefFor } from "git-super/archive-ref"
-import { prepareRetirementArchive, retireOriginBranch } from "./origin-branch-retirement.ts"
+import { retireOriginBranch } from "./origin-branch-retirement.ts"
 import { readCommitSubmodules, type CommitGitlink } from "git-super/commit-graph"
 import { listRefs, openEvents } from "./git.ts"
 import { publishWithTransientRetry } from "./transient-push.ts"
@@ -89,6 +88,9 @@ export const EVENT_TRAILERS = {
   gitlinks: "Gitlinks",
   componentAuthors: "Component-Authors",
   issueEffect: "Issue-Effect",
+  tip: "Tip",
+  uniqueCommits: "Unique-Commits",
+  target: "Target",
 } as const
 const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 /** Only the run path that atomically publishes the target may write merged with this producer. */
@@ -203,6 +205,8 @@ export type EventChange = Readonly<{
     reason: string
   }>
   ignored?: Readonly<{ reason: string; by: string }>
+  /** The owner's drop of a head past its recorded commit, as the ending that dropped it records it (30683). */
+  advancedDrop?: AdvancedDrop
   deferred?: Readonly<{
     id: string
     check: string
@@ -294,7 +298,49 @@ type ChangeInputDetails = Readonly<{
   run?: string
   landedGitlinks?: readonly CommitGitlink[]
   componentAuthors?: readonly ComponentAuthor[]
+  advanced?: AdvancedDrop
 }>
+
+/**
+ * The owner's drop of a head that advanced past its recorded commit (30683): that head, how many of its commits
+ * the target lacked, and the target ref at the commit that was read. The owner's reason is the event's content.
+ */
+export type AdvancedDrop = Readonly<{
+  tip: string
+  uniqueCommits: number
+  target: Readonly<{ ref: string; tip: string }>
+}>
+
+/** An advanced drop's three trailers go together, on a dropped event that keeps both its commits (30683). */
+function readAdvancedDrop(event: EventShape): AdvancedDrop | undefined {
+  const tip = prop(event, EVENT_TRAILERS.tip)
+  const count = prop(event, EVENT_TRAILERS.uniqueCommits)
+  const target = prop(event, EVENT_TRAILERS.target)
+  if (tip === undefined && count === undefined && target === undefined) return undefined
+  const at = target?.lastIndexOf("@") ?? -1
+  const ref = target?.slice(0, Math.max(at, 0))
+  const targetTip = target?.slice(at + 1)
+  if (
+    event.type !== "cancelled" ||
+    prop(event, EVENT_TRAILERS.reason) !== "dropped" ||
+    tip === undefined ||
+    !COMMIT_OID.test(tip) ||
+    !event.links.includes(tip) ||
+    tip === keptCommit(event) ||
+    count === undefined ||
+    !/^[1-9][0-9]{0,15}$/u.test(count) ||
+    ref === undefined ||
+    !ref.startsWith("refs/") ||
+    targetTip === undefined ||
+    !COMMIT_OID.test(targetTip)
+  ) {
+    throw new Error(
+      `event ${event.id} has an invalid advanced drop: Tip:, Unique-Commits: and Target: <ref>@<sha> go together ` +
+        `on a dropped cancelled event that keeps both Commit: and Tip:`,
+    )
+  }
+  return { tip, uniqueCommits: Number(count), target: { ref, tip: targetTip } }
+}
 
 /** Landing proof is deletion authority, so malformed persisted pins must never become an empty list. */
 function checkedLandedGitlinks(value: unknown): readonly CommitGitlink[] {
@@ -514,6 +560,24 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   if (details.warningKind !== undefined && type !== "admission-warning") {
     throw new TypeError("Warning-Kind: belongs on admission-warning")
   }
+  if (details.advanced !== undefined) {
+    const { tip, uniqueCommits, target } = details.advanced
+    if (type !== "cancelled" || details.reason !== "dropped") {
+      throw new TypeError("Tip: belongs on a dropped cancelled event")
+    }
+    if (details.commit === undefined || !COMMIT_OID.test(tip) || tip === details.commit) {
+      throw new TypeError("Tip: must name the advanced head beside a different Commit:")
+    }
+    if (!Number.isSafeInteger(uniqueCommits) || uniqueCommits < 1) {
+      throw new TypeError("Unique-Commits: must count at least one commit the target lacks")
+    }
+    if (!target.ref.startsWith("refs/") || !COMMIT_OID.test(target.tip)) {
+      throw new TypeError("Target: must name <ref>@<commit oid>")
+    }
+    if (details.content === undefined || details.content.trim() === "") {
+      throw new TypeError("an advanced drop needs the owner's reason as its content")
+    }
+  }
   const props: [string, string][] = [
     [EVENT_TRAILERS.queue, details.queueTip],
     [EVENT_TRAILERS.time, details.at.toISOString()],
@@ -538,6 +602,14 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   }
   if (details.warningKind !== undefined) props.push([EVENT_TRAILERS.warningKind, details.warningKind])
   if (details.run !== undefined) props.push([EVENT_TRAILERS.run, details.run])
+  if (details.advanced !== undefined) {
+    const { tip, uniqueCommits, target } = details.advanced
+    props.push(
+      [EVENT_TRAILERS.tip, tip],
+      [EVENT_TRAILERS.uniqueCommits, String(uniqueCommits)],
+      [EVENT_TRAILERS.target, `${target.ref}@${target.tip}`],
+    )
+  }
   if (details.landedGitlinks !== undefined) {
     if (type !== "merged") throw new TypeError("Gitlinks: belongs on merged")
     props.push([EVENT_TRAILERS.gitlinks, JSON.stringify(checkedLandedGitlinks(details.landedGitlinks))])
@@ -550,7 +622,10 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   return {
     type,
     props,
-    ...(details.commit === undefined ? {} : { keeps: [details.commit] }),
+    // An advanced drop keeps the recorded commit and the advanced head (30683).
+    ...(details.commit === undefined
+      ? {}
+      : { keeps: details.advanced === undefined ? [details.commit] : [details.commit, details.advanced.tip] }),
     ...(details.title === undefined ? {} : { title: details.title }),
     ...(details.content === undefined ? {} : { content: details.content }),
   }
@@ -953,6 +1028,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         run: _previousRun,
         landedGitlinks: _previousGitlinks,
         componentAuthors: _previousComponentAuthors,
+        advancedDrop: _previousAdvancedDrop,
         ...fresh
       } = next
       return {
@@ -1044,13 +1120,17 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
     case "failed":
     case "cancelled": {
       const reason = prop(event, "Reason")
+      // An advanced drop describes only the ending that records it (30683).
+      const advancedDrop = readAdvancedDrop(event)
+      const { advancedDrop: _previousAdvancedDrop, ...ended } = next
+      const advancedRecord = advancedDrop === undefined ? {} : { advancedDrop }
       // Dropping a branch records the last head being deleted even when no
       // change was open. This is also the first event for an unsubmitted branch.
       if (!isOpen(state.status) && event.type === "cancelled" && reason === "dropped") {
         // A branch cleanup cannot turn a landed change back into cancelled.
         if (state.status === "merged") return endingRefusal(state, event)
         return {
-          ...next,
+          ...ended,
           status: "cancelled",
           commit: state.commit ?? keptCommit(event),
           issue: undefined,
@@ -1060,6 +1140,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
           lastNotifiable: { kind: "cancelled", id: event.id },
           endedAt: at,
           reason,
+          ...advancedRecord,
         }
       }
       if (!isOpen(state.status)) return endingRefusal(state, event)
@@ -1095,12 +1176,13 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         if (reason === "dropped" || reason === "deleted") keptCommit(event)
       }
       return {
-        ...next,
+        ...ended,
         status: event.type,
         ending: { kind: event.type, id: event.id },
         lastNotifiable: { kind: event.type, id: event.id },
         endedAt: at,
         reason,
+        ...advancedRecord,
         ...(prop(event, EVENT_TRAILERS.run) !== undefined
           ? { run: prop(event, EVENT_TRAILERS.run) }
           : state.run !== undefined
@@ -1257,8 +1339,10 @@ export type DropRequest = Readonly<{
   note?: string
   recipient?: string
   issue?: string
-  /** Publish custody for local retirement; leave the remote branch and candidate refs intact. */
-  localArchive?: Readonly<{ ref: string; tip: string }>
+  /** Local retirement of this exact tip: an event on origin's chain keeps it; the remote branch and
+   * candidate refs stay intact (30683). `advanced` is the owner's drop of a tip past the recorded
+   * commit: its dropped event keeps both commits and records what the target lacks. */
+  local?: Readonly<{ tip: string; advanced?: Omit<AdvancedDrop, "tip"> }>
   /** Retire this exact origin tip without changing an already-terminal history. */
   retire?: Readonly<{ tip: string }>
   /** Optional host policy; absence means a standalone caller with no host policy. */
@@ -1268,8 +1352,9 @@ export type Dropped = Readonly<{
   queue: string
   branch: string
   head: string
+  /** The change chain holding `event`. */
+  ref: string
   event: string
-  archive?: string
   main?: Readonly<{ ref: string; tip: string }>
 }>
 export class DropRetireRefused extends Error {}
@@ -2750,17 +2835,42 @@ async function appendDecision(
   return { event: written }
 }
 
-/** End a branch and publish its disposition atomically: remote deletion, or custody for local retirement. */
+/** End a branch and publish its disposition atomically: remote deletion, or the event that keeps a local tip. */
 export async function drop(store: QueueLocation, request: DropRequest): Promise<Dropped> {
   try {
     return await dropBranch(store, request)
   } catch (cause) {
-    if (request.localArchive === undefined) throw cause
+    if (request.local === undefined) throw cause
     throw new Error(
-      `${request.branch}@${request.localArchive.tip} at ${store.remote}: ${cause instanceof Error ? cause.message : String(cause)}; local refs kept`,
+      `${request.branch}@${request.local.tip} at ${store.remote}: ${cause instanceof Error ? cause.message : String(cause)}; local refs kept`,
       { cause },
     )
   }
+}
+
+/** A chain read back from the pushed store does not hold the event its writer wrote. */
+export class ChainCustodyMismatch extends Error {}
+
+/**
+ * The last read before a kept commit's branch name goes: re-read the change chain from the pushed store and
+ * require that its ref holds `event` and that the event keeps every commit in `keeps` as a Git parent.
+ * Both the retained `--retire` path and local retirement call this one readback (30432, 30683).
+ */
+export async function readKeptCustody(
+  store: QueueLocation,
+  expected: Readonly<{ queue: string; branch: string; ref: string; event: string; keeps: readonly string[] }>,
+): Promise<ChangeHistory> {
+  const observed = await readBranchHistory(store, expected.queue, expected.branch)
+  const keeping = observed.history?.events.find((event) => event.id === expected.event)
+  const unkept = expected.keeps.filter((commit) => keeping?.links.includes(commit) !== true)
+  if (observed.history === undefined || observed.ref !== expected.ref || keeping === undefined || unkept.length > 0) {
+    throw new ChainCustodyMismatch(
+      `${expected.branch} at ${store.remote}: expected ${expected.ref} to hold event ${expected.event} keeping ` +
+        `${expected.keeps.join(", ")}; read ${observed.ref}@${observed.history?.state.tip ?? "absent"}` +
+        (keeping === undefined ? ` without that event` : unkept.length > 0 ? ` with ${unkept.join(", ")} unkept` : ""),
+    )
+  }
+  return observed.history
 }
 
 /** A retire tip is kept when it equals a link, or `isAncestor` says it is an ancestor of one. */
@@ -2810,13 +2920,12 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
   const history = selected?.events ?? []
   const state = selected?.state ?? initial
   const branchRef = `refs/heads/${branch}`
-  const originArchive = archiveRefFor(branch, request.by, new Date().toISOString().slice(0, 10))
-  const archive = request.localArchive
+  const local = request.local
   const retiringDraft = request.retire !== undefined && state.status === "draft" && state.ending === undefined
   let retirementTip = selectedTip
   let main: Dropped["main"]
   if (request.retire !== undefined) {
-    if (archive !== undefined) throw new Error(`${branch}: choose origin retirement or local archive custody`)
+    if (local !== undefined) throw new Error(`${branch}: choose origin retirement or local retirement`)
     if (!COMMIT_OID.test(request.retire.tip) || !request.note?.trim()) {
       throw new Error(
         `${branch}: drop --retire needs a full --tip and nonempty --reason; received --tip ${JSON.stringify(request.retire.tip)}`,
@@ -2826,29 +2935,17 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
       throw new DropRetireRefused(`${branch}: drop --retire requires an already-ended change; found ${state.status}`)
     }
   }
-  if (archive !== undefined) {
-    if (!archive.ref.startsWith(`${ARCHIVE_REF_PREFIX}/`) || !COMMIT_OID.test(archive.tip)) {
-      throw new TypeError(`local retirement ${branch}: expected an archive ref and full commit oid`)
-    }
+  if (local !== undefined && !COMMIT_OID.test(local.tip)) {
+    throw new TypeError(`local retirement ${branch}: expected a full commit oid, received ${JSON.stringify(local.tip)}`)
   }
-  const preparedArchive =
-    archive === undefined
-      ? undefined
-      : await prepareRetirementArchive(store, {
-          branch,
-          archive: archive.ref,
-          head: archive.tip,
-        })
-  const archiveUpdate = preparedArchive?.update
-  const verifyCustody = async (eventTip: string): Promise<void> => {
-    if (archive === undefined) return
-    const event = (await listRefs(ref, store)).get(ref)
-    if (event !== eventTip) {
-      throw new Error(
-        `${branch}@${archive?.tip} at ${store.remote}: ending ${ref} expected ${eventTip}, ` +
-          `read ${event ?? "absent"}`,
-      )
-    }
+  const advanced = local?.advanced
+  if (
+    advanced !== undefined &&
+    (state.commit === undefined || state.commit === local?.tip || state.status === "merged" || !request.note?.trim())
+  ) {
+    throw new Error(
+      `${branch}: an advanced drop needs an unmerged change whose recorded commit differs from ${local?.tip}, and a nonempty --reason`,
+    )
   }
   const fetchRefs = store.backend.fetchRefs
   if (fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs for dropped branch commit")
@@ -2856,33 +2953,27 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
   // A merged change's tip that fresh published main contains needs neither an event nor an
   // archive for custody (ADR-0018 amendment, line 69); its origin retirement leases main (30683).
   const publishedMainHolds = async (tip: string): Promise<Readonly<{ ref: string; tip: string }> | undefined> => {
-    if (state.status !== "merged" || archive !== undefined) return undefined
+    if (state.status !== "merged" || local !== undefined) return undefined
     const contains = store.backend.isAncestor
     if (contains === undefined) throw new Error(`${branch}: backend cannot read fresh published-main ancestry`)
     const target = (await fetchRefs(store.repo, mainRef, store.remote)).get(mainRef)
     if (target === undefined) throw new Error(`${branch}: published ${mainRef} is absent at ${store.remote}`)
     return (await contains(store.repo, tip, target)) ? { ref: mainRef, tip: target } : undefined
   }
-  const head = archive?.tip ?? (await fetchRefs(store.repo, branchRef, store.remote)).get(branchRef)
+  const head = local?.tip ?? (await fetchRefs(store.repo, branchRef, store.remote)).get(branchRef)
   if (request.retire !== undefined && head !== request.retire.tip) {
     const wanted = request.retire.tip
     if (head === undefined && state.ending !== undefined && (await listRefs(ref, store)).get(ref) === selectedTip) {
       const held = await publishedMainHolds(wanted)
-      if (held !== undefined) return { queue, branch, head: wanted, event: state.ending.id, main: held }
-    }
-    if (
-      head === undefined &&
-      history.some((event) => event.links.includes(wanted)) &&
-      (await listRefs(originArchive, store)).get(originArchive) === wanted &&
-      (await listRefs(ref, store)).get(ref) === selectedTip
-    ) {
-      if (state.ending === undefined) throw new Error(`${branch}: terminal retirement lost its ending`)
-      return { queue, branch, head: wanted, event: state.ending.id, archive: originArchive }
+      if (held !== undefined) return { queue, branch, head: wanted, ref, event: state.ending.id, main: held }
+      // A rerun after the branch went: an event on the unchanged chain keeps the exact tip (30683).
+      if (history.some((event) => event.links.includes(wanted))) {
+        return { queue, branch, head: wanted, ref, event: state.ending.id }
+      }
     }
     throw new Error(
       `${branchRef}: expected ${wanted} at ${store.remote}, found ${head ?? "absent"}; ` +
-        `looked for exact custody at ${originArchive} (today's date, actor ${request.by}); ` +
-        `an exact-tip archive from another date or actor is not accepted as proof`,
+        `no event on ${ref}@${selectedTip ?? "absent"} keeps ${wanted}`,
     )
   }
   const protectDraft = async (): Promise<void> => {
@@ -2904,76 +2995,71 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
     main = { ref: mainRef, tip: target }
   }
   let mainCustody: Readonly<{ ref: string; tip: string }> | undefined
-  if (state.ending !== undefined && head !== undefined) {
+  if (state.ending !== undefined && head !== undefined && selectedTip !== null) {
+    const git = gitIn(store.repo, undefined, store.selection)
     const kept = history.flatMap((event) => event.links)
     mainCustody = await publishedMainHolds(head)
-    let keptByLink =
-      mainCustody !== undefined || (await keptLinkAdmits(gitIn(store.repo, undefined, store.selection), head, kept))
+    const keptByLink = mainCustody !== undefined || (await keptLinkAdmits(git, head, kept))
+    const merged = state.status === "merged" && state.ending.kind === "merged"
     if (
       !keptByLink &&
-      request.retire !== undefined &&
-      state.status === "merged" &&
-      state.ending.kind === "merged" &&
-      selectedTip !== null
-    ) {
-      const custody = await prepareRetirementArchive(store, { branch, archive: originArchive, head })
-      if (custody.update.expect === head) {
-        const reasons = await request.protections?.(head, state.issue)
-        if (reasons !== undefined && reasons.length > 0) throw new Error(`${branch}: kept: ${reasons.join("; ")}`)
-        const input = changeInput("retained", {
-          queueTip,
-          at: new Date(),
-          commit: head,
-          by: request.by,
-          reason: request.note,
-          title: `retained ${branch}`,
-        })
-        const retained = await chain.append(decide(history, input), { expect: selectedTip })
-        const written = retained.events.findLast((event) => event.type === "retained")?.id
-        if (written === undefined) throw new Error(`${ref} in ${store.repo}: retained event was not written`)
-        const observed = await readBranchHistory(store, queue, branch)
-        const event = observed.history?.events.at(-1)
-        const observedState = observed.history?.state
-        if (
-          observed.ref !== ref ||
-          observedState?.tip !== written ||
-          event?.id !== written ||
-          event.type !== "retained" ||
-          !event.links.includes(head) ||
-          keptCommit(event) !== head ||
-          observedState.status !== "merged" ||
-          observedState.ending?.kind !== "merged" ||
-          observedState.ending.id !== state.ending.id ||
-          observedState.endedAt?.getTime() !== state.endedAt?.getTime()
-        ) {
-          throw new Error(
-            `${branch}@${head} at ${store.remote}: retained custody did not read back at ${ref}@${written}; ` +
-              `observed ${observed.ref}@${observedState?.tip ?? "absent"} with ending ${observedState?.ending?.id ?? "absent"}; ` +
-              `branch removal was not attempted; inspect the retained history before retrying`,
-          )
-        }
-        retirementTip = written
-        keptByLink = true
-      }
-    }
-    if (
-      !keptByLink &&
-      !(archive !== undefined && preparedArchive?.update.expect === head) &&
-      !(await acceptsMergedLocalRetirement(gitIn(store.repo, undefined, store.selection), {
-        local: archive !== undefined,
-        head,
-        change: state,
-      }))
+      advanced === undefined &&
+      !(merged && request.retire !== undefined) &&
+      !(await acceptsMergedLocalRetirement(git, { local: local !== undefined, head, change: state }))
     ) {
       const lastKept = kept.at(-1)
       throw new Error(
         `${branchRef} at ${head} on ${store.remote} has already ended ${state.ending.kind}; its last kept link is ${lastKept ?? "none"}. ` +
           `The branch is deletable when its head equals, or is an ancestor of, a kept link (kept-link retirement, 25671). ` +
           (state.status === "merged"
-            ? `For explicit merged-head retirement, preserve ${head} at ${store.remote}:${originArchive}, then retry with ` +
-              `--retire --tip ${head} --reason <why>; that exact archive must already exist before Yrd retains the head in event history (30432).`
+            ? `For explicit merged-head retirement, retry with --retire --tip ${head} --reason <why>; ` +
+              `Yrd writes a retained event that keeps the head (30432, 30683).`
             : `This ${state.status} ending cannot retire an unkept head.`),
       )
+    }
+    // A local retirement ends with an event whose links include its exact tip; one already written is reused.
+    const keeping = local === undefined ? undefined : history.findLast((event) => event.links.includes(head))
+    if (keeping !== undefined) return { queue, branch, head, ref, event: keeping.id }
+    // A merged change's head that no link keeps, or a local tip, gets a retained event that keeps it (30432, 30683).
+    if (merged && (!keptByLink || local !== undefined)) {
+      const reasons = await request.protections?.(head, state.issue)
+      if (reasons !== undefined && reasons.length > 0) throw new Error(`${branch}: kept: ${reasons.join("; ")}`)
+      const input = changeInput("retained", {
+        queueTip,
+        at: new Date(),
+        commit: head,
+        by: request.by,
+        reason: request.note,
+        title: `retained ${branch}`,
+      })
+      const retained = await chain.append(decide(history, input), { expect: selectedTip })
+      const written = retained.events.findLast((event) => event.type === "retained")?.id
+      if (written === undefined) throw new Error(`${ref} in ${store.repo}: retained event was not written`)
+      const observed = await readKeptCustody(store, { queue, branch, ref, event: written, keeps: [head] }).catch(
+        (cause: unknown) => {
+          if (!(cause instanceof ChainCustodyMismatch)) throw cause
+          return undefined
+        },
+      )
+      const event = observed?.events.at(-1)
+      if (
+        observed === undefined ||
+        observed.state.tip !== written ||
+        event?.type !== "retained" ||
+        keptCommit(event) !== head ||
+        observed.state.status !== "merged" ||
+        observed.state.ending?.kind !== "merged" ||
+        observed.state.ending.id !== state.ending.id ||
+        observed.state.endedAt?.getTime() !== state.endedAt?.getTime()
+      ) {
+        throw new Error(
+          `${branch}@${head} at ${store.remote}: retained custody did not read back at ${ref}@${written}; ` +
+            `observed ${observed?.state.tip ?? "absent"} with ending ${observed?.state.ending?.id ?? "absent"}; ` +
+            `branch removal was not attempted; inspect the retained history before retrying`,
+        )
+      }
+      if (local !== undefined) return { queue, branch, head, ref, event: written }
+      retirementTip = written
     }
   }
   const alreadyDropped = state.status === "cancelled" && state.reason === "dropped"
@@ -2981,8 +3067,8 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
   const note = request.note?.trim()
   const protections = request.protections
   // Every caller retires the observed head, so mainCustody is that head's: published main's
-  // custody leases main and writes no archive; any other ended head keeps its archive.
-  const retire = async (eventTip: string, keptHead: string): Promise<Pick<Dropped, "archive" | "main">> => {
+  // custody leases main; any other ended head is kept by an event on its chain (30683).
+  const retire = async (eventTip: string, keptHead: string): Promise<Pick<Dropped, "main">> => {
     if (mainCustody !== undefined && keptHead !== head) {
       throw new Error(`${branch}: published-main custody was proven for ${head}, not ${keptHead}`)
     }
@@ -2991,19 +3077,18 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
       head: keptHead,
       authority:
         mainCustody === undefined ? { kind: "event", ref, tip: eventTip } : { kind: "published-main", ...mainCustody },
-      ...(mainCustody === undefined ? { archive: originArchive } : {}),
       protections: protections === undefined ? undefined : () => protections(keptHead, state.issue),
     })
     await deleteCandidateRefsForShas(gitIn(store.repo, undefined, store.selection), store.repo, store.remote, [
       keptHead,
     ])
-    return mainCustody === undefined ? { archive: originArchive } : { main: mainCustody }
+    return mainCustody === undefined ? {} : { main: mainCustody }
   }
   if (request.retire !== undefined && !retiringDraft) {
     if (head === undefined || retirementTip === null || state.ending === undefined) {
       throw new Error(`${branch}: terminal retirement lost its exact head or ending`)
     }
-    return { queue, branch, head, event: state.ending.id, ...(await retire(retirementTip, head)) }
+    return { queue, branch, head, ref, event: state.ending.id, ...(await retire(retirementTip, head)) }
   }
   if (retiringEnded && !note) {
     throw new Error(`${ref} in ${store.repo}: dropping an ended change requires --reason`)
@@ -3012,7 +3097,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
     if (alreadyDropped && state.ending !== undefined) {
       const ending = history.findLast((event) => event.id === state.ending?.id)
       if (ending === undefined) throw new Error(`${ref} in ${store.repo}: missing dropped ending ${state.ending.id}`)
-      return { queue, branch, event: ending.id, head: keptCommit(ending) }
+      return { queue, branch, ref, event: ending.id, head: keptCommit(ending) }
     }
     if (!retiringEnded) {
       const disposition = isOpen(state.status)
@@ -3025,22 +3110,18 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
       )
     }
   }
-  if (state.ending !== undefined && !retiringEnded) {
+  // A local retirement reaching here writes a dropped event that keeps its exact tip.
+  if (state.ending !== undefined && !retiringEnded && local === undefined) {
     if (head === undefined) throw new Error(`${branchRef} in ${store.repo}: ended branch is absent`)
     if (selectedTip === null) throw new Error(`${ref} in ${store.repo}: ended change has no chain tip`)
-    if (archive === undefined) {
-      if (store.backend.publish === undefined) {
-        throw new Error("Gitomic backend lacks publish for dropped branch deletion")
-      }
-      return { queue, branch, head, event: state.ending.id, ...(await retire(selectedTip, head)) }
+    if (store.backend.publish === undefined) {
+      throw new Error("Gitomic backend lacks publish for dropped branch deletion")
     }
-    if (preparedArchive === undefined) throw new Error(`${branch}: local retirement has no archive update`)
-    await preparedArchive.publish({ kind: "event", ref, tip: selectedTip })
-    await verifyCustody(selectedTip)
-    return { queue, branch, event: state.ending.id, head, archive: archive.ref }
+    return { queue, branch, head, ref, event: state.ending.id, ...(await retire(selectedTip, head)) }
   }
   const at = new Date()
-  const keptHead = retiringEnded ? state.commit : head
+  // An advanced drop's Commit: stays the recorded commit; its Tip: is the head it also keeps (30683).
+  const keptHead = advanced !== undefined || (retiringEnded && local === undefined) ? state.commit : head
   if (keptHead === undefined) throw new Error(`${ref} in ${store.repo}: dropped change has no kept head`)
   const input = changeInput("cancelled", {
     queueTip,
@@ -3051,6 +3132,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
     ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
     title: `dropped ${branch}`,
     ...(note === undefined ? {} : { content: note }),
+    ...(advanced === undefined || head === undefined ? {} : { advanced: { ...advanced, tip: head } }),
   })
   const planned =
     selectedTip === null
@@ -3068,36 +3150,26 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
   await protectDraft()
   const result = await chain.append(planned, {
     expect: selectedTip,
-    // The event keeps H, so this branch delete only removes its name.
-    ...(archiveUpdate === undefined
-      ? head === undefined
-        ? {}
-        : {
-            also: [
-              ...(main === undefined ? [] : [{ ref: main.ref, expect: main.tip, oid: main.tip }]),
-              { ref: branchRef, expect: head, oid: retiringEnded ? head : null },
-            ],
-          }
-      : { also: [archiveUpdate] }),
+    // The event keeps H, so this branch delete only removes its name; a local retirement leaves origin's branch.
+    ...(head === undefined || local !== undefined
+      ? {}
+      : {
+          also: [
+            ...(main === undefined ? [] : [{ ref: main.ref, expect: main.tip, oid: main.tip }]),
+            { ref: branchRef, expect: head, oid: retiringEnded ? head : null },
+          ],
+        }),
   })
   const written = result.events.findLast((event) => event.type === "cancelled")?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: dropped event was not written`)
-  await preparedArchive?.verify()
-  await verifyCustody(written)
-  if (retiringEnded && head !== undefined && archive === undefined) {
-    return { queue, branch, event: written, head: keptHead, ...(await retire(written, head)) }
+  if (local !== undefined) return { queue, branch, ref, event: written, head: local.tip }
+  if (retiringEnded && head !== undefined) {
+    return { queue, branch, ref, event: written, head: keptHead, ...(await retire(written, head)) }
   }
-  if (head !== undefined && archive === undefined) {
+  if (head !== undefined) {
     await deleteCandidateRefsForShas(gitIn(store.repo, undefined, store.selection), store.repo, store.remote, [head])
   }
-  return {
-    queue,
-    branch,
-    event: written,
-    head: keptHead,
-    ...(main === undefined ? {} : { main }),
-    ...(archive === undefined ? {} : { archive: archive.ref }),
-  }
+  return { queue, branch, ref, event: written, head: keptHead, ...(main === undefined ? {} : { main }) }
 }
 
 type ChangeHistory = Readonly<{ state: EventChange; events: readonly Event[] }>

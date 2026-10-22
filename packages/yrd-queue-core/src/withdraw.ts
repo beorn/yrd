@@ -1,5 +1,4 @@
 /** End an open event change, then retire its remote branch without delaying the ending. */
-import { archiveRefFor, ensureArchiveRef } from "git-super/archive-ref"
 import { shellQuote } from "git-super/shell-command"
 import { deleteCandidateRefsForShas } from "./candidate-refs.ts"
 import { changeInput, changesRef, decide, isOpen, project, queueFormat, queueRef, readEventQueue } from "./events.ts"
@@ -21,7 +20,6 @@ export type WithdrawnChange = Readonly<{
   head: string
   record: string
   remoteRemoved: boolean
-  archive?: string
   recovery?: string
   retirementError?: string
 }>
@@ -86,7 +84,6 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
   })
   const record = result.events.findLast((event) => event.type === "cancelled")?.id
   if (record === undefined) throw new Error(`${ref} in ${root}: withdrawal published no cancelled event`)
-  let archive: string | undefined
   let recovery: string | undefined
   let retirementError: string | undefined
   let remoteRemoved = false
@@ -97,18 +94,15 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
     const target = await readRemoteCommit(git, remote, `refs/heads/${queue}`)
     if (target === undefined) throw new Error(`published main ${remote}#${queue} is missing`)
     if (!(await isAncestor(git, head, target))) {
-      archive = archiveRefFor(request.branch, request.by, new Date().toISOString().slice(0, 10))
-      const custody = ensureArchiveRef(root, archive, head)
-      if (!custody.ok) throw new Error(custody.reason)
-      // The local protected archive also keeps this object after environment closure.
+      // The withdrawal event keeps the head as a Git parent, so the chain fetches it back (30683).
       // Reusing the original name preserves the change and its issue binding on submit.
-      recovery = `git -C ${shellQuote(root)} branch ${shellQuote(request.branch)} ${shellQuote(head)}`
+      const at = `git -C ${shellQuote(root)}`
+      recovery = `${at} fetch ${shellQuote(remote)} ${shellQuote(ref)} && ${at} branch ${shellQuote(request.branch)} ${shellQuote(head)}`
     }
     await retireOriginBranch(store, {
       branch: request.branch,
       head,
       authority: { kind: "event", ref, tip: record },
-      archive,
       protections: protections === undefined ? undefined : () => protections(head, state.issue),
     })
     remoteRemoved = true
@@ -119,6 +113,6 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
   return {
     branch: request.branch,
     queue,
-    withdrawn: [{ branch: request.branch, head, record, remoteRemoved, archive, recovery, retirementError }],
+    withdrawn: [{ branch: request.branch, head, record, remoteRemoved, recovery, retirementError }],
   }
 }
