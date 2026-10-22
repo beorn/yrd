@@ -1841,7 +1841,7 @@ export async function coreQueueCommand(
       const mode =
         request.command === "drop-issue"
           ? "Issue cleanup inspects the author store and its own component checkouts, plus any other component this issue names. Another worktree's copy is not searched; yrd env close retires an environment's own branches. --dry-run previews. --apply and --submodules are accepted compatibility flags."
-          : "Local branch cleanup archives the exact tip before deleting its local name."
+          : "Local branch cleanup keeps the exact tip in an event or on the target before deleting its local name."
       const branchIssue = (branch: string, recordedIssue?: string): string | undefined => {
         const mapped = io.branchIssue === undefined ? recordedIssue : io.branchIssue({ branch, recordedIssue })
         return mapped === undefined ? undefined : issueIdentity(mapped)
@@ -2109,7 +2109,6 @@ export async function coreQueueCommand(
             owner: change?.submitter,
             issue: bound,
             reason: request.reason ?? "explicit local branch cleanup",
-            date: new Date().toISOString().slice(0, 10),
             dryRun: false,
             log,
             protections: async () =>

@@ -23,7 +23,6 @@ export type LocalBranchRetirement = Readonly<{
   owner?: string
   issue?: string
   reason: string
-  date: string
   /** Read the same eligibility and protections without writing custody or deleting a ref. */
   dryRun?: boolean
   /** A proven worktree-less retained store: its own attached HEAD is not a live checkout (30094). */

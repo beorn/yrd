@@ -652,7 +652,6 @@ export async function retireIssueBranches(
               owner: change?.submitter,
               issue,
               reason: request.reason ?? label,
-              date: new Date().toISOString().slice(0, 10),
               dryRun: !request.apply,
               log,
               protections: async () =>
@@ -697,7 +696,6 @@ export async function retireIssueBranches(
           actor: request.by,
           issue,
           reason: request.reason,
-          date: new Date().toISOString().slice(0, 10),
           dryRun: !request.apply,
           log,
           local: candidate.local,
@@ -785,12 +783,12 @@ async function componentRetirementOwner(input: ComponentRetirementInput) {
     return { owner, ownerGit, queue, config, logDirectory: undefined as string | undefined }
   }
   // A cold retained component store is bare, so it has no superproject to walk to.
-  // It is its own owner: the branch lives here and archives at this store's origin.
+  // It is its own owner: the branch lives here and goes only once this store's origin main holds its head (30683).
   if (retainedComponentStoreHere(repo) !== undefined) {
     const remotes = (await git(["remote"])).split("\n").filter((name) => name.trim() !== "")
     if (!remotes.includes("origin")) {
       throw new Error(
-        `${repo}: cold component store has no origin remote, so its branches cannot be archived; nothing was removed`,
+        `${repo}: cold component store has no origin remote, so no published main can prove its branches; nothing was removed`,
       )
     }
     const queue = await remoteHead(git, "origin")
@@ -827,7 +825,6 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
     target: `origin/${queue}`,
     ...(config === undefined ? {} : { config: config.blob }),
   })
-  const date = new Date().toISOString().slice(0, 10)
   let headMove: { before: { symbolic: string; tip: string }; after: { detached: string } } | undefined
   /** 30094: a worktree-less retained store keeps its own HEAD; move it in place at the verified tip
    * with the tip as the expected old value, so the branch ref can be removed without losing custody. */
@@ -874,7 +871,6 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
         actor: request.by,
         issue: request.issue,
         reason: request.reason,
-        date,
         log,
         local: false,
         origin: true,
@@ -903,7 +899,6 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
       actor: request.by,
       issue: request.issue,
       reason: request.reason ?? "explicit local branch cleanup",
-      date,
       log,
       // An unmerged component branch is kept and reported, with no archive and no delete (work.md:110, 30683).
       disposition: { kind: "merged" as const, base: target, target },
@@ -1036,7 +1031,6 @@ export async function releaseRetainedCheckouts(
   const excluded: { repo: string; path: string; reason: string }[] = []
   const evidence: LocalBranchProtectionResult["evidence"][number][] = []
   const identity = input.issueIdentity
-  const date = new Date().toISOString().slice(0, 10)
   const rootRow: Row = {
     repo: input.repo,
     path: "",
@@ -1456,7 +1450,6 @@ export async function releaseRetainedCheckouts(
           actor: request.by,
           issue: request.issue,
           reason: request.reason,
-          date,
           log: input.log,
           protections: async () => {
             const reasons = await protect(candidate)
@@ -1561,7 +1554,6 @@ export async function retireMergedRootAuthor(
     owner: change.submitter,
     issue: change.issue,
     reason: withdrawn ? "withdrawn" : "merged",
-    date: new Date().toISOString().slice(0, 10),
     log,
     protections: async () => {
       const current = await readStatus(input.store, input.queue, branch)
@@ -1660,7 +1652,7 @@ export async function prepareAuthorRelease(checkout: string, io: YrdCliIO): Prom
 }
 
 /** The ONE release sequence used by native close and public host handles:
- * capture exact native identity, recheck its release, then fresh event/ref/store/protection/CAS and archive-first retire.
+ * capture exact native identity, recheck its release, then fresh event/ref/store/protection/CAS and custody-first retire.
  */
 async function captureAuthorRelease(
   input: Readonly<{
@@ -1785,7 +1777,7 @@ async function captureAuthorRelease(
             const root = await retireMergedRootAuthor({ ...captured, target: freshTarget, actor })
             if (root.outcome !== "removed" && !(root.outcome === "kept" && root.reason === "unreached")) {
               input.io.stderr(
-                `yrd: ${branch}@${tip} ${root.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept after release"}: ${root.detail ?? root.reason}\n`,
+                `yrd: ${branch}@${tip} ${root.outcome === "failed" ? "retirement failed; inspect ref and custody" : "kept after release"}: ${root.detail ?? root.reason}\n`,
               )
             }
             const rootIncomplete = root.outcome === "failed"
@@ -1801,7 +1793,7 @@ async function captureAuthorRelease(
             }
             return { retirement: "complete", reasons: [], failed: [] }
           } catch (cause) {
-            const outcome = attempted ? "retirement incomplete; inspect ref and archive" : "kept before retirement"
+            const outcome = attempted ? "retirement incomplete; inspect ref and custody" : "kept before retirement"
             input.io.stderr(`yrd: ${branch}@${tip} ${outcome}: ${String(cause)}\n`)
             try {
               log.write({
@@ -2054,7 +2046,6 @@ export async function retireMergedComponentAuthors(
         owner: author.owner,
         issue: author.issue,
         reason: "merged",
-        date: new Date().toISOString().slice(0, 10),
         log: input.log,
         protections: async () => {
           if (author.branch === "main" || author.branch === defaultBranch) {
@@ -2090,13 +2081,13 @@ export async function retireMergedComponentAuthors(
         },
       })
       if (result.outcome !== "removed") {
-        const reason = `${author.path} ${result.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept"}: ${result.detail ?? result.reason}`
+        const reason = `${author.path} ${result.outcome === "failed" ? "retirement failed; inspect ref and custody" : "kept"}: ${result.detail ?? result.reason}`
         incomplete.push(reason)
         if (result.outcome === "failed") {
           failed.push(`${author.path} ${author.branch}@${author.tip}: ${result.detail ?? result.reason}`)
         }
         input.io.stderr(
-          `yrd: component ${author.path} ${author.branch}@${author.tip} ${result.outcome === "failed" ? "retirement failed; inspect ref and archive" : "kept"}: ${result.detail ?? result.reason}\n`,
+          `yrd: component ${author.path} ${author.branch}@${author.tip} ${result.outcome === "failed" ? "retirement failed; inspect ref and custody" : "kept"}: ${result.detail ?? result.reason}\n`,
         )
         input.log.write({
           kind: "warning",
@@ -2106,7 +2097,7 @@ export async function retireMergedComponentAuthors(
         })
       }
     } catch (cause) {
-      const reason = `${author.path} ${author.branch}@${author.tip} retirement incomplete; inspect ref and archive: ${String(cause)}`
+      const reason = `${author.path} ${author.branch}@${author.tip} retirement incomplete; inspect ref and custody: ${String(cause)}`
       incomplete.push(reason)
       input.io.stderr(`yrd: component ${reason}\n`)
       input.log.write({
@@ -2149,8 +2140,8 @@ export function createLandedBranchRetirement(
   ): Promise<
     Omit<LocalBranchRetirementResult, "archiveRef"> & {
       archiveRef?: string
-      /** What held the tip when it was removed: main (ancestry), a recorded landing, or the origin archive (closed). */
-      custody?: "main" | "landing" | "origin" | "event"
+      /** What held the tip when it was removed: main (ancestry), or the ending event that keeps it. */
+      custody?: "main" | "event"
       event?: Readonly<{ ref: string; tip: string }>
     }
   > => {

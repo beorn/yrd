@@ -387,7 +387,7 @@ function buildProgram(
       const remotes = (await gitIn(retainedStore, undefined, selection, { env })(["remote"])).split("\n")
       if (!remotes.includes("origin")) {
         throw new Error(
-          `${retainedStore}: cold component store has no origin remote, so its branches cannot be archived; nothing was removed`,
+          `${retainedStore}: cold component store has no origin remote, so no published main can prove its branches; nothing was removed`,
         )
       }
     }

@@ -184,7 +184,7 @@ export const LOG_KINDS = [
   // branch moved or was already gone, and `saw` says which, a sha or "absent".
   "branch-deleted",
   "branch-kept",
-  // Local archive-first retirement, including protected/refused attempts, with actor and issue.
+  // Local custody-first retirement, including protected/refused attempts, with actor and issue.
   "local-branch-retirement",
   // One closed or dropped issue's branch judged by the service's closed-issue sweep (29450): the issue's
   // status as the declared resolver returned it, the retirement outcome, the archive ref and, for a

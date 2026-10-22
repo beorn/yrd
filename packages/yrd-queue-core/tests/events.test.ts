@@ -13,7 +13,6 @@ import type { Event, EventInput } from "gitomic/events"
 import { listRefs, openEvents } from "gitomic/events"
 import { createMemBackend } from "gitomic/mem"
 import { Conflict, open, PublicationRejected } from "gitomic"
-import { archiveRefFor } from "git-super/archive-ref"
 import type { GitomicBackend, RefUpdate } from "gitomic"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
@@ -2683,16 +2682,7 @@ describe("the queue-format boundary", () => {
           return result
         },
       }
-      const archive = kind === "event" ? archiveRefFor(branch, "fixture", "2000-01-01") : undefined
-      const refusal = await retireOriginBranch(
-        { ...location, backend },
-        {
-          branch,
-          head: kept,
-          authority,
-          ...(archive === undefined ? {} : { archive }),
-        },
-      ).then(
+      const refusal = await retireOriginBranch({ ...location, backend }, { branch, head: kept, authority }).then(
         () => undefined,
         (error: unknown) => error,
       )
@@ -2713,40 +2703,40 @@ describe("the queue-format boundary", () => {
     }
 
     // Neither surviving-branch row proves recovery when only origin keeps the
-    // payload. Clear this disposable clone's custody after real remote deletion.
-    const archivedBranch = "task/race'archive-absent"
-    const archivedBranchRef = `refs/heads/${archivedBranch}`
-    await git(["checkout", "--quiet", "-b", archivedBranch, advanced])
-    writeFileSync(join(root, "archive-only"), "unique remote custody\n")
-    await git(["add", "archive-only"])
-    await git(["commit", "--quiet", "-m", "archive-only payload"])
-    const archivedHead = (await git(["rev-parse", "HEAD"])).trim()
-    await git(["push", "--quiet", "origin", archivedBranchRef])
+    // payload, here through the change's event chain alone: no archive is
+    // written (30683). Clear this disposable clone's custody after real remote deletion.
+    const originOnlyBranch = "task/race'origin-only"
+    const originOnlyRef = `refs/heads/${originOnlyBranch}`
+    await git(["checkout", "--quiet", "-b", originOnlyBranch, advanced])
+    writeFileSync(join(root, "origin-only"), "unique remote custody\n")
+    await git(["add", "origin-only"])
+    await git(["commit", "--quiet", "-m", "origin-only payload"])
+    const originOnlyHead = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["push", "--quiet", "origin", originOnlyRef])
     await git(["checkout", "--quiet", "--detach", advanced])
-    const archivedEventRef = changesRef("lab", archivedBranch)
-    const archivedChain = await openEvents({ ...location, ref: archivedEventRef })
-    const archivedStart = await archivedChain.append(
-      [changeInput("opened", { queueTip, at: new Date(), commit: archivedHead, by: "fixture" })],
+    const originOnlyEventRef = changesRef("lab", originOnlyBranch)
+    const originOnlyChain = await openEvents({ ...location, ref: originOnlyEventRef })
+    const originOnlyStart = await originOnlyChain.append(
+      [changeInput("opened", { queueTip, at: new Date(), commit: originOnlyHead, by: "fixture" })],
       { expect: null },
     )
-    const archivedEnd = await archivedChain.append(
-      [changeInput("failed", { queueTip, at: new Date(), reason: "archive-only ending" })],
-      { expect: archivedStart.head },
+    const originOnlyEnd = await originOnlyChain.append(
+      [changeInput("failed", { queueTip, at: new Date(), reason: "origin-only ending" })],
+      { expect: originOnlyStart.head },
     )
-    const archivedStartTip = archivedStart.head
-    const archivedEndTip = archivedEnd.head
-    if (archivedStartTip === null || archivedEndTip === null) {
-      throw new Error("archive-only fixture lacks its event tips")
+    const originOnlyStartTip = originOnlyStart.head
+    const originOnlyEndTip = originOnlyEnd.head
+    if (originOnlyStartTip === null || originOnlyEndTip === null) {
+      throw new Error("origin-only fixture lacks its event tips")
     }
-    const archive = archiveRefFor(archivedBranch, "fixture", "2000-01-01")
-    const archiveBackend: GitomicBackend = {
+    const originOnlyBackend: GitomicBackend = {
       ...git.backend,
       publish: async (repo, updates, remote) => {
         const result = await publish(repo, updates, remote)
-        if (!updates.some((update) => update.ref === archivedBranchRef && update.oid === null)) return result
-        await publish(repo, [{ ref: archivedEventRef, expect: archivedEndTip, oid: archivedStartTip }], remote)
+        if (!updates.some((update) => update.ref === originOnlyRef && update.oid === null)) return result
+        await publish(repo, [{ ref: originOnlyEventRef, expect: originOnlyEndTip, oid: originOnlyStartTip }], remote)
         const localCustody = (
-          await git(["for-each-ref", `--contains=${archivedHead}`, "--format=%(refname) %(objectname)"])
+          await git(["for-each-ref", `--contains=${originOnlyHead}`, "--format=%(refname) %(objectname)"])
         )
           .trim()
           .split("\n")
@@ -2764,34 +2754,37 @@ describe("the queue-format boundary", () => {
         return result
       },
     }
-    const archiveRefusal = await retireOriginBranch(
-      { ...location, backend: archiveBackend },
+    const originOnlyRefusal = await retireOriginBranch(
+      { ...location, backend: originOnlyBackend },
       {
-        branch: archivedBranch,
-        head: archivedHead,
-        archive,
-        authority: { kind: "event", ref: archivedEventRef, tip: archivedEndTip },
+        branch: originOnlyBranch,
+        head: originOnlyHead,
+        authority: { kind: "event", ref: originOnlyEventRef, tip: originOnlyEndTip },
       },
     ).then(
       () => undefined,
       (error: unknown) => error,
     )
-    expect(String(archiveRefusal)).toContain("change moved during retirement")
-    const absentObject = spawnSync("git", ["-C", root, "cat-file", "-e", archivedHead], { encoding: "utf8" })
+    expect(String(originOnlyRefusal)).toContain("change moved during retirement")
+    const absentObject = spawnSync("git", ["-C", root, "cat-file", "-e", originOnlyHead], { encoding: "utf8" })
     expect([1, 128]).toContain(absentObject.status)
-    expect((await git(["for-each-ref", "--format=%(refname)", archivedBranchRef])).trim()).toBe("")
-    expect((await git(["ls-remote", "origin", archive])).trim()).toBe(`${archivedHead}\t${archive}`)
-    const withoutFetch = spawnSync("git", ["-C", root, "branch", archivedBranch, archivedHead], {
+    expect((await git(["for-each-ref", "--format=%(refname)", originOnlyRef])).trim()).toBe("")
+    // The moved chain still reaches the opened event that keeps the head.
+    expect((await git(["ls-remote", "origin", originOnlyEventRef])).trim()).toBe(
+      `${originOnlyStartTip}\t${originOnlyEventRef}`,
+    )
+    expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim()).toBe("")
+    const withoutFetch = spawnSync("git", ["-C", root, "branch", originOnlyBranch, originOnlyHead], {
       cwd: outside,
       encoding: "utf8",
     })
     expect(withoutFetch.status, withoutFetch.stderr).toBe(128)
-    const recovery = /(git -C .+)$/u.exec(String(archiveRefusal))?.[1]
-    if (recovery === undefined) throw new Error("archive retirement supplied no recovery recipe")
+    const recovery = /(git -C .+)$/u.exec(String(originOnlyRefusal))?.[1]
+    if (recovery === undefined) throw new Error("event retirement supplied no recovery recipe")
     const beforeRecovery = await git(["ls-remote", "origin"])
     const recovered = spawnSync("/bin/sh", ["-c", recovery], { cwd: outside, encoding: "utf8" })
     expect(recovered.status, recovered.stderr).toBe(0)
-    expect((await git(["rev-parse", archivedBranchRef])).trim()).toBe(archivedHead)
+    expect((await git(["rev-parse", originOnlyRef])).trim()).toBe(originOnlyHead)
     expect(await git(["ls-remote", "origin"])).toBe(beforeRecovery)
   })
 

@@ -346,7 +346,6 @@ it("local retirement keeps protected tips and preserves custody before removing 
     actor: "@dev/2",
     issue: "@i/10-yrd/1",
     reason: "merged",
-    date: "2026-10-12",
     log,
     protections: async () => protections,
     disposition: { kind: "merged" as const, base: w.target, target: w.target },
@@ -380,7 +379,7 @@ it("local retirement keeps protected tips and preserves custody before removing 
   expect(await archives()).toBe("")
 
   // Native release and queue cleanup can observe the same completed retirement.
-  expect(await retireLocalBranch({ ...input, actor: "@dev/9", date: "2026-10-15" })).toMatchObject({
+  expect(await retireLocalBranch({ ...input, actor: "@dev/9" })).toMatchObject({
     outcome: "removed",
     detail: `already retired: ${w.target} holds ${w.target} and the branch is absent; this run deleted no ref`,
   })
@@ -402,7 +401,6 @@ it("local retirement keeps protected tips and preserves custody before removing 
   const unavailableOrigin = await retireLocalBranch({
     ...input,
     tip: head,
-    date: "2026-10-13",
     reason: "issue closed",
     disposition: {
       kind: "closed",
@@ -416,7 +414,6 @@ it("local retirement keeps protected tips and preserves custody before removing 
   const closed = await retireLocalBranch({
     ...input,
     tip: head,
-    date: "2026-10-13",
     reason: "issue closed",
     disposition: {
       kind: "closed",
@@ -442,7 +439,6 @@ it("local retirement keeps protected tips and preserves custody before removing 
     ...input,
     branch: mergedBranch,
     tip: w.target,
-    date: "2026-10-14",
     reason: "issue closed after merge",
     disposition: { kind: "closed", target: w.target, queue: "main", store: queueStore },
   })
@@ -497,7 +493,6 @@ it("keeps and reports a local branch whose chain no longer keeps its tip", async
     tip: unmergedTip,
     actor: "@dev/2",
     reason: "issue closed",
-    date: "2026-10-15",
     issue: "@i/10-yrd/1",
     log,
     protections: async () => {
@@ -569,7 +564,6 @@ it("merged local retirement reports only changed component branches without owne
     tip,
     actor: "@dev/2",
     reason: "merged",
-    date: "2026-10-12",
     issue: "@i/10-yrd/1",
     log,
     protections: async () => [],
@@ -591,7 +585,6 @@ it("merged local retirement reports only changed component branches without owne
     tip,
     actor: "@dev/2",
     reason: "merged",
-    date: "2026-10-13",
     issue: "@i/10-yrd/1",
     log: unchangedLog,
     protections: async () => [],
