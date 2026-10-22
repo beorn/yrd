@@ -53,7 +53,7 @@
     "@yrd/queue-core": "workspace:*",
     "git-super": "0.9.0",
     "typescript": "6.0.3",
-    "vitest": "4.1.10"
+    "vitest": "5.0.4"
   },
   "overrides": {
     "git-super": "github:beorn/git-super#12a26909ffed4662c9dd6e826b46c72649e2edc9",
