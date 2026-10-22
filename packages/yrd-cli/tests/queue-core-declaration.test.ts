@@ -3614,8 +3614,9 @@ describe("a queue is the selected origin branch carrying config", () => {
       const main = (await git(["rev-parse", "main"])).trim()
       const location = createEventStore(repo, "origin", git.selection)
       const before = await readBranchHistory(location, "main", branch)
-      if (mode === "absent main")
+      if (mode === "absent main") {
         await gitIn(join(dirname(repo), "remote.git"))(["update-ref", "-d", "refs/heads/main"])
+      }
       const by = mode === "queue owner" ? "@chief" : mode === "third seat" ? "@dev/8" : "@dev/7"
       const reason = mode === "no reason" ? [] : ["--reason", "superseded by 30704"]
       const output = capture(repo)

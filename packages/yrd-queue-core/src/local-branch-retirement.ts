@@ -237,8 +237,9 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
             event: custody.event,
             keeps: disposition.advanced === undefined ? [tip] : [disposition.advanced.recorded, tip],
           }).catch((cause: unknown) => {
-            if (cause instanceof ChainCustodyMismatch)
+            if (cause instanceof ChainCustodyMismatch) {
               throw new RetirementKept({ code: "moved", detail: cause.message })
+            }
             throw cause
           })
         },
