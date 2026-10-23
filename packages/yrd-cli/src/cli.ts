@@ -1685,7 +1685,7 @@ function buildProgram(
     )
     .option(
       "--preserve",
-      `preserve a dirty environment's uncommitted root and component bytes to the worktree tool's durable refs before removal (otherwise a dirty environment is refused); the preserve runs before the teardown hook, so bytes a teardown writes afterwards are not preserved`,
+      `preserve a dirty environment's uncommitted root and component bytes before teardown, then preserve again after a successful teardown before removal (otherwise a dirty environment is refused); either save retains its custody refs and author branches`,
     )
     .option("--json", "emit stable JSON")
     .action(async (path, options) => setExit(await closeEnvironment(path, options, io)))
