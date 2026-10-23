@@ -1241,11 +1241,15 @@ export async function closeEnvironment(
         )
       }
       if (remote === "" || remote.includes("\n")) {
-        throw new Error(`environment ${path} preservation ${phase} wrote ${entry.ref} but ${owner} origin push URL is empty or ambiguous; environment kept`)
+        throw new Error(
+          `environment ${path} preservation ${phase} wrote ${entry.ref} but ${owner} origin push URL is empty or ambiguous; environment kept`,
+        )
       }
       const previous = custodyRemotes.get(entry.path)
       if (previous !== undefined && previous !== remote) {
-        throw new Error(`environment ${path} preservation ${phase} wrote ${entry.ref} but ${owner} origin push URL changed from ${previous} to ${remote} across custody passes; environment kept`)
+        throw new Error(
+          `environment ${path} preservation ${phase} wrote ${entry.ref} but ${owner} origin push URL changed from ${previous} to ${remote} across custody passes; environment kept`,
+        )
       }
       custodyRemotes.set(entry.path, remote)
       custody.push({ ...entry, remote })
