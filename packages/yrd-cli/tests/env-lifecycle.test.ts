@@ -1322,11 +1322,32 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
   })
 
   /**
+   * @failure 30814: teardown failure after publication must retain the source
+   *          and name completed custody; existing teardown failure starts clean.
+   * @level l2 @consumer a preserved environment with a failing teardown
+   */
+  it("keeps the environment and first custody ref when teardown fails", async () => {
+    const w = await world(":", "exit 23")
+    installStubWorktreePreserve(w.work)
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    writeFileSync(join(path, "root-dirt.txt"), "before\n")
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(2)
+    const ref = `refs/heads/wip/${basename(path)}-preserve-stub`
+    expect(run.stderr()).toContain(`completed custody refs: wip/${basename(path)}-preserve-stub`)
+    expect(existsSync(path)).toBe(true)
+    expect((await w.git(["show", `${ref}:root-dirt.txt`])).trim()).toBe("before")
+  })
+
+  /**
    * @failure 30814: a successful preservation receipt can be stale by the removal
    *          edge. Earlier tests check only immediate CLI success, never fresh remote custody.
    * @level l2 @consumer a close whose published branch disappears before removal
    */
-  it("keeps the environment when fresh remote custody loses a saved commit", async () => {
+  it.each(["deleted", "rewound"] as const)("keeps the environment when fresh remote custody is %s", async (mode) => {
     const w = await world(":", ":")
     installStubWorktreePreserve(w.work)
     const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
@@ -1336,7 +1357,9 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     const run = capture(w.work)
     await expect(
       closeEnvironment(path, { preserve: true, json: true }, run.io, undefined, "delegate", async () => {
-        if (++reads === 2) await w.git(["push", "origin", `:${ref}`])
+        if (++reads === 2) {
+          await w.git(mode === "deleted" ? ["push", "origin", `:${ref}`] : ["push", "--force", "origin", `main:${ref}`])
+        }
       }),
     ).rejects.toThrow(/origin push URL .*refs\/heads\/wip\/.*no longer contains preserved/u)
     expect(reads).toBe(2)
