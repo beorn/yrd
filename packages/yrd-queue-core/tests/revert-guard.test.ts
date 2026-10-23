@@ -1217,3 +1217,87 @@ describe("revert guard path cap (28195)", () => {
     expect(revertGuardAction(report, "refuse")).toBe("stick")
   })
 })
+
+/**
+ * @failure  A pin-only advance whose component change MOVES a declaration to another manifest is reported as a
+ *           reverted path: the old manifest returns to its pre-declaration content, so the guard sees the target's
+ *           earlier value restored and warns, while the declaration itself is carried by the same component change
+ *           at another path (2026-10-23 noon terminfo freeze: af5dd2007032 keeps exactly one candidate2 declarer,
+ *           00da53623456.json, and 448ce7769d2c.json has no freeze key).
+ * @level    l2
+ * @consumer yrd submit admission warnings and every seat that rechecks a valid tree because of them.
+ * @testonly none
+ */
+it("30901: a pin-only advance that relocates a declaration is not a reverted path", async () => {
+  const root = mkdtempSync(join(tmpdir(), "yrd-revert-relocate-30901-"))
+  roots.push(root)
+  const dep = join(root, "dep")
+  mkdirSync(dep)
+  await gitIn(dep, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(dep, { "manifest-448ce.json": "suite: 448ce\n" }, "the suite manifest, before any freeze")
+  const targetPin = await commit(
+    dep,
+    { "manifest-448ce.json": "suite: 448ce\nfreeze: candidate2\n" },
+    "target declares the candidate2 freeze in the 448ce manifest",
+  )
+  // The final cut relocates the freeze into the 00da manifest, so the 448ce manifest returns to its
+  // pre-declaration content. The declaration is not lost: the same change adds it at another path.
+  const candidatePin = await commit(
+    dep,
+    { "manifest-00da.json": "suite: 00da\nfreeze: candidate2\n", "manifest-448ce.json": "suite: 448ce\n" },
+    "final cut moves the candidate2 freeze to the 00da manifest",
+  )
+  const product = join(root, "product")
+  mkdirSync(product)
+  const productGit = gitIn(product, undefined, undefined, { env })
+  await productGit(["init", "--quiet", "--initial-branch=main"])
+  await commit(product, { "readme.txt": "product\n" }, "product base")
+  const target = await pin(product, "vendor/dep", dep, targetPin, "target pins the freeze declarer")
+  const candidate = await pin(product, "vendor/dep", dep, candidatePin, "candidate pins the relocated freeze")
+  const checkoutAt = async (sha: string): Promise<string> => {
+    const dir = join(root, "checkout-" + sha.slice(0, 12))
+    await productGit(["worktree", "add", "--quiet", "--detach", dir, sha])
+    await gitIn(dir, undefined, undefined, { env })(["submodule", "update", "--init", "--recursive", "--quiet"])
+    return dir
+  }
+  const report = await detect({ checkoutAt, target }, candidate, candidate)
+  expect(report.coverage).toBe("complete")
+  expect(report.paths.map((row) => row.path)).toEqual([])
+  expect(revertedPathsFinding(report)).toBeUndefined()
+})
+
+/**
+ * @failure  The same shape without a relocation is a genuine revert and must keep warning, or the correction
+ *           silences the instrument that exists to catch a lost target advance.
+ * @level    l2
+ * @consumer yrd submit admission warnings (the 12:37 #30625 control: the revert pin restores tty.ts and tty.test.ts
+ *           to their pre-fix blobs, and those values appear at no other path).
+ * @testonly none
+ */
+it("30901 control: a pin that restores a value carried nowhere else is still a reverted path", async () => {
+  const root = mkdtempSync(join(tmpdir(), "yrd-revert-control-30901-"))
+  roots.push(root)
+  const dep = join(root, "dep")
+  mkdirSync(dep)
+  await gitIn(dep, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(dep, { "tty.ts": "read once\n" }, "the tty reader before the fix")
+  const targetPin = await commit(dep, { "tty.ts": "read to the query deadline\n" }, "target lands the tty fix")
+  const candidatePin = await commit(dep, { "tty.ts": "read once\n" }, "candidate reverts the tty fix")
+  const product = join(root, "product")
+  mkdirSync(product)
+  const productGit = gitIn(product, undefined, undefined, { env })
+  await productGit(["init", "--quiet", "--initial-branch=main"])
+  await commit(product, { "readme.txt": "product\n" }, "product base")
+  const target = await pin(product, "vendor/dep", dep, targetPin, "target pins the fix")
+  const candidate = await pin(product, "vendor/dep", dep, candidatePin, "candidate pins the revert")
+  const checkoutAt = async (sha: string): Promise<string> => {
+    const dir = join(root, "checkout-" + sha.slice(0, 12))
+    await productGit(["worktree", "add", "--quiet", "--detach", dir, sha])
+    await gitIn(dir, undefined, undefined, { env })(["submodule", "update", "--init", "--recursive", "--quiet"])
+    return dir
+  }
+  const report = await detect({ checkoutAt, target }, candidate, candidate)
+  expect(report.coverage).toBe("complete")
+  expect(report.paths.map((row) => row.path)).toEqual(["vendor/dep/tty.ts"])
+  expect(revertedPathsFinding(report)?.coverage).toBe("complete")
+})
