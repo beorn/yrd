@@ -3128,6 +3128,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         await git(["commit", "--quiet", "-am", "register component"])
         await git(["push", "--quiet", "origin", "main"])
       }
+      if (mode === "automatic-sibling") await git(["commit", "--quiet", "--allow-empty", "-m", "submitted sibling"])
       const recorded = (await git(["rev-parse", "HEAD"])).trim()
       const queueTip = await createQueue(repo, "main", recorded, new Date())
       const store = createEventStore(repo, "origin", git.selection)
@@ -3142,7 +3143,15 @@ describe("a queue is the selected origin branch carrying config", () => {
       let head: string
       if (mode === "non-descendant" || mode === "automatic-sibling") {
         const tree = (await git(["rev-parse", "HEAD^{tree}"])).trim()
-        head = (await git(["commit-tree", tree, "-m", "unrelated local tip"])).trim()
+        head = (
+          await git([
+            "commit-tree",
+            tree,
+            ...(mode === "automatic-sibling" ? ["-p", `${recorded}^`] : []),
+            "-m",
+            "unrelated local tip",
+          ])
+        ).trim()
         await git(["branch", branch, head])
       } else {
         await git(["checkout", "--quiet", "-b", branch])
@@ -3349,7 +3358,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const outside = outsideRepositoryRoot()
     roots.push(outside)
     const git = gitIn(repo)
-    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    const queueTip = await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
     const issue = "@example/28791-retirement"
     const advancedBranch = "task/28791-advanced'quoted"
     const saved = new Map<string, string>()
@@ -3387,7 +3396,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(report.kept).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ branch: "task/28791-local-only", reason: "unreached" }),
-        // 29579: a branch with work the target lacks names that cure, never a ref move.
+        // 30683: an open advanced change names withdrawal before any abandonment.
         expect.objectContaining({
           branch: advancedBranch,
           reason: "advanced",
@@ -3396,7 +3405,7 @@ describe("a queue is the selected origin branch carrying config", () => {
             advanced +
             " differs from recorded change tip " +
             saved.get(advancedBranch) +
-            "; it holds commits origin/main lacks: submit them, and drop the branch after they land",
+            "; change is still open; withdraw it before dropping its advanced tip",
         }),
       ]),
     )
@@ -3465,6 +3474,18 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect((await git(["rev-parse", `refs/heads/${advancedBranch}`])).trim()).toBe(advanced)
     // Accepted29301: local expected=head, but the recorded change has an older head.
     // Existing assertions only check the reason token, so they miss identical SHAs in the detail.
+    // End the change before exercising the existing on-main advanced-tip cure.
+    const advancedStore = createEventStore(repo, "origin", git.selection)
+    const advancedHistory = (await readBranchHistory(advancedStore, "main", advancedBranch)).history!
+    const advancedChain = await openEvents({
+      ...advancedStore,
+      ref: changesRef("main", advancedBranch),
+      writer: "fixture",
+    })
+    await advancedChain.append(
+      [changeInput("cancelled", { queueTip, at: new Date(), reason: "withdrawn", by: "fixture" })],
+      { expect: advancedHistory.state.tip! },
+    )
     await git(["push", "--quiet", "origin", advanced + ":refs/heads/main"])
     await git(["fetch", "--quiet", "origin", "main"])
     await git(["merge-base", "--is-ancestor", advanced, "origin/main"])
@@ -3881,13 +3902,8 @@ describe("a queue is the selected origin branch carrying config", () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
     await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
-    // One branch the issue reaches by name, archived so the preview lists it as eligible...
-    await git(["checkout", "--quiet", "-b", "task/26133-archived", "main"])
-    writeFileSync(join(repo, "archived.txt"), "archived\n")
-    await git(["add", "archived.txt"])
-    await git(["commit", "--quiet", "-m", "archived work"])
-    const archivedTip = (await git(["rev-parse", "HEAD"])).trim()
-    await git(["push", "--quiet", "origin", `${archivedTip}:refs/archive/2026-10-12/fixture/task/26133-archived`])
+    // One branch the issue reaches by name, already held by main and eligible...
+    await git(["branch", "task/26133-landed", "main"])
     // ...and one it cannot bind at all.
     await git(["checkout", "--quiet", "-b", "task/dev12-26133-sweep-tests", "main"])
     writeFileSync(join(repo, "unbound.txt"), "unbound\n")

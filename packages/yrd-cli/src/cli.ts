@@ -1465,10 +1465,7 @@ function buildProgram(
       .description(
         "end a change, or retire issue branches in the author store and the components that issue names; --dry-run previews",
       )
-      .option(
-        "--local",
-        "archive and retire the named local branch, including explicit unmerged abandonment; requires --tip",
-      )
+      .option("--local", "keep the exact tip in an event or on main, then retire its local branch; requires --tip")
       .option(
         "--release-checkout",
         "retain checkout bytes and detach its exact branch; requires --local, --tip, --issue and --reason; preview unless --apply",
@@ -1477,7 +1474,7 @@ function buildProgram(
         "--retire",
         "retire an ended origin branch, or end a draft whose exact tip is already accepted by fresh origin main; requires --tip and --reason. A branch the merge already removed needs no retire: the merge commit names its tip as a parent and is the custody proof",
       )
-      .option("--tip <commit>", "expected full commit for --local or --retire; an advanced branch is kept")
+      .option("--tip <commit>", "expected full current commit for --local or --retire")
       .option(
         "--issue <id>",
         "retire issue-bound refs in the author store and the components that issue names; with --local, carry the reviewed issue identity",
@@ -1494,6 +1491,7 @@ function buildProgram(
       "\nFor a component branch, run from its component author checkout:\n" +
         "  yrd drop <branch> --local --tip <full-oid>\n" +
         "Plain --local has no preview: it writes the event that keeps the tip at origin, then deletes the local branch.\n" +
+        "For a cancelled change whose local tip advanced, its owner or the queue owner may use --reason <why>; open changes must be withdrawn first. This also applies to local branches selected by --issue.\n" +
         "To keep the tip with that event and detach the branch while keeping checkout bytes: yrd drop <branch> --local --release-checkout --tip <full-oid> --issue <id> --reason <why> [--apply]\n" +
         "For a queue-backed draft, --retire writes an ending event that keeps the exact tip as a Git parent; it creates no separate branch archive under refs/archive/. The event chain is retained, including after a manual move to refs/yrd-archive.\n",
     )
