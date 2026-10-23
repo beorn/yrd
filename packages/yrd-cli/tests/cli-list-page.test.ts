@@ -759,20 +759,21 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     const segment = history.history?.events[0]?.id
     if (head === undefined || segment === undefined) throw new Error("submitted fixture has no opening identity")
     // A recorded checking phase rules out an expected pre-execution segment.
+    // Keep terminal events inside the default 24-hour read horizon as this test ages.
     const verifying = await appendChangeEvent(store, "main", "task/one", tip, {
       type: "verifying",
-      at: new Date("2026-10-22T13:59:00.000Z"),
+      at: new Date(),
       commit: head,
     })
     const checking = await appendChangeEvent(store, "main", "task/one", verifying, {
       type: "checking",
-      at: new Date("2026-10-22T14:00:00.000Z"),
+      at: new Date(),
       commit: head,
     })
     if (columns === 120) {
       await appendChangeEvent(store, "main", "task/one", checking, {
         type: "cancelled",
-        at: new Date("2026-10-22T14:01:00.000Z"),
+        at: new Date(),
         commit: head,
         reason: "dropped",
       })
