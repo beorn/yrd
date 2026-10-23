@@ -845,11 +845,9 @@ function projectionSummary(value: unknown, source: JournalSource): JournalSummar
   ) {
     throw new Error("invalid run facts")
   }
-  if (run.incident !== undefined) {
-    const incident = projectionObject(run.incident)
-    if (["code", "subject", "via", "evidence", "next", "owner"].some((key) => typeof incident[key] !== "string")) {
-      throw new Error("invalid incident facts")
-    }
+  const decodedIncident = run.incident === undefined ? undefined : incidentIn(projectionObject(run.incident))
+  if (decodedIncident !== undefined && decodedIncident.kind !== "incident") {
+    throw new Error("invalid incident facts")
   }
   if (
     run.compositions !== undefined &&
@@ -871,6 +869,7 @@ function projectionSummary(value: unknown, source: JournalSource): JournalSummar
     id: source.run,
     branch: run.branch,
     head: run.head,
+    ...(decodedIncident === undefined ? {} : { incident: decodedIncident.incident }),
     startedAt,
     at: projectionDate(run.at),
     checks: run.checks.map(projectionCheck),

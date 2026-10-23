@@ -480,64 +480,98 @@ describe("a run's journal, read back", () => {
     expect(steps?.[2]?.commands).toEqual([{ args: ["push", "origin"], cwd: "/w", failure: "spawn" }])
   })
 
-  it("reads compact summaries without raw Git rows and hydrates complete detail without rewriting the artifact", () => {
-    // AC2/3: existing cache tests warm the process-local cache first, so they
-    // cannot catch a fresh reader parsing every completed raw journal.
-    const at = new Date("2026-09-03T20:00:00.000Z")
-    const dir = join(scratch("completed-projection"), "logs")
-    const log = openLog(dir, () => at)
-    const detail = `detail-only-${"x".repeat(100_000)}`
-    log.write({ kind: "run", base: "aaa", target: "main", queue: "q" })
-    log.write({
-      kind: "step",
-      name: "compose",
-      phase: "merge",
-      branch: "task/one",
-      head: "abc123",
-      start: at.toISOString(),
-    })
-    log.write({
-      kind: "git",
-      args: ["merge", "task/one", detail],
-      cwd: "/w",
-      evidence: "/w/git/1.stdout.bin.json",
-      exit: 1,
-      discarded: "x".repeat(100_000),
-    })
-    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed", reason: "compose" })
-    log.finish()
-    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
-    const before = fs.readFileSync(artifact, "utf8")
-    expect(JSON.parse(before)).toMatchObject({ schema: 2 })
-    expect(before).not.toContain(detail)
-    const read = vi.spyOn(fs, "readFileSync")
-    try {
-      const summary = readJournals(dir, { now: at, detail: "omit" })
-      expect(read.mock.calls.filter(([path]) => String(path) === log.path)).toHaveLength(0)
-      const compact = summary.runs.get(journalKey("task/one", "abc123"))?.[0]
-      expect(compact).toMatchObject({ id: log.id, decision: "failed", startedAt: at, at })
-      expect(compact).not.toHaveProperty("steps")
-      expect(compact).not.toHaveProperty("commands")
-      const journals = readJournals(dir, { now: at })
-      expect(read.mock.calls.filter(([path]) => String(path) === log.path)).toHaveLength(1)
-      expect(journals.fallbacks).toBeUndefined()
-      const run = journals.runs.get(journalKey("task/one", "abc123"))?.[0]
-      expect(run).toMatchObject({ id: log.id, decision: "failed", startedAt: at, at })
-      expect(run?.steps[0]?.startedAt).toEqual(at)
-      expect(run?.steps[0]?.commands).toEqual([
-        {
-          args: ["merge", "task/one", detail],
-          cwd: "/w",
-          exit: 1,
-          stdout: "/w/git/1.stdout.bin",
-          stderr: "/w/git/1.stderr.bin",
-        },
-      ])
-      expect(fs.readFileSync(artifact, "utf8")).toBe(before)
-    } finally {
-      read.mockRestore()
-    }
-  })
+  it.each(["absent", "minimal", "context", "legacy-owner"] as const)(
+    "reads %s incident compact summaries without raw Git rows and hydrates complete detail without rewriting the artifact",
+    (incidentShape) => {
+      // AC2/3: existing cache tests warm the process-local cache first, so they
+      // cannot catch a fresh reader parsing every completed raw journal.
+      const at = new Date("2026-09-03T20:00:00.000Z")
+      const dir = join(scratch("completed-projection"), "logs")
+      const log = openLog(dir, () => at)
+      const detail = `detail-only-${"x".repeat(100_000)}`
+      // 30167: raw-fold incident tests did not exercise a cold persisted projection.
+      const incident =
+        incidentShape === "absent"
+          ? undefined
+          : {
+              code: "yrd-check-failed",
+              subject: "fixture check failed",
+              ...(incidentShape === "minimal"
+                ? {}
+                : {
+                    via: "fixture check",
+                    evidence: "/w/check.log",
+                    next: "inspect the check log",
+                  }),
+            }
+      log.write({ kind: "run", base: "aaa", target: "main", queue: "q" })
+      log.write({
+        kind: "step",
+        name: "compose",
+        phase: "merge",
+        branch: "task/one",
+        head: "abc123",
+        start: at.toISOString(),
+      })
+      log.write({
+        kind: "git",
+        args: ["merge", "task/one", detail],
+        cwd: "/w",
+        evidence: "/w/git/1.stdout.bin.json",
+        exit: 1,
+        discarded: "x".repeat(100_000),
+      })
+      log.write({
+        kind: "change",
+        branch: "task/one",
+        head: "abc123",
+        decision: "failed",
+        reason: "compose",
+        ...incident,
+      })
+      log.finish()
+      const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+      if (incidentShape === "legacy-owner") {
+        const legacy = JSON.parse(fs.readFileSync(artifact, "utf8")) as {
+          runs: [{ incident: Record<string, unknown> }]
+        }
+        legacy.runs[0].incident.owner = "legacy queue operator"
+        writeFileSync(artifact, JSON.stringify(legacy))
+      }
+      const before = fs.readFileSync(artifact, "utf8")
+      expect(JSON.parse(before)).toMatchObject({ schema: 2 })
+      expect(before).not.toContain(detail)
+      const read = vi.spyOn(fs, "readFileSync")
+      try {
+        const summary = readJournals(dir, { now: at, detail: "omit" })
+        expect(read.mock.calls.filter(([path]) => String(path) === log.path)).toHaveLength(0)
+        const compact = summary.runs.get(journalKey("task/one", "abc123"))?.[0]
+        expect(compact).toMatchObject({ id: log.id, decision: "failed", startedAt: at, at })
+        expect(compact?.incident).toEqual(incident)
+        expect(compact).not.toHaveProperty("steps")
+        expect(compact).not.toHaveProperty("commands")
+        const journals = readJournals(dir, { now: at })
+        expect(read.mock.calls.filter(([path]) => String(path) === log.path)).toHaveLength(1)
+        expect(journals.fallbacks).toBeUndefined()
+        const run = journals.runs.get(journalKey("task/one", "abc123"))?.[0]
+        expect(run).toMatchObject({ id: log.id, decision: "failed", startedAt: at, at })
+        expect(run?.incident).toEqual(incident)
+        expect(run?.steps[0]?.startedAt).toEqual(at)
+        expect(run?.steps[0]?.commands).toEqual([
+          {
+            args: ["merge", "task/one", detail],
+            cwd: "/w",
+            exit: 1,
+            stdout: "/w/git/1.stdout.bin",
+            stderr: "/w/git/1.stderr.bin",
+          },
+        ])
+        expect(fs.readFileSync(artifact, "utf8")).toBe(before)
+      } finally {
+        read.mockRestore()
+      }
+    },
+  )
 
   it("persists a rebuilt projection so the next read finds it present (28908)", () => {
     const at = new Date("2026-09-03T20:00:00.000Z")
@@ -757,6 +791,9 @@ describe("a run's journal, read back", () => {
     ["missing", "missing"],
     ["partial", "partial"],
     ["corrupt", "corrupt"],
+    ["incident-none", "corrupt"],
+    ["incident-missing-subject", "corrupt"],
+    ["incident-invalid-context", "corrupt"],
     ["old-schema", "incompatible"],
     ["new-schema", "incompatible"],
     ["old-fold", "incompatible"],
@@ -792,6 +829,19 @@ describe("a run's journal, read back", () => {
       case "corrupt":
         writeFileSync(artifact, "{")
         break
+      case "incident-none":
+      case "incident-missing-subject":
+      case "incident-invalid-context": {
+        const incident =
+          fault === "incident-none"
+            ? { owner: "legacy queue operator" }
+            : fault === "incident-missing-subject"
+              ? { code: "yrd-check-failed" }
+              : { code: "yrd-check-failed", subject: "fixture check failed", evidence: "relative.log" }
+        const runs = (parsed.runs as Record<string, unknown>[]).map((run) => ({ ...run, incident }))
+        writeFileSync(artifact, JSON.stringify({ ...parsed, runs }))
+        break
+      }
       case "old-schema":
         writeFileSync(artifact, JSON.stringify({ ...parsed, schema: 0 }))
         break
