@@ -19,10 +19,11 @@ export const superprojectRoot = execFileSync("git", ["-C", yrdRoot, "rev-parse",
  */
 function standaloneGitSuperBin(): string {
   const packagePath = realpathSync(Bun.resolveSync("git-super/package.json", yrdRoot))
-  const installed = relative(join(realpathSync(yrdRoot), "node_modules"), packagePath)
-  if (installed === ".." || installed.startsWith("../") || isAbsolute(installed)) {
+  const installedPackage = join(yrdRoot, "node_modules", "git-super")
+  const installed = existsSync(installedPackage) ? relative(realpathSync(installedPackage), packagePath) : null
+  if (installed === null || installed === ".." || installed.startsWith("../") || isAbsolute(installed)) {
     throw new Error(
-      `standalone yrd requires its own installed git-super package under ${yrdRoot}/node_modules; resolved ${packagePath}`,
+      `standalone yrd requires its own installed git-super package under ${installedPackage}; resolved ${packagePath}`,
     )
   }
   return join(dirname(packagePath), "bin")

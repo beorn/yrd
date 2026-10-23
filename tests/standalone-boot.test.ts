@@ -13,9 +13,11 @@
  * install` + `bun bin/yrd.ts` — including CI and external contributors who
  * do not have the hh-dev superproject's vendored packages masking a stale
  * public dependency.
+ * Linked worktree dependencies must load before test collection; a missing
+ * own dependency must still fail loudly even when an ancestor can resolve it.
  */
 import { existsSync } from "node:fs"
-import { copyFile, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, unlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -76,14 +78,12 @@ describe("standalone CLI boot", () => {
       const init = Bun.spawn(["git", "init", root], { stdout: "ignore", stderr: "pipe" })
       const [initStderr, initExit] = await Promise.all([new Response(init.stderr).text(), init.exited])
       expect(initExit, initStderr).toBe(0)
-      const selected = Bun.spawn(
-        [
-          "bun",
-          "-e",
-          'const selected = await import("./tests/support/git-super-bin.ts"); console.log(JSON.stringify({bin: selected.gitSuperBin, sha: selected.gitSuperSha}))',
-        ],
-        { cwd: root, stdout: "pipe", stderr: "pipe" },
-      )
+      const selectCommand = [
+        "bun",
+        "-e",
+        'const selected = await import("./tests/support/git-super-bin.ts"); console.log(JSON.stringify({bin: selected.gitSuperBin, sha: selected.gitSuperSha}))',
+      ]
+      const selected = Bun.spawn(selectCommand, { cwd: root, stdout: "pipe", stderr: "pipe" })
       const [selectionStdout, selectionStderr, selectionExit] = await Promise.all([
         new Response(selected.stdout).text(),
         new Response(selected.stderr).text(),
@@ -98,6 +98,36 @@ describe("standalone CLI boot", () => {
       if (declared === undefined) throw new Error("standalone fixture requires its declared git-super override")
       expect(selection.sha).toBe(declared.split("#")[1])
       expect(selection.bin.startsWith(join(root, "node_modules") + "/")).toBe(true)
+
+      // Worktree tooling links node_modules, whose package entries may themselves
+      // point outside that directory. The installed dependency still owns its bin.
+      const linkedModules = join(root, "linked-modules")
+      const worktree = join(root, "standalone-worktree")
+      await mkdir(linkedModules)
+      await mkdir(join(worktree, "tests", "support"), { recursive: true })
+      await symlink(await realpath(join(root, "node_modules", "git-super")), join(linkedModules, "git-super"), "dir")
+      await symlink(linkedModules, join(worktree, "node_modules"), "dir")
+      for (const file of ["package.json", "bun.lock", "tests/support/git-super-bin.ts"]) {
+        await copyFile(join(root, file), join(worktree, file))
+      }
+      const linked = Bun.spawn(selectCommand, { cwd: worktree, stdout: "pipe", stderr: "pipe" })
+      const [linkedStdout, linkedStderr, linkedExit] = await Promise.all([
+        new Response(linked.stdout).text(),
+        new Response(linked.stderr).text(),
+        linked.exited,
+      ])
+      expect(linkedExit, linkedStderr).toBe(0)
+      expect(JSON.parse(linkedStdout)).toEqual({
+        bin: await realpath(join(root, "node_modules", "git-super", "bin")),
+        sha: declared.split("#")[1],
+      })
+
+      await unlink(join(linkedModules, "git-super"))
+      const missing = Bun.spawn(selectCommand, { cwd: worktree, stdout: "ignore", stderr: "pipe" })
+      const [missingStderr, missingExit] = await Promise.all([new Response(missing.stderr).text(), missing.exited])
+      expect(missingExit).not.toBe(0)
+      expect(missingStderr).toContain(join(worktree, "node_modules", "git-super"))
+      expect(missingStderr).toContain(await realpath(join(root, "node_modules", "git-super", "package.json")))
     } finally {
       await rm(root, { recursive: true, force: true })
     }
