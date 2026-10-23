@@ -72,6 +72,23 @@ it("30683: a never-submitted branch's dropped event starts its chain at origin a
   const tip = (await git(["rev-parse", "HEAD"])).trim()
   await git(["checkout", "--quiet", "main"])
 
+  // 30835: origin retirement cannot count a tip that only the author holds. Explain the local cure without mutation.
+  const localRefs = await git(["for-each-ref", "--format=%(refname) %(objectname)"])
+  const originRefs = await git(["ls-remote", "origin"])
+  const unpublished = capture(repo)
+  expect(
+    await runYrdProcess(
+      ["bun", "yrd", "drop", "task/never-submitted", "--retire", "--tip", tip, "--reason", "retire local work"],
+      unpublished.io,
+    ),
+  ).not.toBe(0)
+  expect(unpublished.stderr()).toContain("task/never-submitted: no published branch or change history")
+  expect(unpublished.stderr()).toContain("local-only")
+  expect(unpublished.stderr()).toContain(`cd '${repo}' && yrd 'drop' 'task/never-submitted' '--local' '--tip' '${tip}'`)
+  expect(unpublished.stderr()).not.toContain("Invalid revision range")
+  expect(await git(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(localRefs)
+  expect(await git(["ls-remote", "origin"])).toBe(originRefs)
+
   const observed = capture(repo)
   const code = await runYrdProcess(
     ["bun", "yrd", "drop", "task/never-submitted", "--local", "--tip", tip, "--submitter", "fixture", "--json"],
@@ -97,6 +114,15 @@ it("30683: a never-submitted branch's dropped event starts its chain at origin a
   // The recovery command reads the tip back from that chain.
   expect(report.removed[0]?.recovery).toContain("refs/yrd/main/changes/task/never-submitted")
   expect(report.removed[0]?.recovery).toContain(tip)
+  // An absent origin branch with completed-drop history is a successful retry, not unpublished work.
+  const repeated = capture(repo)
+  expect(
+    await runYrdProcess(
+      ["bun", "yrd", "drop", "task/never-submitted", "--retire", "--tip", tip, "--reason", "repeat completed drop"],
+      repeated.io,
+    ),
+    repeated.stderr(),
+  ).toBe(0)
 })
 
 it("refuses loudly and keeps the branch when origin will not take the dropped event", async () => {

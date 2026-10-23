@@ -2188,7 +2188,20 @@ export async function coreQueueCommand(
       if (request.retire !== undefined) {
         // Hydrate the origin tip (or a completed drop's keeping history) before counting in this replica.
         if ((await readRemoteCommit(git, eventStore.remote, `refs/heads/${request.branch}`)) === undefined) {
-          await readBranchHistory(eventStore, config.target.branch, request.branch)
+          const { history } = await readBranchHistory(eventStore, config.target.branch, request.branch)
+          if (history === undefined) {
+            const origin = await remoteUrl(git, eventStore.remote)
+            const remedy = formatYrdCommand(
+              io,
+              ["drop", request.branch, "--local", "--tip", request.retire.tip],
+              repositoryHere(io.cwd) ?? io.cwd,
+            )
+            io.stderr(
+              `yrd: ${request.branch}: no published branch or change history was found at ${origin}#${config.target.branch}; ` +
+                `for a never-pushed/local-only branch, run from its author checkout: ${remedy}\n`,
+            )
+            return 2
+          }
         }
         retirementCount = await dropCommitCount(git, request.retire.tip, countTarget)
       }
