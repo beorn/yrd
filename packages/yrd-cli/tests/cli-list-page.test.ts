@@ -9,12 +9,22 @@
  * @consumer the operator at the prompt · `yrd list | grep` · every `--json`
  *           reader (tent's trackerBridge among them)
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { stripAnsi } from "@silvery/ansi"
-import { QUEUE_HEALTH_DOCUMENT, QUEUE_HEALTH_SCHEMA, openLog, readJournals, submit } from "@yrd/queue-core"
+import {
+  QUEUE_HEALTH_DOCUMENT,
+  QUEUE_HEALTH_SCHEMA,
+  appendChangeEvent,
+  createEventStore,
+  drop,
+  openLog,
+  readBranchHistory,
+  readJournals,
+  submit,
+} from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { workdirOf } from "../src/workdir.ts"
@@ -573,7 +583,10 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     expect(JSON.parse(empty.stdout)).toMatchObject({ changes: [] })
   })
 
-  it("keeps a matched journal reason and counts omitted global incompleteness without exposing unrelated branches", async () => {
+  // @failure Expected submissions and actual never-submitted drops were reported as missing journals, while
+  // outside-filter malformed identities collapsed into an anonymous count; existing coverage only checked that count.
+  // @consumer a CLI reader distinguishing expected no-Run cases from unresolved gaps in the selected queue
+  it("keeps complete no-Run and malformed coverage across a filtered list", async () => {
     const work = await queueWithOneChange()
     const git = gitIn(work)
     await git(["checkout", "--quiet", "-b", "task/unrelated", "main"])
@@ -586,41 +599,221 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
       submitter: "@dev/11",
       target: { branch: "main", remote: "origin" },
     })
+    await git(["config", "yrd.workdir", join(work, "..", "queue")])
+    // A linked malformed journal outside the filter must retain its run/key/message and known change identity.
+    const workdir = await workdirOf(git, { cwd: work })
+    const malformedRun = openLog(join(workdir, "logs"))
+    malformedRun.write({ kind: "run", target: "main" })
+    malformedRun.finish()
+    const malformedHistory = await readBranchHistory(
+      createEventStore(work, "origin", git.selection),
+      "main",
+      "task/unrelated",
+    )
+    const malformedTip = malformedHistory.history?.state.tip
+    const malformedHead = malformedHistory.history?.state.commit
+    if (malformedTip === undefined || malformedHead === undefined) {
+      throw new Error("unrelated fixture has no chain head")
+    }
+    appendFileSync(
+      malformedRun.path,
+      `${JSON.stringify({ kind: "change", at: new Date().toISOString(), run: malformedRun.id, branch: "task/unrelated", head: malformedHead, code: "gitlink-off-main", decision: "stuck" })}\n`,
+      "utf8",
+    )
+    expect(readJournals(join(workdir, "logs"), { runIds: [malformedRun.id] }).malformed).toEqual([
+      expect.objectContaining({ run: malformedRun.id, key: `task/unrelated@${malformedHead}` }),
+    ])
+    // A distinct unselected round makes unread a separate file population, not the malformed row count.
+    const unselectedRun = openLog(join(workdir, "logs"))
+    unselectedRun.write({ kind: "run", target: "main" })
+    unselectedRun.finish()
+    const malformedVerifying = await appendChangeEvent(
+      createEventStore(work, "origin", git.selection),
+      "main",
+      "task/unrelated",
+      malformedTip,
+      { type: "verifying", at: new Date("2026-10-22T13:59:00.000Z"), commit: malformedHead },
+    )
+    await appendChangeEvent(
+      createEventStore(work, "origin", git.selection),
+      "main",
+      "task/unrelated",
+      malformedVerifying,
+      {
+        type: "checking",
+        at: new Date("2026-10-22T14:00:00.000Z"),
+        commit: malformedHead,
+        run: malformedRun.id,
+      },
+    )
 
-    // Both opening events have no Run trailer. A filtered answer keeps its own
-    // missing-journal reason, but tells consumers how many other facts it left out.
+    await git(["checkout", "--quiet", "-b", "task/draft", "main"])
+    writeFileSync(join(work, "draft.txt"), "private diagnostic\n")
+    await git(["add", "draft.txt"])
+    await git(["commit", "--quiet", "-m", "private diagnostic never lands"])
+    await git(["push", "--quiet", "origin", "task/draft"])
+    await git(["checkout", "--quiet", "main"])
+    const store = createEventStore(work, "origin", git.selection)
+    await drop(store, { queue: "main", branch: "task/draft", by: "@dev/2" })
+
     const result = await yrd(work, { color: false }, "list", "--json", "--require-match", "task/one")
     expect(result.exitCode, result.report).toBe(0)
     const document = JSON.parse(result.stdout) as {
       changes: readonly { branch: string }[]
-      journal: { absent?: string }
+      journal: {
+        absent?: string
+        unread: number
+        unreadReason: string
+        coverage: {
+          missingRunTrailers: readonly {
+            branch: string
+            head: string
+            segment: string
+            state: string
+            expected: boolean
+            reason: string
+            selected: boolean
+          }[]
+          malformed: readonly unknown[]
+        }
+      }
     }
     expect(document.changes.map((change) => change.branch)).toEqual(["task/one"])
-    const absent = document.journal.absent ?? ""
-    expect(absent).toContain("task/one@")
-    expect(absent).toContain("has no Run trailer")
-    expect.soft(absent).not.toContain("task/unrelated@")
-    const globalLines = absent.split("; ").filter((line) => /global|incomplete/i.test(line) && /\b1\b/.test(line))
-    expect.soft(globalLines).toHaveLength(1)
-    expect.soft(absent).toContain("yrd 'list' '--json'")
-    expect.soft(absent).toContain(`'--queue' '${join(work, "..", "remote.git")}#main'`)
+    const noRun = document.journal.coverage.missingRunTrailers
+    expect(noRun).toHaveLength(2)
+    expect(noRun).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          branch: "task/one",
+          state: expect.stringMatching(/queued|verifying/),
+          expected: true,
+          reason: expect.stringMatching(/pending Run linkage/i),
+          selected: true,
+        }),
+        expect.objectContaining({
+          branch: "task/draft",
+          state: "cancelled",
+          expected: true,
+          reason: expect.stringMatching(/dropped before execution/i),
+          selected: false,
+        }),
+      ]),
+    )
+    expect(noRun.every((entry) => entry.head.length > 0 && entry.segment.length > 0)).toBe(true)
+    expect(document.journal.coverage.malformed).toEqual([
+      expect.objectContaining({
+        run: malformedRun.id,
+        key: `task/unrelated@${malformedHead}`,
+        message: expect.any(String),
+        branch: "task/unrelated",
+        head: malformedHead,
+        segment: expect.any(String),
+        state: "checking",
+        selected: false,
+      }),
+    ])
+    expect(document.journal.absent ?? "").not.toContain("has no Run trailer")
+    expect(document.journal.unread).toEqual(expect.any(Number))
+    expect(document.journal.unreadReason).toMatch(/unselected.*round journal files/i)
 
     const empty = await yrd(work, { color: false }, "list", "--json", "--require-match", "no-such-change")
     expect(empty.exitCode, empty.report).toBe(1)
     const emptyDocument = JSON.parse(empty.stdout) as typeof document
     expect(emptyDocument.changes).toEqual([])
-    const emptyAbsent = emptyDocument.journal.absent ?? ""
-    expect.soft(emptyAbsent).not.toContain("task/one@")
-    expect.soft(emptyAbsent).not.toContain("task/unrelated@")
-    expect
-      .soft(emptyAbsent.split("; ").filter((line) => /global|incomplete/i.test(line) && /\b2\b/.test(line)))
-      .toHaveLength(1)
-    expect.soft(emptyAbsent).toContain("yrd 'list' '--json'")
+    expect(emptyDocument.journal.coverage.missingRunTrailers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ branch: "task/one", selected: false }),
+        expect.objectContaining({ branch: "task/draft", selected: false }),
+      ]),
+    )
+    expect(emptyDocument.journal.coverage.malformed).toEqual(
+      expect.arrayContaining([expect.objectContaining({ run: malformedRun.id, selected: false })]),
+    )
 
     const unfiltered = await yrd(work, { color: false }, "list", "--json")
     expect(unfiltered.exitCode, unfiltered.report).toBe(0)
     const fullDocument = JSON.parse(unfiltered.stdout) as typeof document
-    expect(fullDocument.journal.absent).toContain("task/one@")
-    expect(fullDocument.journal.absent).toContain("task/unrelated@")
+    expect(fullDocument.journal.coverage.missingRunTrailers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ branch: "task/one", selected: true }),
+        expect.objectContaining({ branch: "task/draft", selected: true }),
+      ]),
+    )
+    expect(fullDocument.journal.coverage.malformed).toEqual(
+      expect.arrayContaining([expect.objectContaining({ run: malformedRun.id, selected: true })]),
+    )
+  })
+
+  // @failure A prior execution event with no Run link was printed as the same short generic warning as an expected
+  // pending opening; the existing CLI test only checks JSON selection and cannot catch terminal clipping.
+  // @consumer a human deciding if an executed change lacks journal detail and which store Yrd inspected
+  it.each([80, 120])("prints the complete unresolved journal cause at %s columns", async (columns) => {
+    const work = await queueWithOneChange()
+    const git = gitIn(work)
+    await git(["config", "yrd.workdir", join(work, "..", "queue")])
+    const store = createEventStore(work, "origin", git.selection)
+    const history = await readBranchHistory(store, "main", "task/one")
+    const tip = history.history?.state.tip
+    if (tip === undefined) throw new Error("submitted fixture has no event-chain tip")
+    const head = history.history?.state.commit
+    const segment = history.history?.events[0]?.id
+    if (head === undefined || segment === undefined) throw new Error("submitted fixture has no opening identity")
+    // A recorded checking phase rules out an expected pre-execution segment.
+    const verifying = await appendChangeEvent(store, "main", "task/one", tip, {
+      type: "verifying",
+      at: new Date("2026-10-22T13:59:00.000Z"),
+      commit: head,
+    })
+    const checking = await appendChangeEvent(store, "main", "task/one", verifying, {
+      type: "checking",
+      at: new Date("2026-10-22T14:00:00.000Z"),
+      commit: head,
+    })
+    if (columns === 120) {
+      await appendChangeEvent(store, "main", "task/one", checking, {
+        type: "cancelled",
+        at: new Date("2026-10-22T14:01:00.000Z"),
+        commit: head,
+        reason: "dropped",
+      })
+    }
+    const json = await yrd(work, { color: false, columns }, "list", "--json", "task/one")
+    expect(json.exitCode, json.report).toBe(0)
+    const unresolvedDocument = JSON.parse(json.stdout) as {
+      journal: {
+        coverage: {
+          missingRunTrailers: readonly {
+            branch: string
+            head: string
+            segment: string
+            state: string
+            expected: boolean
+            reason: string
+            selected: boolean
+          }[]
+        }
+      }
+    }
+    expect(unresolvedDocument.journal.coverage.missingRunTrailers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          branch: "task/one",
+          head,
+          segment,
+          state: columns === 120 ? "cancelled" : "checking",
+          expected: false,
+          reason: expect.stringMatching(/unresolved/i),
+          selected: true,
+        }),
+      ]),
+    )
+    const human = await yrd(work, { color: false, columns }, "list", "task/one")
+    expect(human.exitCode, human.report).toBe(0)
+    const page = human.stdout.replace(/\s+/gu, " ")
+    expect(page).toContain(`task/one@${head}`)
+    expect(page).toContain(`segment ${segment}`)
+    expect(page).toContain("has no Run trailer")
+    expect(page).toContain("unlinked journal files were not searched")
+    expect(page).toContain("/logs")
   })
 })

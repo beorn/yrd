@@ -576,8 +576,17 @@ export type Journals<Run extends JournalSummary = JournalRun> = Readonly<{
   dir: string
   /** Why there is nothing, when there is nothing: a sentence naming what was looked for and where. */
   absent?: string
-  /** Event segments whose journals could not be selected because they name no Run trailer. */
-  missingRunTrailers?: readonly Readonly<{ branch: string; head: string; segment?: string }>[]
+  /** No-Run observations; only explicit complete pre-execution evidence makes one expected. */
+  missingRunTrailers?: readonly Readonly<{
+    branch: string
+    head: string
+    segment?: string
+    state?: string
+    expected?: boolean
+    reason?: string
+    /** Presentation scope, without discarding facts about other acquired changes. */
+    selected?: boolean
+  }>[]
   /**
    * Every journal row in the window that could not be read, each naming the run
    * it was in, the `<branch>@<head>` it was about, and what was wrong with it.
@@ -585,7 +594,18 @@ export type Journals<Run extends JournalSummary = JournalRun> = Readonly<{
    * prints nothing here is stating that every row read, and a skipped row that
    * nobody prints is exactly the silent error this reader must not commit.
    */
-  malformed: readonly Readonly<{ run: string; key: string; message: string }>[]
+  malformed: readonly Readonly<{
+    run: string
+    key: string
+    message: string
+    reason?: string
+    /** Identity from acquired event history only; absent when unattributable. */
+    branch?: string
+    head?: string
+    segment?: string
+    state?: string
+    selected?: boolean
+  }>[]
   /**
    * How many round journals had to be read RAW because their disposable
    * projection could not be reused, and why — ONE counted fact per reason,

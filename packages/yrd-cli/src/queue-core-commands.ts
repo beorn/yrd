@@ -4502,7 +4502,7 @@ export async function coreQueueCommand(
                 ? row.row
                 : { ...row.row, diagnosticSummary: revertWarningLine(row.row) },
             ),
-            journal: journalFact(diagnostics.facts, diagnostics.omitted),
+            journal: journalFact(diagnostics),
             // The runner belongs to the whole queue, even when a selector hides every row.
             ...(runnerStatus === undefined ? {} : { runner: runnerStatus }),
             pause: pause ?? null,
@@ -5348,7 +5348,7 @@ export async function coreQueueCommand(
                 ...(view?.note === undefined ? {} : { checksNote: view.note }),
               }
             }),
-            journal: journalFact(reading.journals),
+            journal: journalFact(journalDiagnostics(reading.journals)),
             observation: reading.observation,
             scope,
           },
@@ -6788,42 +6788,65 @@ function journalFor<Run extends JournalSummary>(item: WatchRow, journals: Journa
  * sees no `live` and no `run` can tell a queue with nothing running from a
  * machine that holds no journal at all.
  */
-function journalFact(
-  journals: Journals<JournalSummary>,
-  omitted?: string,
-): Readonly<{
-  dir: string
-  absent?: string
-  malformed?: Journals["malformed"]
-  fallbacks?: Journals["fallbacks"]
-  unread?: number
-}> {
-  const { facts } = journalDiagnostics(journals)
+function journalFact({ facts, omitted }: ReturnType<typeof journalDiagnostics>) {
   const absent = [facts.absent, omitted].filter((part) => part !== undefined).join("; ")
+  const coverage = {
+    missingRunTrailers: (facts.missingRunTrailers ?? []).map((entry) => ({
+      ...entry,
+      state: entry.state ?? "unknown",
+      expected: entry.expected === true,
+      reason: entry.reason ?? "unresolved: no Run trailer and no recorded expectation metadata",
+      selected: entry.selected ?? true,
+    })),
+    malformed: facts.malformed.map((entry) => ({
+      ...entry,
+      branch: entry.branch ?? "unknown",
+      head: entry.head ?? "unknown",
+      segment: entry.segment ?? "unknown",
+      state: entry.state ?? "unknown",
+      selected: entry.selected ?? true,
+      reason:
+        entry.reason ??
+        (entry.branch === undefined
+          ? "unattributable: no acquired change identity matches this journal row"
+          : "malformed journal row for the acquired change segment"),
+    })),
+  }
   return {
     dir: facts.dir,
     ...(absent === "" ? {} : { absent }),
     ...(facts.malformed.length === 0 ? {} : { malformed: facts.malformed }),
     ...(facts.fallbacks === undefined ? {} : { fallbacks: facts.fallbacks }),
-    ...(facts.unread === undefined ? {} : { unread: facts.unread }),
+    ...(coverage.missingRunTrailers.length === 0 && coverage.malformed.length === 0 ? {} : { coverage }),
+    ...(facts.unread === undefined
+      ? {}
+      : {
+          unread: facts.unread,
+          unreadReason:
+            "unselected round journal files in this read window; selection opens only the linked runs, not unread records or no-Run event segments",
+        }),
   }
 }
 
-/** Scope diagnostic presentation only; acquisition and the run facts remain shared. */
+/** Scope diagnostic presentation only; keep every acquired fact for JSON inspection. */
 function journalDiagnostics<Run extends JournalSummary>(
   journals: Journals<Run>,
   selectedKeys?: ReadonlySet<string>,
   unfilteredCommand?: () => string,
 ): Readonly<{ facts: Journals<Run>; omitted?: string }> {
   const { missingRunTrailers = [], absent: baseAbsent, ...base } = journals
-  const selectedMissing =
-    selectedKeys === undefined
-      ? missingRunTrailers
-      : missingRunTrailers.filter((entry) => selectedKeys.has(journalKey(entry.branch, entry.head)))
-  const malformed =
-    selectedKeys === undefined ? base.malformed : base.malformed.filter((entry) => selectedKeys.has(entry.key))
-  const missingCount = missingRunTrailers.length - selectedMissing.length
-  const malformedCount = base.malformed.length - malformed.length
+  const missing = missingRunTrailers.map((entry) => ({
+    ...entry,
+    selected:
+      selectedKeys === undefined ? (entry.selected ?? true) : selectedKeys.has(journalKey(entry.branch, entry.head)),
+  }))
+  const malformed = base.malformed.map((entry) => ({
+    ...entry,
+    selected: selectedKeys === undefined ? (entry.selected ?? true) : selectedKeys.has(entry.key),
+  }))
+  const selectedMissing = missing.filter((entry) => entry.selected && entry.expected !== true)
+  const missingCount = missing.filter((entry) => !entry.selected && entry.expected !== true).length
+  const malformedCount = malformed.filter((entry) => !entry.selected).length
   const omittedParts = [
     ...(missingCount === 0 ? [] : [`${String(missingCount)} missing-Run segment(s)`]),
     ...(malformedCount === 0 ? [] : [`${String(malformedCount)} malformed row(s)`]),
@@ -6831,20 +6854,18 @@ function journalDiagnostics<Run extends JournalSummary>(
   const absent = [
     baseAbsent,
     ...selectedMissing.map(
-      ({ branch, head, segment }) =>
-        `journal detail unavailable: ${branch}@${head}, segment ${segment ?? "without opening identity"}, has no Run trailer; unlinked journal files were not searched`,
+      ({ branch, head, segment, state, reason }) =>
+        `journal detail unavailable: ${branch}@${head}, state ${state ?? "unknown"}, segment ${segment ?? "without opening identity"}, has no Run trailer; ${reason ?? "expectation unknown"}; unlinked journal files were not searched`,
     ),
   ]
     .filter((part) => part !== undefined)
     .join("; ")
   return {
-    facts: { ...base, malformed, ...(absent === "" ? {} : { absent }) },
+    facts: { ...base, missingRunTrailers: missing, malformed, ...(absent === "" ? {} : { absent }) },
     ...(omittedParts.length === 0
       ? {}
       : {
-          // An unknown key is global too: it is not evidence that a selected
-          // change is clean, and it must remain counted and inspectable.
-          omitted: `global journal incompleteness: ${omittedParts.join(", ")} outside or not attributable to the selected change identities; run ${unfilteredCommand?.()} for unfiltered diagnostics`,
+          omitted: `global journal incompleteness: ${omittedParts.join(", ")} outside or not attributable to the selected change identities; named facts are in journal.coverage; run ${unfilteredCommand?.()} for unfiltered diagnostics`,
         }),
   }
 }
@@ -6902,7 +6923,7 @@ function narrateJournalReading(
     }
   }
   for (const defect of journals.malformed) {
-    const line = `yrd: run journal ${defect.run} has a row that could not be read for ${defect.key}: ${defect.message}; the row was skipped — fix the writer (26230)\n`
+    const line = `yrd: run journal ${defect.run} has a row that could not be read for ${defect.key}, state ${defect.state ?? "unknown"}: ${defect.message}; the row was skipped — fix the writer (26230)\n`
     if (said.has(line)) continue
     said.add(line)
     io.stderr(line)
@@ -7174,9 +7195,6 @@ export async function readEventListing(
     const dir = join(workdir, "logs")
     const read = (runTerminal?: (id: string) => boolean): Journals<JournalSummary> => {
       const judged = runTerminal === undefined ? {} : { runTerminal }
-      if (options.branch === undefined && recent === undefined) {
-        return readJournals(dir, { detail, sinceMs: options.journalSinceMs ?? FULL_READ_RUNS_MS, ...judged })
-      }
       const listed = new Set(rows.map((row) => row.branch))
       const segments =
         options.branch === undefined
@@ -7188,19 +7206,75 @@ export async function readEventListing(
           return id === undefined ? [] : [id]
         }),
       )
-      const journals = readJournals(dir, { runIds: ids, branch: options.branch, detail, ...judged })
-      const legacy = segments.filter(
-        ({ events }) => !events.some((event) => trailer(event, EVENT_TRAILERS.run) !== undefined),
-      )
-      if (legacy.length === 0) return journals
-      return {
-        ...journals,
-        missingRunTrailers: legacy.map(({ row, events }) => ({
-          branch: row.branch,
-          head: row.head,
-          ...(events[0] === undefined ? {} : { segment: events[0].id }),
-        })),
-      }
+      const journals =
+        options.branch === undefined && recent === undefined
+          ? readJournals(dir, { detail, sinceMs: options.journalSinceMs ?? FULL_READ_RUNS_MS, ...judged })
+          : readJournals(dir, { runIds: ids, branch: options.branch, detail, ...judged })
+      // enumerateChangeSegments has already validated the complete event chain.
+      // Only its own known opening and wholly pre-execution sequence prove an
+      // expected absence; the resting state alone cannot erase prior execution.
+      const missingRunTrailers = segments
+        .filter(({ events }) => !events.some((event) => trailer(event, EVENT_TRAILERS.run) !== undefined))
+        .map(({ row, events }) => {
+          const opening = events[0]
+          const preExecution =
+            opening?.type === "opened" &&
+            trailer(opening, EVENT_TRAILERS.commit) === row.head &&
+            row.diagnostic === undefined &&
+            events.every((event) =>
+              ["opened", "verifying", "admission-warning", "ignored", "unignored", "cancelled", "notified"].includes(
+                event.type,
+              ),
+            )
+          const cancelled = events.filter((event) => event.type === "cancelled")
+          const pending =
+            preExecution && cancelled.length === 0 && (row.state === "queued" || row.state === "verifying")
+          const cancellation = cancelled[0]
+          const dropped =
+            preExecution &&
+            row.state === "cancelled" &&
+            cancelled.length === 1 &&
+            cancellation !== undefined &&
+            trailer(cancellation, EVENT_TRAILERS.reason) === "dropped"
+          return {
+            branch: row.branch,
+            head: row.head,
+            ...(opening === undefined ? {} : { segment: opening.id }),
+            state: row.state,
+            expected: pending || dropped,
+            reason: pending
+              ? "pending Run linkage: complete recorded segment has not entered execution"
+              : dropped
+                ? "dropped before execution: complete recorded segment has no execution event"
+                : "unresolved: recorded history does not establish an expected pre-execution absence of a Run trailer",
+          }
+        })
+      const acquired = [...history.values()].flat()
+      const malformed = journals.malformed.map((entry) => {
+        const identities = acquired.filter(({ row }) => journalKey(row.branch, row.head) === entry.key)
+        const linked = identities.filter(({ events }) =>
+          events.some((event) => trailer(event, EVENT_TRAILERS.run) === entry.run),
+        )
+        const matching = linked.length === 0 ? identities : linked
+        const identity = identities[0]?.row
+        const states = new Set(matching.map(({ row }) => row.state))
+        const linkedSegment = linked.length === 1 ? linked[0]?.events[0]?.id : undefined
+        return {
+          ...entry,
+          ...(identity === undefined ? {} : { branch: identity.branch, head: identity.head }),
+          state: states.size === 1 ? (matching[0]?.row.state ?? "unknown") : "unknown",
+          ...(linkedSegment === undefined ? {} : { segment: linkedSegment }),
+          reason:
+            identity === undefined
+              ? "unattributable: no acquired change identity matches this journal row"
+              : linked.length === 0
+                ? "malformed journal row; change identity is known but Run-to-segment linkage is unrecorded"
+                : linked.length > 1
+                  ? "malformed journal row; segment is ambiguous across acquired histories, differing states remain unknown"
+                  : "malformed journal row for the acquired change segment",
+        }
+      })
+      return { ...journals, missingRunTrailers, malformed }
     }
     // A source-changed artifact is repaired only when its round's writer is
     // proven gone (28918), and that proof costs a Git read of the runner claim.

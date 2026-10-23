@@ -82,7 +82,7 @@ export function ListingPage({
             <TopLine queues={snapshot.queues} status={printedStatus(snapshot)} />
             <QueueLine snapshot={snapshot} columns={columns} />
             {snapshot.journalAbsent === undefined ? null : (
-              <Text color="$fg-muted" wrap="truncate">
+              <Text color="$fg-muted" wrap="wrap">
                 {snapshot.journalAbsent}
               </Text>
             )}
@@ -134,7 +134,7 @@ export function ListingPage({
               />
               {rows.length === 0 ? <Text color="$fg-muted">nothing in line</Text> : null}
               {(options.trailer ?? []).map((line) => (
-                <Text key={line} wrap="truncate">
+                <Text key={line} wrap="wrap">
                   {line}
                 </Text>
               ))}
@@ -159,6 +159,8 @@ export async function printListing(snapshot: WatchSnapshot, options: ListingPrin
       : [snapshot.observation.message, ...snapshot.observation.notices.map((notice) => notice.text)]
   const extraLines = observationLines
     .concat(options.scope === undefined ? [] : [options.scope])
+    .concat(snapshot.journalAbsent === undefined ? [] : [snapshot.journalAbsent])
+    .concat(options.trailer ?? [])
     .flatMap((text) => text.split("\n"))
     .reduce((lines, text) => lines + Math.ceil(text.length / Math.max(38, options.columns - 2)) + 1, 0)
   const parts: string[] = []

@@ -19,6 +19,7 @@ import { render } from "silvery/test"
 import { journalKey, watchRows, type Journals, type JournalRun, type Row } from "@yrd/queue-core"
 import { ListingPage, printListing } from "../src/watch-print.tsx"
 import { formatYrdCommand } from "../src/command-format.ts"
+import { noticeLine } from "../src/watch-notice.ts"
 import type { WatchSnapshot } from "../src/watch-pane.tsx"
 import { journalRun } from "../../../tests/support/journal-run.ts"
 
@@ -572,5 +573,24 @@ describe("the flow page: four bands, one row per change", () => {
       )
       expect(visible(stopped)).toContain(visible(`viewer /viewer/worktree yrd queue up --queue ${paused.queue}`))
     }
+  })
+
+  // @failure The real branch notice passed through ListingPrintOptions.trailer was clipped at terminal width;
+  // existing tests checked full command text there but not a diagnostic cause produced by the notice formatter.
+  // @consumer a human opening one selected queue change at 80 or 120 columns
+  it.each([80, 120])("wraps the formatted branch notice at %s columns", async (columns) => {
+    const noticed = row({
+      branch: "task/diagnostic",
+      state: "cancelled",
+      reason: "drop refused because the recorded target and retained branch tip do not match",
+      next: { owner: "@dev/2", because: "inspect the recorded branch and retry after the tip is reconciled" },
+    })
+    const line = noticeLine(noticed)
+    const printed = await printListing(snapshot({ rows: [{ row: noticed }] }), {
+      color: false,
+      columns,
+      trailer: [line],
+    })
+    expect(printed.replace(/\s+/gu, " ")).toContain(line.replace(/\s+/gu, " "))
   })
 })

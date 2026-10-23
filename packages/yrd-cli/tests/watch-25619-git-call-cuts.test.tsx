@@ -305,7 +305,16 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     expect(hotBodies).toContain(hotTip)
     expect(hotBodies).not.toContain(coldTip)
     expect(hot.journals.absent).toContain("journal detail unavailable")
-    expect(hot.journals.missingRunTrailers).toEqual([{ branch: "task/one", head: commit2, segment: hotTip }])
+    expect(hot.journals.missingRunTrailers).toEqual([
+      expect.objectContaining({
+        branch: "task/one",
+        head: commit2,
+        segment: hotTip,
+        state: "queued",
+        expected: true,
+        reason: expect.stringMatching(/pending Run linkage/),
+      }),
+    ])
     const scopedFence = mockGit.observe.mock.calls.at(-1)?.[0]?.fence
     expect(scopedFence.prefixes).toContain(changesRef("main", "task/one"))
     expect(scopedFence.prefixes).toContain(`${archivedChangesPrefix("main")}task/one`)
