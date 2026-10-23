@@ -1048,6 +1048,7 @@ console.log(JSON.stringify(args.includes("--component-custody")
       exitOverride?: number
       stderr?: string
       noReceipt?: boolean
+      failIfPathExists?: string
       /** Repositories the stub reports as consulted and skipped, as bearly does since 29392 (29406). */
       skipped?: ReadonlyArray<{ path: string; head: string; reason: string }>
     } = {},
@@ -1057,6 +1058,7 @@ console.log(JSON.stringify(args.includes("--component-custody")
       .replace("__BAD_PATH__", options.badPath === true ? "true" : "false")
       .replace("__STDERR__", JSON.stringify(options.stderr ?? ""))
       .replace("__NO_RECEIPT__", options.noReceipt === true ? "true" : "false")
+      .replace("__FAIL_IF_PATH_EXISTS__", JSON.stringify(options.failIfPathExists ?? ""))
       .replace("__EXIT_OVERRIDE__", options.exitOverride === undefined ? '""' : String(options.exitOverride))
       .replace("__SKIPPED__", JSON.stringify(options.skipped ?? []))
     writeFileSync(join(root, "tools", "worktree.ts"), source)
@@ -1084,10 +1086,11 @@ const git = (cwd, args, env) => {
 }
 const dirty = (cwd) =>
   git(cwd, ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=all"]).length > 0
-const snapshot = (cwd) => {
+const snapshot = (cwd, ref) => {
   const index = join(mkdtempSync(join(tmpdir(), "stub-preserve-")), "index")
   const env = { ...process.env, GIT_INDEX_FILE: index }
-  const parent = git(cwd, ["rev-parse", "HEAD"])
+  const previous = spawnSync("git", ["-C", cwd, "rev-parse", "--verify", "refs/heads/" + ref], { encoding: "utf8" })
+  const parent = previous.status === 0 ? previous.stdout.trim() : git(cwd, ["rev-parse", "HEAD"])
   git(cwd, ["read-tree", "HEAD"], env)
   git(cwd, ["add", "-A"], env)
   const tree = git(cwd, ["write-tree"], env)
@@ -1101,6 +1104,11 @@ const exitOverride = __EXIT_OVERRIDE__
 const skipped = __SKIPPED__
 process.stderr.write(__STDERR__)
 if (__NO_RECEIPT__) process.exit(exitOverride === "" ? 1 : Number(exitOverride))
+const failIfPathExists = __FAIL_IF_PATH_EXISTS__
+if (failIfPathExists !== "" && existsSync(join(target, failIfPathExists))) {
+  console.error("stub worktree: second preserve refused after teardown")
+  process.exit(9)
+}
 const receipt = (body) => {
   const out = bad ? { ...body, schema: "stub-worktree-preserve/1" } : { ...body }
   if (badPath) delete out.path
@@ -1121,8 +1129,9 @@ let rootDirty = dirty(target)
 for (const path of components) {
   const component = join(target, path)
   if (!existsSync(component) || !dirty(component)) continue
-  const sha = snapshot(component)
+  const sha = snapshot(component, ref)
   git(component, ["update-ref", "refs/heads/" + ref, sha])
+  git(component, ["push", "origin", "refs/heads/" + ref + ":refs/heads/" + ref])
   submodules.push({ path, ref, sha })
   rootDirty = true
 }
@@ -1130,8 +1139,15 @@ if (!rootDirty) {
   receipt({ schema: "bearly-worktree-preserve/1", slot, path: target, preserved: false, reason: "clean", ref: null, sha: null, submodules: [], skipped })
   process.exit(exitOverride === "" ? 3 : Number(exitOverride))
 }
-const sha = snapshot(target)
+const sha = snapshot(target, ref)
+const prior = spawnSync("git", ["-C", target, "rev-parse", "--verify", "refs/heads/" + ref], { encoding: "utf8" })
+if (prior.status === 0 && submodules.length === 0 &&
+    git(target, ["rev-parse", sha + "^{tree}"]) === git(target, ["rev-parse", prior.stdout.trim() + "^{tree}"])) {
+  receipt({ schema: "bearly-worktree-preserve/1", slot, path: target, preserved: false, reason: "unchanged", ref: null, sha: null, submodules: [], skipped })
+  process.exit(exitOverride === "" ? 3 : Number(exitOverride))
+}
 git(target, ["update-ref", "refs/heads/" + ref, sha])
+git(target, ["push", "origin", "refs/heads/" + ref + ":refs/heads/" + ref])
 receipt({ schema: "bearly-worktree-preserve/1", slot, path: target, preserved: true, reason: "dirty", ref, sha, submodules, skipped })
 process.exit(exitOverride === "" ? 0 : Number(exitOverride))
 `
@@ -1178,12 +1194,11 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     expect(run.stderr()).toContain("submodules: vendor/dependency@")
     expect(existsSync(path)).toBe(false)
 
-    // The retired limit must not resurface in the help a reader lands on; the truthful
-    // teardown-after-preserve boundary stays stated there.
+    // The help names both saves now that teardown writes are preserved.
     const help = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "close", "--help"], help.io)).toBe(0)
     expect(help.stdout()).not.toContain("a staged version that differs from it is not kept")
-    expect(help.stdout()).toContain("bytes a teardown writes afterwards are not preserved")
+    expect(help.stdout()).toMatch(/preserve again\s+after a successful teardown/u)
 
     // The root recovery ref resolves in the root store yrd handed `git super --preserved`, and
     // carries the ROOT dirt's bytes (the component's own custody lives in vendor/bearly's suite).
@@ -1233,6 +1248,207 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     expect(refs).toHaveLength(1)
     expect((await w.git(["show", `${refs[0]}:root-dirt.txt`])).trim()).toBe("root preserved")
   })
+
+  /**
+   * @failure 30814: teardown can change tracked, staged and untracked bytes after the first save.
+   *          The existing preserve close test has no teardown write, so it cannot detect that loss.
+   * @level l2 (real close, teardown and Git ref)
+   * @consumer every preserved environment with a teardown hook
+   */
+  it("preserves teardown writes with a second save descended from the first", async () => {
+    const w = await world(
+      ":",
+      "printf 'after\\n' > root-dirt.txt; printf 'new\\n' > teardown-new.txt; git add root-dirt.txt",
+    )
+    installStubWorktreePreserve(w.work)
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    writeFileSync(join(path, "root-dirt.txt"), "before\n")
+
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+    expect(existsSync(path)).toBe(false)
+    const ref = `refs/heads/wip/${basename(path)}-preserve-stub`
+    expect((await w.git(["show", `${ref}^:root-dirt.txt`])).trim()).toBe("before")
+    expect((await w.git(["show", `${ref}:root-dirt.txt`])).trim()).toBe("after")
+    expect((await w.git(["show", `${ref}:teardown-new.txt`])).trim()).toBe("new")
+  })
+
+  /**
+   * @failure 30814: a no-op second receipt once overwrote the first save's ref list and
+   *          allowed author retirement to consume its branch. Existing no-op coverage starts clean.
+   * @level l2 @consumer preserved close with an unchanged teardown
+   */
+  it("keeps first-pass custody when teardown leaves the snapshot unchanged", async () => {
+    const w = await world(":", ":")
+    installStubWorktreePreserve(w.work)
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    writeFileSync(join(path, "root-dirt.txt"), "before\n")
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+    expect(run.stderr()).toContain(`found nothing to preserve in ${path} after teardown`)
+    expect(existsSync(path)).toBe(false)
+    const ref = `refs/heads/wip/${basename(path)}-preserve-stub`
+    expect((await w.git(["show", `${ref}:root-dirt.txt`])).trim()).toBe("before")
+  })
+
+  /**
+   * @failure 30814: a second-pass refusal must leave the source and report the
+   *          first pass's completed ref. Existing refusal tests fail before any save.
+   * @level l2 @consumer preserved close whose teardown creates a new custody need
+   */
+  it("keeps the environment and first custody ref when the second save fails", async () => {
+    const w = await world(":", "printf 'after\\n' > teardown-new.txt")
+    installStubWorktreePreserve(w.work, { failIfPathExists: "teardown-new.txt" })
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    writeFileSync(join(path, "root-dirt.txt"), "before\n")
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(2)
+    const ref = `refs/heads/wip/${basename(path)}-preserve-stub`
+    expect(run.stderr()).toContain(
+      `preservation after teardown failed; completed custody refs: wip/${basename(path)}-preserve-stub`,
+    )
+    expect(existsSync(path)).toBe(true)
+    expect(readFileSync(join(path, "teardown-new.txt"), "utf8")).toBe("after\n")
+    expect((await w.git(["show", `${ref}:root-dirt.txt`])).trim()).toBe("before")
+  })
+
+  /**
+   * @failure 30814: teardown failure after publication must retain the source
+   *          and name completed custody; existing teardown failure starts clean.
+   * @level l2 @consumer a preserved environment with a failing teardown
+   */
+  it("keeps the environment and first custody ref when teardown fails", async () => {
+    const w = await world(":", "exit 23")
+    installStubWorktreePreserve(w.work)
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    writeFileSync(join(path, "root-dirt.txt"), "before\n")
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(2)
+    const ref = `refs/heads/wip/${basename(path)}-preserve-stub`
+    expect(run.stderr()).toContain(`completed custody refs: wip/${basename(path)}-preserve-stub`)
+    expect(existsSync(path)).toBe(true)
+    expect((await w.git(["show", `${ref}:root-dirt.txt`])).trim()).toBe("before")
+  })
+
+  /**
+   * @failure 30814: a successful preservation receipt can be stale by the removal
+   *          edge. Earlier tests check only immediate CLI success, never fresh remote custody.
+   * @level l2 @consumer a close whose published branch disappears before removal
+   */
+  it.each(["deleted", "rewound"] as const)("keeps the environment when fresh remote custody is %s", async (mode) => {
+    const w = await world(":", ":")
+    installStubWorktreePreserve(w.work)
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    writeFileSync(join(path, "root-dirt.txt"), "before\n")
+    const ref = `refs/heads/wip/${basename(path)}-preserve-stub`
+    let reads = 0
+    const run = capture(w.work)
+    await expect(
+      closeEnvironment(path, { preserve: true, json: true }, run.io, undefined, "delegate", async () => {
+        if (++reads === 2) {
+          await w.git(mode === "deleted" ? ["push", "origin", `:${ref}`] : ["push", "--force", "origin", `main:${ref}`])
+        }
+      }),
+    ).rejects.toThrow(/origin push URL .*refs\/heads\/wip\/.*no longer contains preserved/u)
+    expect(reads).toBe(2)
+    expect(existsSync(path)).toBe(true)
+    expect((await w.git(["show", `${ref}:root-dirt.txt`])).trim()).toBe("before")
+  })
+
+  /**
+   * @failure 30814: reading a mutable origin alias at removal could inspect a
+   *          different remote than the one selected when custody was published.
+   * @level l2 @consumer a teardown or concurrent writer changing local remote config
+   */
+  it("reads custody from the captured push URL after origin is repointed", async () => {
+    const w = await world(":", ":")
+    installStubWorktreePreserve(w.work)
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    writeFileSync(join(path, "root-dirt.txt"), "before\n")
+    const alternate = join(dirname(w.work), "alternate.git")
+    await w.git(["init", "--quiet", "--bare", alternate])
+    let reads = 0
+    const run = capture(w.work)
+    expect(
+      await closeEnvironment(path, { preserve: true, json: true }, run.io, undefined, "delegate", async () => {
+        if (++reads === 2) await gitIn(path)(["remote", "set-url", "origin", alternate])
+      }),
+      run.stderr(),
+    ).toBe(0)
+    expect(reads).toBe(2)
+    expect(existsSync(path)).toBe(false)
+  })
+
+  /**
+   * @failure 30814: the first same-UID CWD admission ran after preserve, so a held
+   *          checkout could gain a ref even though its close was refused.
+   * @level l2 @consumer close of a held dirty environment
+   */
+  it("refuses a CWD holder before the first preserve ref write", async () => {
+    const w = await world(":")
+    installStubWorktreePreserve(w.work)
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    writeFileSync(join(path, "root-dirt.txt"), "before\n")
+    processCensus.mockResolvedValue(await holderCensus(4242, path))
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      run.stderr(),
+    ).toBe(2)
+    expect(existsSync(path)).toBe(true)
+    expect((await w.git(["for-each-ref", "--format=%(refname)", "refs/heads/wip/"])).trim()).toBe("")
+  })
+
+  /**
+   * @failure 30814: author retirement was captured before teardown and could delete an
+   *          unchanged withdrawn tip even after the first pass established custody.
+   *          Ordinary clean retirement tests never return a preserve ref.
+   * @level l3 @consumer a landed author whose environment also carries unsaved bytes
+   */
+  it("retains an unchanged withdrawn author branch when preservation establishes custody", async () => {
+    const w = await world(":")
+    await birthEventQueue(w.work, "main", { localStore: false })
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "custody-retention", "--keep", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const author = (JSON.parse(opened.stdout()) as { path: string }).path
+    const authorGit = gitIn(author)
+    const branch = "task/custody-retention"
+    await authorGit(["commit", "--quiet", "--allow-empty", "-m", "author work\n\nRefs: @example/30814-retention"])
+    const head = (await authorGit(["rev-parse", "HEAD"])).trim()
+    const submitted = capture(author)
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--json"], submitted.io), submitted.stderr()).toBe(0)
+    const landed = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], landed.io),
+      landed.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(landed.stdout())).toMatchObject({ merged: [branch] })
+    expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
+    installStubWorktreePreserve(w.work)
+    writeFileSync(join(author, "unsaved.txt"), "custody\n")
+    const closed = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", author, "--preserve", "--json"], closed.io),
+      closed.stderr(),
+    ).toBe(0)
+    expect(existsSync(author)).toBe(false)
+    expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
+  }, 60_000)
 
   /**
    * @failure 29406: bearly's receipt names the repositories it consulted and skipped (a child shared

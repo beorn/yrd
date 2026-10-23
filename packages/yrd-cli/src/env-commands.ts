@@ -31,6 +31,8 @@ import {
   issueOf,
   readConfig,
   readRemoteCommit,
+  readRemoteCommits,
+  isAncestor,
   refAt,
   resolveGitSelection,
   retirePreviewSubject,
@@ -1193,37 +1195,88 @@ export async function closeEnvironment(
       { submodule: privatePath, checkout, store, command: verify },
     )
   }
-  // 29073: preserve FIRST (the ONE worktree implementation, reached as a subprocess at the CLI
-  // boundary like git super), then skip the clean gate it is standing in for. The worktree stays
-  // dirty by design — the bytes are in the durable preserve refs, and the removal below is what
-  // retires them. A preserve that cannot complete throws (loud) and blocks the removal, so no path
-  // discards uncommitted work silently.
+  // Admit the close before preserve can mutate any ref. The later admission still
+  // checks again after teardown; this census does not exclude concurrent writers.
+  const admission = await admitEnvironmentClose(path, io, censusSource)
+  if (admission.kind === "needs-delegation") {
+    if (onIncompleteCensus === "refuse") throw uncertified(path, admission)
+    return queueDelegatedClose(path, options, io, workdir, commit, admission)
+  }
+  // Both saves use the same worktree preserve operation. Keep custody from the
+  // first pass even if the second pass reports no changes.
   const preservedRefs: string[] = []
+  const custody: Array<{ path: string; ref: string; sha: string; remote: string }> = []
+  const custodyRemotes = new Map<string, string>()
   // 29406: the repositories the preserve consulted and skipped, named in the --json close receipt
   // below; undefined when no preserve ran, so the plain close receipt is unchanged.
   let skipped: WorktreePreserveReceipt["skipped"] | undefined
-  if (options.preserve === true) {
-    const receipt = await preserveEnvironmentWorktree(process, root, path)
+  const preserve = async (phase: "before teardown" | "after teardown"): Promise<void> => {
+    let receipt: WorktreePreserveReceipt
+    try {
+      receipt = await preserveEnvironmentWorktree(process, root, path)
+    } catch (error) {
+      throw new Error(
+        `environment ${path} preservation ${phase} failed; completed custody refs: ${preservedRefs.length === 0 ? "none" : preservedRefs.join(", ")}; environment kept: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      )
+    }
     for (const ref of [receipt.ref, ...receipt.submodules.map((entry) => entry.ref)]) {
       if (ref !== null && ref !== "" && !preservedRefs.includes(ref)) preservedRefs.push(ref)
     }
-    skipped = receipt.skipped
+    const passCustody = [
+      ...(receipt.ref === null || receipt.sha === null ? [] : [{ path: "", ref: receipt.ref, sha: receipt.sha }]),
+      ...receipt.submodules.flatMap((entry) =>
+        entry.ref === null ? [] : [{ path: entry.path, ref: entry.ref, sha: entry.sha }],
+      ),
+    ]
+    for (const entry of passCustody) {
+      const owner = entry.path === "" ? root : join(path, entry.path)
+      let remote: string
+      try {
+        remote = (await gitIn(owner, process, selection)(["remote", "get-url", "--push", "origin"])).trim()
+      } catch (error) {
+        throw new Error(
+          `environment ${path} preservation ${phase} wrote ${entry.ref} but cannot capture ${owner} origin push URL; completed custody refs: ${preservedRefs.join(", ")}; environment kept: ${String(error)}`,
+          { cause: error },
+        )
+      }
+      if (remote === "" || remote.includes("\n")) {
+        throw new Error(
+          `environment ${path} preservation ${phase} wrote ${entry.ref} but ${owner} origin push URL is empty or ambiguous; environment kept`,
+        )
+      }
+      const previous = custodyRemotes.get(entry.path)
+      if (previous !== undefined && previous !== remote) {
+        throw new Error(
+          `environment ${path} preservation ${phase} wrote ${entry.ref} but ${owner} origin push URL changed from ${previous} to ${remote} across custody passes; environment kept`,
+        )
+      }
+      custodyRemotes.set(entry.path, remote)
+      custody.push({ ...entry, remote })
+    }
+    skipped = [
+      ...(skipped ?? []),
+      ...receipt.skipped.filter(
+        (entry) =>
+          !skipped?.some(
+            (earlier) => earlier.path === entry.path && earlier.head === entry.head && earlier.reason === entry.reason,
+          ),
+      ),
+    ]
     const skippedNote =
       receipt.skipped.length === 0
         ? ""
         : `; skipped: ${receipt.skipped.map((entry) => `${entry.path}@${entry.head.slice(0, 12)} (${entry.reason})`).join(", ")}`
     io.stderr(
       receipt.preserved
-        ? `yrd: env close preserved ${receipt.reason ?? "dirty"} state of ${path} before removal: ${receipt.ref ?? "(no ref)"} (${(receipt.sha ?? "").slice(0, 12)})${receipt.submodules.length === 0 ? "" : `; submodules: ${receipt.submodules.map((entry) => `${entry.path}@${entry.sha.slice(0, 12)}`).join(", ")}`}${skippedNote}\n`
-        : `yrd: env close --preserve found nothing to preserve in ${path}; the close proceeds${skippedNote}\n`,
+        ? `yrd: env close preserved ${receipt.reason ?? "dirty"} state of ${path} ${phase}: ${receipt.ref ?? "(no ref)"} (${(receipt.sha ?? "").slice(0, 12)})${receipt.submodules.length === 0 ? "" : `; submodules: ${receipt.submodules.map((entry) => `${entry.path}@${entry.sha.slice(0, 12)}`).join(", ")}`}${skippedNote}\n`
+        : `yrd: env close --preserve found nothing to preserve in ${path} ${phase}; the close proceeds${skippedNote}\n`,
     )
+  }
+  if (options.preserve === true) {
+    await preserve("before teardown")
   } else {
     await requireClean(treeGit, path, " — or re-run with --preserve to keep this exact state in a durable ref first")
-  }
-  const admission = await admitEnvironmentClose(path, io, censusSource)
-  if (admission.kind === "needs-delegation") {
-    if (onIncompleteCensus === "refuse") throw uncertified(path, admission)
-    return queueDelegatedClose(path, options, io, workdir, commit, admission)
   }
   const config = await readConfig(
     treeGit,
@@ -1235,11 +1288,6 @@ export async function closeEnvironment(
     },
   )
   await beforeRemove?.()
-  const retirement = await prepareAuthorRelease(path, io)
-  if (retirement.kind === "unreadable") {
-    io.stderr(`yrd: ${retirement.reason}; read ${retirement.reads.join("; ")}; close continues\n`)
-  }
-  using retirementHandle = retirement.kind === "eligible" ? retirement.handle : undefined
   if (config?.teardown !== undefined) {
     const artifacts = join(workdir, "logs", "environments", basename(path), runId())
     const result = await runCheck({
@@ -1253,13 +1301,23 @@ export async function closeEnvironment(
     if (result.result !== "pass") {
       const output = readFileSync(result.log, "utf8").trim() || "(teardown produced no output)"
       throw new Error(
-        `environment teardown ${result.result} in preserved environment ${path}: exit ${String(result.exit)}${result.why === undefined ? "" : ` (${result.why})`}\ncommand: ${config.teardown}\n${output}\nlog ${result.log}`,
+        `environment teardown ${result.result} in preserved environment ${path}; completed custody refs: ${preservedRefs.length === 0 ? "none" : preservedRefs.join(", ")}: exit ${String(result.exit)}${result.why === undefined ? "" : ` (${result.why})`}\ncommand: ${config.teardown}\n${output}\nlog ${result.log}`,
       )
     }
     if (options.preserve !== true) {
       await requireClean(treeGit, path, " — or re-run with --preserve to keep this exact state in a durable ref first")
+    } else {
+      await preserve("after teardown")
     }
   }
+  // A captured retirement handle can delete an unchanged author tip after
+  // removal. Any custody pass retains every author branch, so capture only for
+  // the ordinary clean close with no preservation ref.
+  const retirement = preservedRefs.length === 0 ? await prepareAuthorRelease(path, io) : undefined
+  if (retirement?.kind === "unreadable") {
+    io.stderr(`yrd: ${retirement.reason}; read ${retirement.reads.join("; ")}; close continues\n`)
+  }
+  using retirementHandle = retirement?.kind === "eligible" ? retirement.handle : undefined
   // 27510: closing an environment retires its own branch's preview custody, root first, before removal; a removal that
   // fails afterwards leaves the retirement standing. A detached environment never submitted, so has none.
   const subject = registered.branch?.replace(/^refs\/heads\//u, "")
@@ -1279,6 +1337,27 @@ export async function closeEnvironment(
     throw uncertified(path, recheck, "after teardown")
   }
   await beforeRemove?.()
+  // The root composition binds every selected owning destination to its
+  // authorized `origin`. Re-read that remote after teardown and final
+  // admission, with objects fetched into the owning store. Every pass's saved
+  // commit must remain reachable, even when a later pass was a no-op.
+  for (const entry of custody) {
+    // A child may have no primary checkout; its environment store still owns
+    // the fetched objects until git-super transfers or retains that store.
+    const owner = entry.path === "" ? root : join(path, entry.path)
+    const ownerGit = gitIn(owner, process, selection)
+    const ref = entry.ref.startsWith("refs/heads/") ? entry.ref : `refs/heads/${entry.ref}`
+    const local = await refAt(ownerGit, ref)
+    if (local === undefined || !(await isAncestor(ownerGit, entry.sha, local))) {
+      throw new Error(`environment ${path} kept: ${owner} ${ref} no longer contains preserved ${entry.sha} locally`)
+    }
+    const remote = (await readRemoteCommits(ownerGit, entry.remote, [ref])).get(ref)
+    if (remote === undefined || !(await isAncestor(ownerGit, entry.sha, remote))) {
+      throw new Error(
+        `environment ${path} kept: ${owner} origin push URL ${entry.remote} ${ref} no longer contains preserved ${entry.sha}; completed custody refs: ${preservedRefs.join(", ")}`,
+      )
+    }
+  }
   // 29073 (@cto ruling): with --preserve the no-submodule path takes the SAME git-super worktree
   // remove as the submodule path, so the verified-ref dirt gate has ONE implementation in ONE
   // process and yrd never re-derives it. The cost is an empty or absent modules retention and one
