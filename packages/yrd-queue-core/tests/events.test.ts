@@ -2641,6 +2641,58 @@ describe("the queue-format boundary", () => {
     expect(await chain.head()).toBe(failed.head)
   })
 
+  /** @failure A caller bypassing the CLI can advance-drop a failed or merged change (30683 V1).
+   * @level l2 @consumer Core drop callers providing advanced-drop metadata
+   * The ordinary ended-drop test supplies no advanced metadata, so cannot exercise this unlock.
+   */
+  it.each(["failed", "merged"] as const)("refuses an advanced owner drop past a %s ending", async (ending) => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-event-drop-ending-"))
+    const origin = mkdtempSync(join(tmpdir(), "yrd-event-drop-ending-origin-"))
+    const git = gitIn(root)
+    await git(["init", "--quiet"])
+    await git(["init", "--bare", "--quiet", origin])
+    await git(["remote", "add", "origin", origin])
+    await git(["config", "user.name", "fixture"])
+    await git(["config", "user.email", "fixture@yrd.test"])
+    await git(["commit", "--allow-empty", "-m", "recorded", "--quiet"])
+    const recorded = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["commit", "--allow-empty", "-m", "advanced", "--quiet"])
+    const advanced = (await git(["rev-parse", "HEAD"])).trim()
+    const branch = "task/advanced-ending"
+    await git(["update-ref", "refs/heads/lab", recorded])
+    await git(["update-ref", `refs/heads/${branch}`, advanced])
+    await git(["push", "--quiet", "origin", "refs/heads/lab", `refs/heads/${branch}`])
+    const location = { repo: root, backend: git.backend, remote: "origin", selection: git.selection }
+    const queueTip = await seedEventQueue(location, "lab", recorded, new Date())
+    const chain = await openEvents({ ...location, ref: changesRef("lab", branch) })
+    const before = await chain.append(
+      [
+        changeInput("opened", { queueTip, at: new Date(), commit: recorded, by: "@dev/2" }),
+        changeInput(ending, {
+          queueTip,
+          at: new Date(),
+          reason: "ended",
+          ...(ending === "merged" ? { commit: recorded } : {}),
+        }),
+      ],
+      { expect: null },
+    )
+    await expect(
+      drop(location, {
+        queue: "lab",
+        branch,
+        by: "@dev/2",
+        note: "superseded",
+        local: { tip: advanced, advanced: { uniqueCommits: 1, target: { ref: "refs/heads/lab", tip: recorded } } },
+      }),
+    ).rejects.toThrow(/advanced drop needs a cancelled/)
+    expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(advanced)
+    expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(
+      `${advanced}\trefs/heads/${branch}`,
+    )
+    expect(await chain.head()).toBe(before.head)
+  })
+
   // @failure delete-only drop loses a branch's newer, unkept commit (ADR-0018 / 25658).
   it("refuses an ended branch whose current head is not already kept by its chain", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-event-drop-ended-advanced-"))

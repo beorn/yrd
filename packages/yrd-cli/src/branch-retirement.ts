@@ -2392,7 +2392,7 @@ export async function advancedDrop(
       detail: `; how many commits ${input.targetLabel} lacks is unknown (${error instanceof Error ? error.message : String(error)})`,
     }
   }
-  if (!Number.isSafeInteger(uniqueCommits) || uniqueCommits < 1) {
+  if (uniqueCommits < 1) {
     return { detail: `; ${input.targetLabel} does not hold ${input.head}, yet counts no commit it lacks` }
   }
   return {

@@ -3052,7 +3052,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
       ) {
         throw new Error(
           `${branch}@${head} at ${store.remote}: retained custody did not read back at ${ref}@${written}; ` +
-            `observed ${observed?.state.tip ?? "absent"} with ending ${observed?.state.ending?.id ?? "absent"}; ` +
+            `observed ${observed.state.tip ?? "absent"} with ending ${observed.state.ending?.id ?? "absent"}; ` +
             `branch removal was not attempted; inspect the retained history before retrying`,
         )
       }

@@ -3619,6 +3619,8 @@ describe("a queue is the selected origin branch carrying config", () => {
     "third seat",
     "absent main",
     "open",
+    "failed",
+    "merged",
     "issue open",
     "sibling",
     "issue sibling",
@@ -3646,9 +3648,11 @@ describe("a queue is the selected origin branch carrying config", () => {
         const chain = await openEvents({ ...location, ref: changesRef("main", branch), writer: "fixture" })
         await chain.append(
           [
-            changeInput("cancelled", {
+            // Open/cancelled rows alone miss a predicate that admits failed endings.
+            changeInput(mode === "failed" || mode === "merged" ? mode : "cancelled", {
               queueTip: before.events[0]!.props.find(([key]) => key === "Queue")![1],
               at: new Date(),
+              ...(mode === "merged" ? { commit: recorded } : {}),
               reason: "withdrawn",
               by: "@dev/7",
             }),
@@ -3658,7 +3662,8 @@ describe("a queue is the selected origin branch carrying config", () => {
       }
       writeFileSync(join(repo, "work.txt"), "advanced\n")
       await git(["commit", "--quiet", "-am", "work after submission"])
-      const sibling = mode === "sibling" || mode === "issue sibling"
+      // A merged descendant has its separate retained-history path; a sibling reaches the advanced-drop check.
+      const sibling = mode === "sibling" || mode === "issue sibling" || mode === "merged"
       if (sibling) {
         const tree = (await git(["rev-parse", "HEAD^{tree}"])).trim()
         const siblingTip = (await git(["commit-tree", tree, "-p", "main", "-m", "replacement sibling"])).trim()
@@ -3707,7 +3712,12 @@ describe("a queue is the selected origin branch carrying config", () => {
         removed: { branch: string; head: string; archiveRef?: string }[]
         kept: { branch: string; head: string; reason: string; detail: string }[]
       }
-      if (mode === "owner" || mode === "queue owner" || mode === "issue legacy archive" || sibling) {
+      if (
+        mode === "owner" ||
+        mode === "queue owner" ||
+        mode === "issue legacy archive" ||
+        (sibling && mode !== "merged")
+      ) {
         expect(code, output.stderr()).toBe(0)
         expect(report.removed).toEqual([expect.objectContaining({ branch, head: tip })])
         expect(report.removed[0]).not.toHaveProperty("archiveRef")
@@ -3751,7 +3761,7 @@ describe("a queue is the selected origin branch carrying config", () => {
    * @level l3 @consumer Authors reviewing local, issue and origin drop receipts
    * Advanced-drop metadata does not exercise these ordinary receipts.
    */
-  it.each(["local", "issue", "origin"] as const)(
+  it.each(["local", "issue", "origin", "origin count failure"] as const)(
     "reports the ordinary unmerged %s drop tip and commit count",
     async (mode) => {
       const repo = await world("{}\n")
@@ -3782,10 +3792,50 @@ describe("a queue is the selected origin branch carrying config", () => {
         { expect: null },
       )
       const output = capture(repo)
+      const location = createEventStore(repo, "origin", git.selection)
+      const before = await readBranchHistory(location, "main", branch)
       const args =
         mode === "issue"
           ? ["--issue", "@example/30683-count"]
-          : [branch, ...(mode === "local" ? ["--local", "--tip", tip] : [])]
+          : [
+              branch,
+              ...(mode === "local"
+                ? ["--local", "--tip", tip]
+                : mode === "origin count failure"
+                  ? ["--retire", "--tip", tip]
+                  : []),
+            ]
+      if (mode === "origin count failure") {
+        // A receipt count must succeed before origin retirement changes the branch or its history.
+        const found = spawnSync("which", ["git"], { encoding: "utf8" })
+        if (found.status !== 0 || found.stdout.trim() === "") throw new Error(`which git failed: ${found.stderr}`)
+        const bin = join(dirname(repo), "count-failure-bin")
+        mkdirSync(bin)
+        const realGit = found.stdout.trim()
+        writeFileSync(
+          join(bin, "git"),
+          `#!/bin/sh\ncase " $* " in *" rev-list --count "*) echo 'fixture count unreadable' >&2; exit 73;; esac\nexec ${shellQuote(realGit)} "$@"\n`,
+        )
+        chmodSync(join(bin, "git"), 0o755)
+        const previous = process.env.PATH
+        process.env.PATH = `${bin}:${previous ?? ""}`
+        let code: number
+        try {
+          code = await runYrdProcess(
+            ["bun", "yrd", "drop", ...args, "--reason", "superseded", "--submitter", "fixture"],
+            output.io,
+          )
+        } finally {
+          if (previous === undefined) delete process.env.PATH
+          else process.env.PATH = previous
+        }
+        expect(code).toBe(2)
+        expect(output.stderr()).toContain("fixture count unreadable")
+        expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(`${tip}\trefs/heads/${branch}`)
+        expect((await readBranchHistory(location, "main", branch)).history).toEqual(before.history)
+        expect(output.stderr()).not.toContain("completed")
+        return
+      }
       expect(
         await runYrdProcess(
           ["bun", "yrd", "drop", ...args, "--reason", "superseded", "--submitter", "fixture"],

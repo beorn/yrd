@@ -2184,6 +2184,14 @@ export async function coreQueueCommand(
       if (countTarget === undefined) {
         throw new Error(`drop: target ${eventStore.remote}#${config.target.branch} is absent`)
       }
+      let retirementCount: number | undefined
+      if (request.retire !== undefined) {
+        // Hydrate the origin tip (or a completed drop's keeping history) before counting in this replica.
+        if ((await readRemoteCommit(git, eventStore.remote, `refs/heads/${request.branch}`)) === undefined) {
+          await readBranchHistory(eventStore, config.target.branch, request.branch)
+        }
+        retirementCount = await dropCommitCount(git, request.retire.tip, countTarget)
+      }
       let dropped: Awaited<ReturnType<typeof drop>>
       try {
         dropped = await drop(eventStore, {
@@ -2238,7 +2246,7 @@ export async function coreQueueCommand(
       }
       let uniqueCommits: number
       try {
-        uniqueCommits = await dropCommitCount(git, dropped.head, countTarget)
+        uniqueCommits = retirementCount ?? (await dropCommitCount(git, dropped.head, countTarget))
       } catch (cause) {
         throw new Error(
           `drop of ${request.branch}@${dropped.head} completed; its unique-commit count against ${countTarget} could not be read: ${String(cause)}`,
