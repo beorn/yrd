@@ -7242,13 +7242,13 @@ export async function readEventListing(
           const cancelled = events.filter((event) => event.type === "cancelled")
           const pending =
             preExecution && cancelled.length === 0 && (row.state === "queued" || row.state === "verifying")
-          const cancellation = cancelled[0]
+          // Advanced local retirement appends another dropped custody event to an already-cancelled change.
+          // Complete pre-execution history still proves expected absence when every cancellation is a drop.
           const dropped =
             preExecution &&
             row.state === "cancelled" &&
-            cancelled.length === 1 &&
-            cancellation !== undefined &&
-            trailer(cancellation, EVENT_TRAILERS.reason) === "dropped"
+            cancelled.length > 0 &&
+            cancelled.every((event) => trailer(event, EVENT_TRAILERS.reason) === "dropped")
           return {
             branch: row.branch,
             head: row.head,
