@@ -17,6 +17,7 @@ import {
   createLocalEventStore,
   gitIn,
   isAncestor,
+  issueBindingsOf,
   keptLinkAdmits,
   listRefs,
   openLog,
@@ -1257,37 +1258,55 @@ export async function releaseRetainedCheckouts(
       io.stderr(
         `yrd: release inspection ${repository}@${commit}: attached ${attached?.branch ?? "none"} at ${attached?.head ?? "unreadable"}\n`,
       )
-      const mappedIssue =
-        attached?.branch === undefined
-          ? undefined
-          : io.branchIssue === undefined
-            ? undefined
-            : io.branchIssue({ branch: attached.branch })
-      // An interrupted release leaves a checkout detached at its pin. Its task branch carries the root's name:
-      // it is that row while it still holds the pin, or once the root's event keeps the root tip (30683).
-      const resumed =
-        attached !== undefined &&
-        attached.branch === undefined &&
-        branch === undefined &&
-        (rootKept || (await refAt(git, `refs/heads/${request.branch}`)) === commit)
-          ? request.branch
-          : undefined
-      const detachedBranches: string[] = []
-      if (attached !== undefined && attached.branch === undefined && branch === undefined && resumed === undefined) {
-        for (const [ref] of await listRefs("refs/heads/", createLocalEventStore(repository, input.selection))) {
-          const name = ref.slice("refs/heads/".length)
-          const issue = io.branchIssue?.({ branch: name })
-          if (issue !== undefined && identity(issue) === identity(request.issue)) detachedBranches.push(name)
+      let recordedIssue: string | undefined
+      if (branch === undefined) {
+        const bindings = new Set<string>()
+        try {
+          for await (const binding of issueBindingsOf(git, [`${commit}^!`], attached?.branch ?? request.branch)) {
+            bindings.add(binding.issue)
+          }
+        } catch (cause) {
+          throw new Error(`${repository}@${commit}: cannot read exact-tip issue binding: ${String(cause)}`, { cause })
         }
-        if (detachedBranches.length > 1) {
-          throw new Error(`${repository}: ambiguous detached checkout branches: ${detachedBranches.join(", ")}`)
+        if (bindings.size > 1) {
+          throw new Error(`${repository}@${commit}: conflicting exact-tip issue bindings: ${[...bindings].join(", ")}`)
+        }
+        recordedIssue = bindings.values().next().value
+      }
+      const bindingDetail = `${repository}@${commit}: exact-tip issue binding ${recordedIssue ?? "absent"}`
+      const matchesIssue = (name: string) => {
+        const mapped = io.branchIssue?.({ branch: name, recordedIssue })
+        // Explicit opaque identity wins even if an embedding host ignores recordedIssue and returns a numeric name.
+        return recordedIssue === undefined
+          ? mapped !== undefined && identity(mapped) === identity(request.issue)
+          : recordedIssue === request.issue
+      }
+      let resumed: string | undefined
+      const detachedBranches: string[] = []
+      if (attached !== undefined && attached.branch === undefined && branch === undefined) {
+        const rootNamedTip = await refAt(git, `refs/heads/${request.branch}`)
+        // With no binding, preserve the existing root-name recovery precedence (30683).
+        // Explicit bindings instead resolve actual pinned refs before an absence-only replay fallback (30704).
+        if (recordedIssue === undefined && (rootKept || rootNamedTip === commit)) {
+          resumed = request.branch
+        } else {
+          for (const [ref, tip] of await listRefs("refs/heads/", createLocalEventStore(repository, input.selection))) {
+            const name = ref.slice("refs/heads/".length)
+            if (tip === commit && matchesIssue(name)) detachedBranches.push(name)
+          }
+          if (detachedBranches.length > 1) {
+            throw new Error(`${bindingDetail}; ambiguous detached checkout branches: ${detachedBranches.join(", ")}`)
+          }
+          if (detachedBranches.length === 0 && rootKept && rootNamedTip === undefined && matchesIssue(request.branch)) {
+            resumed = request.branch
+          }
         }
       }
       if (
         branch !== undefined ||
         resumed !== undefined ||
         detachedBranches.length > 0 ||
-        (mappedIssue !== undefined && identity(mappedIssue) === identity(request.issue))
+        (attached?.branch !== undefined && matchesIssue(attached.branch))
       ) {
         const selectedBranch = branch ?? attached?.branch ?? resumed ?? detachedBranches[0]
         if (selectedBranch === undefined) throw new Error(`${repository}: selected attached branch became unreadable`)
@@ -1349,8 +1368,8 @@ export async function releaseRetainedCheckouts(
           path,
           reason:
             attached?.branch !== undefined
-              ? `attached branch ${attached.branch} at ${attached.head ?? "unreadable"} does not map to ${request.issue}; not selected`
-              : "no current attached branch mapping to the requested issue",
+              ? `${bindingDetail}; attached branch ${attached.branch} at ${attached.head ?? "unreadable"} does not map to ${request.issue}; not selected`
+              : `${bindingDetail}; no current attached branch mapping to the requested issue`,
         })
       }
       if (request.submodules) {

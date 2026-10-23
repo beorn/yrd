@@ -6211,10 +6211,18 @@ describe("drop --local --release-checkout", () => {
     return output
   }
   type ReleaseReport = Awaited<ReturnType<typeof releaseRetainedCheckouts>>
-  async function releaseWorld(component = false, unmergedChild = false) {
+  async function releaseWorld(
+    component = false,
+    unmergedChild = false,
+    binding?: { issue: string; childBindings: readonly string[] },
+  ) {
     const repo = await world("{}\n")
     const git = gitIn(repo)
     const branch = "task/29600-retained"
+    const childMessage =
+      binding === undefined
+        ? "unmerged component work"
+        : ["component work", "", ...binding.childBindings.map((issue) => `Refs: ${issue}`)].join("\n")
     let child: string | undefined
     if (component) {
       const seed = await world()
@@ -6230,6 +6238,20 @@ describe("drop --local --release-checkout", () => {
       child = join(repo, "modules/child")
       await gitIn(child)(["checkout", "--quiet", "-b", branch])
       await gitIn(child)(["branch", "task/29600-unselected"])
+      if (binding !== undefined && !unmergedChild) {
+        await gitIn(child)([
+          "-c",
+          "user.name=fixture",
+          "-c",
+          "user.email=fixture@test.invalid",
+          "commit",
+          "--quiet",
+          "--allow-empty",
+          "-m",
+          childMessage,
+        ])
+        await gitIn(child)(["push", "--quiet", "origin", "HEAD:main"])
+      }
       await git(["commit", "--quiet", "-am", "record exact child"])
       await git(["push", "--quiet", "origin", "main"])
     }
@@ -6248,7 +6270,7 @@ describe("drop --local --release-checkout", () => {
         "commit",
         "--quiet",
         "-m",
-        "unmerged component work",
+        childMessage,
       ])
       // Published on its task branch, as component work is, and absent from the child's main.
       await gitIn(child)(["push", "--quiet", "origin", branch])
@@ -6285,7 +6307,7 @@ describe("drop --local --release-checkout", () => {
       "--tip",
       tip,
       "--issue",
-      "29600",
+      binding?.issue ?? "29600",
       "--reason",
       "retain checkout",
       "--release-checkout",
@@ -6296,6 +6318,149 @@ describe("drop --local --release-checkout", () => {
     ]
     return { repo, git, branch, tip, child, checkoutFiles, argv }
   }
+  // Canonical Refs on the exact pinned child tip must survive numeric-name mapping (30704).
+  // Existing release cases bind only a numeric issue and cannot expose this lost identity.
+  it.each(["attached", "detached", "duplicate"] as const)(
+    "selects the %s component by exact-tip binding and preserves retained bytes on root replay",
+    async (kind) => {
+      const issue = "@i/10-yrd/30704-component-branch-owner-delete"
+      const fixture = await releaseWorld(true, false, {
+        issue,
+        childBindings: kind === "duplicate" ? [issue, issue] : [issue],
+      })
+      const { spy } = await permitCensus()
+      try {
+        const rootOnly = releaseCapture(fixture.repo)
+        expect(
+          await runYrdProcess([...fixture.argv.filter((arg) => arg !== "--submodules"), "--apply"], rootOnly.io),
+          rootOnly.stderr(),
+        ).toBe(0)
+        expect((JSON.parse(rootOnly.stdout()) as ReleaseReport).removed).toHaveLength(1)
+        const childGit = gitIn(fixture.child!)
+        const childBranch = "task/30704-component-alias"
+        const childTip = (await childGit(["rev-parse", "HEAD"])).trim()
+        await childGit(["branch", "-m", fixture.branch, childBranch])
+        if (kind === "detached") await childGit(["update-ref", "--no-deref", "HEAD", childTip, childTip])
+        const before = await childGit([
+          "--no-optional-locks",
+          "status",
+          "--porcelain=v2",
+          "-z",
+          "--untracked-files=all",
+        ])
+        const preview = releaseCapture(fixture.repo)
+        expect(await runYrdProcess(fixture.argv, preview.io), preview.stderr()).toBe(0)
+        const planned = JSON.parse(preview.stdout()) as ReleaseReport
+        expect(planned.eligible, JSON.stringify(planned)).toEqual([
+          expect.objectContaining({ path: "modules/child", branch: childBranch, head: childTip }),
+        ])
+        expect(planned.alreadyRetired).toHaveLength(1)
+        const applied = releaseCapture(fixture.repo)
+        expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(0)
+        const report = JSON.parse(applied.stdout()) as ReleaseReport
+        expect(report.removed).toEqual([
+          expect.objectContaining({ path: "modules/child", branch: childBranch, head: childTip }),
+        ])
+        expect(await childGit(["for-each-ref", `refs/heads/${childBranch}`])).toBe("")
+        expect((await childGit(["rev-parse", "HEAD"])).trim()).toBe(childTip)
+        expect(await childGit(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")).toBe("")
+        expect(await childGit(["--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=all"])).toBe(
+          before,
+        )
+        expect(readFileSync(join(fixture.child!, "private.bin"))).toEqual(Buffer.from([0, 255, 12, 8]))
+        for (const files of fixture.checkoutFiles.values()) {
+          expect([readFileSync(files.lease), readFileSync(files.lock), readFileSync(files.index)]).toEqual(files.bytes)
+        }
+        expect(await childGit(["for-each-ref", "refs/heads/task/29600-unselected"])).not.toBe("")
+        for (const repo of [fixture.repo, fixture.child!]) {
+          expect(await gitIn(repo)(["for-each-ref", "refs/archive/"])).toBe("")
+          expect(await gitIn(repo)(["ls-remote", "origin", "refs/archive/*"])).toBe("")
+        }
+        const events = (
+          await readEventQueueWithChanges(createEventStore(fixture.repo, "origin", fixture.git.selection), "main")
+        ).histories.get(fixture.branch)!.events
+        expect(events.filter((event) => event.type === "cancelled")).toHaveLength(1)
+      } finally {
+        spy.mockRestore()
+      }
+    },
+    60_000,
+  )
+  // Explicit identity must beat numeric names and root replay; discovery errors precede ALL mutation.
+  it.each(["attached mismatch", "detached mismatch", "resumed mismatch", "conflicting", "ambiguous"] as const)(
+    "preserves refs and checkout bytes for %s exact-tip bindings",
+    async (kind) => {
+      const mismatch = kind.endsWith("mismatch")
+      const issue = mismatch ? "29600" : "@i/10-yrd/30704-component-branch-owner-delete"
+      const other = "@i/10-yrd/29601-other"
+      const fixture = await releaseWorld(true, false, {
+        issue,
+        childBindings: mismatch ? [other] : kind === "conflicting" ? [issue, other] : [issue],
+      })
+      const { spy } = await permitCensus()
+      try {
+        if (mismatch) {
+          const rootOnly = releaseCapture(fixture.repo)
+          expect(
+            await runYrdProcess([...fixture.argv.filter((arg) => arg !== "--submodules"), "--apply"], rootOnly.io),
+            rootOnly.stderr(),
+          ).toBe(0)
+          expect((JSON.parse(rootOnly.stdout()) as ReleaseReport).removed).toHaveLength(1)
+        }
+        const childGit = gitIn(fixture.child!)
+        const childTip = (await childGit(["rev-parse", "HEAD"])).trim()
+        if (kind === "detached mismatch" || kind === "ambiguous") {
+          await childGit(["branch", "-m", fixture.branch, "task/29600-alias"])
+        }
+        if (kind === "ambiguous") await childGit(["branch", "task/30704-second"])
+        if (kind === "detached mismatch" || kind === "resumed mismatch" || kind === "ambiguous") {
+          await childGit(["update-ref", "--no-deref", "HEAD", childTip, childTip])
+        }
+        const before = new Map<string, { refs: string; head: string; status: string }>()
+        for (const repo of fixture.checkoutFiles.keys()) {
+          const read = gitIn(repo)
+          before.set(repo, {
+            refs: await read(["for-each-ref", "refs/heads/", "refs/archive/"]),
+            head: await read(["symbolic-ref", "--quiet", "HEAD"]).catch(() => ""),
+            status: await read(["--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=all"]),
+          })
+        }
+        const applied = releaseCapture(fixture.repo)
+        if (mismatch) {
+          // A host's numeric-only mapper cannot override the observed explicit binding.
+          applied.io.branchIssue = ({ branch }) => /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
+        }
+        expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(mismatch ? 0 : 1)
+        const report = JSON.parse(applied.stdout()) as ReleaseReport
+        expect(report.removed).toEqual([])
+        const detail = mismatch ? report.excluded[0]?.reason : report.failed[0]?.detail
+        expect(detail).toContain(fixture.child!)
+        expect(detail).toContain(childTip)
+        expect(detail).toContain(mismatch ? other : kind === "conflicting" ? "conflicting" : "ambiguous")
+        if (kind === "conflicting") {
+          expect(detail).toContain(issue)
+          expect(detail).toContain(other)
+        }
+        for (const [repo, files] of fixture.checkoutFiles) {
+          const read = gitIn(repo)
+          expect(await read(["for-each-ref", "refs/heads/", "refs/archive/"])).toBe(before.get(repo)!.refs)
+          expect(await read(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")).toBe(before.get(repo)!.head)
+          expect(await read(["--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=all"])).toBe(
+            before.get(repo)!.status,
+          )
+          expect([readFileSync(files.lease), readFileSync(files.lock), readFileSync(files.index)]).toEqual(files.bytes)
+          expect(await read(["ls-remote", "origin", "refs/archive/*"])).toBe("")
+        }
+        expect((await childGit(["rev-parse", "HEAD"])).trim()).toBe(childTip)
+        expect((await listChanges(createEventStore(fixture.repo, "origin", fixture.git.selection), "main")).size).toBe(
+          mismatch ? 1 : 0,
+        )
+      } finally {
+        spy.mockRestore()
+      }
+    },
+    60_000,
+  )
   // 29721: queue clones do not identify an author's root. Existing release
   // effect tests start at the right root and cannot detect a misdirected hint.
   it.each(["child", "standalone", "outside", "unreadable"] as const)(
@@ -6819,28 +6984,39 @@ describe("drop --local --release-checkout", () => {
     }
   }, 60_000)
   // @failure An unmerged component branch released with --submodules is deleted with no custody (30683).
-  it("keeps and reports an unmerged component branch and releases nothing", async () => {
-    const fixture = await releaseWorld(true, true)
-    fixture.argv.push("--queue", `${fixture.repo}#main`)
-    const { spy } = await permitCensus()
-    try {
-      const applied = releaseCapture(fixture.repo)
-      // A kept row is reported, not failed.
-      expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(0)
-      const report = JSON.parse(applied.stdout()) as ReleaseReport
-      expect(report.removed).toEqual([])
-      expect(report.kept).toEqual([
-        expect.objectContaining({ path: "modules/child", branch: fixture.branch, reason: "unreached" }),
-      ])
-      expect((await gitIn(fixture.child!)(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
-      expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
-      expect(await gitIn(fixture.child!)(["ls-remote", "origin", "refs/archive/*"])).toBe("")
-      expect(await fixture.git(["ls-remote", "origin", "refs/archive/*"])).toBe("")
-      expect((await listChanges(createEventStore(fixture.repo, "origin", fixture.git.selection), "main")).size).toBe(0)
-    } finally {
-      spy.mockRestore()
-    }
-  }, 60_000)
+  it.each(["name", "exact-tip"] as const)(
+    "keeps and reports an unmerged component with %s binding and releases nothing",
+    async (kind) => {
+      const issue = "@i/10-yrd/30704-component-branch-owner-delete"
+      const fixture = await releaseWorld(
+        true,
+        true,
+        kind === "exact-tip" ? { issue, childBindings: [issue] } : undefined,
+      )
+      fixture.argv.push("--queue", `${fixture.repo}#main`)
+      const { spy } = await permitCensus()
+      try {
+        const applied = releaseCapture(fixture.repo)
+        // A kept row is reported, not failed.
+        expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(0)
+        const report = JSON.parse(applied.stdout()) as ReleaseReport
+        expect(report.removed).toEqual([])
+        expect(report.kept).toEqual([
+          expect.objectContaining({ path: "modules/child", branch: fixture.branch, reason: "unreached" }),
+        ])
+        expect((await gitIn(fixture.child!)(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+        expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+        expect(await gitIn(fixture.child!)(["ls-remote", "origin", "refs/archive/*"])).toBe("")
+        expect(await fixture.git(["ls-remote", "origin", "refs/archive/*"])).toBe("")
+        expect((await listChanges(createEventStore(fixture.repo, "origin", fixture.git.selection), "main")).size).toBe(
+          0,
+        )
+      } finally {
+        spy.mockRestore()
+      }
+    },
+    60_000,
+  )
   // The existing declared-holder case covered equality only. A container cwd
   // must not hold descendant checkouts, while a real root use holds the batch.
   it.each(["ancestor", "equal", "inside"] as const)(
@@ -7009,8 +7185,8 @@ describe("drop --local --release-checkout", () => {
             path: "modules/child",
             reason:
               kind === "attached"
-                ? `attached branch task/29601-other at ${childTip} does not map to 29600; not selected`
-                : "no current attached branch mapping to the requested issue",
+                ? `${fixture.child}@${childTip}: exact-tip issue binding absent; attached branch task/29601-other at ${childTip} does not map to 29600; not selected`
+                : `${fixture.child}@${childTip}: exact-tip issue binding absent; no current attached branch mapping to the requested issue`,
           },
         ])
       } finally {
