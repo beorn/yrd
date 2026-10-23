@@ -1770,9 +1770,14 @@ describe("what a watch says it looked at", () => {
     }>
     expect(listed.journal.malformed).toEqual([
       {
+        branch: "task/good",
+        head,
         key: `task/good@${head}`,
         message: expect.stringContaining("missing subject"),
+        reason: "malformed journal row; change identity is known but Run-to-segment linkage is unrecorded",
         run: journal.id,
+        selected: true,
+        state: "queued",
       },
     ])
     // Counted, not omitted: a listing that hid the defective change would still
@@ -1789,8 +1794,8 @@ describe("what a watch says it looked at", () => {
     // Narration is stderr's; the product a consumer parses stays on stdout.
     expect(json.stderr()).toBe("")
 
-    // Selecting the healthy change must retain a counted warning about the
-    // global gap without expanding the unrelated malformed change's identity.
+    // Selecting the healthy change keeps its rows filtered while retaining
+    // the counted warning and named facts for the outside-filter defect.
     const selectedJson = capture(w.work)
     await coreQueueCommand(
       w.work,
@@ -1803,12 +1808,14 @@ describe("what a watch says it looked at", () => {
       journal: { absent?: string; malformed?: readonly { key: string }[] }
     }
     expect(selected.changes.map((change) => change.branch)).toEqual(["task/other"])
-    expect.soft(selected.journal.malformed ?? []).toEqual([])
+    expect
+      .soft(selected.journal.malformed ?? [])
+      .toEqual([expect.objectContaining({ key: `task/good@${head}`, selected: false })])
     expect.soft(selected.journal.absent).toMatch(/global.*\b1\b.*malformed/i)
     expect
       .soft(selected.journal.absent)
       .toContain(`yrd 'list' '--all' '--json' '--queue' '${join(dirname(w.work), "remote.git")}#main'`)
-    expect.soft(JSON.stringify(selected.journal)).not.toContain(`task/good@${head}`)
+    expect.soft(JSON.stringify(selected.journal)).toContain(`task/good@${head}`)
 
     const selectedHuman = capture(w.work)
     await coreQueueCommand(
@@ -1818,7 +1825,8 @@ describe("what a watch says it looked at", () => {
       { workdir: w.workdir },
     )
     expect(selectedHuman.stdout()).toContain("task/other")
-    expect.soft(selectedHuman.stderr()).not.toContain(`task/good@${head}`)
+    expect(selectedHuman.stdout()).not.toContain("task/good")
+    expect.soft(selectedHuman.stderr()).toContain(`task/good@${head}`)
     expect.soft(selectedHuman.stderr()).toMatch(/global.*\b1\b.*malformed/i)
     expect
       .soft(selectedHuman.stderr())
