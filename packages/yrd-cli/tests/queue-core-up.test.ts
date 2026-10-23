@@ -729,7 +729,7 @@ describe("yrd queue up, the service", () => {
           branch,
           head,
           outcome: "kept",
-          detail: "fixture author hold; not archived",
+          detail: "fixture author hold; branch kept",
         }),
       )
     } finally {

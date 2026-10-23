@@ -3104,6 +3104,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     "unknown-ancestry",
     "unmerged",
     "automatic",
+    "automatic-sibling",
   ] as const)(
     "keeps a merged local descendant with a retained event only with its authority: %s",
     async (mode) => {
@@ -3139,7 +3140,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         { expect: null },
       )
       let head: string
-      if (mode === "non-descendant") {
+      if (mode === "non-descendant" || mode === "automatic-sibling") {
         const tree = (await git(["rev-parse", "HEAD^{tree}"])).trim()
         head = (await git(["commit-tree", tree, "-m", "unrelated local tip"])).trim()
         await git(["branch", branch, head])
@@ -3184,7 +3185,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       }
       const out = capture(repo)
       const argv =
-        mode === "automatic"
+        mode === "automatic" || mode === "automatic-sibling"
           ? ["bun", "yrd", "drop", "--issue", issue, "--dry-run", "--json"]
           : [
               "bun",
@@ -3432,7 +3433,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         branch: "task/manual-only",
         head: manualHead,
         reason: "held",
-        detail: `declared cwd for @dev/5 in /hh/hh.hab.tsx: ${repo}; not archived`,
+        detail: `declared cwd for @dev/5 in /hh/hh.hab.tsx: ${repo}; branch kept`,
       }),
     ])
     expect(heldManualReport.kept[0]).not.toHaveProperty("archiveRef")
@@ -3590,7 +3591,18 @@ describe("a queue is the selected origin branch carrying config", () => {
    * @level l3
    * @consumer The branch owner or @chief running yrd drop --local --reason on an advanced branch
    */
-  it.each(["owner", "queue owner", "no reason", "third seat", "absent main"] as const)(
+  it.each([
+    "owner",
+    "queue owner",
+    "no reason",
+    "third seat",
+    "absent main",
+    "open",
+    "issue open",
+    "sibling",
+    "issue sibling",
+    "issue legacy archive",
+  ] as const)(
     "an advanced branch drops only for its owner or the queue owner with a reason, keeping both commits: %s",
     async (mode) => {
       const repo = await world("{}\n")
@@ -3607,8 +3619,30 @@ describe("a queue is the selected origin branch carrying config", () => {
         await runYrdProcess(["bun", "yrd", "submit", "--submitter", "@dev/7", "--json"], submitted.io),
         submitted.stderr(),
       ).toBe(0)
+      if (mode !== "open" && mode !== "issue open") {
+        const location = createEventStore(repo, "origin", git.selection)
+        const before = (await readBranchHistory(location, "main", branch)).history!
+        const chain = await openEvents({ ...location, ref: changesRef("main", branch), writer: "fixture" })
+        await chain.append(
+          [
+            changeInput("cancelled", {
+              queueTip: before.events[0]!.props.find(([key]) => key === "Queue")![1],
+              at: new Date(),
+              reason: "withdrawn",
+              by: "@dev/7",
+            }),
+          ],
+          { expect: before.state.tip! },
+        )
+      }
       writeFileSync(join(repo, "work.txt"), "advanced\n")
       await git(["commit", "--quiet", "-am", "work after submission"])
+      const sibling = mode === "sibling" || mode === "issue sibling"
+      if (sibling) {
+        const tree = (await git(["rev-parse", "HEAD^{tree}"])).trim()
+        const siblingTip = (await git(["commit-tree", tree, "-p", "main", "-m", "replacement sibling"])).trim()
+        await git(["update-ref", `refs/heads/${branch}`, siblingTip])
+      }
       const tip = (await git(["rev-parse", "HEAD"])).trim()
       await git(["checkout", "--quiet", "main"])
       const main = (await git(["rev-parse", "main"])).trim()
@@ -3620,8 +3654,22 @@ describe("a queue is the selected origin branch carrying config", () => {
       const by = mode === "queue owner" ? "@chief" : mode === "third seat" ? "@dev/8" : "@dev/7"
       const reason = mode === "no reason" ? [] : ["--reason", "superseded by 30704"]
       const output = capture(repo)
+      const issueMode = mode.startsWith("issue ")
+      if (issueMode) output.io.branchIssue = () => "@example/30683-advanced"
+      if (mode === "issue legacy archive") {
+        await git(["update-ref", `refs/archive/2026-10-22/fixture/${branch}`, tip])
+      }
       const code = await runYrdProcess(
-        ["bun", "yrd", "drop", branch, "--local", "--tip", tip, ...reason, "--submitter", by, "--json"],
+        [
+          "bun",
+          "yrd",
+          "drop",
+          ...(issueMode ? ["--issue", "@example/30683-advanced"] : [branch, "--local", "--tip", tip]),
+          ...reason,
+          "--submitter",
+          by,
+          "--json",
+        ],
         output.io,
       )
       const refused = `current tip ${tip} differs from recorded change tip ${recorded}`
@@ -3638,7 +3686,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         removed: { branch: string; head: string; archiveRef?: string }[]
         kept: { branch: string; head: string; reason: string; detail: string }[]
       }
-      if (mode === "owner" || mode === "queue owner") {
+      if (mode === "owner" || mode === "queue owner" || mode === "issue legacy archive" || sibling) {
         expect(code, output.stderr()).toBe(0)
         expect(report.removed).toEqual([expect.objectContaining({ branch, head: tip })])
         expect(report.removed[0]).not.toHaveProperty("archiveRef")
@@ -3652,10 +3700,10 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect(after?.state).toMatchObject({
           status: "cancelled",
           reason: "dropped",
-          advancedDrop: { tip, uniqueCommits: 2, target: { ref: "refs/heads/main", tip: main } },
+          advancedDrop: { tip, uniqueCommits: sibling ? 1 : 2, target: { ref: "refs/heads/main", tip: main } },
         })
       } else {
-        expect(code, output.stderr()).toBe(1)
+        expect(code, output.stderr()).toBe(issueMode ? 0 : 1)
         expect(report.removed).toEqual([])
         expect(report.kept).toEqual([expect.objectContaining({ branch, head: tip, reason: "advanced" })])
         const detail = report.kept[0]!.detail
@@ -3667,11 +3715,65 @@ describe("a queue is the selected origin branch carrying config", () => {
           )
         }
         if (mode === "no reason") expect(detail).toContain("--reason <why>")
+        if (mode === "open" || mode === "issue open") expect(detail).toContain("withdraw")
         expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tip)
         expect((await readBranchHistory(location, "main", branch)).history).toEqual(before.history)
       }
-      expect(await git(["for-each-ref", "refs/archive/"])).toBe("")
+      if (mode === "issue legacy archive") {
+        expect((await git(["rev-parse", `refs/archive/2026-10-22/fixture/${branch}`])).trim()).toBe(tip)
+      } else expect(await git(["for-each-ref", "refs/archive/"])).toBe("")
       expect(await git(["ls-remote", "origin", "refs/archive/*"])).toBe("")
+    },
+  )
+
+  /** @failure Ordinary unmerged drops omit the exact tip or number of commits main lacks (30683 R6).
+   * @level l3 @consumer Authors reviewing local, issue and origin drop receipts
+   * Advanced-drop metadata does not exercise these ordinary receipts.
+   */
+  it.each(["local", "issue", "origin"] as const)(
+    "reports the ordinary unmerged %s drop tip and commit count",
+    async (mode) => {
+      const repo = await world("{}\n")
+      const git = gitIn(repo)
+      const queueTip = await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+      const branch = "task/30683-count"
+      await git(["checkout", "--quiet", "-b", branch])
+      await git(["commit", "--quiet", "--allow-empty", "-m", "unmerged work"])
+      const tip = (await git(["rev-parse", "HEAD"])).trim()
+      await git(["push", "--quiet", "origin", branch])
+      await git(["checkout", "--quiet", "main"])
+      const chain = await openEvents({
+        ...createEventStore(repo, "origin", git.selection),
+        ref: changesRef("main", branch),
+        writer: "fixture",
+      })
+      await chain.append(
+        [
+          changeInput("opened", {
+            queueTip,
+            at: new Date(),
+            commit: tip,
+            by: "fixture",
+            issue: "@example/30683-count",
+          }),
+          changeInput("cancelled", { queueTip, at: new Date(), reason: "withdrawn", by: "fixture" }),
+        ],
+        { expect: null },
+      )
+      const output = capture(repo)
+      const args =
+        mode === "issue"
+          ? ["--issue", "@example/30683-count"]
+          : [branch, ...(mode === "local" ? ["--local", "--tip", tip] : [])]
+      expect(
+        await runYrdProcess(
+          ["bun", "yrd", "drop", ...args, "--reason", "superseded", "--submitter", "fixture"],
+          output.io,
+        ),
+        output.stderr(),
+      ).toBe(0)
+      expect(output.stdout()).toContain(tip)
+      expect(output.stdout()).toContain("1 unique commit")
     },
   )
 
@@ -3684,9 +3786,16 @@ describe("a queue is the selected origin branch carrying config", () => {
     const repo = await world("{}\n")
     const real = gitIn(repo)
     const head = (await real(["rev-parse", "HEAD"])).trim()
+    let firstRead = true
     const failing = Object.assign(
       async (args: readonly string[]): Promise<string> => {
-        if (args[0] === "merge-base") throw new Error("fatal: bad object")
+        if (args[0] === "merge-base") {
+          if (firstRead) {
+            firstRead = false
+            throw new Error("fatal: bad object")
+          }
+          return ""
+        }
         return real([...args])
       },
       { selection: real.selection },
@@ -3698,10 +3807,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       head: "1".repeat(40),
       history: {
         state: {
-          status: "failed",
+          status: "cancelled",
           commit: head,
           submitter: "@dev/7",
-          ending: { kind: "failed", id: "2".repeat(40) },
+          ending: { kind: "cancelled", id: "2".repeat(40) },
           at,
         },
         events: [],
@@ -3893,16 +4002,13 @@ describe("a queue is the selected origin branch carrying config", () => {
     }
     expect(report.apply).toBe(false)
     expect(report.eligible).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ branch: "task/29010-landed", reason: "landed" }),
-        // 30683: a head an earlier version archived is kept by an event like any closed one.
-        expect.objectContaining({ branch: "task/29010-archived", reason: "closed" }),
-      ]),
+      expect.arrayContaining([expect.objectContaining({ branch: "task/29010-landed", reason: "landed" })]),
     )
-    expect(report.eligible).toHaveLength(2)
+    expect(report.eligible).toHaveLength(1)
     expect(report.kept).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ branch: "task/29010-active", reason: "active" }),
+        expect.objectContaining({ branch: "task/29010-archived", reason: "unreached" }),
         expect.objectContaining({ branch: "task/29010-held", reason: "held" }),
         expect.objectContaining({ branch: "task/29010-wrong-branch", reason: "unreached" }),
         expect.objectContaining({ branch: "task/29010-wrong-tip", reason: "unreached" }),
@@ -3926,10 +4032,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     apply.io.localBranchProtections = preview.io.localBranchProtections
     expect(await runYrdProcess(args, apply.io), apply.stderr()).toBe(1)
     const applied = JSON.parse(apply.stdout()) as typeof report
-    expect(applied.removed.map((row: { branch: string }) => row.branch).sort()).toEqual([
-      "task/29010-archived",
-      "task/29010-landed",
-    ])
+    expect(applied.removed.map((row: { branch: string }) => row.branch).sort()).toEqual(["task/29010-landed"])
     const location = createEventStore(repo, "origin", git.selection)
     for (const row of applied.removed) {
       // 30683: an event on the branch's chain keeps the exact tip (the landing's own, or a new dropped event),
@@ -3937,9 +4040,6 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect(row).not.toHaveProperty("archiveRef")
       const history = (await readBranchHistory(location, "main", row.branch)).history
       expect(history?.events.some((event) => event.links.includes(tips.get(row.branch)!))).toBe(true)
-      if (row.branch === "task/29010-archived") {
-        expect(history?.state).toMatchObject({ status: "cancelled", reason: "dropped" })
-      }
       expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${row.branch}`])).trim()).toBe("")
     }
     expect((await git(["for-each-ref", "--format=%(refname)", "refs/archive/"])).trim()).toBe("")
@@ -5731,7 +5831,7 @@ describe("component-local retirement without a component queue", () => {
       ) {
         expect(report.removed).toEqual([])
         expect(report.kept).toEqual([
-          expect.objectContaining({ branch, head: actualTip, detail: expect.stringContaining("; not archived") }),
+          expect.objectContaining({ branch, head: actualTip, detail: expect.stringContaining("; branch kept") }),
         ])
         expect(report.kept[0]).not.toHaveProperty("archiveRef")
         expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(actualTip)
@@ -6704,7 +6804,7 @@ describe("drop --local --release-checkout", () => {
             expect.objectContaining({
               repo: fixture.repo,
               reason: "held",
-              detail: expect.stringContaining("; not archived"),
+              detail: expect.stringContaining("; branch kept"),
             }),
           )
           for (const row of report.kept) expect(row).not.toHaveProperty("archiveRef")
@@ -6783,7 +6883,7 @@ describe("drop --local --release-checkout", () => {
         expect(outcomeRow).not.toHaveProperty("archiveRef")
         const beforeApply =
           kind === "moved" || kind === "cwd" || kind === "delegation" || kind === "host" || kind === "preview host"
-        if (beforeApply && !failed) expect(outcomeRow?.detail).toContain("; not archived")
+        if (beforeApply && !failed) expect(outcomeRow?.detail).toContain("; branch kept")
         expect(outcomeRow?.detail).toMatch(
           kind === "moved"
             ? /tip|moved/

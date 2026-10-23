@@ -54,7 +54,7 @@ export type LocalBranchRetirement = Readonly<{
 export type LocalBranchRetirementResult = Readonly<{
   outcome: "removed" | "kept" | "failed" | "eligible"
   archiveRef?: string
-  archiveLocation?: "local" | "origin"
+  archiveLocation?: "local"
   /** The change chain at origin and the event on it (`tip`) that keeps the removed tip (30683). */
   event?: Readonly<{ ref: string; tip: string }>
   reason: string
@@ -70,7 +70,7 @@ class RetirementKept extends Error {
   }
 }
 
-/** One policy for local retirement; git-super owns archive/ref mechanics.
+/** One policy for local retirement; git-super owns ref mechanics.
  * Unmerged closed work first writes the event that keeps its exact tip to origin's chain (30683). A tip
  * proven merged into the target needs no custody of its own (ADR-0018 amendment,
  * line 69), so it is removed with no archive ref and no queue write (30683).
@@ -88,7 +88,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
   // A proven tip writes no archive, so a rerun after its removal finds only the target holding it.
   let completedOnTarget = false
   let writtenArchive: string | undefined
-  let archiveLocation: "local" | "origin" | undefined
+  let archiveLocation: "local" | undefined
   let custody: Dropped | undefined
   const protection = async (): Promise<Kept | undefined> => {
     const firstRead = firstProtectionRead
@@ -146,7 +146,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     return undefined
   }
   const formatKept = (kept: Kept): LocalBranchRetirementResult => {
-    const detail = writtenArchive === undefined ? `${kept.detail}; not archived` : kept.detail
+    const detail = writtenArchive === undefined ? `${kept.detail}; branch kept` : kept.detail
     return {
       outcome: "kept",
       ...(writtenArchive === undefined ? {} : { archiveRef: writtenArchive }),

@@ -47,6 +47,7 @@ import {
   retireIssueBranches,
   readBranchProtections,
   advancedDrop,
+  dropCommitCount,
   type AdvancedRecord,
   componentDropHint,
   componentsHoldingBranch,
@@ -2100,6 +2101,7 @@ export async function coreQueueCommand(
             }
             advanced = unlocked.advanced
           }
+          const uniqueCommits = advanced?.uniqueCommits ?? (await dropCommitCount(authorGit, head, target))
           const result = await retireLocalBranch({
             repo: authorRepo,
             git: authorGit,
@@ -2124,7 +2126,13 @@ export async function coreQueueCommand(
           const output = {
             ...row,
             reason: result.reason,
-            ...(result.detail === undefined ? {} : { detail: result.detail }),
+            ...(result.outcome === "removed"
+              ? {
+                  detail: `tip ${head}; ${uniqueCommits} unique commits relative to ${targetLabel}@${target}${result.detail === undefined ? "" : `; ${result.detail}`}`,
+                }
+              : result.detail === undefined
+                ? {}
+                : { detail: result.detail }),
             ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
             // The event that keeps the tip lives on the change chain at origin (30683).
             ...(result.outcome === "removed" && result.event !== undefined
@@ -2172,6 +2180,9 @@ export async function coreQueueCommand(
     }
     case "drop": {
       const eventStore = createEventStore(repo, config.target.remote, selection)
+      const countTarget = await readRemoteCommit(git, eventStore.remote, `refs/heads/${config.target.branch}`)
+      if (countTarget === undefined)
+        throw new Error(`drop: target ${eventStore.remote}#${config.target.branch} is absent`)
       let dropped: Awaited<ReturnType<typeof drop>>
       try {
         dropped = await drop(eventStore, {
@@ -2224,11 +2235,20 @@ export async function coreQueueCommand(
         }
         throw error
       }
+      let uniqueCommits: number
+      try {
+        uniqueCommits = await dropCommitCount(git, dropped.head, countTarget)
+      } catch (cause) {
+        throw new Error(
+          `drop of ${request.branch}@${dropped.head} completed; its unique-commit count against ${countTarget} could not be read: ${String(cause)}`,
+          { cause },
+        )
+      }
       emit(
         io,
         options.json,
-        dropped,
-        `dropped ${request.branch} at ${dropped.head.slice(0, 12)}; ending ${dropped.event.slice(0, 12)} kept its commit` +
+        { ...dropped, uniqueCommits },
+        `dropped ${request.branch} at ${dropped.head}; ${uniqueCommits} unique commits relative to ${targetLabel}@${countTarget}; ending ${dropped.event.slice(0, 12)} kept its commit` +
           (dropped.main === undefined ? "" : `; published main ${dropped.main.ref}@${dropped.main.tip}`),
       )
       return 0

@@ -2349,6 +2349,38 @@ describe("the queue-format boundary", () => {
       expect((await listRefs(branchRef, location)).get(branchRef)).toBe(extra)
       const before = await readStatus(location, "lab", branch)
 
+      // R4: a retained event lost from the selected chain must name what was actually read.
+      let lostRetained: string | undefined
+      const lostBackend: GitomicBackend = {
+        ...git.backend,
+        publish: async (repo, updates, remote) => {
+          const result = await publish(repo, updates, remote)
+          const update = updates.find((item) => item.ref === selectedRef && item.oid !== null)
+          if (lostRetained === undefined && update?.oid !== undefined && update.oid !== null) {
+            lostRetained = update.oid
+            await publish(repo, [{ ref: selectedRef, expect: update.oid, oid: before.tip! }], remote)
+          }
+          return result
+        },
+      }
+      const lostFailure = await drop(
+        { ...location, backend: lostBackend },
+        {
+          queue: "lab",
+          branch,
+          by: "@dev/3",
+          note: "retain divergent head",
+          retire: { tip: extra },
+        },
+      ).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      expect(lostRetained).toBeDefined()
+      expect(String(lostFailure)).toContain(`expected ${selectedRef} to hold event ${lostRetained}`)
+      expect(String(lostFailure)).toContain(`read ${selectedRef}@${before.tip} without that event`)
+      expect((await listRefs(branchRef, location)).get(branchRef)).toBe(extra)
+
       let readbackRaced = false
       const readbackBackend: GitomicBackend = {
         ...git.backend,
@@ -2478,6 +2510,7 @@ describe("the queue-format boundary", () => {
   it.each([
     "open",
     "wrong-tip",
+    "absent-unkept",
     "unreadable",
     "held-later",
     "branch-moved",
@@ -2500,7 +2533,16 @@ describe("the queue-format boundary", () => {
       await chain.append(
         [
           changeInput("opened", { queueTip, at: new Date(), commit: head, by: "@dev/2" }),
-          ...(fault === "open" ? [] : [changeInput("merged", { queueTip, at: new Date(), commit: head })]),
+          ...(fault === "open"
+            ? []
+            : [
+                changeInput(fault === "absent-unkept" ? "cancelled" : "merged", {
+                  queueTip,
+                  at: new Date(),
+                  commit: head,
+                  reason: "withdrawn",
+                }),
+              ]),
         ],
         { expect: null },
       )
@@ -2515,12 +2557,16 @@ describe("the queue-format boundary", () => {
     }
     let checks = 0
     let expectedBranch: string | null = head
+    if (fault === "absent-unkept") {
+      await publish(store.repo, [{ ref: branchRef, expect: head, oid: null }], "origin")
+      expectedBranch = null
+    }
     const action = drop(location, {
       queue: "lab",
       branch: branchName,
       by: "@dev/2",
       note: "retire exact ended work",
-      retire: { tip: fault === "wrong-tip" ? base : head },
+      retire: { tip: fault === "wrong-tip" || fault === "absent-unkept" ? base : head },
       protections: async () => {
         checks++
         if (fault === "unreadable") throw new Error("host protection census unreadable")
@@ -2558,6 +2604,7 @@ describe("the queue-format boundary", () => {
       (error: unknown) => error,
     )
     expect(refusal).toBeInstanceOf(Error)
+    if (fault === "absent-unkept") expect(String(refusal)).toContain(`no event on ${ref}@${ending} keeps ${base}`)
     if (fault === "ending-final") {
       expect(String(refusal)).toContain("change moved during retirement")
       expect(String(refusal)).toContain(`git -C 'retire-ending-final' branch '${branchName}' '${head}'`)

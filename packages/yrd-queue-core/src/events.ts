@@ -2941,10 +2941,14 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
   const advanced = local?.advanced
   if (
     advanced !== undefined &&
-    (state.commit === undefined || state.commit === local?.tip || state.status === "merged" || !request.note?.trim())
+    (state.commit === undefined ||
+      state.commit === local?.tip ||
+      state.status !== "cancelled" ||
+      state.ending?.kind !== "cancelled" ||
+      !request.note?.trim())
   ) {
     throw new Error(
-      `${branch}: an advanced drop needs an unmerged change whose recorded commit differs from ${local?.tip}, and a nonempty --reason`,
+      `${branch}: an advanced drop needs a cancelled change whose recorded commit differs from ${local?.tip}, and a nonempty --reason`,
     )
   }
   const fetchRefs = store.backend.fetchRefs
@@ -3035,15 +3039,9 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
       const retained = await chain.append(decide(history, input), { expect: selectedTip })
       const written = retained.events.findLast((event) => event.type === "retained")?.id
       if (written === undefined) throw new Error(`${ref} in ${store.repo}: retained event was not written`)
-      const observed = await readKeptCustody(store, { queue, branch, ref, event: written, keeps: [head] }).catch(
-        (cause: unknown) => {
-          if (!(cause instanceof ChainCustodyMismatch)) throw cause
-          return undefined
-        },
-      )
-      const event = observed?.events.at(-1)
+      const observed = await readKeptCustody(store, { queue, branch, ref, event: written, keeps: [head] })
+      const event = observed.events.at(-1)
       if (
-        observed === undefined ||
         observed.state.tip !== written ||
         event?.type !== "retained" ||
         keptCommit(event) !== head ||

@@ -474,52 +474,72 @@ it("local retirement keeps protected tips and preserves custody before removing 
   })
 })
 
-/** @failure Local retirement removes a branch whose chain stopped keeping its tip, or reports that as removed (30683).
+/** @failure Local retirement removes a branch whose chain stopped keeping its tip, or reports a failed removal as removed (30683).
  * @level l2 @consumer the local-retirement journal reader and cleanup caller
  * The shared chain readback runs last, inside beforeRemove; a mismatch keeps the branch and reports it.
  */
-it("keeps and reports a local branch whose chain no longer keeps its tip", async () => {
-  const w = await world()
-  await createWorldEventQueue(w)
-  const branch = "task/chain-moved"
-  const unmergedTip = await submitCommit(w, branch, "unmerged.txt")
-  const chainRef = changesRef("main", branch)
-  const log = openLog(join(w.workdir, "retirement-chain-moved"))
-  let reads = 0
-  const result = await retireLocalBranch({
-    repo: w.work,
-    git: w.git,
-    branch,
-    tip: unmergedTip,
-    actor: "@dev/2",
-    reason: "issue closed",
-    issue: "@i/10-yrd/1",
-    log,
-    protections: async () => {
-      // The third read is beforeRemove's, just ahead of the chain readback.
-      if (++reads === 3) await gitIn(w.remote)(["update-ref", "-d", chainRef])
-      return []
-    },
-    disposition: {
-      kind: "closed",
-      target: w.target,
-      queue: "main",
-      store: createEventStore(w.work, "origin", gitIn(w.work).selection),
-    },
-  })
-  expect(reads).toBe(3)
-  // A closed disposition reports its code; the readback names the moved chain in detail.
-  expect(result).toMatchObject({
-    outcome: "kept",
-    reason: "moved",
-    detail: expect.stringContaining(`expected ${chainRef} to hold event`),
-  })
-  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(unmergedTip)
-  expect((await w.git(["for-each-ref", "--format=%(refname)", "refs/archive"])).trim()).toBe("")
-  expect(readRunLog(dirname(log.path), log.id)).toContainEqual(
-    expect.objectContaining({ kind: "local-branch-retirement", outcome: "kept", branch, head: unmergedTip }),
-  )
-})
+it.each(["chain moved", "branch locked"] as const)(
+  "keeps and reports a local branch after custody when %s",
+  async (failure) => {
+    const w = await world()
+    await createWorldEventQueue(w)
+    const branch = "task/chain-moved"
+    const unmergedTip = await submitCommit(w, branch, "unmerged.txt")
+    const chainRef = changesRef("main", branch)
+    const log = openLog(join(w.workdir, "retirement-chain-moved"))
+    let reads = 0
+    if (failure === "branch locked") {
+      const lock = (await w.git(["rev-parse", "--git-path", `refs/heads/${branch}.lock`])).trim()
+      writeFileSync(join(w.work, lock), "fixture branch lock\n")
+    }
+    const result = await retireLocalBranch({
+      repo: w.work,
+      git: w.git,
+      branch,
+      tip: unmergedTip,
+      actor: "@dev/2",
+      reason: "issue closed",
+      issue: "@i/10-yrd/1",
+      log,
+      protections: async () => {
+        // The third read is beforeRemove's, just ahead of the chain readback.
+        if (++reads === 3 && failure === "chain moved") await gitIn(w.remote)(["update-ref", "-d", chainRef])
+        return []
+      },
+      disposition: {
+        kind: "closed",
+        target: w.target,
+        queue: "main",
+        store: createEventStore(w.work, "origin", gitIn(w.work).selection),
+      },
+    })
+    if (failure === "chain moved") {
+      expect(reads).toBe(3)
+      expect(result).toMatchObject({
+        outcome: "kept",
+        reason: "moved",
+        detail: expect.stringContaining(`expected ${chainRef} to hold event`),
+      })
+    } else {
+      expect(result).toMatchObject({ outcome: "failed", reason: expect.stringContaining(".lock") })
+      const keptEvent = await refAt(gitIn(w.remote), chainRef)
+      expect(keptEvent).toBeDefined()
+      expect((await gitIn(w.remote)(["rev-list", "--parents", "-n", "1", keptEvent!])).trim().split(" ")).toContain(
+        unmergedTip,
+      )
+    }
+    expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(unmergedTip)
+    expect((await w.git(["for-each-ref", "--format=%(refname)", "refs/archive"])).trim()).toBe("")
+    expect(readRunLog(dirname(log.path), log.id)).toContainEqual(
+      expect.objectContaining({
+        kind: "local-branch-retirement",
+        outcome: failure === "chain moved" ? "kept" : "failed",
+        branch,
+        head: unmergedTip,
+      }),
+    )
+  },
+)
 
 /** @failure Merge cleanup reports unchanged components or misses changed component branches.
  * @level l2 @consumer local retirement after a merged root change

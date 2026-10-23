@@ -1,6 +1,5 @@
 import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs"
 import { createHash } from "node:crypto"
-import { findArchiveRefFor } from "git-super/archive-ref"
 import { readCommitSubmodules } from "git-super/commit-graph"
 import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
 import { shellQuote } from "git-super/shell-command"
@@ -535,7 +534,6 @@ export async function retireIssueBranches(
     )
     const discoveryFailure = failed[0]
     let retirementFailure: Row | undefined
-    const archives = await listRefs("refs/archive/", eventStore)
     for (const candidate of candidates) {
       const origin = originOwners.get(key(candidate)) === candidate
       if (!candidate.local && !origin) continue
@@ -563,28 +561,38 @@ export async function retireIssueBranches(
           continue
         }
         const custody = await targetFor(candidate)
-        const existingArchive =
-          path === "" && candidate.local && change?.ending !== undefined
-            ? findArchiveRefFor(repo, branch, head)
-            : undefined
-        if (path === "" && change?.commit !== undefined && change.commit !== head && existingArchive === undefined) {
-          kept.push({
-            ...row,
-            reason: "advanced",
-            detail:
-              `current tip ${head} differs from recorded change tip ${change.commit}` +
-              (await advancedCure(
-                candidate.git,
-                candidate.repo,
-                branch,
-                head,
-                change.commit,
-                custody.target,
-                targetLabel,
-                false,
-              )),
+        const mergedOnTarget =
+          path === "" && change?.status === "merged" && (await isAncestor(candidate.git, head, custody.target))
+        let advanced: AdvancedRecord | undefined
+        if (
+          path === "" &&
+          history !== undefined &&
+          change?.commit !== undefined &&
+          change.commit !== head &&
+          !mergedOnTarget
+        ) {
+          const unlocked = await advancedDrop(candidate.git, {
+            repo,
+            branch,
+            head,
+            history,
+            queue: config.target.branch,
+            target: custody.target,
+            targetLabel,
+            by: request.by,
+            reason: request.reason,
           })
-          continue
+          if (!candidate.local || "detail" in unlocked) {
+            kept.push({
+              ...row,
+              reason: "advanced",
+              detail:
+                `current tip ${head} differs from recorded change tip ${change.commit}` +
+                ("detail" in unlocked ? unlocked.detail : "; advanced abandonment selects only a local branch"),
+            })
+            continue
+          }
+          advanced = unlocked.advanced
         }
         if (custody.ownQueue || (change !== undefined && isOpen(change.status))) {
           kept.push({
@@ -616,7 +624,7 @@ export async function retireIssueBranches(
             head,
             history.events.flatMap((event) => event.links),
           ))
-        // Exact root event/archive custody remains authoritative even when the
+        // Exact root event custody remains authoritative even when the
         // submitted head is no longer in main's graph (including adopted history).
         // A bad branch record is reported independently; only discovery or an
         // attempted retirement failure stops subsequent mutations.
@@ -631,9 +639,6 @@ export async function retireIssueBranches(
               : enumerateChangeSegments(history.events, changesRef(config.target.branch, branch), repo).find(
                   (segment) => segment.head === head && segment.state.status === "merged",
                 )
-          const archive = [...archives].find(
-            ([ref, tip]) => tip === head && /^refs\/archive\/[^/]+\/[^/]+\/(.+)$/u.exec(ref)?.[1] === branch,
-          )
           let disposition: LocalBranchRetirement["disposition"] | undefined
           if (landing !== undefined && landing.state.ending === undefined) {
             failed.push({
@@ -643,21 +648,27 @@ export async function retireIssueBranches(
             })
             continue
           }
-          // A landed head keeps its report label; a head an earlier version archived is now kept like any closed one.
+          // A landed head keeps its report label; cancelled work is kept by its dropped event.
           const label = landing === undefined ? "closed" : "landed"
-          if (landing !== undefined || archive !== undefined || existingArchive !== undefined) {
-            // An event on origin's chain keeps the exact head before the local name goes: a landed head's
-            // retained event, or the dropped event of a head already archived (30683).
-            disposition = { kind: "closed", target: custody.target, store: eventStore, queue: config.target.branch }
+          if (landing !== undefined || change?.status === "cancelled" || mergedOnTarget) {
+            disposition = {
+              kind: "closed",
+              target: custody.target,
+              store: eventStore,
+              queue: config.target.branch,
+              ...(advanced === undefined ? {} : { advanced }),
+            }
           } else if (!(await isAncestor(candidate.git, head, custody.target))) {
             kept.push({
               ...row,
               reason: "unreached",
-              detail: "no exact submitted root tip in merged history or same-branch origin archive",
+              detail: "no exact submitted root tip in merged history or cancelled change with event custody",
             })
             continue
           }
           if (disposition !== undefined) {
+            const uniqueCommits =
+              advanced?.uniqueCommits ?? (await dropCommitCount(candidate.git, head, custody.target))
             const result = await retireLocalBranch({
               repo,
               git: candidate.git,
@@ -673,12 +684,16 @@ export async function retireIssueBranches(
                 (await readBranchProtections(io, { repo, branch, tip: head, issue })).protections,
               disposition,
             })
-            const detail = origin
+            const custodyDetail = origin
               ? `origin ${candidate.remote}#${branch}@${candidate.originHead} remains; this custody path selects only the local name${result.detail === undefined ? "" : `; ${result.detail}`}` +
                 (needsExplicitRetention
                   ? `; retire origin explicitly with ${formatYrdCommand(io, ["drop", branch, "--retire", "--tip", head, "--reason", "<why>", "--submitter", request.by], repo)}; the retained event keeps the exact head`
                   : "")
               : result.detail
+            const detail =
+              result.outcome === "removed" || result.outcome === "eligible"
+                ? `tip ${head}; ${uniqueCommits} unique commits relative to ${targetLabel}@${custody.target}${custodyDetail === undefined ? "" : `; ${custodyDetail}`}`
+                : custodyDetail
             const output = {
               ...row,
               reason: result.outcome === "removed" || result.outcome === "eligible" ? label : result.reason,
@@ -1202,7 +1217,7 @@ export async function releaseRetainedCheckouts(
       kept.push({
         ...rootRow,
         reason: "moved",
-        detail: `tip moved: expected ${request.tip}, found ${actual ?? "absent"}; not archived`,
+        detail: `tip moved: expected ${request.tip}, found ${actual ?? "absent"}; branch kept`,
       })
       return report
     }
@@ -1306,7 +1321,7 @@ export async function releaseRetainedCheckouts(
           kept.push({
             ...row,
             reason: "moved",
-            detail: `attached checkout does not match exact recorded pin ${commit}; not archived`,
+            detail: `attached checkout does not match exact recorded pin ${commit}; branch kept`,
           })
         } else if (path !== "" && !onMain) {
           kept.push({
@@ -1382,7 +1397,7 @@ export async function releaseRetainedCheckouts(
         kept.push({
           ...candidate.row,
           reason: "held",
-          detail: `${heldDetail}; not archived`,
+          detail: `${heldDetail}; branch kept`,
         })
       }
     }
@@ -1441,6 +1456,7 @@ export async function releaseRetainedCheckouts(
           kept.push({ ...row, reason: "held", detail: publicText(reasons.join("; ")) })
           break
         }
+        const uniqueCommits = await dropCommitCount(candidate.git, row.head, candidate.disposition.target)
         if (row.path === "" && endingId === undefined) {
           // Descendants are gone by now; the dropped event keeps the root tip and carries the receipt
           // before the root name goes (30683).
@@ -1487,7 +1503,10 @@ export async function releaseRetainedCheckouts(
           })
         } else {
           original = undefined
-          removed.push(row)
+          removed.push({
+            ...row,
+            detail: `tip ${row.head}; ${uniqueCommits} unique commits relative to ${candidate.disposition.target}`,
+          })
         }
         await verify(candidate, before)
       } catch (cause) {
@@ -1549,7 +1568,7 @@ export async function retireMergedRootAuthor(
     const result = {
       outcome: "kept",
       reason: "unreached",
-      detail: `exact author head ${tip} is not an ancestor of ${input.target}; kept for owner review; not archived`,
+      detail: `exact author head ${tip} is not an ancestor of ${input.target}; kept for owner review; branch kept`,
     } as const
     log.write({
       kind: "local-branch-retirement",
@@ -2294,6 +2313,15 @@ export async function advancedCure(
 /** What the owner's advanced drop records beside the head it keeps: the recorded commit, the count and the target. */
 export type AdvancedRecord = Readonly<{ recorded: string } & Omit<AdvancedDrop, "tip">>
 
+/** The advanced-drop check and ordinary drop receipts count against the same observed target. */
+export async function dropCommitCount(git: Git, head: string, target: string): Promise<number> {
+  const raw = (await git(["rev-list", "--count", `${target}..${head}`])).trim()
+  const count = /^\d+$/u.test(raw) ? Number(raw) : NaN
+  if (!Number.isSafeInteger(count) || count < 0)
+    throw new Error(`invalid unique-commit count for ${target}..${head}: ${JSON.stringify(raw)}`)
+  return count
+}
+
 /**
  * The owner's local drop of a branch that advanced past its recorded change tip (30683). Only the change's
  * submitter, the seat that ended it, or the seat that owns its queue may drop it, with a nonempty reason, and only
@@ -2335,8 +2363,10 @@ export async function advancedDrop(
   let held: boolean
   try {
     held = await isAncestor(git, input.head, input.target)
-  } catch {
-    return refusal()
+  } catch (error) {
+    return {
+      detail: `; whether ${input.targetLabel} holds ${input.head} is unknown (${error instanceof Error ? error.message : String(error)})`,
+    }
   }
   const ending = events.find((event) => event.id === state.ending?.id)
   const owners = [
@@ -2344,7 +2374,9 @@ export async function advancedDrop(
     ending?.props.find(([key]) => key === "By")?.[1],
     ...yrdQueueRunnerDeclarations.filter((row) => row.queue.base === input.queue).map((row) => row.owner),
   ]
-  if (held || state.status === "merged" || !owners.includes(input.by)) return refusal()
+  if (isOpen(state.status)) return { detail: "; change is still open; withdraw it before dropping its advanced tip" }
+  if (held || state.status !== "cancelled" || state.ending?.kind !== "cancelled" || !owners.includes(input.by))
+    return refusal()
   if (input.reason === undefined || input.reason.trim() === "") {
     return {
       detail: `${(await refusal()).detail}; or, as its owner, drop it with --reason <why>, which its dropped event records`,
@@ -2352,7 +2384,7 @@ export async function advancedDrop(
   }
   let uniqueCommits: number
   try {
-    uniqueCommits = Number((await git(["rev-list", "--count", `${input.target}..${input.head}`])).trim())
+    uniqueCommits = await dropCommitCount(git, input.head, input.target)
   } catch (error) {
     return {
       detail: `; how many commits ${input.targetLabel} lacks is unknown (${error instanceof Error ? error.message : String(error)})`,
