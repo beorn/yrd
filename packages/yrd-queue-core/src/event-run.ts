@@ -13,7 +13,7 @@ import {
   type TransientPush5xx,
   type TransientPushAttempt,
 } from "./transient-push.ts"
-import { readEventChain } from "./event-read.ts"
+import { readEventChain, readRetainedEvent } from "./event-read.ts"
 
 import {
   appendChangeEvent,
@@ -839,6 +839,7 @@ export async function eventQueueRun(
     kind: "merged" | "failed" | "stuck" | "deferred" | "cancelled",
     eventId: string,
     existingEnding?: Event,
+    freshMergedEnding = false,
   ): Promise<void> => {
     if ((options.notify?.length ?? 0) === 0) return
     const change = await readChange(branch, "noticeStatus")
@@ -850,8 +851,13 @@ export async function eventQueueRun(
     }
     let tip = change.tip
     if (tip === undefined) throw new Error(`event queue ${url}#${queue}: ${branch} notice has no chain tip`)
+    // A fresh merged notice uses the immutable event acquired by noticeStatus.
+    // Later resubmissions are still protected by the exact noticeWrite CAS.
     const ending =
-      existingEnding ?? (await readHistory(branch, tip, "noticeHistory")).find((event) => event.id === eventId)
+      existingEnding ??
+      (freshMergedEnding && kind === "merged"
+        ? await readRetainedEvent(await openEvents({ ...store, ref: changesRef(queue, branch) }), eventId)
+        : (await readHistory(branch, tip, "noticeHistory")).find((event) => event.id === eventId))
     if (ending === undefined) {
       throw new Error(`event queue ${url}#${queue}: ${branch} notice has no ${kind} event ${eventId}`)
     }
@@ -1698,6 +1704,7 @@ export async function eventQueueRun(
     candidate: string,
     marker: string,
     reason?: string,
+    freshInRound = false,
   ): Promise<QueueRunOutcome | undefined> => {
     const current = await readChange(branch, "publishStatus")
     if (current.tip !== marker) {
@@ -2147,7 +2154,9 @@ export async function eventQueueRun(
       return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch], undefined, movedTarget)
     }
     if (ended === undefined) throw new Error(`${changesRef(queue, branch)}: merged publication returned no event`)
-    await timedStep(log, { branch, head, name: "notify", phase: "merge" }, () => tell(branch, "merged", ended))
+    await timedStep(log, { branch, head, name: "notify", phase: "merge" }, () =>
+      tell(branch, "merged", ended, undefined, freshInRound),
+    )
     if (transientProbe === branch) {
       log.write({
         kind: "observation",
@@ -3007,7 +3016,7 @@ export async function eventQueueRun(
         ...evidence,
         ...(checkReason === undefined ? {} : { reason: checkReason }),
       })
-      const published = await publish(branch, head, candidate, tip, checkReason)
+      const published = await publish(branch, head, candidate, tip, checkReason, true)
       if (published !== undefined) return published
     } catch (error) {
       if (error instanceof QueueAuthorityUnreadable) throw error

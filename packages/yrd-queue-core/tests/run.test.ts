@@ -108,6 +108,13 @@ function beforeGitomicPublish(
     prefix: string | readonly string[],
     remote?: string,
   ) => Promise<ReadonlyMap<string, string> | undefined>,
+  afterFetchRefs?: (
+    repo: string,
+    refs: string | readonly string[],
+    remote: string,
+    options: gitomic.FetchRefsOptions | undefined,
+    fetched: ReadonlyMap<string, string>,
+  ) => Promise<void>,
 ): ReturnType<typeof vi.spyOn> {
   const createBackend = gitomic.createShellBackend
   return vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
@@ -124,7 +131,9 @@ function beforeGitomicPublish(
         (await beforeListRefs?.(repo, prefix, remote)) ?? listRefs(repo, prefix, remote),
       fetchRefs: async (repo, refs, remote, fetchOptions) => {
         await beforeFetchRefs?.(repo, refs, remote, fetchOptions)
-        return fetchRefs(repo, refs, remote, fetchOptions)
+        const fetched = await fetchRefs(repo, refs, remote, fetchOptions)
+        await afterFetchRefs?.(repo, refs, remote, fetchOptions, fetched)
+        return fetched
       },
       publish: async (repo, updates, remote) => {
         await before(repo, updates, remote)
@@ -1985,6 +1994,99 @@ it("a resubmission between merged and the notice record stays queued, and the ru
   )
 })
 
+/** @failure A resubmit in the interval after notice status selection but before ending lookup changes the selected outcome.
+ * @level l3 @consumer the queue line and the resubmitting seat (@i/10-yrd/30833)
+ * The held-notifier case above resubmits only after delivery starts; it cannot witness this pre-delivery read interval.
+ */
+it.each([
+  { phase: "before notice status acquisition", afterStatus: false },
+  { phase: "after notice status acquisition", afterStatus: true },
+])("a resubmit $phase keeps the selected notice and next opening distinct", async ({ afterStatus }) => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const branch = "task/resubmit-at-notice-read"
+  const oldHead = await submitCommit(w, branch, "one.txt")
+  let mergedPublished = false
+  let resubmitted = false
+  const resubmit = async (): Promise<string> => {
+    await w.git(["checkout", "--quiet", branch])
+    writeFileSync(join(w.work, "two.txt"), "two\n")
+    await w.git(["add", "two.txt"])
+    await w.git(["commit", "--quiet", "-m", "two"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch,
+      submitter: "@dev/5",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/30833",
+    })
+    return head
+  }
+  let newHead: string | undefined
+  const branchRef = changesRef("main", branch)
+  const interleave = async (_repo: string, refs: string | readonly string[], remote: string): Promise<void> => {
+    const requested = typeof refs === "string" ? [refs] : refs
+    if (!mergedPublished || resubmitted || remote !== "origin" || !requested.includes(branchRef)) return
+    resubmitted = true
+    newHead = await resubmit()
+  }
+  using _backend = beforeGitomicPublish(
+    async () => {},
+    afterStatus ? undefined : interleave,
+    async (_repo, updates) => {
+      if (updates.some((update) => update.ref === "refs/heads/main" && update.oid !== w.target)) {
+        mergedPublished = true
+      }
+    },
+    undefined,
+    afterStatus ? interleave : undefined,
+  )
+
+  const run = queueRun({
+    ...(await w.options({ exit: 0 })),
+    notify: [{ name: "recorder", on: ["merged"], run: w.notifier }],
+  })
+  if (!afterStatus) {
+    await expect(run).rejects.toThrow(/notice lost its merged event/u)
+    expect(messages(w)).toHaveLength(0)
+    expect(resubmitted).toBe(true)
+    expect(newHead).toEqual(expect.any(String))
+    expect(await readStatus(store, "main", branch)).toMatchObject({ status: "queued", commit: newHead })
+    return
+  }
+
+  const outcome = await run
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [branch] })
+  const calls = logRecords(outcome).find((row) => row.kind === "remote-calls")
+  expect(calls).toMatchObject({ unreadable: 0, "seam.noticeStatus.fetch": 2 })
+  expect(calls).not.toHaveProperty("seam.noticeHistory.fetch")
+  expect(resubmitted).toBe(true)
+  expect(newHead).toEqual(expect.any(String))
+  expect(await readStatus(store, "main", branch)).toMatchObject({ status: "queued", commit: newHead })
+
+  const notice = messages(w)[0]
+  expect(messages(w)).toHaveLength(1)
+  expect(notice).toMatchObject({ record: "merged", change: `${branch}@${oldHead}` })
+  const history = await (await openEvents({ ...store, ref: branchRef })).events()
+  const ending = history.find((event) => event.id === notice?.endingId)
+  const opened = history.findLast((event) => event.type === "opened")
+  if (ending === undefined || opened === undefined) throw new Error(`${branchRef}: expected merged and opened events`)
+  expect(ending.type).toBe("merged")
+  expect(notice?.endingId).toBe(ending.id)
+  expect(notice?.merge).toBe(trailer(ending, "Commit"))
+  expect(logRecords(outcome)).toContainEqual(
+    expect.objectContaining({
+      kind: "notice-unrecorded",
+      branch,
+      to: "recorder",
+      result: "delivered",
+      opened: opened.id,
+    }),
+  )
+})
+
 /** @failure Reading every moved chain tip as a resubmission would let a rewound or forged change chain pass silently.
  * @level l3 @consumer the queue line (@i/10-yrd/26989)
  */
@@ -2025,6 +2127,9 @@ it("delivers an event ending and settles its recipient on the branch chain", asy
   const outcome = await queueRun(await w.options({ exit: 0 }))
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/notified-event"] })
+  const calls = logRecords(outcome).find((row) => row.kind === "remote-calls")
+  expect(calls).toMatchObject({ unreadable: 0, "seam.noticeStatus.fetch": 2, "seam.noticeWrite.push": 1 })
+  expect(calls).not.toHaveProperty("seam.noticeHistory.fetch")
   expect(readFileSync(w.notifyLog, "utf8")).toContain('"record":"merged"')
   expect(messages(w)[0]?.endingId).toEqual(expect.any(String))
   const events = await (await openEvents({ ...store, ref: changesRef("main", "task/notified-event") })).events()
@@ -3294,7 +3399,11 @@ it("recognizes the exact staged merge event after an accepted push loses its ack
     },
   )
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "recorder", on: ["merged"], run: w.notifier }],
+  })
   expect(injected).toBe(true)
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/transport-landed"] })
   expect((await readStatus(store, "main", "task/transport-landed")).status).toBe("merged")
@@ -3306,6 +3415,7 @@ it("recognizes the exact staged merge event after an accepted push loses its ack
       reason: "landed after unknown publication response",
     }),
   )
+  expect(logRecords(outcome).find((row) => row.kind === "remote-calls")?.["seam.noticeHistory.fetch"]).toBe(1)
 })
 
 /** @failure 25708: repeated definite non-publication must page a stuck change with the transport cause.
@@ -3444,8 +3554,12 @@ it("keeps a final first-round refusal and retries the next round's indexed merge
   expect((await readStatus(store, "main", branch)).status).toBe("merging")
   const before = await readStatus(store, "main", branch)
   if (before.tip === undefined || before.since === undefined) throw new Error("fixture lost its open marker")
-  const published = await queueRun(options)
+  const published = await queueRun({
+    ...options,
+    notify: [{ name: "recorder", on: ["merged"], run: w.notifier }],
+  })
   expect(published.merged).toEqual([branch])
+  expect(logRecords(published).find((row) => row.kind === "remote-calls")?.["seam.noticeHistory.fetch"]).toBe(1)
   expect(published.line?.casRefused).toBeUndefined()
   expect(logRecords(published)).toContainEqual(expect.objectContaining({ kind: "merge", ref }))
   expect(recentCasRefusals(dirname(published.log), ref, before.tip, before.since)).toBe(0)
