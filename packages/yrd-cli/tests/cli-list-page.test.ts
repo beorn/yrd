@@ -742,6 +742,39 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     expect(fullDocument.journal.coverage.malformed).toEqual(
       expect.arrayContaining([expect.objectContaining({ run: malformedRun.id, selected: true })]),
     )
+
+    // 30167: retiring a newer local tip appends another dropped event to the same cancelled history.
+    // The real writer keeps the original Commit and advanced Tip; this custody step is not execution.
+    await git(["checkout", "--quiet", "task/draft"])
+    writeFileSync(join(work, "advanced.txt"), "newer private diagnostic\n")
+    await git(["add", "advanced.txt"])
+    await git(["commit", "--quiet", "-m", "advance the cancelled private diagnostic"])
+    const advancedTip = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    const targetTip = (await git(["rev-parse", "HEAD"])).trim()
+    await drop(store, {
+      queue: "main",
+      branch: "task/draft",
+      by: "@dev/2",
+      note: "superseded private diagnostic",
+      local: { tip: advancedTip, advanced: { uniqueCommits: 2, target: { ref: "refs/heads/main", tip: targetTip } } },
+    })
+    const retired = await readBranchHistory(store, "main", "task/draft")
+    expect(retired.history?.events.map((event) => event.type)).toEqual(["opened", "cancelled", "cancelled"])
+    // The earlier list populated a local view; refresh after the writer appends the custody event.
+    const repeated = await yrd(work, { color: false }, "list", "--json", "--fresh", "--require-match", "task/draft")
+    expect(repeated.exitCode, repeated.report).toBe(0)
+    const repeatedDocument = JSON.parse(repeated.stdout) as typeof document
+    expect(repeatedDocument.journal.coverage.missingRunTrailers).toContainEqual(
+      expect.objectContaining({
+        branch: "task/draft",
+        state: "cancelled",
+        expected: true,
+        reason: expect.stringMatching(/dropped before execution/i),
+        selected: true,
+      }),
+    )
+    expect(repeatedDocument.journal.absent ?? "").not.toContain("task/draft@")
   })
 
   // @failure A prior execution event with no Run link was printed as the same short generic warning as an expected
