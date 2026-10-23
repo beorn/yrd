@@ -2317,8 +2317,9 @@ export type AdvancedRecord = Readonly<{ recorded: string } & Omit<AdvancedDrop, 
 export async function dropCommitCount(git: Git, head: string, target: string): Promise<number> {
   const raw = (await git(["rev-list", "--count", `${target}..${head}`])).trim()
   const count = /^\d+$/u.test(raw) ? Number(raw) : NaN
-  if (!Number.isSafeInteger(count) || count < 0)
+  if (!Number.isSafeInteger(count) || count < 0) {
     throw new Error(`invalid unique-commit count for ${target}..${head}: ${JSON.stringify(raw)}`)
+  }
   return count
 }
 
@@ -2375,8 +2376,9 @@ export async function advancedDrop(
     ...yrdQueueRunnerDeclarations.filter((row) => row.queue.base === input.queue).map((row) => row.owner),
   ]
   if (isOpen(state.status)) return { detail: "; change is still open; withdraw it before dropping its advanced tip" }
-  if (held || state.status !== "cancelled" || state.ending?.kind !== "cancelled" || !owners.includes(input.by))
+  if (held || state.status !== "cancelled" || state.ending?.kind !== "cancelled" || !owners.includes(input.by)) {
     return refusal()
+  }
   if (input.reason === undefined || input.reason.trim() === "") {
     return {
       detail: `${(await refusal()).detail}; or, as its owner, drop it with --reason <why>, which its dropped event records`,

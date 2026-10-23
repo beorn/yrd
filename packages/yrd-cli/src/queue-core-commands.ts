@@ -2181,8 +2181,9 @@ export async function coreQueueCommand(
     case "drop": {
       const eventStore = createEventStore(repo, config.target.remote, selection)
       const countTarget = await readRemoteCommit(git, eventStore.remote, `refs/heads/${config.target.branch}`)
-      if (countTarget === undefined)
+      if (countTarget === undefined) {
         throw new Error(`drop: target ${eventStore.remote}#${config.target.branch} is absent`)
+      }
       let dropped: Awaited<ReturnType<typeof drop>>
       try {
         dropped = await drop(eventStore, {
