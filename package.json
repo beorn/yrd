@@ -56,8 +56,8 @@
     "vitest": "5.0.4"
   },
   "overrides": {
-    "git-super": "github:beorn/git-super#063533c333b1ef6b7763b4ec7ee9c9c2767e98a1",
-    "gitomic": "github:beorn/gitomic#2f849a3d3c9da883ee4429ff219e3eb51df40aa7",
-    "loggily": "github:beorn/loggily#5e4bcdad0563418c143d62e834615b8a6fcc84bb"
+    "git-super": "github:beorn/git-super#a26e29be216accdcc6cfec65c3cbe2289549912a",
+    "gitomic": "github:beorn/gitomic#f9dd2b88ce76348bd3ace3837c5aaaaf17dcdef7",
+    "loggily": "github:beorn/loggily#a078a6026453a2897574ef96fe642467f232da97"
   }
 }
