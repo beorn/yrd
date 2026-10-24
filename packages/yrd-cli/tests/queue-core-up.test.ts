@@ -38,7 +38,7 @@ import { hostname, tmpdir } from "node:os"
 import { monitorEventLoopDelay } from "node:perf_hooks"
 import { basename, dirname, join, relative, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { tryAcquireFlock } from "@bearly/flock"
 import * as gitomic from "gitomic"
 import * as removely from "removely"
@@ -126,6 +126,8 @@ beforeEach(() => {
 })
 afterEach(() => {
   if (idleCensus !== undefined) vi.mocked(removely.inspectProcessCensus).mockRestore()
+  // Release each test's Git fixtures instead of accumulating one suite-sized cleanup hook.
+  for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true })
 })
 
 // A selected event change must keep the watch open through every working phase.
@@ -144,10 +146,6 @@ describe("event watch selector endings", () => {
 // Resolve the queue's declared dependency; the CLI need not install a second copy.
 const queueCoreEntry = Bun.resolveSync("@yrd/queue-core", import.meta.dirname)
 const gitSuperBin = resolve(Bun.resolveSync("git-super", dirname(queueCoreEntry)), "../../bin")
-
-afterAll(() => {
-  for (const root of roots) rmSync(root, { force: true, recursive: true })
-})
 
 type Capture = Readonly<{ io: YrdCliIO; stdout(): string; stderr(): string }>
 
