@@ -975,6 +975,14 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
       ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
       reason: result.outcome === "failed" ? `${repo}: ${result.reason}` : result.reason,
       ...(result.detail === undefined ? {} : { detail: result.detail }),
+      ...(retirement.disposition.kind === "discarded" && result.outcome === "removed"
+        ? {
+            intent: "local-discard" as const,
+            actor: retirement.actor,
+            issue: retirement.issue,
+            uniqueCommits: retirement.disposition.uniqueCommits,
+          }
+        : {}),
       ...(headMove === undefined ? {} : { headMove }),
     }
     return {

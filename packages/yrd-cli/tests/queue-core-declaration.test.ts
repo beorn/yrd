@@ -5933,6 +5933,11 @@ describe("component-local retirement without a component queue", () => {
           .flatMap((name) => readRunLog(logs, name.slice(0, -6)))
         const decisions = rows.filter((row) => row.intent === "local-discard")
         if (["discard-unbound", "discard-bound"].includes(mode)) {
+          // The procedural value call must be visible in the actual cleanup report, not only its log.
+          expect(report.removed).toEqual([
+            expect.objectContaining({ intent: "local-discard", actor: "fixture", uniqueCommits: 1 }),
+          ])
+          expect((report.removed[0] as { issue?: string }).issue).toBe(mode === "discard-bound" ? issue : undefined)
           expect(syncedDecision).toBe(true)
           expect(decisions).toEqual([
             expect.objectContaining({
