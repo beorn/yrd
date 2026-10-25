@@ -5707,6 +5707,7 @@ describe("component-local retirement without a component queue", () => {
         (await git(["rev-parse", `${integratedMain}^{tree}`])).trim(),
       )
     }
+    if (discard) await git(["push", "--quiet", "origin", `refs/heads/${branch}:refs/heads/${branch}`])
     if (origin) {
       await git(["push", "--quiet", "origin", `refs/heads/${branch}:refs/heads/${branch}`])
       if (mode === "origin-only" || mode === "origin-equivalent" || mode === "origin-unmerged") {
@@ -5837,7 +5838,9 @@ describe("component-local retirement without a component queue", () => {
         mode === "discard-checked-out" ? `refs/heads/${branch}` : "refs/heads/main",
       )
       expect(await git(["for-each-ref", "refs/archive/", "refs/yrd/"])).toBe("")
-      expect(await git(["ls-remote", "origin", `refs/heads/${branch}`, "refs/archive/*", "refs/yrd/*"])).toBe("")
+      expect((await git(["ls-remote", "origin", `refs/heads/${branch}`, "refs/archive/*", "refs/yrd/*"])).trim()).toBe(
+        `${actualTip}\trefs/heads/${branch}`,
+      )
       const logs = join(await workdirOf(rootGit), "logs")
       if (!["discard-unreadable"].includes(mode)) {
         const rows = readdirSync(logs)
