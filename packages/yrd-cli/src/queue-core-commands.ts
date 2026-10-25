@@ -1024,6 +1024,11 @@ export async function coreQueueCommand(
     }
     return await noQueueOnTarget(targetLabel)
   }
+  if (request.command === "drop-local" && request.discard) {
+    throw new Error(
+      "--discard requires a component author checkout without its own queue declaration; ordinary queue cleanup does not apply discard intent",
+    )
+  }
   const config = captured.config
   const eventStore = createEventStore(repo, config.target.remote, selection, git.backend)
   // The fetched refs describe `remote`/`queue`; they stand in only for a declaration that targets that same queue.

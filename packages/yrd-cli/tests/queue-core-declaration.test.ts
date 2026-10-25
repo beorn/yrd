@@ -3047,6 +3047,91 @@ describe("a queue is the selected origin branch carrying config", () => {
     )
   }, 60_000)
 
+  /** @failure An inapplicable --discard silently selects ordinary drop, origin retirement, issue cleanup, or checkout release.
+   * @level l1 @consumer A caller expressing explicit local component-loss intent
+   */
+  it.each([
+    ["task/30704", "--discard"],
+    ["task/30704", "--discard", "--retire", "--tip", "a".repeat(40), "--reason", "reviewed"],
+    ["--issue", "@i/10-yrd/30704-component-branch-owner-delete", "--discard"],
+    ["task/30704", "--local", "--discard", "--retire", "--tip", "a".repeat(40), "--reason", "reviewed"],
+    [
+      "task/30704",
+      "--local",
+      "--discard",
+      "--release-checkout",
+      "--tip",
+      "a".repeat(40),
+      "--issue",
+      "@i/10-yrd/30704-component-branch-owner-delete",
+      "--reason",
+      "reviewed",
+    ],
+  ])("rejects inapplicable discard options %j", async (...args) => {
+    const out = capture(outsideRepositoryRoot())
+    expect(await runYrdProcess(["bun", "yrd", "drop", ...args, "--json"], out.io)).toBe(2)
+    expect(out.stderr()).toContain(
+      "--discard requires drop <branch> --local --tip <full-commit>; it cannot combine with --retire or --release-checkout",
+    )
+    expect(out.stdout()).toBe("")
+  })
+
+  /** @failure A declared queue silently converts explicit component-loss intent into event-retaining root cleanup.
+   * @level l2 @consumer A caller using --discard in a queue-owning repository
+   */
+  it("rejects discard in a declared queue without ordinary root cleanup", async () => {
+    const repo = await world("checks: []\n")
+    const git = gitIn(repo)
+    const tip = (await git(["rev-parse", "HEAD"])).trim()
+    await createQueue(repo, "main", tip, new Date())
+    const branch = "task/discard-root"
+    await git(["branch", branch, tip])
+    const out = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "drop", branch, "--local", "--discard", "--tip", tip, "--reason", "reviewed", "--json"],
+        out.io,
+      ),
+    ).toBe(2)
+    expect(out.stderr()).toContain(
+      "--discard requires a component author checkout without its own queue declaration; ordinary queue cleanup does not apply discard intent",
+    )
+    expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tip)
+    expect(out.stdout()).toBe("")
+  })
+
+  /** @failure The discard no-preview message promises Git object custody that deliberate local loss does not provide.
+   * @level l1 @consumer A caller copying the explicit discard apply command
+   */
+  it("describes discard no-preview as local loss without Git object custody", async () => {
+    const out = capture(outsideRepositoryRoot())
+    expect(
+      await runYrdProcess(
+        [
+          "bun",
+          "yrd",
+          "drop",
+          "task/discard",
+          "--local",
+          "--discard",
+          "--tip",
+          "a".repeat(40),
+          "--reason",
+          "reviewed",
+          "--dry-run",
+          "--json",
+        ],
+        out.io,
+      ),
+    ).toBe(2)
+    expect(out.stderr()).toContain(
+      "it logs and reads back the discard decision, then deliberately loses local component content; it keeps no Git object custody",
+    )
+    expect(out.stderr()).not.toContain("keeps the tip at origin")
+    expect(out.stderr()).toContain("--discard")
+    expect(out.stdout()).toBe("")
+  })
+
   /** @failure Public drop help leaves the caller in the superproject when the local branch belongs to a component author store.
    * @level l1 @consumer A caller choosing the local branch command from drop help
    */

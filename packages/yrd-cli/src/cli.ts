@@ -264,6 +264,19 @@ function buildProgram(
     command: "withdraw" | "drop",
   ): Promise<void> => {
     if (
+      options.discard &&
+      (command !== "drop" ||
+        !options.local ||
+        branch === undefined ||
+        options.tip === undefined ||
+        options.retire ||
+        options.releaseCheckout)
+    ) {
+      throw new Error(
+        "--discard requires drop <branch> --local --tip <full-commit>; it cannot combine with --retire or --release-checkout",
+      )
+    }
+    if (
       command === "drop" &&
       (options.retire || options.releaseCheckout) &&
       (options.tip === "<root-tip>" || options.tip === "<observed-full-oid>")
@@ -316,7 +329,9 @@ function buildProgram(
       if (options.discard) argv.push("--discard")
       if (options.json) argv.push("--json")
       throw new Error(
-        "drop --local has no preview; it writes the event that keeps the tip at origin, then deletes the local branch.\n" +
+        (options.discard
+          ? "drop --local --discard has no preview; it logs and reads back the discard decision, then deliberately loses local component content; it keeps no Git object custody.\n"
+          : "drop --local has no preview; it writes the event that keeps the tip at origin, then deletes the local branch.\n") +
           `To apply: ${formatYrdCommand(io, argv, io.cwd)}`,
       )
     }
