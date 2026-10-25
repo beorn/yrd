@@ -1354,6 +1354,7 @@ export type Dropped = Readonly<{
   head: string
   /** The change chain holding `event`. */
   ref: string
+  /** Event keeping head exactly or through ancestry; main custody may instead name the historical ending. */
   event: string
   main?: Readonly<{ ref: string; tip: string }>
 }>
@@ -2923,7 +2924,19 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
   const local = request.local
   const retiringDraft = request.retire !== undefined && state.status === "draft" && state.ending === undefined
   let retirementTip = selectedTip
+  let retainedEvent: string | undefined
   let main: Dropped["main"]
+  const receiptEvent = async (head: string, held?: Dropped["main"]): Promise<string> => {
+    if (retainedEvent !== undefined) return retainedEvent
+    const exact = history.findLast((event) => event.links.includes(head))
+    if (exact !== undefined) return exact.id
+    if (held !== undefined && state.ending !== undefined) return state.ending.id
+    const git = gitIn(store.repo, undefined, store.selection)
+    for (const event of history.toReversed()) {
+      if (await keptLinkAdmits(git, head, event.links)) return event.id
+    }
+    throw new ChainCustodyMismatch(`${branch}@${head}: no event on ${ref}@${selectedTip} keeps the admitted tip`)
+  }
   if (request.retire !== undefined) {
     if (local !== undefined) throw new Error(`${branch}: choose origin retirement or local retirement`)
     if (!COMMIT_OID.test(request.retire.tip) || !request.note?.trim()) {
@@ -2969,10 +2982,16 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
     const wanted = request.retire.tip
     if (head === undefined && state.ending !== undefined && (await listRefs(ref, store)).get(ref) === selectedTip) {
       const held = await publishedMainHolds(wanted)
-      if (held !== undefined) return { queue, branch, head: wanted, ref, event: state.ending.id, main: held }
       // A rerun after the branch went: an event on the unchanged chain keeps the exact tip (30683).
-      if (history.some((event) => event.links.includes(wanted))) {
-        return { queue, branch, head: wanted, ref, event: state.ending.id }
+      if (held !== undefined || history.some((event) => event.links.includes(wanted))) {
+        return {
+          queue,
+          branch,
+          head: wanted,
+          ref,
+          event: await receiptEvent(wanted, held),
+          ...(held === undefined ? {} : { main: held }),
+        }
       }
     }
     throw new Error(
@@ -3058,6 +3077,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
       }
       if (local !== undefined) return { queue, branch, head, ref, event: written }
       retirementTip = written
+      retainedEvent = written
     }
   }
   const alreadyDropped = state.status === "cancelled" && state.reason === "dropped"
@@ -3086,7 +3106,14 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
     if (head === undefined || retirementTip === null || state.ending === undefined) {
       throw new Error(`${branch}: terminal retirement lost its exact head or ending`)
     }
-    return { queue, branch, head, ref, event: state.ending.id, ...(await retire(retirementTip, head)) }
+    return {
+      queue,
+      branch,
+      head,
+      ref,
+      event: await receiptEvent(head, mainCustody),
+      ...(await retire(retirementTip, head)),
+    }
   }
   if (retiringEnded && !note) {
     throw new Error(`${ref} in ${store.repo}: dropping an ended change requires --reason`)
@@ -3115,7 +3142,14 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
     if (store.backend.publish === undefined) {
       throw new Error("Gitomic backend lacks publish for dropped branch deletion")
     }
-    return { queue, branch, head, ref, event: state.ending.id, ...(await retire(selectedTip, head)) }
+    return {
+      queue,
+      branch,
+      head,
+      ref,
+      event: await receiptEvent(head, mainCustody),
+      ...(await retire(selectedTip, head)),
+    }
   }
   const at = new Date()
   // An advanced drop's Commit: stays the recorded commit; its Tip: is the head it also keeps (30683).

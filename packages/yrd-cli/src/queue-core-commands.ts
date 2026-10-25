@@ -2083,6 +2083,7 @@ export async function coreQueueCommand(
             history !== undefined &&
             change?.commit !== undefined &&
             change.commit !== head &&
+            !(change.status === "merged" && history.events.some((event) => event.links.includes(head))) &&
             !(await acceptsMergedLocalRetirement(authorGit, { local: true, head, change }))
           ) {
             // The owner may drop it with a reason; the dropped event then keeps both commits (30683).
@@ -2276,8 +2277,10 @@ export async function coreQueueCommand(
         io,
         options.json,
         { ...dropped, uniqueCommits },
-        `dropped ${request.branch} at ${dropped.head}; ${uniqueCommits} unique commits relative to ${targetLabel}@${countTarget}; ending ${dropped.event.slice(0, 12)} kept its commit` +
-          (dropped.main === undefined ? "" : `; published main ${dropped.main.ref}@${dropped.main.tip}`),
+        `dropped ${request.branch} at ${dropped.head}; ${uniqueCommits} unique commits relative to ${targetLabel}@${countTarget}; ` +
+          (dropped.main === undefined
+            ? `kept by event ${dropped.event.slice(0, 12)}`
+            : `kept by published main ${dropped.main.ref}@${dropped.main.tip}; event ${dropped.event.slice(0, 12)}`),
       )
       return 0
     }

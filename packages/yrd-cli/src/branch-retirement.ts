@@ -2320,7 +2320,9 @@ export function createLandedBranchRetirement(
         reason:
           ending === undefined
             ? `${repo}: retired origin ${candidate.branch}@${candidate.tip}; ${store.targetRef}@${target} contains its exact tip`
-            : `${repo}: retired origin ${candidate.branch}@${candidate.tip}; ending ${ending.event}`,
+            : ending.main === undefined
+              ? `${repo}: retired origin ${candidate.branch}@${candidate.tip}; kept by event ${ending.event}`
+              : `${repo}: retired origin ${candidate.branch}@${candidate.tip}; kept by published main ${ending.main.ref}@${ending.main.tip}; event ${ending.event}`,
       })
     }
     return {

@@ -2437,6 +2437,8 @@ describe("the queue-format boundary", () => {
       const afterReadbackRace = await readBranchHistory(location, "lab", branch)
       expect(afterReadbackRace.history?.events.filter((item) => item.type === "retained")).toHaveLength(1)
       expect(afterReadbackRace.history?.events.at(-1)?.type).toBe("notified")
+      // Notifications carry no kept links: the later chain lease tip is not a custody receipt.
+      expect(afterReadbackRace.history?.events.at(-1)?.links).toEqual([])
       expect((await listRefs(branchRef, location)).get(branchRef)).toBe(extra)
       const beforeDeleteRetry = await readStatus(location, "lab", branch)
 
@@ -2483,8 +2485,9 @@ describe("the queue-format boundary", () => {
         custody === "hot"
           ? await drop(location, { queue: "lab", branch, by: "@dev/3", protections })
           : await drop(location, request)
-      expect(retry).toMatchObject({ head: extra, event: merged.head })
+      expect(retry).toMatchObject({ head: extra, event: retainedEvent?.id })
       const afterRetry = await readBranchHistory(location, "lab", branch)
+      expect(afterRetry.history?.events.find((event) => event.id === retry.event)?.links).toContain(extra)
       expect(afterRetry.history?.events.filter((item) => item.type === "retained")).toHaveLength(1)
       expect(afterRetry.history?.state).toEqual(beforeDeleteRetry)
       expect((await listRefs(branchRef, location)).has(branchRef)).toBe(false)
@@ -2987,6 +2990,7 @@ describe("the queue-format boundary", () => {
     const retained = await readBranchHistory(location, "lab", branch)
     expect(retained.ref).toBe(eventRef)
     expect(retained.history?.events.at(-1)).toMatchObject({ type: "retained", links: [extra] })
+    expect(dropped.event).toBe(retained.history?.events.at(-1)?.id)
     expect(retained.history?.state).toEqual({ ...before, tip: retained.history?.state.tip })
     const keepingRefs = (await git(["for-each-ref", `--contains=${extra}`, "--format=%(refname) %(objectname)"]))
       .trim()
@@ -3065,13 +3069,14 @@ describe("the queue-format boundary", () => {
         [changeInput("failed", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), reason: "check failed" })],
         { expect: opened.head },
       )
+      return opened.head
     }
     const retire = (branchName: string, tip: string) =>
       drop(location, { queue: "lab", branch: branchName, by: "@dev/2", note: "25671", retire: { tip } })
-    await ended("task/six", sixBehind)
-    await expect(retire("task/six", sixBehind)).resolves.toMatchObject({ head: sixBehind })
-    await ended("task/one", oneBehind)
-    await expect(retire("task/one", oneBehind)).resolves.toMatchObject({ head: oneBehind })
+    const sixKeeper = await ended("task/six", sixBehind)
+    await expect(retire("task/six", sixBehind)).resolves.toMatchObject({ head: sixBehind, event: sixKeeper })
+    const oneKeeper = await ended("task/one", oneBehind)
+    await expect(retire("task/one", oneBehind)).resolves.toMatchObject({ head: oneBehind, event: oneKeeper })
     await ended("task/beyond", beyond)
     await expect(retire("task/beyond", beyond)).rejects.toThrow(new RegExp(`${beyond}.*${kept}.*ancestor of`))
     await ended("task/same", sameTree)

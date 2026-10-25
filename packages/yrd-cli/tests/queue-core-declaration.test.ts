@@ -3177,7 +3177,7 @@ describe("a queue is the selected origin branch carrying config", () => {
   })
 
   /**
-   * @failure Exact local abandonment rejects a merged descendant, or relaxes requested-tip, ancestry, state or automatic-cleanup protection.
+   * @failure Exact local abandonment rejects a merged descendant or already-retained sibling, or relaxes requested-tip, ancestry, state or automatic-cleanup protection.
    * @level l3 @consumer The existing local drop caller and the retained event that keeps its tip (30683)
    * The older advanced case below is still queued; it cannot exercise an already-merged chain with a later local tip.
    */
@@ -3186,6 +3186,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     "gitlink-delta",
     "wrong-tip",
     "non-descendant",
+    "retained-sibling",
     "unknown-ancestry",
     "unmerged",
     "automatic",
@@ -3218,7 +3219,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       const queueTip = await createQueue(repo, "main", recorded, new Date())
       const store = createEventStore(repo, "origin", git.selection)
       const chain = await openEvents({ ...store, ref: changesRef("main", branch), writer: "fixture" })
-      await chain.append(
+      const seeded = await chain.append(
         [
           changeInput("opened", { queueTip, at: new Date(), commit: recorded, by: "fixture", issue }),
           ...(mode === "unmerged" ? [] : [changeInput("merged", { queueTip, at: new Date(), commit: recorded })]),
@@ -3226,7 +3227,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         { expect: null },
       )
       let head: string
-      if (mode === "non-descendant" || mode === "automatic-sibling") {
+      if (mode === "non-descendant" || mode === "retained-sibling" || mode === "automatic-sibling") {
         const tree = (await git(["rev-parse", "HEAD^{tree}"])).trim()
         head = (
           await git([
@@ -3249,6 +3250,22 @@ describe("a queue is the selected origin branch carrying config", () => {
         } else await git(["commit", "--quiet", "--allow-empty", "-m", "local advancement"])
         head = (await git(["rev-parse", "HEAD"])).trim()
         await git(["checkout", "--quiet", "main"])
+      }
+      if (mode === "retained-sibling") {
+        // 30122: the archive-free replacement omitted this existing-custody admission.
+        // Unlike the unretained non-descendant control, this exact sibling is already kept.
+        await chain.append(
+          [
+            changeInput("retained", {
+              queueTip,
+              at: new Date(),
+              commit: head,
+              by: "fixture",
+              reason: "keep the exact sibling before local retirement",
+            }),
+          ],
+          { expect: seeded.head },
+        )
       }
       const history = (await readBranchHistory(store, "main", branch)).history
       if (history === undefined) throw new Error("fixture has no change history")
@@ -3309,7 +3326,7 @@ describe("a queue is the selected origin branch carrying config", () => {
           kept: { branch: string; reason: string }[]
           failed: unknown[]
         }
-        if (mode === "duplicate" || mode === "gitlink-delta") {
+        if (mode === "duplicate" || mode === "gitlink-delta" || mode === "retained-sibling") {
           expect(report.kept).toEqual([])
           expect(report.failed).toEqual([])
           expect(report.removed).toEqual([expect.objectContaining({ branch, head })])
@@ -3332,6 +3349,10 @@ describe("a queue is the selected origin branch carrying config", () => {
         )
         expect(after?.events.at(-1)).toMatchObject({ type: "retained", links: [head] })
         expect(after?.state).toEqual({ ...history.state, tip: after?.events.at(-1)?.id })
+      } else if (mode === "retained-sibling") {
+        expect(await git(["ls-remote", "origin", changesRef("main", branch)])).toBe(endingRef)
+        expect(after?.state).toEqual(history.state)
+        expect(after?.events).toEqual(history.events)
       } else {
         expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(head)
         expect(await git(["ls-remote", "origin", changesRef("main", branch)])).toBe(endingRef)
