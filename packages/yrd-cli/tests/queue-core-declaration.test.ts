@@ -5871,7 +5871,7 @@ describe("component-local retirement without a component queue", () => {
             "discard-mismatch",
             "discard-conflict",
             "discard-no-reason",
-                  ].includes(mode)
+          ].includes(mode)
         ) {
           expect(decisions).toEqual([])
         }
