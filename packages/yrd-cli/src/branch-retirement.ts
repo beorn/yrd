@@ -788,7 +788,7 @@ type ComponentRetirementInput = Readonly<{
   env?: NodeJS.ProcessEnv
   io: YrdCliIO
   destination: "local" | "origin"
-  request: Readonly<{ branch: string; tip: string; by: string; issue?: string; reason?: string }>
+  request: Readonly<{ branch: string; tip: string; by: string; issue?: string; reason?: string; discard?: boolean }>
 }>
 
 /** Find the declared parent from freshly published default refs, never cached origin/HEAD. */
@@ -919,22 +919,54 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
         failed: result.outcome === "failed" ? [output] : [],
       }
     }
-    const protections = async (): Promise<readonly string[]> =>
-      (await readBranchProtections(io, { repo, branch: request.branch, tip: request.tip, issue: request.issue }))
-        .protections
-    const retirement = {
+    let discardProblem: string | undefined
+    let canonicalIssue: string | undefined
+    let uniqueCommits = 0
+    if (request.discard === true && !merged) {
+      try {
+        const bindings = new Set<string>()
+        for await (const binding of issueBindingsOf(git, [`${request.tip}^!`], request.branch)) {
+          bindings.add(binding.issue)
+        }
+        if (bindings.size > 1) discardProblem = `conflicting exact-tip issue bindings: ${[...bindings].join(", ")}`
+        canonicalIssue = bindings.values().next().value
+        if (discardProblem === undefined && canonicalIssue !== request.issue) {
+          discardProblem = `exact-tip issue binding ${canonicalIssue ?? "absent"} differs from supplied ${request.issue ?? "absent"}`
+        }
+        const count = (await git(["rev-list", "--count", `${target}..${request.tip}`])).trim()
+        if (!/^\d+$/u.test(count) || !Number.isSafeInteger(Number(count))) {
+          throw new Error(`unreadable unique commit count ${count}`)
+        }
+        uniqueCommits = Number(count)
+      } catch (cause) {
+        discardProblem = `cannot read exact-tip discard binding/count: ${String(cause)}`
+      }
+    }
+    const protections = async (): Promise<readonly string[]> => {
+      const held = (
+        await readBranchProtections(io, { repo, branch: request.branch, tip: request.tip, issue: request.issue })
+      ).protections
+      return discardProblem === undefined ? held : [...held, discardProblem]
+    }
+    const retirement: Omit<LocalBranchRetirement, "protections"> = {
       repo,
       git,
       branch: request.branch,
       tip: request.tip,
       actor: request.by,
       issue: request.issue,
-      reason: request.reason ?? "explicit local branch cleanup",
+      reason:
+        request.discard === true && !merged
+          ? (request.reason ?? "")
+          : (request.reason ?? "explicit local branch cleanup"),
       log,
-      // An unmerged component branch is kept and reported, with no archive and no delete (work.md:110, 30683).
-      disposition: { kind: "merged" as const, base: target, target },
+      // The explicit local-loss call is procedural owner/Chief policy, not provider payload authentication.
+      disposition:
+        request.discard === true && !merged
+          ? { kind: "discarded", target, targetRef: `refs/heads/${targetBranch}`, uniqueCommits, log }
+          : { kind: "merged", base: target, target },
     }
-    if (merged) headMove = await detachStoreHeadAtTip()
+    if (merged || request.discard === true) headMove = await detachStoreHeadAtTip()
     const result = await retireLocalBranch({ ...retirement, protections, worktreeLess })
     if (result.outcome !== "removed") await restoreStoreHead()
     const row = {

@@ -491,6 +491,7 @@ export type CoreQueueCommand =
     }>
   | Readonly<{
       command: "drop-local"
+      discard?: boolean
       releaseCheckout?: boolean
       submodules?: boolean
       dryRun?: boolean

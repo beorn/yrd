@@ -5572,6 +5572,19 @@ describe("a queue is the selected origin branch carrying config", () => {
  */
 describe("component-local retirement without a component queue", () => {
   it.each([
+    "discard-sync-failure",
+    "discard-no-reason",
+    "discard-unbound",
+    "discard-bound",
+    "discard-mismatch",
+    "discard-conflict",
+    "discard-held",
+    "discard-checked-out",
+    "discard-moved",
+    "discard-missing",
+    "discard-different",
+    "discard-unreadable",
+    "discard-contained",
     "origin-merged",
     "origin-only",
     "origin-equivalent",
@@ -5598,6 +5611,8 @@ describe("component-local retirement without a component queue", () => {
   ] as const)("retires exact %s component work through the declared root's existing log", async (mode) => {
     // The local-only fixture missed origin retirement and an absent local twin.
     // Fresh published-main custody suffices, but host holds and exact-tip races still keep the name.
+    const discard = mode.startsWith("discard-")
+    const issue = "@i/10-yrd/30704-component-branch-owner-delete"
     const origin = mode.startsWith("origin-")
     const contentIntegrated = mode === "origin-equivalent" || mode === "origin-held"
     const root = await world("{}\n")
@@ -5628,6 +5643,7 @@ describe("component-local retirement without a component queue", () => {
     const branch = "task/28824-component"
     const baseTip = (await git(["rev-parse", "HEAD"])).trim()
     if (
+      (discard && mode !== "discard-contained") ||
       mode === "unmerged" ||
       mode === "unmerged-held" ||
       mode === "advanced" ||
@@ -5648,14 +5664,18 @@ describe("component-local retirement without a component queue", () => {
         "commit",
         "--quiet",
         "-m",
-        "unmerged component work",
+        [
+          "unmerged component work",
+          ...(discard && mode !== "discard-unbound" ? ["", `Refs: ${issue}`] : []),
+          ...(mode === "discard-conflict" ? ["Refs: @i/10-yrd/other"] : []),
+        ].join("\n"),
       ])
       await git(["checkout", "--quiet", "main"])
     } else {
       await git(["branch", branch])
     }
     const actualTip = (await git(["rev-parse", "refs/heads/" + branch])).trim()
-    const tip = mode === "advanced" || mode === "origin-advanced" ? baseTip : actualTip
+    const tip = mode === "advanced" || mode === "origin-advanced" || mode === "discard-moved" ? baseTip : actualTip
     // Explicit retirement must distinguish integrated content from ancestry (30396).
     // Existing origin-only rows use ancestors, and queue-backed draft rows have an ending event.
     // Independently delivered content plus later main work also defeats direct tree equality.
@@ -5700,7 +5720,7 @@ describe("component-local retirement without a component queue", () => {
         await git(["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"])
       }
     }
-    if (mode === "checked-out") await git(["checkout", "--quiet", branch])
+    if (mode === "checked-out" || mode === "discard-checked-out") await git(["checkout", "--quiet", branch])
     if (mode === "root-retired") {
       const rootBranch = "task/28824-root-already-retired"
       await rootGit(["branch", rootBranch])
@@ -5717,13 +5737,35 @@ describe("component-local retirement without a component queue", () => {
     const run = capture(child)
     const selectedOther = ownSelectedOther ? await world() : undefined
     if (ownSelectedOther) unlinkSync(join(child, ".yrd.yml"))
+    let protectionReads = 0
     run.io.localBranchProtections = async () => {
+      if (++protectionReads === 3 && ["discard-missing", "discard-different", "discard-unreadable"].includes(mode)) {
+        const logs = join(await workdirOf(rootGit), "logs")
+        const path = readdirSync(logs)
+          .filter((name) => name.endsWith(".jsonl"))
+          .map((name) => join(logs, name))
+          .find((path) => readFileSync(path, "utf8").includes("local-discard"))!
+        const text = readFileSync(path, "utf8")
+        writeFileSync(
+          path,
+          mode === "discard-unreadable"
+            ? "not json\n"
+            : mode === "discard-different"
+              ? text.replace("explicit reviewed component drop", "different call")
+              : text
+                  .split("\n")
+                  .filter((line) => !line.includes("local-discard"))
+                  .join("\n"),
+        )
+      }
       if (mode === "protection-error") throw new Error("host protection authority unavailable")
       // A launcher from a checkout older than the { protections, evidence } answer still returns the bare array (30693).
       if (mode === "stale-host-array") return [] as unknown as LocalBranchProtectionResult
       return {
         protections:
-          mode === "held" || mode === "unmerged-held" || mode === "origin-held" ? ["fixture owner hold"] : [],
+          mode === "held" || mode === "unmerged-held" || mode === "origin-held" || mode === "discard-held"
+            ? ["fixture owner hold"]
+            : [],
         evidence: [],
       }
     }
@@ -5754,15 +5796,91 @@ describe("component-local retirement without a component queue", () => {
       origin ? "--retire" : "--local",
       "--tip",
       tip,
-      ...(origin ? [] : ["--issue", "28824"]),
+      ...(origin || mode === "discard-unbound"
+        ? []
+        : ["--issue", discard ? (mode === "discard-mismatch" ? "@i/10-yrd/other" : issue) : "28824"]),
+      ...(discard ? ["--discard"] : []),
       "--reason",
-      "explicit reviewed component drop",
+      mode === "discard-no-reason" ? "" : "explicit reviewed component drop",
       "--submitter",
       "fixture",
       "--json",
       ...(selectedOther === undefined ? [] : ["--queue", `${join(dirname(selectedOther), "remote.git")}#main`]),
     ]
-    const exit = await runYrdProcess(argv, io).finally(() => unreadable?.mockRestore())
+    let syncedDecision = false
+    const nativeFsync = fs.fsyncSync
+    const sync = discard
+      ? vi.spyOn(fs, "fsyncSync").mockImplementation((fd) => {
+          const text = readFileSync(fd, "utf8")
+          if (text.includes('"intent":"local-discard"')) {
+            syncedDecision = true
+            if (mode === "discard-sync-failure") throw new Error("injected log fsync failure")
+          }
+          nativeFsync(fd)
+        })
+      : undefined
+    const exit = await runYrdProcess(argv, io).finally(() => {
+      unreadable?.mockRestore()
+      sync?.mockRestore()
+    })
+    if (discard) {
+      const removed = ["discard-unbound", "discard-bound", "discard-contained"].includes(mode)
+      expect(exit, run.stdout() + run.stderr()).toBe(removed ? 0 : 1)
+      const report = JSON.parse(run.stdout()) as { removed: unknown[]; kept: { detail?: string }[]; failed: unknown[] }
+      expect(report.failed).toEqual([])
+      expect(report.removed).toHaveLength(removed ? 1 : 0)
+      expect(report.kept).toHaveLength(removed ? 0 : 1)
+      expect((await git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe(
+        removed ? "" : actualTip,
+      )
+      expect((await git(["symbolic-ref", "HEAD"])).trim()).toBe(
+        mode === "discard-checked-out" ? `refs/heads/${branch}` : "refs/heads/main",
+      )
+      expect(await git(["for-each-ref", "refs/archive/", "refs/yrd/"])).toBe("")
+      expect(await git(["ls-remote", "origin", `refs/heads/${branch}`, "refs/archive/*", "refs/yrd/*"])).toBe("")
+      const logs = join(await workdirOf(rootGit), "logs")
+      if (!["discard-unreadable"].includes(mode)) {
+        const rows = readdirSync(logs)
+          .filter((name) => name.endsWith(".jsonl"))
+          .flatMap((name) => readRunLog(logs, name.slice(0, -6)))
+        const decisions = rows.filter((row) => row.intent === "local-discard")
+        if (["discard-unbound", "discard-bound"].includes(mode)) {
+          expect(syncedDecision).toBe(true)
+          expect(decisions).toEqual([
+            expect.objectContaining({
+              kind: "local-branch-retirement",
+              repo: child,
+              branch,
+              head: tip,
+              actor: "fixture",
+              reason: "explicit reviewed component drop",
+              pid: process.pid,
+              uniqueCommits: 1,
+            }),
+          ])
+          expect(decisions[0]?.issue).toBe(mode === "discard-bound" ? issue : undefined)
+          const result = rows.findIndex((row) => row.kind === "local-branch-retirement" && row.outcome === "removed")
+          expect(rows.indexOf(decisions[0]!)).toBeLessThan(result)
+        }
+        if (
+          [
+            "discard-contained",
+            "discard-held",
+            "discard-checked-out",
+            "discard-moved",
+            "discard-mismatch",
+            "discard-conflict",
+            "discard-no-reason",
+                  ].includes(mode)
+        ) {
+          expect(decisions).toEqual([])
+        }
+      }
+      if (["discard-missing", "discard-different", "discard-unreadable", "discard-sync-failure"].includes(mode)) {
+        expect(report.kept[0]?.detail).toContain(logs)
+      }
+      return
+    }
     const failure =
       mode === "protection-error" ||
       mode === "missing-protections-reader" ||
