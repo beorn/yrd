@@ -253,6 +253,7 @@ function buildProgram(
     options: PauseOptions & {
       issue?: string
       local?: boolean
+      discard?: boolean
       releaseCheckout?: boolean
       retire?: boolean
       tip?: string
@@ -312,6 +313,7 @@ function buildProgram(
       ] as const) {
         if (value !== undefined) argv.push(flag, value)
       }
+      if (options.discard) argv.push("--discard")
       if (options.json) argv.push("--json")
       throw new Error(
         "drop --local has no preview; it writes the event that keeps the tip at origin, then deletes the local branch.\n" +
@@ -347,6 +349,7 @@ function buildProgram(
           tip: string
           issue?: string
           releaseCheckout?: boolean
+          discard?: boolean
           submodules?: boolean
           dryRun?: boolean
           apply?: boolean
@@ -354,6 +357,7 @@ function buildProgram(
     if (command === "drop" && options.local === true && branch !== undefined && options.tip !== undefined) {
       subject = {
         command: "drop-local",
+        discard: options.discard,
         releaseCheckout: options.releaseCheckout,
         submodules: options.submodules,
         dryRun: options.dryRun,
@@ -1466,6 +1470,10 @@ function buildProgram(
         "end a change, or retire issue branches in the author store and the components that issue names; --dry-run previews",
       )
       .option("--local", "keep the exact tip in an event or on main, then retire its local branch; requires --tip")
+      .option(
+        "--discard",
+        "with --local, intentionally lose unmerged component content after its decision is logged and read back",
+      )
       .option(
         "--release-checkout",
         "retain checkout bytes and detach its exact branch; requires --local, --tip, --issue and --reason; preview unless --apply",

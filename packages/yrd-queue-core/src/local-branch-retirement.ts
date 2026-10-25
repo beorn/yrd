@@ -1,4 +1,5 @@
-import { resolve } from "node:path"
+import { closeSync, fsyncSync, openSync } from "node:fs"
+import { dirname, resolve } from "node:path"
 
 import { findArchiveRefFor } from "git-super/archive-ref"
 import { changedCommitGitlinks } from "git-super/commit-graph"
@@ -12,7 +13,7 @@ import {
   type QueueLocation,
 } from "./events.ts"
 import { isAncestor, refAt, seamProcess, type Git } from "./git.ts"
-import type { QueueRunLog } from "./log.ts"
+import { readRunLog, type LogRecord, type QueueRunLog } from "./log.ts"
 
 export type LocalBranchRetirement = Readonly<{
   repo: string
@@ -35,6 +36,13 @@ export type LocalBranchRetirement = Readonly<{
   protections(): Promise<readonly string[]>
   disposition:
     | Readonly<{ kind: "merged"; base: string; target: string }>
+    | Readonly<{
+        kind: "discarded"
+        target: string
+        targetRef: string
+        uniqueCommits: number
+        log: Pick<QueueRunLog, "id" | "path">
+      }>
     | Readonly<{
         kind: "closed"
         target: string
@@ -90,6 +98,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
   let writtenArchive: string | undefined
   let archiveLocation: "local" | undefined
   let custody: Dropped | undefined
+  let decision: LogRecord | undefined
   const protection = async (): Promise<Kept | undefined> => {
     const firstRead = firstProtectionRead
     firstProtectionRead = false
@@ -140,7 +149,11 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     return undefined
   }
   const reachability = async (): Promise<Kept | undefined> => {
-    if (disposition.kind !== "closed" && !(await isAncestor(git, tip, disposition.target))) {
+    if (disposition.kind === "discarded") {
+      if (await isAncestor(git, tip, disposition.target)) {
+        return { code: "unreached", detail: `tip ${tip} is contained in ${disposition.target}; use merged retirement` }
+      }
+    } else if (disposition.kind !== "closed" && !(await isAncestor(git, tip, disposition.target))) {
       return { code: "unreached", detail: `tip ${tip} is not merged into ${disposition.target}` }
     }
     return undefined
@@ -157,7 +170,12 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
   }
   let result: LocalBranchRetirementResult
   try {
-    if (actor.trim() === "" || reason.trim() === "") throw new Error("retirement requires an actor and reason")
+    if (actor.trim() === "" || reason.trim() === "") {
+      if (disposition.kind === "discarded") {
+        throw new RetirementKept({ code: "held", detail: "discard requires an actor and reason" })
+      }
+      throw new Error("retirement requires an actor and reason")
+    }
     await git(["check-ref-format", "--branch", branch])
     if (disposition.kind === "merged") {
       const mergeBase = (await git(["merge-base", disposition.base, tip])).trim()
@@ -197,6 +215,35 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
         },
       })
     }
+    if (kept === undefined && !input.dryRun && disposition.kind === "discarded") {
+      try {
+        decision = input.log.write({
+          kind: "local-branch-retirement",
+          intent: "local-discard",
+          repo,
+          branch,
+          head: tip,
+          actor,
+          issue,
+          reason,
+          target: disposition.target,
+          targetRef: disposition.targetRef,
+          uniqueCommits: disposition.uniqueCommits,
+          pid: process.pid,
+        })
+        const fd = openSync(disposition.log.path, "r")
+        try {
+          fsyncSync(fd)
+        } finally {
+          closeSync(fd)
+        }
+      } catch (cause) {
+        throw new RetirementKept({
+          code: "held",
+          detail: `discard decision could not be synced in ${disposition.log.path}: ${String(cause)}`,
+        })
+      }
+    }
     if (kept === undefined) kept = await protection()
     if (kept === undefined && (completedArchive !== undefined || completedOnTarget)) kept = await reachability()
     if (kept !== undefined) {
@@ -228,6 +275,19 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
         beforeRemove: async () => {
           const held = await protection()
           if (held !== undefined) throw new RetirementKept(held)
+          if (disposition.kind === "discarded") {
+            try {
+              const rows = readRunLog(dirname(disposition.log.path), disposition.log.id)
+              if (decision === undefined || !rows.some((row) => JSON.stringify(row) === JSON.stringify(decision))) {
+                throw new Error("exact decision row is missing or differs")
+              }
+            } catch (cause) {
+              throw new RetirementKept({
+                code: "held",
+                detail: `discard decision readback in ${disposition.log.path}: ${String(cause)}`,
+              })
+            }
+          }
           if (custody === undefined || disposition.kind !== "closed") return
           // The shared chain readback: a chain that no longer keeps the tip keeps the branch (30683).
           await readKeptCustody(disposition.store, {

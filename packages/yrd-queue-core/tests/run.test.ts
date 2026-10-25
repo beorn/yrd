@@ -440,6 +440,33 @@ it("local retirement keeps protected tips and preserves custody before removing 
   expect(await refAt(origin, closed.event!.ref)).toBe(closed.event?.tip)
   expect((await origin(["rev-list", "--parents", "-n", "1", closed.event!.tip])).trim().split(" ")).toContain(head)
   expect(await refAt(origin, `refs/heads/${branch}`)).toBe(head)
+  //30704: the counting/custody rule has one explicit component-discard clause.
+  // Its sole decision log records intentional loss, not a keeping event or recovery object.
+  const discardBranch = "task/component-discard-count"
+  await w.git(["branch", discardBranch, head])
+  const discarded = await retireLocalBranch({
+    ...input,
+    branch: discardBranch,
+    tip: head,
+    reason: "owner value call: discard",
+    disposition: { kind: "discarded", target: w.target, targetRef: "refs/heads/main", uniqueCommits: 1, log },
+  })
+  expect(discarded).toMatchObject({ outcome: "removed" })
+  expect(discarded.event).toBeUndefined()
+  expect(discarded.archiveRef).toBeUndefined()
+  expect(await refAt(w.git, `refs/heads/${discardBranch}`)).toBeUndefined()
+  const discardRows = readRunLog(dirname(log.path), log.id).filter((row) => row.branch === discardBranch)
+  expect(discardRows).toEqual([
+    expect.objectContaining({
+      intent: "local-discard",
+      actor: input.actor,
+      head,
+      reason: "owner value call: discard",
+      uniqueCommits: 1,
+    }),
+    expect.objectContaining({ outcome: "removed", head }),
+  ])
+  expect(await archives()).toBe("")
   const mergedBranch = "task/closed-but-merged"
   await w.git(["branch", mergedBranch, w.target])
   const queueStore = createEventStore(w.work, "origin", gitIn(w.work).selection)
@@ -460,7 +487,11 @@ it("local retirement keeps protected tips and preserves custody before removing 
     outcome: "removed",
     detail: `already retired: ${w.target} holds ${w.target} and the branch is absent; this run deleted no ref`,
   })
-  expect(rows.filter((row) => row.kind === "local-branch-retirement").map((row) => row.outcome)).toEqual([
+  expect(
+    rows
+      .filter((row) => row.kind === "local-branch-retirement" && row.intent !== "local-discard")
+      .map((row) => row.outcome),
+  ).toEqual([
     "kept",
     "kept",
     "failed",
@@ -470,6 +501,7 @@ it("local retirement keeps protected tips and preserves custody before removing 
     "kept",
     "kept",
     "failed",
+    "removed",
     "removed",
     "removed",
   ])
