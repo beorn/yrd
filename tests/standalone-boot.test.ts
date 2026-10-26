@@ -40,9 +40,15 @@ async function runCli(...args: string[]): Promise<{ stdout: string; stderr: stri
 }
 
 describe("standalone CLI boot", () => {
-  it("imports git-super after a frozen standalone Yrd install", async () => {
+  it("imports git-super after a frozen standalone Yrd install", async ({ onTestFailed }) => {
+    let phase = "create standalone fixture"
+    let failedPhase: string | undefined
+    onTestFailed(() => {
+      console.error(`Standalone boot failed during ${failedPhase ?? phase}; last phase: ${phase}`)
+    })
     const root = await mkdtemp(join(tmpdir(), "yrd-standalone-"))
     try {
+      phase = "copy standalone manifests"
       await copyFile(join(REPO_ROOT, "package.json"), join(root, "package.json"))
       await copyFile(join(REPO_ROOT, "bun.lock"), join(root, "bun.lock"))
       for (const entry of await readdir(join(REPO_ROOT, "packages"), { withFileTypes: true })) {
@@ -52,6 +58,7 @@ describe("standalone CLI boot", () => {
         await copyFile(join(REPO_ROOT, "packages", entry.name, "package.json"), join(packageDir, "package.json"))
       }
 
+      phase = "bun install --frozen-lockfile"
       const install = Bun.spawn(["bun", "install", "--frozen-lockfile"], {
         cwd: root,
         stdout: "ignore",
@@ -60,6 +67,7 @@ describe("standalone CLI boot", () => {
       const [installStderr, installExit] = await Promise.all([new Response(install.stderr).text(), install.exited])
       expect(installExit, installStderr).toBe(0)
 
+      phase = "import installed git-super"
       const imported = Bun.spawn(["bun", "-e", 'await import("git-super")'], {
         cwd: join(root, "packages", "yrd-bay"),
         stdout: "ignore",
@@ -70,6 +78,7 @@ describe("standalone CLI boot", () => {
 
       // 27306: successful package import alone can mask the enclosing Yrd HEAD
       // being mistaken for the installed archive's pinned Git Super identity.
+      phase = "prepare dependency selector fixture and git init"
       await mkdir(join(root, "tests", "support"), { recursive: true })
       await copyFile(
         join(REPO_ROOT, "tests", "support", "git-super-bin.ts"),
@@ -83,6 +92,7 @@ describe("standalone CLI boot", () => {
         "-e",
         'const selected = await import("./tests/support/git-super-bin.ts"); console.log(JSON.stringify({bin: selected.gitSuperBin, sha: selected.gitSuperSha}))',
       ]
+      phase = "select installed git-super identity"
       const selected = Bun.spawn(selectCommand, { cwd: root, stdout: "pipe", stderr: "pipe" })
       const [selectionStdout, selectionStderr, selectionExit] = await Promise.all([
         new Response(selected.stdout).text(),
@@ -101,6 +111,7 @@ describe("standalone CLI boot", () => {
 
       // Worktree tooling links node_modules, whose package entries may themselves
       // point outside that directory. The installed dependency still owns its bin.
+      phase = "prepare linked dependency fixture"
       const linkedModules = join(root, "linked-modules")
       const worktree = join(root, "standalone-worktree")
       await mkdir(linkedModules)
@@ -110,6 +121,7 @@ describe("standalone CLI boot", () => {
       for (const file of ["package.json", "bun.lock", "tests/support/git-super-bin.ts"]) {
         await copyFile(join(root, file), join(worktree, file))
       }
+      phase = "select linked git-super identity"
       const linked = Bun.spawn(selectCommand, { cwd: worktree, stdout: "pipe", stderr: "pipe" })
       const [linkedStdout, linkedStderr, linkedExit] = await Promise.all([
         new Response(linked.stdout).text(),
@@ -122,13 +134,18 @@ describe("standalone CLI boot", () => {
         sha: declared.split("#")[1],
       })
 
+      phase = "reject missing own git-super dependency"
       await unlink(join(linkedModules, "git-super"))
       const missing = Bun.spawn(selectCommand, { cwd: worktree, stdout: "ignore", stderr: "pipe" })
       const [missingStderr, missingExit] = await Promise.all([new Response(missing.stderr).text(), missing.exited])
       expect(missingExit).not.toBe(0)
       expect(missingStderr).toContain(join(worktree, "node_modules", "git-super"))
       expect(missingStderr).toContain(await realpath(join(root, "node_modules", "git-super", "package.json")))
+    } catch (error) {
+      failedPhase = phase
+      throw error
     } finally {
+      phase = "remove standalone fixture"
       await rm(root, { recursive: true, force: true })
     }
   })
