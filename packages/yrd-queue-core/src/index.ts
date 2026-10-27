@@ -246,6 +246,8 @@ export type {
   AdmissionVerdict,
   IssueCandidate,
   IssueResolution,
+  IssueSameness,
+  SameIssue,
   Submitted,
   Prepared,
   SubmitGitlink,

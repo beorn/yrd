@@ -31,6 +31,7 @@ import {
   submit,
   writeQueueEvent,
   type Git,
+  type SameIssue,
 } from "../src/index.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runnerFor } from "../src/git.ts"
@@ -1068,9 +1069,9 @@ describe("event submit", () => {
     await w.git(["commit", "--quiet", "--allow-empty", "-m", `work\n\nRefs: ${path}`])
     const head = (await w.git(["rev-parse", "HEAD"])).trim()
     const asked: (readonly [string, string])[] = []
-    const sameIssue = async (a: string, b: string): Promise<boolean> => {
+    const sameIssue: SameIssue = async (a, b) => {
       asked.push([a, b])
-      return new Set([a, b]).size === 2 && [a, b].every((raw) => raw === "26585" || raw === path)
+      return [a, b].every((raw) => raw === "26585" || raw === path) ? { same: true } : { same: false, resolved: true }
     }
     expect(await issueOf(w.git, "task/one-issue-two-spellings", head, w.target, undefined, sameIssue)).toEqual({
       issue: "26585",
@@ -1084,15 +1085,56 @@ describe("event submit", () => {
       commit: bind,
     })
     // The provider is asked only where two raw strings differ.
+    expect(asked.length).toBeGreaterThan(0)
     expect(asked.every(([a, b]) => a !== b)).toBe(true)
-    // A provider that says different keeps today's refusal, naming both spellings.
-    const message = await issueOf(w.git, "task/one-issue-two-spellings", head, w.target, undefined, async () => false).then(
-      () => "",
-      (cause: unknown) => (cause instanceof Error ? cause.message : String(cause)),
+    const refusal = (judge: SameIssue, declared?: string) =>
+      issueOf(w.git, "task/one-issue-two-spellings", head, w.target, declared, judge).then(
+        () => "",
+        (cause: unknown) => (cause instanceof Error ? cause.message : String(cause)),
+      )
+    // Two different issues: the refusal says so, and drops the rewrite hint that only fits one issue.
+    const different = await refusal(async () => ({ same: false, resolved: true }))
+    expect(different).toContain("conflicting issue bindings")
+    expect(different).toContain(`26585 and ${path} resolve to different issues`)
+    expect(different).not.toMatch(/rewrite .*trailer/u)
+    // A declared key the provider names as another issue than the (one) binding.
+    const other = "@hh/tooling/99999-other-issue"
+    const declaredDifferent = await refusal(sameIssue, other)
+    expect(declaredDifferent).toContain(`${other} and 26585 resolve to different issues`)
+    // No answer: exact comparison as today, plus what resolve returned.
+    const why = `resolve ${path}: yrd-issues-provider-failed: provider ended with exit 1`
+    const unresolved = await refusal(async () => ({ same: false, resolved: false, why }))
+    expect(unresolved).toContain("compares issue keys exactly")
+    expect(unresolved).toContain(why)
+    expect(unresolved).toMatch(/rewrite .*trailer/u)
+    const declaredUnresolved = await refusal(
+      async (a, b) => ((await sameIssue(a, b)).same ? { same: true } : { same: false, resolved: false, why }),
+      other,
     )
-    expect(message).toContain("conflicting issue bindings")
-    expect(message).toContain("26585")
-    expect(message).toContain(path)
+    expect(declaredUnresolved).toContain("pass it exactly as bound: 26585")
+    expect(declaredUnresolved).toContain(why)
+  })
+
+  /**
+   * @failure 31060: a host comparer must cost nothing on the common path; byte-equal keys never reach it.
+   * @level   l2 (real git history through issueOf)
+   * @consumer every submit in a project that declares resolve
+   */
+  it("byte-equal issue keys never ask the host comparer (31060)", async () => {
+    const w = await world()
+    const path = "@hh/tooling/31060-yrd-issue-ref-exact-string"
+    await branchWithCommit(w, "task/one-spelling", "change.txt")
+    await w.git(["checkout", "--quiet", "task/one-spelling"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", `bind\n\nRefs: ${path}`])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", `work\n\nRefs: ${path}`])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    let calls = 0
+    const counted: SameIssue = async () => {
+      calls++
+      return { same: true }
+    }
+    expect(await issueOf(w.git, "task/one-spelling", head, w.target, path, counted)).toMatchObject({ issue: path })
+    expect(calls).toBe(0)
   })
 
   /**

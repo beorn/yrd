@@ -60,6 +60,7 @@ import {
 } from "git-super/worktree"
 import { unaddressedRepository as findRepository } from "./declaration.ts"
 import { ISSUE_DISPLAY_TIMEOUT_MS } from "./issue-resolver.ts"
+import { issueComparer } from "./issue-sameness.ts"
 import { ISSUES_CODES } from "./issues/declaration.ts"
 import { runIssuesVerb } from "./issues/run.ts"
 import { originHead } from "./queue-location.ts"
@@ -673,7 +674,14 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     try {
       const environmentGit = gitIn(path, process, selection)
       headSha = (await environmentGit(["rev-parse", "HEAD"])).trim()
-      const binding = await issueOf(environmentGit, branch, headSha, base, options.issue)
+      const binding = await issueOf(
+        environmentGit,
+        branch,
+        headSha,
+        base,
+        options.issue,
+        issueComparer({ projectRoot: root, cwd: root, stderr: (text) => io.stderr(text) }),
+      )
       if (binding === undefined) throw new Error(`no issue resolved for requested binding ${options.issue}`)
       if (binding.source !== "binding") {
         const tree = (await environmentGit(["rev-parse", `${headSha}^{tree}`])).trim()

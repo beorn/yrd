@@ -1,0 +1,85 @@
+import type { SameIssue } from "@yrd/queue-core"
+import { ISSUE_DISPLAY_TIMEOUT_MS } from "./issue-resolver.ts"
+import { ISSUES_CODES } from "./issues/declaration.ts"
+import { runIssuesVerb } from "./issues/run.ts"
+
+type Resolution = Readonly<{ key: string } | { why: string }>
+
+export type IssueComparerInput = Readonly<{
+  /** The project whose `issues.yml` declares `resolve`. */
+  projectRoot: string
+  /** Where the provider runs. */
+  cwd: string
+  env?: NodeJS.ProcessEnv
+  /** Where the provider's stderr passes through. */
+  stderr?: (text: string) => void
+  timeoutMs?: number
+}>
+
+/**
+ * One command's issue comparer (31060). Byte-equal keys are one issue with no provider call. Differing keys ask
+ * the project's declared `resolve` verb once per distinct raw key, memoized for this invocation only. Two keys
+ * are one issue only when each resolves to exactly one key and those keys are equal. Any other outcome is no
+ * answer: the caller compares exactly and names what resolve returned. Keys stay opaque; Yrd parses no issue syntax.
+ */
+export function issueComparer(input: IssueComparerInput): SameIssue {
+  const resolutions = new Map<string, Promise<Resolution>>()
+  const resolveOnce = (raw: string): Promise<Resolution> => {
+    let reading = resolutions.get(raw)
+    if (reading === undefined) {
+      reading = resolveRaw(input, raw)
+      resolutions.set(raw, reading)
+    }
+    return reading
+  }
+  return async (a, b) => {
+    if (a === b) return { same: true }
+    const [left, right] = await Promise.all([resolveOnce(a), resolveOnce(b)])
+    if ("key" in left && "key" in right) {
+      return left.key === right.key ? { same: true } : { same: false, resolved: true }
+    }
+    const why = [left, right].flatMap((resolution) => ("why" in resolution ? [resolution.why] : []))
+    return { same: false, resolved: false, why: why.join("; ") }
+  }
+}
+
+/** Appended to a mismatch receipt: what the comparer said beyond the two spellings it names. */
+export function samenessDetail(a: string, b: string, judged: Awaited<ReturnType<SameIssue>>): string {
+  if (judged.same) return ""
+  return judged.resolved ? `; ${a} and ${b} resolve to different issues` : `; ${judged.why}`
+}
+
+async function resolveRaw(input: IssueComparerInput, raw: string): Promise<Resolution> {
+  let said = ""
+  const outcome = await runIssuesVerb({
+    verb: "resolve",
+    args: [raw],
+    projectRoot: input.projectRoot,
+    cwd: input.cwd,
+    ...(input.env === undefined ? {} : { env: input.env }),
+    timeoutMs: input.timeoutMs ?? ISSUE_DISPLAY_TIMEOUT_MS,
+    stderr: (text) => {
+      said += text
+      input.stderr?.(text)
+    },
+  })
+  if (!outcome.ok) {
+    if (outcome.code === ISSUES_CODES.declarationMissing || outcome.code === ISSUES_CODES.unsupported) {
+      return {
+        why: `${raw} was not checked against an issues store, because ${input.projectRoot} declares none for it: ${outcome.message}`,
+      }
+    }
+    const line = said
+      .split(/\r?\n/u)
+      .map((text) => text.trim())
+      .filter((text) => text !== "")
+      .at(-1)
+    return { why: `resolve ${raw}: ${outcome.message}${line === undefined ? "" : `; the provider said: ${line}`}` }
+  }
+  const keys = (outcome.envelope.result as { keys: readonly string[] }).keys
+  const [key] = keys
+  if (keys.length !== 1 || key === undefined) {
+    return { why: `resolve ${raw} returned ${keys.length} keys (${keys.join(", ")}), not one issue` }
+  }
+  return { key }
+}
