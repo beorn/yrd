@@ -2740,10 +2740,12 @@ describe("a queue is the selected origin branch carrying config", () => {
   )
 
   /** @failure A recorded root issue is discarded for same-named components, or key mismatches disappear from the receipt.
+   * 31060: `yrd drop --issue 30759` kept a branch recorded as `#30759` as a mismatch although the project's
+   * declared resolve verb names one issue for both spellings ("resolved" mode).
    * @level l3 @consumer The root and expanded issue retirement commands with the host's recorded-or-numeric policy
    * The ending-custody fixture above maps every fallback to its canonical key, hiding the lost root record.
    */
-  it.each(["recorded", "unrecorded", "mismatch"] as const)(
+  it.each(["recorded", "unrecorded", "mismatch", "resolved"] as const)(
     "selects one same-named retirement set with %s issue evidence",
     async (mode) => {
       type Report = {
@@ -2827,6 +2829,23 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect(canonical).toMatchObject({ eligible: [], removed: [], failed: [], kept: [] })
         expect(canonical.mode).toContain(`No branches matched issue key "${recordedIssue}"`)
         expect(await run(recordedIssue, true, true)).toContain(`No branches matched issue key "${recordedIssue}"`)
+      } else if (mode === "resolved") {
+        // The project's provider names one issue for the given and the recorded spelling.
+        writeFileSync(
+          join(repo, "issues.yml"),
+          JSON.stringify({
+            resolve: [
+              "sh",
+              "-c",
+              `case "$1" in 1234|${recordedIssue}) printf '{"keys":["issue-1234"]}\\n';; *) printf '{"keys":[]}\\n';; esac`,
+              "resolve",
+              "<raw>",
+            ],
+          }),
+        )
+        const report = JSON.parse(await run("1234")) as Report
+        expect(report).toMatchObject({ removed: [], failed: [], kept: [] })
+        expect(report.eligible.map((row) => row.repo).sort()).toEqual([repo, ...children].sort())
       } else {
         const expanded = JSON.parse(await run("1234")) as Report
         expect(expanded).toMatchObject({ eligible: [], removed: [], failed: [] })
