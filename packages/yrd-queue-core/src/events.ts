@@ -2952,16 +2952,16 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
     throw new TypeError(`local retirement ${branch}: expected a full commit oid, received ${JSON.stringify(local.tip)}`)
   }
   const advanced = local?.advanced
+  // The owner's advanced drop follows a cancelled or a merged ending alike (30683, 30999).
+  const advancedEnded =
+    (state.status === "cancelled" && state.ending?.kind === "cancelled") ||
+    (state.status === "merged" && state.ending?.kind === "merged")
   if (
     advanced !== undefined &&
-    (state.commit === undefined ||
-      state.commit === local?.tip ||
-      state.status !== "cancelled" ||
-      state.ending?.kind !== "cancelled" ||
-      !request.note?.trim())
+    (state.commit === undefined || state.commit === local?.tip || !advancedEnded || !request.note?.trim())
   ) {
     throw new Error(
-      `${branch}: an advanced drop needs a cancelled change whose recorded commit differs from ${local?.tip}, and a nonempty --reason`,
+      `${branch}: an advanced drop needs a cancelled or merged change whose recorded commit differs from ${local?.tip}, and a nonempty --reason`,
     )
   }
   const fetchRefs = store.backend.fetchRefs

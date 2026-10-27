@@ -48,8 +48,9 @@ export type LocalBranchRetirement = Readonly<{
         target: string
         store: QueueLocation
         queue: string
-        /** The owner's drop of a tip past `recorded`: the event keeps both and records what the target lacks (30683). */
-        advanced?: Readonly<{ recorded: string } & Omit<AdvancedDrop, "tip">>
+        /** The owner's drop of a tip past `recorded`: a cancelled chain's dropped event keeps both and records what
+         * the target lacks (30683); a merged chain's retained event keeps the tip, its merged ending `recorded` (30999). */
+        advanced?: Readonly<{ recorded: string; ended: "cancelled" | "merged" } & Omit<AdvancedDrop, "tip">>
       }>
     | Readonly<{
         kind: "landed"
@@ -295,7 +296,10 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
             branch,
             ref: custody.ref,
             event: custody.event,
-            keeps: disposition.advanced === undefined ? [tip] : [disposition.advanced.recorded, tip],
+            keeps:
+              disposition.advanced === undefined || disposition.advanced.ended === "merged"
+                ? [tip]
+                : [disposition.advanced.recorded, tip],
           }).catch((cause: unknown) => {
             if (cause instanceof ChainCustodyMismatch) {
               throw new RetirementKept({ code: "moved", detail: cause.message })
