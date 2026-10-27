@@ -1,14 +1,50 @@
-import { isAbsolute, relative, sep } from "node:path"
+import { isAbsolute, parse, relative, sep } from "node:path"
 import { realpathSync } from "node:fs"
 import {
   clearedByIdentity,
   inspectProcessCensus,
   inspectProcessCwds,
+  isStrictlyInside,
+  resolveContainedPath,
   type ProcessCwdProjection,
   type ProcessCensus,
   type UnreadableProcess,
 } from "removely"
 import type { YrdCliIO } from "./types.ts"
+
+export function validateLiveEnvironmentUses(uses: unknown): readonly Readonly<{ path: string; reason: string }>[] {
+  if (!Array.isArray(uses)) throw new Error("live environment-use reader did not return an array")
+  return uses.map((use: unknown) => {
+    if (
+      typeof use !== "object" ||
+      use === null ||
+      !("path" in use) ||
+      typeof use.path !== "string" ||
+      !isAbsolute(use.path) ||
+      !("reason" in use) ||
+      typeof use.reason !== "string" ||
+      use.reason.trim() === ""
+    ) {
+      throw new Error("live environment-use reader needs absolute paths and nonempty reasons")
+    }
+    return { path: use.path, reason: use.reason }
+  })
+}
+
+export async function assertNoLiveEnvironmentUse(path: string, io: YrdCliIO): Promise<void> {
+  if (io.liveEnvironmentUse === undefined) return
+  let uses: ReturnType<typeof validateLiveEnvironmentUses>
+  try {
+    uses = validateLiveEnvironmentUses(await io.liveEnvironmentUse(path)).map((use) => ({
+      path: resolveContainedPath(use.path, parse(use.path).root, { allowRoot: true }),
+      reason: use.reason,
+    }))
+  } catch (cause) {
+    throw new Error(`live environment-use reader unavailable: ${String(cause)}`, { cause })
+  }
+  const holder = uses.find((use) => use.path === path || isStrictlyInside(use.path, path))
+  if (holder !== undefined) throw new Error(`live use: ${holder.reason} (${holder.path})`)
+}
 
 /** Shared admission policy: identity-cleared denials are evidence, an unexplained gap is not. */
 export function processCwdCoverage(snapshot: ProcessCwdProjection) {

@@ -1640,6 +1640,52 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     expect(existsSync(join(path, "root-dirt.txt"))).toBe(true)
   })
 
+  it.each(["held", "unavailable", "malformed"] as const)(
+    "preserves an environment before teardown when host live-use evidence is %s",
+    async (evidence) => {
+      const fixture = await world(":", "printf touched > ../host-use-teardown-ran.txt")
+      const { path } = await openEnvironment(fixture.work, (await fixture.git(["rev-parse", "HEAD"])).trim())
+      const registration = await fixture.git(["worktree", "list", "--porcelain", "-z"])
+      const output = capture(fixture.work)
+      output.io.liveEnvironmentUse = vi.fn(async (target?: string) => {
+        expect(target).toBe(realpathSync(path))
+        if (evidence === "unavailable") throw new Error("host owner evidence unreadable")
+        if (evidence === "malformed") return [{ path: "relative/owner", reason: "invalid host use" }]
+        return [{ path: join(path, "nested"), reason: "active owner" }]
+      })
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], output.io), output.stderr()).toBe(2)
+      expect(output.stderr()).toContain(
+        evidence === "held"
+          ? `live use: active owner (${join(path, "nested")})`
+          : evidence === "unavailable"
+            ? "host owner evidence unreadable"
+            : "absolute paths and nonempty reasons",
+      )
+      expect(existsSync(path)).toBe(true)
+      expect(await fixture.git(["worktree", "list", "--porcelain", "-z"])).toBe(registration)
+      expect(existsSync(join(dirname(path), "host-use-teardown-ran.txt"))).toBe(false)
+    },
+  )
+
+  it.each(["teardown", "final preparation"] as const)(
+    "preserves a host use acquired during %s at the final removal read",
+    async (phase) => {
+      const fixture = await world(":", phase === "teardown" ? "printf active > ../late-host-use.txt" : undefined)
+      const { path } = await openEnvironment(fixture.work, (await fixture.git(["rev-parse", "HEAD"])).trim())
+      const marker = join(dirname(path), "late-host-use.txt")
+      const output = capture(fixture.work)
+      output.io.liveEnvironmentUse = async () => (existsSync(marker) ? [{ path, reason: "new active owner" }] : [])
+      await expect(
+        closeEnvironment(path, { json: true }, output.io, undefined, "delegate", async () => {
+          if (phase === "final preparation") writeFileSync(marker, "active")
+        }),
+      ).rejects.toThrow(`live use: new active owner (${path})`)
+      expect(existsSync(marker)).toBe(true)
+      expect(existsSync(path)).toBe(true)
+      expect(await fixture.git(["worktree", "list", "--porcelain", "-z"])).toContain(path)
+    },
+  )
+
   /**
    * @failure 28120: direct close removed an unrelated process's cwd and ran teardown first.
    * @level l2 (real CLI and native cwd holder in a temporary retained worktree)
@@ -1938,7 +1984,12 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     expect(emptied.stderr()).toContain("is still present")
     expect(emptied.stderr()).toContain(`then remove the private store ${store}`)
     expect(emptied.stderr()).toContain("@chief owns this custody call")
-    expect(JSON.parse(emptied.stdout())).toMatchObject({ kept: path, class: "private checkout", owner: "@chief", store })
+    expect(JSON.parse(emptied.stdout())).toMatchObject({
+      kept: path,
+      class: "private checkout",
+      owner: "@chief",
+      store,
+    })
     expect(existsSync(path)).toBe(true)
     expect(existsSync(store)).toBe(true)
 
@@ -2146,6 +2197,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     const closed = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
     expect(JSON.parse(closed.stdout())).toEqual({ closed: path })
+    expect(closed.stderr()).toContain("owner leases were not checked because no host reader is wired")
     expect(existsSync(path)).toBe(false)
     expect(await w.git(["worktree", "list", "--porcelain", "-z"])).not.toContain(path)
     if (teardown) {

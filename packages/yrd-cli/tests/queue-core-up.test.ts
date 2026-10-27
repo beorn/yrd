@@ -871,7 +871,9 @@ describe("yrd queue up, the service", () => {
       JSON.stringify({ ...opening, at: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() }),
     )
     mkdirSync(join(path, "working"))
-    const uses = vi.fn(async () => [{ path: join(path, "working"), reason: "declared working directory" }])
+    const uses = vi.fn(async (_targetPath?: string) => [
+      { path: join(path, "working"), reason: "declared working directory" },
+    ])
     const census = vi
       .spyOn(removely, "inspectProcessCwds")
       .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
@@ -897,7 +899,7 @@ describe("yrd queue up, the service", () => {
         const run = capture(w.work)
         run.io.liveEnvironmentUse = uses
         const completedBefore = allCleanupRows(workdir).filter((row) => typeof row.remaining === "number").length
-        const readsBefore = uses.mock.calls.length
+        const readsBefore = uses.mock.calls.filter(([targetPath]) => targetPath === undefined).length
         try {
           expect(
             await coreQueueCommand(
@@ -922,9 +924,11 @@ describe("yrd queue up, the service", () => {
           else expect(run.stderr()).toContain("native retained removal proof accepted")
           const completed = allCleanupRows(workdir).filter((row) => typeof row.remaining === "number")
           expect(completed.length - completedBefore, "startup and round cleanup both complete").toBe(2)
-          expect(uses.mock.calls.length - readsBefore, "one live-use read per completed nonempty cleanup").toBe(
-            completed.filter((row) => row.result !== "none").length - completedBefore,
-          )
+          expect(
+            uses.mock.calls.filter(([targetPath]) => targetPath === undefined).length - readsBefore,
+            "one discovery read per completed nonempty cleanup",
+          ).toBe(completed.filter((row) => row.result !== "none").length - completedBefore)
+          expect(uses.mock.calls.filter(([targetPath]) => targetPath === path)).toHaveLength(protects ? 0 : 2)
         } finally {
           stop.abort()
         }
@@ -1189,64 +1193,73 @@ describe("yrd queue up, the service", () => {
    * @consumer the seat whose sandbox scopes ptrace over other same-UID pids
    * @testonly none
    */
-  it("consumes a filed close request: this round closes the environment and deletes the row (22894 T2)", async () => {
-    const w = await world()
-    await w.git(["config", "yrd.workdir", w.workdir])
-    await redeclare(w, "setup: ':'\n")
-    await w.git(["fetch", "--quiet", "origin", "main"])
-    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
-    const workdir = await workdirOf(w.git, { cwd: w.work })
-    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    const opened = capture(w.work)
-    expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "delegated-close", "--json"], opened.io),
-      opened.stderr(),
-    ).toBe(0)
-    const environment = JSON.parse(opened.stdout()) as { path: string }
-    const uid = process.getuid?.()
-    if (uid === undefined) throw new Error("this queue case needs a real unix uid")
-    const file = closeRequestFile(workdir, environment.path)
-    writeCloseRequest(workdir, {
-      name: basename(environment.path),
-      path: environment.path,
-      requester: "@dev/luna2",
-      uid,
-      at: new Date().toISOString(),
-      predicate: "direct-admission",
-      options: { noRehome: true },
-      head: selected,
-    })
-    const census = vi
-      .spyOn(removely, "inspectProcessCwds")
-      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
-    const stop = new AbortController()
-    const run = capture(w.work)
-    try {
+  it.each([false, true])(
+    "consumes a filed close request without discarding a host-held environment: %s",
+    async (held) => {
+      const w = await world()
+      await w.git(["config", "yrd.workdir", w.workdir])
+      await redeclare(w, "setup: ':'\n")
+      await w.git(["fetch", "--quiet", "origin", "main"])
+      await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+      const workdir = await workdirOf(w.git, { cwd: w.work })
+      const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+      const opened = capture(w.work)
       expect(
-        await coreQueueCommand(
-          w.work,
-          run.io,
-          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
-          { json: true, workdir },
-        ),
-        run.stderr(),
+        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "delegated-close", "--json"], opened.io),
+        opened.stderr(),
       ).toBe(0)
-      expect(existsSync(environment.path), run.stderr()).toBe(false)
-      expect(existsSync(file), run.stderr()).toBe(false)
-      const closed = allCleanupRows(workdir).find((row) => row.result === "closed" && typeof row.request === "object")
-      expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeDefined()
-      expect(closed?.path).toBe(environment.path)
-      expect(closed?.request).toMatchObject({
-        requester: "@dev/luna2",
+      const environment = JSON.parse(opened.stdout()) as { path: string }
+      const uid = process.getuid?.()
+      if (uid === undefined) throw new Error("this queue case needs a real unix uid")
+      const file = closeRequestFile(workdir, environment.path)
+      writeCloseRequest(workdir, {
+        name: basename(environment.path),
         path: environment.path,
-        head: selected,
+        requester: "@dev/luna2",
+        uid,
+        at: new Date().toISOString(),
+        predicate: "direct-admission",
         options: { noRehome: true },
+        head: selected,
       })
-    } finally {
-      stop.abort()
-      census.mockRestore()
-    }
-  }, 120_000)
+      const census = vi
+        .spyOn(removely, "inspectProcessCwds")
+        .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+      const stop = new AbortController()
+      const run = capture(w.work)
+      run.io.liveEnvironmentUse = async (target?: string) =>
+        held && target === environment.path ? [{ path: target, reason: "active owner acquired after filing" }] : []
+      try {
+        expect(
+          await coreQueueCommand(
+            w.work,
+            run.io,
+            { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+            { json: true, workdir },
+          ),
+          run.stderr(),
+        ).toBe(0)
+        expect(existsSync(environment.path), run.stderr()).toBe(held)
+        expect(existsSync(file), run.stderr()).toBe(false)
+        const outcome = allCleanupRows(workdir).find(
+          (row) => row.result === (held ? "retired" : "closed") && typeof row.request === "object",
+        )
+        expect(outcome, JSON.stringify(allCleanupRows(workdir))).toBeDefined()
+        expect(outcome?.path).toBe(environment.path)
+        expect(outcome?.request).toMatchObject({
+          requester: "@dev/luna2",
+          path: environment.path,
+          head: selected,
+          options: { noRehome: true },
+        })
+        if (held) expect(JSON.stringify(outcome)).toContain("live use: active owner acquired after filing")
+      } finally {
+        stop.abort()
+        census.mockRestore()
+      }
+    },
+    120_000,
+  )
 
   /**
    * @failure 22894: a request whose round ALSO cannot take a complete census is

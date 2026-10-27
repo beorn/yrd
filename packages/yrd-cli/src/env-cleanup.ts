@@ -20,7 +20,7 @@ import {
 import { createLocalGitProcess } from "git-super/process"
 import { assertNoPrivateStore, createLocalGitWorktreeStore, PrivateStoreRefusalError } from "git-super/worktree"
 import { inspectProcessCwds, resolveContainedPath, type ProcessCwdProjection } from "removely"
-import { environmentCwdHolder, processCwdCoverage } from "./env-close-holders.ts"
+import { environmentCwdHolder, processCwdCoverage, validateLiveEnvironmentUses } from "./env-close-holders.ts"
 import {
   IncompleteCensusError,
   PrivateCheckoutRefusalError,
@@ -936,23 +936,10 @@ async function cleanupEnvironments(
   let liveUseFailure: string | undefined
   if (io.liveEnvironmentUse !== undefined) {
     try {
-      const uses: unknown = await io.liveEnvironmentUse()
-      if (!Array.isArray(uses)) throw new Error("expected an array of absolute paths and reasons")
-      liveUses = uses.map((use: unknown) => {
-        if (
-          typeof use !== "object" ||
-          use === null ||
-          !("path" in use) ||
-          typeof use.path !== "string" ||
-          !isAbsolute(use.path) ||
-          !("reason" in use) ||
-          typeof use.reason !== "string" ||
-          use.reason.trim() === ""
-        ) {
-          throw new Error("expected each use to have an absolute path and a nonempty reason")
-        }
-        return { path: resolveContainedPath(use.path, parse(use.path).root, { allowRoot: true }), reason: use.reason }
-      })
+      liveUses = validateLiveEnvironmentUses(await io.liveEnvironmentUse()).map((use) => ({
+        path: resolveContainedPath(use.path, parse(use.path).root, { allowRoot: true }),
+        reason: use.reason,
+      }))
     } catch (cause) {
       liveUseFailure = `live environment-use reader unavailable: ${String(cause)}`
     }

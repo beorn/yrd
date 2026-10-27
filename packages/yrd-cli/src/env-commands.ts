@@ -68,7 +68,12 @@ import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 import { formatYrdCommand } from "./command-format.ts"
 import { envOpenRecordFromFlags, writeEnvOpenRecord } from "./env-open-record.ts"
-import { admitEnvironmentClose, type CloseAdmission, type CloseCensusReceipt } from "./env-close-holders.ts"
+import {
+  admitEnvironmentClose,
+  assertNoLiveEnvironmentUse,
+  type CloseAdmission,
+  type CloseCensusReceipt,
+} from "./env-close-holders.ts"
 import {
   ENV_CLOSE_PREDICATE,
   requesterOf,
@@ -1218,6 +1223,10 @@ export async function closeEnvironment(
   }
   // Admit the close before preserve can mutate any ref. The later admission still
   // checks again after teardown; this census does not exclude concurrent writers.
+  if (io.liveEnvironmentUse === undefined) {
+    io.stderr("yrd: owner leases were not checked because no host reader is wired.\n")
+  }
+  await assertNoLiveEnvironmentUse(path, io)
   const admission = await admitEnvironmentClose(path, io, censusSource)
   if (admission.kind === "needs-delegation") {
     if (onIncompleteCensus === "refuse") throw uncertified(path, admission)
@@ -1394,6 +1403,7 @@ export async function closeEnvironment(
   ) {
     const retain = options.retain === undefined ? join(workdir, "retained-modules") : resolve(io.cwd, options.retain)
     let removed: unknown
+    await assertNoLiveEnvironmentUse(path, io)
     try {
       removed = JSON.parse(
         await git([
@@ -1503,6 +1513,7 @@ export async function closeEnvironment(
     // git-super to materialize on the way out. The helper re-asks before it
     // issues the plain removal — the probe reads the TREE, the mutation belongs
     // to the repository that owns the worktree registry.
+    await assertNoLiveEnvironmentUse(path, io)
     await worktreeWithoutSubmodules(treeGit, git, commit, ["remove", path])
   }
   const retirementOutcome =
