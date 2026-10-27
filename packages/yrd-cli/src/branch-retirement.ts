@@ -299,6 +299,16 @@ export async function retireIssueBranches(
     sameIssue,
   } = input
   const issue = request.issue
+  // One admission rule for every selection below (31060, 31081): a branch is the issue's when its bound key is the
+  // request, or when its name carries the request and the comparer names its recorded spelling the same issue.
+  const judgeSpelling = (branch: string, bound: string | undefined, recordedIssue: string | undefined) =>
+    bound !== undefined && bound !== issue && recordedIssue !== undefined && branchIssue(branch) === issue
+      ? sameIssue(bound, issue)
+      : undefined
+  const isIssueBranch = async (branch: string, recordedIssue: string | undefined) => {
+    const bound = branchIssue(branch, recordedIssue)
+    return bound === issue || (await judgeSpelling(branch, bound, recordedIssue))?.same === true
+  }
 
   const eventStore = createEventStore(authorRepo, input.remote, selection)
   type Row = {
@@ -390,14 +400,7 @@ export async function retireIssueBranches(
       const bound =
         io.branchIssue !== undefined || /^(task|exp)\//u.test(branch) ? branchIssue(branch, recordedIssue) : undefined
       // Only a would-be mismatch row asks the comparer; unrelated branches never reach the provider (31060).
-      const judged =
-        branch !== targetBranch &&
-        bound !== undefined &&
-        bound !== issue &&
-        recordedIssue !== undefined &&
-        branchIssue(branch) === issue
-          ? await sameIssue(bound, issue)
-          : undefined
+      const judged = branch === targetBranch ? undefined : await judgeSpelling(branch, bound, recordedIssue)
       if (branch === targetBranch) counts.target++
       else if (bound !== issue && judged?.same !== true) {
         if (judged !== undefined && bound !== undefined) {
@@ -472,7 +475,7 @@ export async function retireIssueBranches(
     await collect(authorStore.repository, authorStore.path, authorStore.git, authorStore.commonDirectory, reading)
     const named = new Set<string>()
     for (const [branch, history] of reading.histories) {
-      if (branchIssue(branch, history.state.issue) !== issue) continue
+      if (!(await isIssueBranch(branch, history.state.issue))) continue
       let state = initial
       for (const event of history.events) {
         state = evolve(state, event)
@@ -485,7 +488,7 @@ export async function retireIssueBranches(
     for (const candidate of candidates) {
       if (candidate.path !== "") continue
       const recorded = reading.histories.get(candidate.branch)?.state.issue
-      if (branchIssue(candidate.branch, recorded) !== issue) continue
+      if (!(await isIssueBranch(candidate.branch, recorded))) continue
       const base = (await authorGit(["merge-base", candidate.head, targetTip])).trim()
       // -z and --no-renames match queue-core/worktree.ts: a path may contain anything,
       // and a rename is a delete plus an add so each record has exactly one path.
