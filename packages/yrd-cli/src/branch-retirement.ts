@@ -51,7 +51,7 @@ import { samenessDetail } from "./issue-sameness.ts"
 import type { LocalBranchProtectionResult, YrdCliIO } from "./types.ts"
 import { originHead, retainedComponentStoreHere } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
-import { admitEnvironmentClose } from "./env-close-holders.ts"
+import { admitEnvironmentClose, validateLiveEnvironmentUses } from "./env-close-holders.ts"
 import { formatYrdCommand } from "./command-format.ts"
 
 /** Ordinary cleanup permits an explicitly standalone host; missing wiring is not that declaration. */
@@ -1238,21 +1238,7 @@ export async function releaseRetainedCheckouts(
     if (io.liveEnvironmentUse === undefined) {
       throw new Error(RELEASE_CHECKOUT_NEEDS_LAUNCHER)
     }
-    const uses: unknown = await io.liveEnvironmentUse()
-    if (!Array.isArray(uses)) throw new Error("live environment-use reader did not return an array")
-    for (const use of uses as readonly unknown[]) {
-      if (
-        typeof use !== "object" ||
-        use === null ||
-        !("path" in use) ||
-        typeof use.path !== "string" ||
-        !isAbsolute(use.path) ||
-        !("reason" in use) ||
-        typeof use.reason !== "string" ||
-        !use.reason.trim()
-      ) {
-        throw new Error("live environment-use reader needs absolute paths and nonempty reasons")
-      }
+    for (const use of validateLiveEnvironmentUses(await io.liveEnvironmentUse())) {
       if (overlaps(checkout, use.path)) return [`live use: ${use.reason} (${use.path})`]
     }
     if (typeof io.localBranchProtections !== "function") {
