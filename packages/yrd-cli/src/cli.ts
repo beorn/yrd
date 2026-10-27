@@ -39,6 +39,7 @@ import {
   lookupRunIndex,
   parseDuration,
   resolveGitSelection,
+  refAt,
   readRunLog,
   runIndexPath,
   runIndexRef,
@@ -71,6 +72,7 @@ import {
 } from "./issues/declaration.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { formatYrdCommand } from "./command-format.ts"
+import { componentsHoldingBranch, componentDropHint } from "./branch-retirement.ts"
 
 /** The seat a submit names. Never the git author: the fleet's git identity
  * names nobody (ruling @i/10-yrd/24028). */
@@ -328,11 +330,21 @@ function buildProgram(
       }
       if (options.discard) argv.push("--discard")
       if (options.json) argv.push("--json")
+      let apply = formatYrdCommand(io, argv, io.cwd)
+      const authorRepo = repositoryHere(cwd())
+      if (authorRepo !== undefined) {
+        const selection = await resolveGitSelection(authorRepo, { env })
+        const git = gitIn(authorRepo, undefined, selection, { env })
+        if ((await refAt(git, `refs/heads/${branch}`)) === undefined) {
+          const held = await componentsHoldingBranch(authorRepo, git, selection, env, branch)
+          if (held.length > 0) apply = componentDropHint(io, branch, held, argv)
+        }
+      }
       throw new Error(
         (options.discard
           ? "drop --local --discard has no preview; it logs and reads back the discard decision, then deliberately loses local component content; it keeps no Git object custody.\n"
           : "drop --local has no preview; it writes the event that keeps the tip at origin, then deletes the local branch.\n") +
-          `To apply: ${formatYrdCommand(io, argv, io.cwd)}`,
+          `To apply: ${apply}`,
       )
     }
     if (

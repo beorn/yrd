@@ -2971,81 +2971,127 @@ describe("a queue is the selected origin branch carrying config", () => {
    * @level l3 @consumer A caller copying the refusal's exact direct-apply command
    * Other custody fixtures call valid argv; none copies a refused preview through a host renderer and executes the cure.
    */
-  it("a local preview refusal supplies the exact host-rendered archive and local-delete command", async () => {
-    const repo = await world("checks: []\n")
-    const git = gitIn(repo)
-    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
-    const branch = "task/local-retirement"
-    const issue = "@example/local-retirement"
-    const reason = "finish unsubmitted local work"
-    await git(["checkout", "--quiet", "-b", branch])
-    writeFileSync(join(repo, "local.txt"), "retain through origin custody\n")
-    await git(["add", "local.txt"])
-    await git(["commit", "--quiet", "-m", "local work"])
-    const tip = (await git(["rev-parse", "HEAD"])).trim()
-    await git(["checkout", "--quiet", "main"])
-    const out = capture(repo)
-    let recipe: string | undefined
-    const entry = fileURLToPath(new URL("../../../bin/yrd", import.meta.url))
-    out.io.formatYrdCommand = (argv, cwd) => {
-      recipe = "cd " + shellQuote(cwd) + " && " + [process.execPath, entry, ...argv].map(shellQuote).join(" ")
-      return recipe
-    }
-    expect(
-      await runYrdProcess(
-        [
-          "bun",
-          "yrd",
-          "drop",
-          branch,
-          "--local",
-          "--tip",
-          tip,
-          "--issue",
-          issue,
-          "--queue",
-          "main",
-          "--submitter",
-          "fixture",
-          "--reason",
-          reason,
-          "--dry-run",
-          "--json",
-        ],
-        out.io,
-      ),
-    ).toBe(2)
-    expect(out.stderr()).toContain("--local has no preview")
-    expect(out.stderr()).toContain("writes the event that keeps the tip at origin")
-    expect(out.stderr()).toContain("deletes the local branch")
-    expect(out.stderr()).not.toContain("require drop --issue")
-    if (recipe === undefined) throw new Error("refusal did not use the host renderer")
-    expect(out.stderr()).toContain(recipe)
-    expect(recipe).not.toContain("--dry-run")
-    expect(recipe).toContain(["--reason", reason].map(shellQuote).join(" "))
-    expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(tip)
-    const applied = spawnSync("/bin/sh", ["-c", recipe], {
-      cwd: repo,
-      encoding: "utf8",
-      timeout: 30_000,
-      maxBuffer: 1024 * 1024,
-    })
-    expect(applied.status, applied.stderr).toBe(0)
-    const report = JSON.parse(applied.stdout) as { removed: { branch: string; archiveRef?: string }[] }
-    expect(report.removed).toEqual([expect.objectContaining({ branch })])
-    const row = report.removed[0]
-    if (row === undefined) throw new Error("copied command removed no branch")
-    expect(row.archiveRef).toBeUndefined()
-    expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/" + branch])).trim()).toBe("")
-    const history = (await readBranchHistory(createEventStore(repo, "origin", git.selection), "main", branch)).history
-    expect(history?.events.at(-1)?.links).toContain(tip)
-    expect(history?.state.issue).toBe(issue)
-    expect(history?.events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ content: reason, props: expect.arrayContaining([["By", "fixture"]]) }),
-      ]),
-    )
-  }, 60_000)
+  it.each(["root", "component"])(
+    "a local preview refusal supplies the exact host-rendered %s local-delete command",
+    async (mode) => {
+      const root = await world("checks: []\n")
+      const rootGit = gitIn(root)
+      let repo = root
+      if (mode === "component") {
+        const seed = await world()
+        await rootGit([
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          "--quiet",
+          join(dirname(seed), "remote.git"),
+          "child with spaces",
+        ])
+        await rootGit(["commit", "--quiet", "-am", "register child"])
+        await rootGit(["push", "--quiet", "origin", "main"])
+        repo = join(root, "child with spaces")
+      }
+      const git = gitIn(repo)
+      await createQueue(root, "main", (await rootGit(["rev-parse", "HEAD"])).trim(), new Date())
+      const branch = "task/local-retirement"
+      const issue = "@example/local-retirement"
+      const reason = "finish unsubmitted local work"
+      await git(["checkout", "--quiet", "-b", branch])
+      writeFileSync(join(repo, "local.txt"), "retain through origin custody\n")
+      await git(["add", "local.txt"])
+      await git([
+        "-c",
+        "user.name=fixture",
+        "-c",
+        "user.email=fixture@test.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        `local work\n\nRefs: ${issue}`,
+      ])
+      const tip = (await git(["rev-parse", "HEAD"])).trim()
+      await git(["checkout", "--quiet", "main"])
+      const out = capture(root)
+      let recipe: string | undefined
+      const entry = fileURLToPath(new URL("../../../bin/yrd", import.meta.url))
+      out.io.formatYrdCommand = (argv, cwd) => {
+        recipe = "cd " + shellQuote(cwd) + " && " + [process.execPath, entry, ...argv].map(shellQuote).join(" ")
+        return recipe
+      }
+      expect(
+        await runYrdProcess(
+          [
+            "bun",
+            "yrd",
+            "drop",
+            branch,
+            "--local",
+            "--tip",
+            tip,
+            "--issue",
+            issue,
+            "--queue",
+            "main",
+            "--submitter",
+            "fixture",
+            "--reason",
+            reason,
+            "--dry-run",
+            ...(mode === "component" ? ["--discard"] : []),
+            "--json",
+          ],
+          out.io,
+        ),
+      ).toBe(2)
+      expect(out.stderr()).toContain(
+        mode === "component" ? "--local --discard has no preview" : "--local has no preview",
+      )
+      expect(out.stderr()).toContain(
+        mode === "component" ? "keeps no Git object custody" : "writes the event that keeps the tip at origin",
+      )
+      expect(out.stderr()).not.toContain("require drop --issue")
+      if (recipe === undefined) throw new Error("refusal did not use the host renderer")
+      expect(out.stderr()).toContain(recipe)
+      expect(recipe).toContain(`cd ${shellQuote(repo)} &&`)
+      expect(recipe).not.toContain("--dry-run")
+      expect(recipe).toContain(["--reason", reason].map(shellQuote).join(" "))
+      expect((await git(["rev-parse", "refs/heads/" + branch])).trim()).toBe(tip)
+      const applied = spawnSync("/bin/sh", ["-c", recipe], {
+        cwd: repo,
+        encoding: "utf8",
+        timeout: 30_000,
+        maxBuffer: 1024 * 1024,
+      })
+      expect(applied.status, applied.stderr).toBe(0)
+      const report = JSON.parse(applied.stdout) as { removed: { branch: string; archiveRef?: string }[] }
+      expect(report.removed).toEqual([expect.objectContaining({ branch })])
+      const row = report.removed[0]
+      if (row === undefined) throw new Error("copied command removed no branch")
+      expect(row.archiveRef).toBeUndefined()
+      expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/" + branch])).trim()).toBe("")
+      if (mode === "component") {
+        const logs = join(await workdirOf(rootGit), "logs")
+        const rows = readdirSync(logs)
+          .filter((name) => name.endsWith(".jsonl"))
+          .flatMap((name) => readRunLog(logs, name.slice(0, -6)))
+        expect(rows).toContainEqual(
+          expect.objectContaining({ intent: "local-discard", repo, branch, head: tip, actor: "fixture", issue }),
+        )
+        expect(await git(["for-each-ref", "refs/yrd/", "refs/archive/"])).toBe("")
+        return
+      }
+      const history = (await readBranchHistory(createEventStore(repo, "origin", git.selection), "main", branch)).history
+      expect(history?.events.at(-1)?.links).toContain(tip)
+      expect(history?.state.issue).toBe(issue)
+      expect(history?.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ content: reason, props: expect.arrayContaining([["By", "fixture"]]) }),
+        ]),
+      )
+    },
+    60_000,
+  )
 
   /** @failure An inapplicable --discard silently selects ordinary drop, origin retirement, issue cleanup, or checkout release.
    * @level l1 @consumer A caller expressing explicit local component-loss intent
