@@ -1199,12 +1199,12 @@ export async function closeEnvironment(
     ]
     if (options.json === true) {
       io.stdout(
-        `${JSON.stringify({ kept: path, class: "private checkout", submodule: privatePath, checkout, store, command: verify })}\n`,
+        `${JSON.stringify({ kept: path, class: "private checkout", owner: "@chief", submodule: privatePath, checkout, store, command: verify })}\n`,
       )
     }
     throw new PrivateCheckoutRefusalError(
       `environment ${path} cannot close with private submodule ${privatePath}: private checkout, custody not proven — ${stage}. ` +
-        `Retire it by operator steps: ${steps.join("; ")}. This tool reads, copies, hashes and renames nothing in the store.`,
+        `Retire it by operator steps: ${steps.join("; ")}. @chief owns this custody call. This tool reads, copies, hashes and renames nothing in the store.`,
       { submodule: privatePath, checkout, store, command: verify },
     )
   }
