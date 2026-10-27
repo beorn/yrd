@@ -3886,27 +3886,30 @@ describe("a queue is the selected origin branch carrying config", () => {
         removed: { branch: string; head: string; archiveRef?: string }[]
         kept: { branch: string; head: string; reason: string; detail: string }[]
       }
-      if (
-        mode === "owner" ||
-        mode === "queue owner" ||
-        mode === "issue legacy archive" ||
-        (sibling && mode !== "merged")
-      ) {
+      if (mode === "owner" || mode === "queue owner" || mode === "issue legacy archive" || sibling) {
         expect(code, output.stderr()).toBe(0)
         expect(report.removed).toEqual([expect.objectContaining({ branch, head: tip })])
         expect(report.removed[0]).not.toHaveProperty("archiveRef")
         expect((await git(["for-each-ref", `refs/heads/${branch}`])).trim()).toBe("")
         const after = (await readBranchHistory(location, "main", branch)).history
         const ending = after?.events.at(-1)
-        // The dropped event keeps the recorded commit and the advanced head, and records what main lacks.
-        expect(ending?.type).toBe("cancelled")
-        expect(ending?.links).toEqual(expect.arrayContaining([recorded, tip]))
-        expect(ending?.content).toBe("superseded by 30704")
-        expect(after?.state).toMatchObject({
-          status: "cancelled",
-          reason: "dropped",
-          advancedDrop: { tip, uniqueCommits: sibling ? 1 : 2, target: { ref: "refs/heads/main", tip: main } },
-        })
+        if (mode === "merged") {
+          // A merged chain keeps its facts: a retained event keeps the advanced tip, the merge keeps recorded (30999).
+          expect(ending?.type).toBe("retained")
+          expect(ending?.links).toContain(tip)
+          expect(after?.state).toMatchObject({ status: "merged", ending: before.history!.state.ending })
+          expect(after?.state).not.toHaveProperty("advancedDrop")
+        } else {
+          // The dropped event keeps the recorded commit and the advanced head, and records what main lacks.
+          expect(ending?.type).toBe("cancelled")
+          expect(ending?.links).toEqual(expect.arrayContaining([recorded, tip]))
+          expect(ending?.content).toBe("superseded by 30704")
+          expect(after?.state).toMatchObject({
+            status: "cancelled",
+            reason: "dropped",
+            advancedDrop: { tip, uniqueCommits: sibling ? 1 : 2, target: { ref: "refs/heads/main", tip: main } },
+          })
+        }
       } else {
         expect(code, output.stderr()).toBe(issueMode ? 0 : 1)
         expect(report.removed).toEqual([])
@@ -3928,6 +3931,139 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect((await git(["rev-parse", `refs/archive/2026-10-22/fixture/${branch}`])).trim()).toBe(tip)
       } else expect(await git(["for-each-ref", "refs/archive/"])).toBe("")
       expect(await git(["ls-remote", "origin", "refs/archive/*"])).toBe("")
+    },
+  )
+
+  /** @failure 30999: a change MERGED, then its same-name branch advanced with commits the owner rejected; the owner's
+   * `--reason` drop accepted only a cancelled change, so Yrd kept the branch and told the owner to submit work it had
+   * rejected. The same #30683 route now drops it: a retained event keeps the advanced tip, the merged ending keeps
+   * the recorded commit, and origin holding the same tip goes in the same command by that event's authority
+   * (@cto ruling 48b89203, option A).
+   * @level l3 @consumer owners and @chief retiring rejected work left on a merged change's branch
+   */
+  it.each(["owner", "origin behind", "no reason", "third seat", "held"] as const)(
+    "an advanced branch of a merged change drops only for its owner with a reason (30999): %s",
+    async (mode) => {
+      const repo = await world("{}\n")
+      const git = gitIn(repo)
+      await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+      const branch = "task/30999-advanced"
+      await git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(repo, "work.txt"), "merged\n")
+      await git(["add", "work.txt"])
+      await git(["commit", "--quiet", "-m", "merged work"])
+      const recorded = (await git(["rev-parse", "HEAD"])).trim()
+      const submitted = capture(repo)
+      expect(
+        await runYrdProcess(["bun", "yrd", "submit", "--submitter", "@dev/7", "--json"], submitted.io),
+        submitted.stderr(),
+      ).toBe(0)
+      // The change merges: main fast-forwards to the recorded tip and the chain ends merged.
+      await git(["checkout", "--quiet", "main"])
+      await git(["merge", "--quiet", "--ff-only", recorded])
+      await git(["push", "--quiet", "origin", "main"])
+      const location = createEventStore(repo, "origin", git.selection)
+      const opened = (await readBranchHistory(location, "main", branch)).history!
+      const chain = await openEvents({ ...location, ref: changesRef("main", branch), writer: "fixture" })
+      await chain.append(
+        [
+          changeInput("merged", {
+            queueTip: opened.events[0]!.props.find(([key]) => key === "Queue")![1],
+            at: new Date(),
+            commit: recorded,
+            by: "@dev/7",
+          }),
+        ],
+        { expect: opened.state.tip! },
+      )
+      // Then the same-name branch advances with one commit the owner rejects, published to origin too unless behind.
+      await git(["checkout", "--quiet", branch])
+      writeFileSync(join(repo, "work.txt"), "rejected\n")
+      await git(["commit", "--quiet", "-am", "rejected work after the merge"])
+      if (mode === "held") await git(["checkout", "--quiet", "--detach", "main"])
+      const advanced = (await git(["rev-parse", "HEAD"])).trim()
+      if (mode !== "origin behind") await git(["push", "--quiet", "origin", `${advanced}:refs/heads/${branch}`])
+      const originBefore = (await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()
+      // Held: the branch moved back onto main's tip, so main already holds everything it points at.
+      if (mode === "held") await git(["update-ref", `refs/heads/${branch}`, recorded])
+      await git(["checkout", "--quiet", "main"])
+      const tip = (await git(["rev-parse", `refs/heads/${branch}`])).trim()
+      const main = (await git(["rev-parse", "main"])).trim()
+      const before = await readBranchHistory(location, "main", branch)
+      const by = mode === "third seat" ? "@dev/8" : "@dev/7"
+      const reason = mode === "no reason" ? [] : ["--reason", "rejected after merge; chief value call"]
+      const output = capture(repo)
+      // The issue sweep is the route the 29936 specimen took; `--local` keeps its merged-descendant abandonment.
+      const issue = "@example/30999-advanced"
+      output.io.branchIssue = () => issue
+      const code = await runYrdProcess(
+        ["bun", "yrd", "drop", "--issue", issue, ...reason, "--submitter", by, "--json"],
+        output.io,
+      )
+      const report = JSON.parse(output.stdout()) as {
+        removed: { branch: string; head: string; detail?: string }[]
+        kept: { branch: string; head: string; reason: string; detail: string }[]
+      }
+      if (mode === "owner" || mode === "origin behind") {
+        expect(code, output.stderr() + output.stdout()).toBe(0)
+        expect(report.removed, output.stdout()).toEqual([expect.objectContaining({ branch, head: tip })])
+        expect((await git(["for-each-ref", `refs/heads/${branch}`])).trim()).toBe("")
+        const after = (await readBranchHistory(location, "main", branch)).history
+        // A retained event keeps the advanced tip and the reason; the merge's facts are unchanged.
+        const retained = after?.events.at(-1)
+        expect(retained?.type).toBe("retained")
+        expect(retained?.links).toContain(tip)
+        expect(retained?.props).toContainEqual(["Reason", "rejected after merge; chief value call"])
+        expect(after?.state).toMatchObject({ status: "merged", ending: before.history!.state.ending })
+        expect(after?.state).not.toHaveProperty("advancedDrop")
+        const detail = report.removed[0]!.detail ?? ""
+        if (mode === "owner") {
+          // Origin held the same tip, so it goes in the same command, by the retained event's authority.
+          expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe("")
+          expect(detail).toContain(`retired by event ${retained!.id}`)
+        } else {
+          // Origin holds another head: it stays, and the row names both heads and the explicit cure.
+          expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(originBefore)
+          expect(originBefore).not.toContain(tip)
+          expect(detail).toContain(`${branch}@${originBefore.split("\t")[0]} remains`)
+          expect(detail).toContain(`'--retire' '--tip' '${tip}'`)
+        }
+        const logs = join(await workdirOf(git, { cwd: repo }), "logs")
+        const rows = readdirSync(logs)
+          .filter((name) => name.endsWith(".jsonl"))
+          .flatMap((name) => readRunLog(logs, name.slice(0, -6)))
+          .map((row) => JSON.stringify(row))
+        expect(
+          rows.some((row) =>
+            row.includes(`past merged ${recorded}; 1 unique commits relative to refs/heads/main@${main}`),
+          ),
+          rows.join("\n"),
+        ).toBe(true)
+      } else if (mode === "held") {
+        // Moved back onto the merged tip, main holds everything: an ordinary merged retirement, no advanced record.
+        expect(code, output.stderr()).toBe(0)
+        expect(report.removed).toEqual([expect.objectContaining({ branch, head: recorded })])
+        expect((await git(["for-each-ref", `refs/heads/${branch}`])).trim()).toBe("")
+        expect((await readBranchHistory(location, "main", branch)).history?.state).not.toHaveProperty("advancedDrop")
+      } else {
+        expect(code, output.stderr()).toBe(0)
+        expect(report.removed).toEqual([])
+        expect(report.kept).toEqual([expect.objectContaining({ branch, head: tip, reason: "advanced" })])
+        const detail = report.kept[0]!.detail
+        if (mode === "no reason") expect(detail).toContain("--reason <why>")
+        // A third seat gets today's refusal, word for word.
+        if (mode === "third seat") {
+          expect(detail).toBe(
+            `current tip ${tip} differs from recorded change tip ${recorded}; it holds commits origin/main lacks: submit them, and drop the branch after they land`,
+          )
+        }
+        expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tip)
+        expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(
+          `${advanced}\trefs/heads/${branch}`,
+        )
+        expect((await readBranchHistory(location, "main", branch)).history).toEqual(before.history)
+      }
+      expect(await git(["for-each-ref", "refs/archive/"])).toBe("")
     },
   )
 

@@ -664,7 +664,8 @@ export async function retireIssueBranches(
           }
           // A landed head keeps its report label; cancelled work is kept by its dropped event.
           const label = landing === undefined ? "closed" : "landed"
-          if (landing !== undefined || change?.status === "cancelled" || mergedOnTarget) {
+          // An owner's unlocked advanced drop is kept by its own dropped event, merged change or not (30999).
+          if (landing !== undefined || change?.status === "cancelled" || mergedOnTarget || advanced !== undefined) {
             disposition = {
               kind: "closed",
               target: custody.target,
@@ -698,12 +699,60 @@ export async function retireIssueBranches(
                 (await readBranchProtections(io, { repo, branch, tip: head, issue })).protections,
               disposition,
             })
-            const custodyDetail = origin
-              ? `origin ${candidate.remote}#${branch}@${candidate.originHead} remains; this custody path selects only the local name${result.detail === undefined ? "" : `; ${result.detail}`}` +
-                (needsExplicitRetention
-                  ? `; retire origin explicitly with ${formatYrdCommand(io, ["drop", branch, "--retire", "--tip", head, "--reason", "<why>", "--submitter", request.by], repo)}; the retained event keeps the exact head`
-                  : "")
-              : result.detail
+            const retireOrigin = formatYrdCommand(
+              io,
+              ["drop", branch, "--retire", "--tip", head, "--reason", "<why>", "--submitter", request.by],
+              repo,
+            )
+            // Origin holding the same merged advanced tip goes in this command, through drop() and the retained
+            // event that now keeps the tip; a differing origin head is left with the explicit cure (30999).
+            let originEnding: Awaited<ReturnType<typeof drop>> | undefined
+            if (
+              origin &&
+              advanced?.ended === "merged" &&
+              result.outcome === "removed" &&
+              candidate.originHead === head
+            ) {
+              try {
+                originEnding = await drop(eventStore, {
+                  queue: config.target.branch,
+                  branch,
+                  by: request.by,
+                  retire: { tip: head },
+                  note: request.reason ?? label,
+                  protections: async () =>
+                    (await readBranchProtections(io, { repo, branch, tip: head, issue })).protections,
+                })
+              } catch (cause) {
+                throw new Error(
+                  `${branch}@${head}: local branch removed, but origin ${candidate.remote}#${branch} was not retired: ` +
+                    `${cause instanceof Error ? cause.message : String(cause)}; retire it with ${retireOrigin}`,
+                )
+              }
+            }
+            // No event records what a merged chain's advanced tip held beyond main, so the run log does (30999).
+            if (advanced?.ended === "merged" && result.outcome === "removed") {
+              log.write({
+                kind: "observation",
+                branch,
+                scope: "branch-retirement",
+                reason:
+                  `${repo}: dropped ${branch}@${head} past merged ${advanced.recorded}; ${advanced.uniqueCommits} unique ` +
+                  `commits relative to ${advanced.target.ref}@${advanced.target.tip}; ` +
+                  (originEnding === undefined
+                    ? `origin ${candidate.remote}#${branch}@${candidate.originHead ?? "absent"} kept`
+                    : `origin retired, kept by event ${originEnding.event}`),
+              })
+            }
+            const custodyDetail =
+              originEnding !== undefined
+                ? `origin ${candidate.remote}#${branch}@${head} retired by event ${originEnding.event}${result.detail === undefined ? "" : `; ${result.detail}`}`
+                : origin
+                  ? `origin ${candidate.remote}#${branch}@${candidate.originHead} remains; this custody path selects only the local name${result.detail === undefined ? "" : `; ${result.detail}`}` +
+                    (needsExplicitRetention
+                      ? `; retire origin explicitly with ${retireOrigin}; the retained event keeps the exact head`
+                      : "")
+                  : result.detail
             const detail =
               result.outcome === "removed" || result.outcome === "eligible"
                 ? `tip ${head}; ${uniqueCommits} unique commits relative to ${targetLabel}@${custody.target}${custodyDetail === undefined ? "" : `; ${custodyDetail}`}`
@@ -2402,8 +2451,9 @@ export async function advancedCure(
   )
 }
 
-/** What the owner's advanced drop records beside the head it keeps: the recorded commit, the count and the target. */
-export type AdvancedRecord = Readonly<{ recorded: string } & Omit<AdvancedDrop, "tip">>
+/** What the owner's advanced drop records beside the head it keeps: the recorded commit, the ending it follows, the
+ * count and the target. */
+export type AdvancedRecord = Readonly<{ recorded: string; ended: "cancelled" | "merged" } & Omit<AdvancedDrop, "tip">>
 
 /** The advanced-drop check and ordinary drop receipts count against the same observed target. */
 export async function dropCommitCount(git: Git, head: string, target: string): Promise<number> {
@@ -2468,7 +2518,11 @@ export async function advancedDrop(
     ...yrdQueueRunnerDeclarations.filter((row) => row.queue.base === input.queue).map((row) => row.owner),
   ]
   if (isOpen(state.status)) return { detail: "; change is still open; withdraw it before dropping its advanced tip" }
-  if (held || state.status !== "cancelled" || state.ending?.kind !== "cancelled" || !owners.includes(input.by)) {
+  // A merged change's branch that advanced with rejected work drops the same way as a cancelled one's (30999).
+  const ended =
+    (state.status === "cancelled" && state.ending?.kind === "cancelled") ||
+    (state.status === "merged" && state.ending?.kind === "merged")
+  if (held || !ended || !owners.includes(input.by)) {
     return refusal()
   }
   if (input.reason === undefined || input.reason.trim() === "") {
@@ -2488,6 +2542,11 @@ export async function advancedDrop(
     return { detail: `; ${input.targetLabel} does not hold ${input.head}, yet counts no commit it lacks` }
   }
   return {
-    advanced: { recorded, uniqueCommits, target: { ref: `refs/heads/${input.queue}`, tip: input.target } },
+    advanced: {
+      recorded,
+      ended: state.status === "merged" ? "merged" : "cancelled",
+      uniqueCommits,
+      target: { ref: `refs/heads/${input.queue}`, tip: input.target },
+    },
   }
 }
