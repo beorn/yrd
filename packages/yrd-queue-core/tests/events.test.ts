@@ -2644,11 +2644,12 @@ describe("the queue-format boundary", () => {
     expect(await chain.head()).toBe(failed.head)
   })
 
-  /** @failure A caller bypassing the CLI can advance-drop a failed or merged change (30683 V1).
+  /** @failure A caller bypassing the CLI can advance-drop a failed change (30683 V1), or an advanced drop past a
+   *   merged ending rewrites the merge instead of keeping its tip in a retained event (30999, @cto 48b89203).
    * @level l2 @consumer Core drop callers providing advanced-drop metadata
    * The ordinary ended-drop test supplies no advanced metadata, so cannot exercise this unlock.
    */
-  it.each(["failed", "merged"] as const)("refuses an advanced owner drop past a %s ending", async (ending) => {
+  it.each(["failed", "merged"] as const)("an advanced owner drop past a %s ending", async (ending) => {
     const root = mkdtempSync(join(tmpdir(), "yrd-event-drop-ending-"))
     const origin = mkdtempSync(join(tmpdir(), "yrd-event-drop-ending-origin-"))
     const git = gitIn(root)
@@ -2680,20 +2681,29 @@ describe("the queue-format boundary", () => {
       ],
       { expect: null },
     )
-    await expect(
-      drop(location, {
-        queue: "lab",
-        branch,
-        by: "@dev/2",
-        note: "superseded",
-        local: { tip: advanced, advanced: { uniqueCommits: 1, target: { ref: "refs/heads/lab", tip: recorded } } },
-      }),
-    ).rejects.toThrow(/advanced drop needs a cancelled/)
+    const dropping = drop(location, {
+      queue: "lab",
+      branch,
+      by: "@dev/2",
+      note: "superseded",
+      local: { tip: advanced, advanced: { uniqueCommits: 1, target: { ref: "refs/heads/lab", tip: recorded } } },
+    })
+    if (ending === "failed") {
+      await expect(dropping).rejects.toThrow(/advanced drop needs a cancelled or merged change/)
+      expect(await chain.head()).toBe(before.head)
+    } else {
+      // The merge stays the ending; a retained event keeps the advanced tip and records the reason.
+      const dropped = await dropping
+      expect((await chain.events()).at(-1)).toMatchObject({ id: dropped.event, type: "retained", links: [advanced] })
+      const after = (await readBranchHistory(location, "lab", branch)).history?.state
+      expect(after).toMatchObject({ status: "merged", ending: { kind: "merged" } })
+      expect(after).not.toHaveProperty("advancedDrop")
+    }
+    // A local retirement leaves both refs to its caller.
     expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(advanced)
     expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(
       `${advanced}\trefs/heads/${branch}`,
     )
-    expect(await chain.head()).toBe(before.head)
   })
 
   // @failure delete-only drop loses a branch's newer, unkept commit (ADR-0018 / 25658).
