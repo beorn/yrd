@@ -619,6 +619,184 @@ describe("yrd queue up, the service", () => {
    * @consumer the author whose fresh recorded job must close after service restart
    * @testonly none
    */
+  /**
+   * @failure Ordinary startup repeats history/protection work for checked-out merged roots, or a KEEP snapshot
+   *          hides a released/advanced root or an unavailable native inventory (#29662).
+   * @level l2
+   * @consumer Yrd startup issue updates and exact-head author retirement
+   * @testonly none
+   */
+  it("startup reuses fresh native KEEP without hiding release, advance or inventory failure", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    const target = (await w.git(["rev-parse", "HEAD"])).trim()
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const queueTip = (await readEventQueue(store, "main")).tip
+    if (queueTip === null) throw new Error("fixture queue has no tip")
+    const authors: { branch: string; path: string }[] = []
+    // Same bounded population as the live 105-KEEP occurrence; native registrations and event histories are real.
+    for (let index = 0; index < 105; index++) {
+      const branch = `task/native-keep-${String(index).padStart(3, "0")}`
+      const path = join(w.workdir, "environments", basename(branch))
+      await w.git(["worktree", "add", "--quiet", "-b", branch, path, target])
+      await w.git(["worktree", "lock", "--reason", "fixture explicit KEEP", path])
+      const events = await openEvents({ ...store, ref: changesRef("main", branch), writer: "fixture" })
+      const at = new Date()
+      await events.append(
+        [
+          changeInput("opened", { queueTip, at, commit: target, by: "fixture" }),
+          changeInput("merged", { queueTip, at, commit: target }),
+        ],
+        { expect: null },
+      )
+      authors.push({ branch, path })
+    }
+    const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue({
+      complete: true,
+      unreadable: [],
+      mechanism: "proc",
+      rows: [],
+    })
+    const realReadStatus = queueCore.readStatus
+    const realInventory = queueCore.registeredWorktrees
+    let afterEnvironment = false
+    let fault: "unavailable" | "incomplete" | undefined
+    let armedFault = false
+    let liveRead = false
+    const realAppend = fs.appendFileSync
+    const writes = vi.spyOn(fs, "appendFileSync").mockImplementation((...args) => {
+      realAppend(...args)
+      if (!String(args[0]).startsWith(w.workdir) || typeof args[1] !== "string") return
+      for (const line of args[1].split("\n").filter((line) => line.startsWith("{"))) {
+        const row = JSON.parse(line) as Record<string, unknown>
+        if (row.scope === "environment-cleanup" && typeof row.remaining === "number") {
+          afterEnvironment = true
+          armedFault = fault !== undefined
+        }
+      }
+    })
+    const historyReads: string[] = []
+    const reads = vi.spyOn(queueCore, "readStatus").mockImplementation(async (...args) => {
+      if (afterEnvironment && authors.some(({ branch }) => branch === args[2])) historyReads.push(args[2])
+      return realReadStatus(...args)
+    })
+    const inventory = vi.spyOn(queueCore, "registeredWorktrees").mockImplementation(async (...args) => {
+      const rows = await realInventory(...args)
+      if (!afterEnvironment || !armedFault) return rows
+      armedFault = false
+      if (fault === "unavailable") throw new Error("fixture native inventory unavailable")
+      return rows.map((row) => (row.branch === authors[3]!.branch ? { ...row, head: undefined } : row))
+    })
+    const journal = () => {
+      const dir = join(w.workdir, "logs", "post-merge")
+      return (existsSync(dir) ? readdirSync(dir) : [])
+        .filter((name) => name.endsWith(".jsonl"))
+        .sort()
+        .flatMap((name) => readRunLog(dir, name.slice(0, -".jsonl".length)))
+    }
+    const release = async (index: number) => {
+      await w.git(["worktree", "unlock", authors[index]!.path])
+      await w.git(["worktree", "remove", authors[index]!.path])
+    }
+    const startup = async (label: string, mutate?: () => Promise<void>) => {
+      afterEnvironment = false
+      liveRead = false
+      armedFault = false
+      historyReads.length = 0
+      const prior = journal().length
+      const expected = (await environmentInventory(w.work, w.git, w.workdir)).rows.flatMap((row) =>
+        row.branch === undefined ? [] : [row.branch],
+      )
+      const stop = new AbortController()
+      const run = capture(w.work)
+      run.io.liveEnvironmentUse = async () => {
+        if (!liveRead) {
+          liveRead = true
+          await mutate?.()
+        }
+        return []
+      }
+      try {
+        expect(
+          await coreQueueCommand(
+            w.work,
+            run.io,
+            {
+              command: "up",
+              intervalSeconds: 0,
+              stop: stop.signal,
+              afterRound: async () => {
+                await vi.waitFor(
+                  () => {
+                    const completed = new Set(
+                      journal()
+                        .slice(prior)
+                        .filter((row) => row.kind === "local-branch-retirement")
+                        .map((row) => row.branch),
+                    )
+                    expect(
+                      expected.every((branch) => completed.has(branch)),
+                      `${label}: every root is accounted for`,
+                    ).toBe(true)
+                  },
+                  { timeout: 120_000 },
+                )
+                stop.abort()
+              },
+            },
+            { json: true, workdir: w.workdir },
+          ),
+          run.stderr(),
+        ).toBe(0)
+      } finally {
+        stop.abort()
+      }
+      return { rows: journal().slice(prior), stderr: run.stderr() }
+    }
+    try {
+      await startup("first-105")
+      expect(historyReads, "registered KEEP roots require no repeated post-environment history walks").toEqual([])
+      await startup("restart-105")
+      expect(historyReads, "restart derives fresh KEEP without replaying decisions").toEqual([])
+      const advanced = (await w.git(["commit-tree", `${target}^{tree}`, "-p", target], "advanced author\n")).trim()
+      const released = await startup("release-and-advance", async () => {
+        await release(0)
+        await release(1)
+        await w.git(["update-ref", `refs/heads/${authors[2]!.branch}`, advanced, target])
+      })
+      expect(new Set(historyReads)).toEqual(new Set(authors.slice(0, 2).map(({ branch }) => branch)))
+      for (const { branch } of authors.slice(0, 2)) {
+        expect(released.rows).toContainEqual(expect.objectContaining({ branch, outcome: "removed" }))
+        expect((await w.git(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).trim()).toBe("")
+      }
+      expect((await w.git(["rev-parse", `refs/heads/${authors[2]!.branch}`])).trim()).toBe(advanced)
+      fault = "unavailable"
+      const unavailable = await startup("unavailable-inventory", () => release(2))
+      expect(unavailable.stderr).toContain("fixture native inventory unavailable")
+      expect(
+        unavailable.stderr.split("\n").filter((line) => line.includes("running full root retirement checks")),
+      ).toHaveLength(1)
+      expect(new Set(historyReads)).toEqual(new Set(authors.slice(2).map(({ branch }) => branch)))
+      expect(unavailable.rows).toContainEqual(expect.objectContaining({ branch: authors[2]!.branch, outcome: "kept" }))
+      expect((await w.git(["rev-parse", `refs/heads/${authors[2]!.branch}`])).trim()).toBe(advanced)
+      fault = "incomplete"
+      const incomplete = await startup("incomplete-inventory")
+      expect(incomplete.stderr).toContain("native inventory has no exact HEAD")
+      expect(
+        incomplete.stderr.split("\n").filter((line) => line.includes("running full root retirement checks")),
+      ).toHaveLength(1)
+      expect(new Set(historyReads)).toEqual(new Set(authors.slice(3).map(({ branch }) => branch)))
+      for (const { branch } of authors.slice(3)) {
+        expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(target)
+      }
+    } finally {
+      reads.mockRestore()
+      inventory.mockRestore()
+      writes.mockRestore()
+      census.mockRestore()
+    }
+  }, 300_000)
+
   it("startup recovers terminal cleanup for a fresh recorded job merged before interruption", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])

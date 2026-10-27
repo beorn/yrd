@@ -1252,27 +1252,32 @@ export async function coreQueueCommand(
       })
     }
     if (outcome.merged.length > 0) {
-      let stopInventoryRead = false
-      let rowHoldingBranches: Set<string> | undefined
+      // Environment cleanup has finished. Native registration alone already requires KEEP; rediscover it once
+      // per cleanup, before repeating each branch's terminal history and host protection reads (#29662).
+      // This snapshot can only keep a ref. Every other root still takes the full fresh retirement path below.
+      let rowHoldingBranches: Map<string, { path: string; head: string }> | undefined
+      try {
+        const inventory = await environmentInventory(authorRepo, authorGit, workdir)
+        const held = new Map<string, { path: string; head: string }>()
+        for (const row of inventory.rows) {
+          if (row.head === undefined || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(row.head)) {
+            throw new Error(`native inventory has no exact HEAD for ${row.path}`)
+          }
+          if (row.branch !== undefined) held.set(row.branch, { path: row.path, head: row.head })
+        }
+        rowHoldingBranches = held
+      } catch (error) {
+        const reason = `root retirement native inventory unavailable in ${authorRepo} (workdir ${workdir}): ${String(error)}; running full root retirement checks`
+        retirementLog.write({ kind: "warning", scope: "local-branch-retirement", reason })
+        io.stderr(`yrd: ${reason}\n`)
+      }
       const skippedRoots: string[] = []
       try {
         for (const branch of outcome.merged) {
           try {
-            if (postMergeSignal?.aborted) {
-              if (!stopInventoryRead) {
-                stopInventoryRead = true
-                try {
-                  const inventory = await environmentInventory(authorRepo, authorGit, workdir)
-                  rowHoldingBranches = new Set(
-                    inventory.rows.flatMap((row) => (row.branch === undefined ? [] : [row.branch])),
-                  )
-                } catch (error) {
-                  const reason = `stop-time environment inventory unavailable in ${authorRepo} (workdir ${workdir}): ${String(error)}; running remaining root retirement checks`
-                  retirementLog.write({ kind: "warning", scope: "local-branch-retirement", reason })
-                  io.stderr(`yrd: ${reason}\n`)
-                }
-              }
-              if (rowHoldingBranches?.has(branch)) {
+            const held = rowHoldingBranches?.get(branch)
+            if (held !== undefined) {
+              if (postMergeSignal?.aborted) {
                 skippedRoots.push(branch)
                 retirementLog.write({
                   kind: "warning",
@@ -1280,8 +1285,21 @@ export async function coreQueueCommand(
                   scope: "local-branch-retirement",
                   reason: "root retirement skipped during shutdown; left to startup catch-up",
                 })
-                continue
+              } else {
+                const detail = `branch is checked out at ${held.path}; branch kept`
+                retirementLog.write({
+                  kind: "local-branch-retirement",
+                  repo: authorRepo,
+                  branch,
+                  head: held.head,
+                  actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
+                  outcome: "kept",
+                  reason: detail,
+                  detail,
+                })
+                io.stderr(`yrd: ${branch}@${held.head} kept: ${detail}\n`)
               }
+              continue
             }
             const change = await readStatus(eventStore, config.target.branch, branch)
             await retireMergedRootAuthor({
