@@ -14,6 +14,7 @@
  */
 
 import { shellQuote } from "git-super/shell-command"
+import { inspectCheckoutGitMetadata } from "git-super"
 import {
   existsSync,
   appendFileSync,
@@ -1022,6 +1023,9 @@ export async function coreQueueCommand(
                 : [
                     `${row.branch}: HEAD detached at ${row.headMove.after.detached} (was ${row.headMove.before.symbolic})`,
                   ],
+            ),
+            ...report.kept.map(
+              (row) => `${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`,
             ),
             ...report.failed.map((row) => `${row.branch}: ${row.reason}`),
           ].join("\n"),
@@ -2176,6 +2180,12 @@ export async function coreQueueCommand(
         }
       } finally {
         log.finish()
+      }
+      if (kept.length > 0) {
+        const { commonDirectory } = await inspectCheckoutGitMetadata(authorRepo)
+        for (const row of kept) {
+          row.detail = `local ref ${commonDirectory}#refs/heads/${row.branch}: ${row.detail ?? row.reason}`
+        }
       }
       const report = {
         branch: request.branch,

@@ -1044,12 +1044,17 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
     if (merged || request.discard === true) headMove = await detachStoreHeadAtTip()
     const result = await retireLocalBranch({ ...retirement, protections, worktreeLess })
     if (result.outcome !== "removed") await restoreStoreHead()
+    let detail = result.detail
+    if (result.outcome === "kept") {
+      const store = worktreeLess ? realpathSync(repo) : (await inspectCheckoutGitMetadata(repo)).commonDirectory
+      detail = `local ref ${store}#refs/heads/${request.branch}: ${detail ?? result.reason}`
+    }
     const row = {
       branch: request.branch,
       head: observedTip,
       ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
       reason: result.outcome === "failed" ? `${repo}: ${result.reason}` : result.reason,
-      ...(result.detail === undefined ? {} : { detail: result.detail }),
+      ...(detail === undefined ? {} : { detail }),
       ...(retirement.disposition.kind === "discarded" && result.outcome === "removed"
         ? {
             intent: "local-discard" as const,
