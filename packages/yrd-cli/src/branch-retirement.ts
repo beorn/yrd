@@ -45,7 +45,9 @@ import {
   type EventChange,
   type QueueLocation,
   type QueueConfig,
+  type SameIssue,
 } from "@yrd/queue-core"
+import { samenessDetail } from "./issue-sameness.ts"
 import type { LocalBranchProtectionResult, YrdCliIO } from "./types.ts"
 import { originHead, retainedComponentStoreHere } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
@@ -279,6 +281,7 @@ export async function retireIssueBranches(
     targetLabel: string
     command: string
     branchIssue(branch: string, recordedIssue?: string): string | undefined
+    sameIssue: SameIssue
   }>,
 ) {
   const {
@@ -293,6 +296,7 @@ export async function retireIssueBranches(
     mode,
     targetLabel,
     branchIssue,
+    sameIssue,
   } = input
   const issue = request.issue
 
@@ -385,16 +389,25 @@ export async function retireIssueBranches(
       const recordedIssue = reading.histories.get(branch)?.state.issue
       const bound =
         io.branchIssue !== undefined || /^(task|exp)\//u.test(branch) ? branchIssue(branch, recordedIssue) : undefined
+      // Only a would-be mismatch row asks the comparer; unrelated branches never reach the provider (31060).
+      const judged =
+        branch !== targetBranch &&
+        bound !== undefined &&
+        bound !== issue &&
+        recordedIssue !== undefined &&
+        branchIssue(branch) === issue
+          ? await sameIssue(bound, issue)
+          : undefined
       if (branch === targetBranch) counts.target++
-      else if (bound !== issue) {
-        if (bound !== undefined && recordedIssue !== undefined && branchIssue(branch) === issue) {
+      else if (bound !== issue && judged?.same !== true) {
+        if (judged !== undefined && bound !== undefined) {
           mismatches.push({
             repo: repository,
             path,
             branch,
             head,
             reason: "mismatch",
-            detail: `recorded issue ${bound} differs from reviewed ${issue}`,
+            detail: `recorded issue ${bound} differs from reviewed ${issue}${samenessDetail(bound, issue, judged)}`,
           })
         } else if (bound === undefined) {
           counts.unnumbered++
@@ -788,6 +801,7 @@ type ComponentRetirementInput = Readonly<{
   env?: NodeJS.ProcessEnv
   io: YrdCliIO
   destination: "local" | "origin"
+  sameIssue: SameIssue
   request: Readonly<{ branch: string; tip: string; by: string; issue?: string; reason?: string; discard?: boolean }>
 }>
 
@@ -930,8 +944,17 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
         }
         if (bindings.size > 1) discardProblem = `conflicting exact-tip issue bindings: ${[...bindings].join(", ")}`
         canonicalIssue = bindings.values().next().value
-        if (discardProblem === undefined && canonicalIssue !== request.issue) {
-          discardProblem = `exact-tip issue binding ${canonicalIssue ?? "absent"} differs from supplied ${request.issue ?? "absent"}`
+        if (discardProblem === undefined) {
+          let differs: string | undefined
+          if (canonicalIssue === undefined || request.issue === undefined) {
+            if (canonicalIssue !== request.issue) differs = ""
+          } else {
+            const judged = await input.sameIssue(canonicalIssue, request.issue)
+            if (!judged.same) differs = samenessDetail(canonicalIssue, request.issue, judged)
+          }
+          if (differs !== undefined) {
+            discardProblem = `exact-tip issue binding ${canonicalIssue ?? "absent"} differs from supplied ${request.issue ?? "absent"}${differs}`
+          }
         }
         const count = (await git(["rev-list", "--count", `${target}..${request.tip}`])).trim()
         if (!/^\d+$/u.test(count) || !Number.isSafeInteger(Number(count))) {
@@ -1069,7 +1092,7 @@ export async function releaseRetainedCheckouts(
     log: LocalBranchRetirement["log"]
     queue: string
     remote: string
-    issueIdentity: (value: string) => string
+    sameIssue: SameIssue
     request: Readonly<{
       branch: string
       tip: string
@@ -1101,7 +1124,6 @@ export async function releaseRetainedCheckouts(
     failed: Row[] = []
   const excluded: { repo: string; path: string; reason: string }[] = []
   const evidence: LocalBranchProtectionResult["evidence"][number][] = []
-  const identity = input.issueIdentity
   const rootRow: Row = {
     repo: input.repo,
     path: "",
@@ -1267,8 +1289,14 @@ export async function releaseRetainedCheckouts(
     const rootMain = await readRemoteCommit(input.git, rootStore.remote, `refs/heads/${input.queue}`)
     if (rootMain === undefined) throw new Error(`published ${input.queue} is absent at ${rootStore.remote}`)
     const rootKept = bound.history?.events.some((event) => event.links.includes(request.tip)) === true
-    if (bound.history?.state.issue !== undefined && identity(bound.history.state.issue) !== identity(request.issue)) {
-      throw new Error(`recorded issue ${bound.history.state.issue} differs from requested ${request.issue}`)
+    const recordedIssue = bound.history?.state.issue
+    if (recordedIssue !== undefined) {
+      const judged = await input.sameIssue(recordedIssue, request.issue)
+      if (!judged.same) {
+        throw new Error(
+          `recorded issue ${recordedIssue} differs from requested ${request.issue}${samenessDetail(recordedIssue, request.issue, judged)}`,
+        )
+      }
     }
     const registrations = await registeredWorktrees(input.git)
     const attachedRoots = registrations.filter((row) => row.head === request.tip && row.branch === request.branch)
@@ -1314,12 +1342,10 @@ export async function releaseRetainedCheckouts(
         recordedIssue = bindings.values().next().value
       }
       const bindingDetail = `${repository}@${commit}: exact-tip issue binding ${recordedIssue ?? "absent"}`
-      const matchesIssue = (name: string) => {
-        const mapped = io.branchIssue?.({ branch: name, recordedIssue })
+      const matchesIssue = async (name: string): Promise<boolean> => {
         // Explicit opaque identity wins even if an embedding host ignores recordedIssue and returns a numeric name.
-        return recordedIssue === undefined
-          ? mapped !== undefined && identity(mapped) === identity(request.issue)
-          : recordedIssue === request.issue
+        const key = recordedIssue ?? io.branchIssue?.({ branch: name, recordedIssue })
+        return key !== undefined && (await input.sameIssue(key, request.issue)).same
       }
       let resumed: string | undefined
       const detachedBranches: string[] = []
@@ -1332,12 +1358,17 @@ export async function releaseRetainedCheckouts(
         } else {
           for (const [ref, tip] of await listRefs("refs/heads/", createLocalEventStore(repository, input.selection))) {
             const name = ref.slice("refs/heads/".length)
-            if (tip === commit && matchesIssue(name)) detachedBranches.push(name)
+            if (tip === commit && (await matchesIssue(name))) detachedBranches.push(name)
           }
           if (detachedBranches.length > 1) {
             throw new Error(`${bindingDetail}; ambiguous detached checkout branches: ${detachedBranches.join(", ")}`)
           }
-          if (detachedBranches.length === 0 && rootKept && rootNamedTip === undefined && matchesIssue(request.branch)) {
+          if (
+            detachedBranches.length === 0 &&
+            rootKept &&
+            rootNamedTip === undefined &&
+            (await matchesIssue(request.branch))
+          ) {
             resumed = request.branch
           }
         }
@@ -1346,7 +1377,7 @@ export async function releaseRetainedCheckouts(
         branch !== undefined ||
         resumed !== undefined ||
         detachedBranches.length > 0 ||
-        (attached?.branch !== undefined && matchesIssue(attached.branch))
+        (attached?.branch !== undefined && (await matchesIssue(attached.branch)))
       ) {
         const selectedBranch = branch ?? attached?.branch ?? resumed ?? detachedBranches[0]
         if (selectedBranch === undefined) throw new Error(`${repository}: selected attached branch became unreadable`)

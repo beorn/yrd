@@ -271,6 +271,8 @@ export type SubmitRequest = Readonly<{
   fetchedQueueRefs?: ReadonlyMap<string, string>
   submitter: string
   issue?: string
+  /** The host's judgment whether two differing raw issue keys name one issue (31060); absent, keys compare exactly. */
+  sameIssue?: SameIssue
   /** Target-owned process policy. The host runs it; core only interprets its verdict. */
   admit?: (issue: string, branch: string, head: string, targetHead: string) => Promise<AdmissionVerdict>
 }>
@@ -287,6 +289,18 @@ export type AdmissionOutcome = Readonly<
   | { kind: "warn"; reason: string }
   | { kind: "cannot-judge"; reason: string }
 >
+
+/**
+ * A host's answer to whether two differing raw issue keys name one issue (31060). Core parses no key; the host
+ * asks its issues provider. `resolved: false` means the provider gave no answer, so the keys compare exactly and
+ * `why` says what it returned.
+ */
+export type IssueSameness = Readonly<
+  { same: true } | { same: false; resolved: true } | { same: false; resolved: false; why: string }
+>
+
+/** Asked only for byte-unequal keys. */
+export type SameIssue = (a: string, b: string) => Promise<IssueSameness>
 
 export type IssueResolution = Readonly<{
   issue: string
@@ -852,7 +866,7 @@ async function admitSubmitAtHead(
       `${request.branch} at ${head} has no common base with ${targetName(request.target)}; found no merge base, expected ${targetHead}. Start a change from that target; ${bound}`,
     )
   }
-  const issue = await issueOf(git, request.branch, head, targetHead, request.issue)
+  const issue = await issueOf(git, request.branch, head, targetHead, request.issue, request.sameIssue)
   // 27147: after issue admission, before composition or any publication.
   await refuseMovedPrivateGitlinks(
     git,
@@ -1535,6 +1549,7 @@ export async function issueOf(
   head: string,
   targetHead: string,
   declared?: string,
+  sameIssue?: SameIssue,
 ): Promise<IssueResolution | undefined> {
   if (
     declared !== undefined &&
@@ -1552,26 +1567,39 @@ export async function issueOf(
     const commit = candidate.commit
     if (binding === undefined) binding = { issue, source: "binding", commit }
     else if (binding.issue !== issue) {
+      const judged = sameIssue === undefined ? undefined : await sameIssue(binding.issue, issue)
+      // The first spelling stays the binding: a second spelling of one issue is no conflict (31060).
+      if (judged?.same === true) continue
       const trailer = candidate.trailer ?? "Refs/Resolves"
       throw new Error(
         `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${issue} at ${commit}; ` +
-          `Yrd compares issue keys exactly, so it cannot tell whether two keys name one issue; ` +
+          (judged?.resolved === true
+            ? `${binding.issue} and ${issue} resolve to different issues; `
+            : `Yrd compares issue keys exactly, so it cannot tell whether two keys name one issue; ` +
+              (judged === undefined ? "" : `${judged.why}; `)) +
           `the second binding is a ${trailer} trailer, and a Refs or Resolves trailer always binds; ` +
-          `keep a follow-up link without binding it with a "Follow-up: ${issue}" line, ` +
-          `or, if both keys name one issue, rewrite one trailer to the other key; ` +
-          `a bind commit made by yrd env open carries the --issue value exactly as given, so a split between two spellings can start there; ` +
+          `keep a follow-up link without binding it with a "Follow-up: ${issue}" line` +
+          (judged?.resolved === true
+            ? "; "
+            : `, or, if both keys name one issue, rewrite one trailer to the other key; ` +
+              `a bind commit made by yrd env open carries the --issue value exactly as given, so a split between two spellings can start there; `) +
           `then fix trailer at ${commit}`,
       )
     }
   }
   if (binding !== undefined) {
-    const canonicalDeclared = declared === undefined ? undefined : declared
-    if (canonicalDeclared !== undefined && canonicalDeclared !== binding.issue) {
+    if (declared !== undefined && declared !== binding.issue) {
+      const judged = sameIssue === undefined ? undefined : await sameIssue(declared, binding.issue)
+      if (judged?.same === true) return binding
       throw new Error(
-        `declared issue ${canonicalDeclared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}; ` +
-          `Yrd compares issue keys exactly, so the declared value must equal the binding; ` +
-          `omit --issue to use the binding, or pass it exactly as bound: ${binding.issue}; ` +
-          `or fix trailer at ${binding.commit}`,
+        `declared issue ${declared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}; ` +
+          (judged?.resolved === true
+            ? `${declared} and ${binding.issue} resolve to different issues; ` +
+              `omit --issue to use the binding, or fix trailer at ${binding.commit}`
+            : `Yrd compares issue keys exactly, so the declared value must equal the binding; ` +
+              (judged === undefined ? "" : `${judged.why}; `) +
+              `omit --issue to use the binding, or pass it exactly as bound: ${binding.issue}; ` +
+              `or fix trailer at ${binding.commit}`),
       )
     }
     return binding

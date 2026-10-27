@@ -33,6 +33,7 @@ import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
 import { readIssueDisplay } from "./issue-resolver.ts"
+import { issueComparer, samenessDetail } from "./issue-sameness.ts"
 import { formatYrdCommand } from "./command-format.ts"
 import { createPostMerge, readPostMergeIssueDiagnostics } from "./post-merge.ts"
 import { repositoryHere } from "./declaration.ts"
@@ -987,6 +988,12 @@ export async function coreQueueCommand(
         env,
         io,
         destination: request.command === "drop-local" ? "local" : "origin",
+        sameIssue: issueComparer({
+          projectRoot: authorRepo,
+          cwd: authorRepo,
+          ...(env === undefined ? {} : { env }),
+          stderr: (text) => io.stderr(text),
+        }),
         request:
           request.command === "drop-local"
             ? request
@@ -1844,14 +1851,18 @@ export async function coreQueueCommand(
         throw new Error(`${NAMED[request.command]} requires the authoring repository as cwd`)
       }
       const authorGit = gitIn(authorRepo, undefined, selection, { env })
-      const issueIdentity = (value: string): string => value
+      const sameIssue = issueComparer({
+        projectRoot: authorRepo,
+        cwd: authorRepo,
+        ...(env === undefined ? {} : { env }),
+        stderr: (text) => io.stderr(text),
+      })
       const mode =
         request.command === "drop-issue"
           ? "Issue cleanup inspects the author store and its own component checkouts, plus any other component this issue names. Another worktree's copy is not searched; yrd env close retires an environment's own branches. --dry-run previews. --apply and --submodules are accepted compatibility flags."
           : "Local branch cleanup keeps the exact tip in an event or on the target before deleting its local name."
       const branchIssue = (branch: string, recordedIssue?: string): string | undefined => {
-        const mapped = io.branchIssue === undefined ? recordedIssue : io.branchIssue({ branch, recordedIssue })
-        return mapped === undefined ? undefined : issueIdentity(mapped)
+        return io.branchIssue === undefined ? recordedIssue : io.branchIssue({ branch, recordedIssue })
       }
       if (request.command === "drop-local" && request.releaseCheckout) {
         if (
@@ -1879,7 +1890,7 @@ export async function coreQueueCommand(
             log,
             queue: config.target.branch,
             remote: config.target.remote,
-            issueIdentity,
+            sameIssue,
             request: { ...request, issue: request.issue, reason: request.reason },
           })
           emit(
@@ -1914,6 +1925,7 @@ export async function coreQueueCommand(
           targetLabel,
           command: NAMED[request.command],
           branchIssue,
+          sameIssue,
         })
         emit(
           io,
@@ -2064,9 +2076,16 @@ export async function coreQueueCommand(
             continue
           }
           const bound = change?.issue ?? issue
-          if (issue !== undefined && bound !== undefined && issueIdentity(bound) !== issueIdentity(issue)) {
-            kept.push({ ...row, reason: "mismatch", detail: `recorded issue ${bound} differs from requested ${issue}` })
-            continue
+          if (issue !== undefined && bound !== undefined) {
+            const judged = await sameIssue(bound, issue)
+            if (!judged.same) {
+              kept.push({
+                ...row,
+                reason: "mismatch",
+                detail: `recorded issue ${bound} differs from requested ${issue}${samenessDetail(bound, issue, judged)}`,
+              })
+              continue
+            }
           }
           if (head !== request.tip) {
             kept.push({
@@ -2649,6 +2668,12 @@ export async function coreQueueCommand(
         throw new Error("--prepare cannot be combined with --gitlink; prepare an existing authored branch")
       }
       assertPlainEventQueueConfig(config, "submit")
+      const sameIssue = issueComparer({
+        projectRoot: repo,
+        cwd: repo,
+        ...(env === undefined ? {} : { env }),
+        stderr: (text) => io.stderr(text),
+      })
       if (request.pins !== undefined) {
         if (request.branch !== undefined) throw new Error("--gitlink does not take a branch operand")
         if (request.issue === undefined) throw new Error("--gitlink needs --issue <id>")
@@ -2688,6 +2713,7 @@ export async function coreQueueCommand(
           expectedTargetHead: captured.oid,
           ...(fetchedQueue === undefined ? {} : { fetchedQueueRefs: fetchedQueue }),
           issue: canonicalIssue,
+          sameIssue,
           admit,
         }
         if (request.dryRun === true) {
@@ -2774,6 +2800,7 @@ export async function coreQueueCommand(
         expectedTargetHead: captured.oid,
         ...(fetchedQueue === undefined ? {} : { fetchedQueueRefs: fetchedQueue }),
         ...(request.issue === undefined ? {} : { issue: request.issue }),
+        sameIssue,
         admit,
       }
       // Operator and stuck stops accept submits (the andon, operator 2026-09-16).
