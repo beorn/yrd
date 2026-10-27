@@ -1052,6 +1052,50 @@ describe("event submit", () => {
   })
 
   /**
+   * @failure 31060: `yrd submit` refused #26585 because one commit carries `Refs: 26585` and a later one
+   *          `Refs: @hh/tooling/26585-vterm-trusted-publishing-proof`; the project's declared resolve verb
+   *          names one issue for both, yet Yrd compared the raw strings and called them two bindings.
+   * @level   l2 (real git history through issueOf, provider judgment stubbed)
+   * @consumer every submitter whose trailers spell one issue two ways in a project that declares resolve
+   */
+  it("two spellings the provider resolves to one issue are one binding, and the first spelling is kept (31060)", async () => {
+    const w = await world()
+    const path = "@hh/tooling/26585-vterm-trusted-publishing-proof"
+    await branchWithCommit(w, "task/one-issue-two-spellings", "change.txt")
+    await w.git(["checkout", "--quiet", "task/one-issue-two-spellings"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "bind\n\nRefs: 26585"])
+    const bind = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", `work\n\nRefs: ${path}`])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const asked: (readonly [string, string])[] = []
+    const sameIssue = async (a: string, b: string): Promise<boolean> => {
+      asked.push([a, b])
+      return new Set([a, b]).size === 2 && [a, b].every((raw) => raw === "26585" || raw === path)
+    }
+    expect(await issueOf(w.git, "task/one-issue-two-spellings", head, w.target, undefined, sameIssue)).toEqual({
+      issue: "26585",
+      source: "binding",
+      commit: bind,
+    })
+    // A declared spelling the provider also resolves to that issue is admitted against the binding.
+    expect(await issueOf(w.git, "task/one-issue-two-spellings", head, w.target, path, sameIssue)).toEqual({
+      issue: "26585",
+      source: "binding",
+      commit: bind,
+    })
+    // The provider is asked only where two raw strings differ.
+    expect(asked.every(([a, b]) => a !== b)).toBe(true)
+    // A provider that says different keeps today's refusal, naming both spellings.
+    const message = await issueOf(w.git, "task/one-issue-two-spellings", head, w.target, undefined, async () => false).then(
+      () => "",
+      (cause: unknown) => (cause instanceof Error ? cause.message : String(cause)),
+    )
+    expect(message).toContain("conflicting issue bindings")
+    expect(message).toContain("26585")
+    expect(message).toContain(path)
+  })
+
+  /**
    * @failure Yrd issue binding read only Refs and Resolves, so commits with Closes: or Fixes:
    *          trailers submitted with "has no issue link; no explicit issue binding was found"
    *          (29962, specimen 29957-dark-work-duplicate-ref at 05c927cb).
