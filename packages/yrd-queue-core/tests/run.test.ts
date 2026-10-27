@@ -513,6 +513,21 @@ it("local retirement keeps protected tips and preserves custody before removing 
     branch: mergedBranch,
     reason: "issue closed after merge",
   })
+
+  // #31029: a primitive refusal must survive the caller's receipt and journal boundary.
+  const symbolicBranch = "task/local-retirement-symbolic"
+  await w.git(["symbolic-ref", `refs/heads/${symbolicBranch}`, "refs/heads/main"])
+  const symbolic = await retireLocalBranch({ ...input, branch: symbolicBranch })
+  expect(await refAt(w.git, "refs/heads/main")).toBe(w.target)
+  expect(symbolic).toMatchObject({ outcome: "failed", reason: expect.stringMatching(/symbolic/iu) })
+  expect(symbolic.reason).toContain(symbolicBranch)
+  expect((await w.git(["symbolic-ref", `refs/heads/${symbolicBranch}`])).trim()).toBe("refs/heads/main")
+  expect(readRunLog(dirname(log.path), log.id).at(-1)).toMatchObject({
+    kind: "local-branch-retirement",
+    branch: symbolicBranch,
+    outcome: "failed",
+    reason: symbolic.reason,
+  })
 })
 
 /** @failure Local retirement removes a branch whose chain stopped keeping its tip, or reports a failed removal as removed (30683).
