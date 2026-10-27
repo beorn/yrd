@@ -2890,6 +2890,101 @@ describe("a queue is the selected origin branch carrying config", () => {
     60_000,
   )
 
+  /** @failure A root-only issue drop never inspects a component that only the issue's root change names.
+   * 31081: the named component set compared raw issue strings, so a root change recorded as
+   * `@example/1234-retirement`, which the declared resolve verb names as issue 1234, named nothing.
+   * @level l3 @consumer The root issue retirement command naming components from the issue's root changes
+   * The 31060 "resolved" mode above reaches its components through the author checkout's own tree, never this set.
+   */
+  it.each(["moved", "landed", "unrelated"] as const)(
+    "an issue drop inspects the component a second-spelling root change %s (31081)",
+    async (mode) => {
+      const repo = await world("checks: []\n")
+      const seed = await world()
+      const git = gitIn(repo)
+      const branch = "task/1234-shared"
+      // "unrelated": a spelling the resolver does not name as 1234, so nothing of it may be selected.
+      const recordedIssue = mode === "unrelated" ? "@example/9999-other" : "@example/1234-retirement"
+      writeFileSync(
+        join(repo, "issues.yml"),
+        JSON.stringify({
+          resolve: [
+            "sh",
+            "-c",
+            `case "$1" in 1234|@example/1234-retirement) printf '{"keys":["issue-1234"]}\\n';; *) printf '{"keys":[]}\\n';; esac`,
+            "resolve",
+            "<raw>",
+          ],
+        }),
+      )
+      await git(["add", "issues.yml"])
+      await git(["commit", "--quiet", "-m", "declare resolve"])
+      await git(["push", "--quiet", "origin", "main"])
+      const queueTip = await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+      // The issue's root branch adds the component `third` and pins its work there; main never carries `third`.
+      await git(["checkout", "--quiet", "-b", branch])
+      await git([
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        join(dirname(seed), "remote.git"),
+        "third",
+      ])
+      const third = join(repo, "third")
+      const thirdGit = gitIn(third)
+      await thirdGit(["checkout", "--quiet", "-b", branch])
+      writeFileSync(join(third, "work.txt"), "work")
+      await thirdGit(["add", "work.txt"])
+      await thirdGit(["commit", "--quiet", "-m", "component work"])
+      await thirdGit(["push", "--quiet", "origin", branch])
+      const thirdTip = (await thirdGit(["rev-parse", "HEAD"])).trim()
+      await git(["add", "third"])
+      await git(["commit", "--quiet", "-m", "root adds the component"])
+      const rootBranchTip = (await git(["rev-parse", "HEAD"])).trim()
+      // Back on main, the checkout of `third` stays on disk, as a seat's does after switching branches.
+      await git(["checkout", "--quiet", "main"])
+      const chain = await openEvents({
+        ...createEventStore(repo, "origin", git.selection),
+        ref: changesRef("main", branch),
+        writer: "fixture",
+      })
+      const opened = changeInput("opened", {
+        queueTip,
+        at: new Date(),
+        commit: rootBranchTip,
+        by: "fixture",
+        issue: recordedIssue,
+      })
+      if (mode !== "landed") await chain.append([opened], { expect: null })
+      else {
+        // Landed and retired: only the merged event's pin names the component.
+        const merged = changeInput("merged", {
+          queueTip,
+          at: new Date(),
+          commit: rootBranchTip,
+          landedGitlinks: [{ path: "third", target: thirdTip }],
+        })
+        await chain.append([opened, merged], { expect: null })
+        await git(["branch", "--quiet", "-D", branch])
+      }
+      const out = capture(repo)
+      out.io.branchIssue = ({ branch: name, recordedIssue: recorded }) => recorded ?? /^task\/(\d+)-/u.exec(name)?.[1]
+      const exit = await runYrdProcess(["bun", "yrd", "drop", "--issue", "1234", "--dry-run", "--json"], out.io)
+      expect(exit, out.stderr()).toBe(0)
+      const report = JSON.parse(out.stdout()) as {
+        inspected: string[]
+        eligible: { repo: string; branch: string }[]
+        kept: { repo: string; branch: string }[]
+      }
+      const selected = mode === "unrelated" ? [] : [expect.objectContaining({ branch })]
+      expect(report.inspected.sort(), out.stdout()).toEqual(mode === "unrelated" ? [repo] : [repo, third].sort())
+      expect([...report.eligible, ...report.kept].filter((row) => row.repo === third)).toEqual(selected)
+    },
+    60_000,
+  )
+
   /**
    * @failure Landing evidence disappears after resubmission, or a root pin without component origin custody permits deletion.
    * @level l3
