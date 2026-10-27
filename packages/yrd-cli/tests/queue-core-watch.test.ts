@@ -1103,7 +1103,13 @@ process.exit(result.exitCode)
     expect(moved).toBe(true)
     expect(JSON.parse(run.stdout())).toMatchObject({
       removed: [],
-      kept: [{ branch, head: tip, detail: `branch moved: expected ${tip}, found ${next}; branch kept` }],
+      kept: [
+        {
+          branch,
+          head: tip,
+          detail: `local ref ${fs.realpathSync(join(w.work, ".git"))}#refs/heads/${branch}: branch moved: expected ${tip}, found ${next}; branch kept`,
+        },
+      ],
       failed: [],
     })
     expect((await w.git(["rev-parse", branch])).trim()).toBe(next)

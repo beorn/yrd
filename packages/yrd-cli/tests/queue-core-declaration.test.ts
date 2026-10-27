@@ -3711,7 +3711,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         branch: "task/manual-only",
         head: manualHead,
         reason: "held",
-        detail: `declared cwd for @dev/5 in /hh/hh.hab.tsx: ${repo}; branch kept`,
+        detail: `local ref ${fs.realpathSync(join(repo, ".git"))}#refs/heads/task/manual-only: declared cwd for @dev/5 in /hh/hh.hab.tsx: ${repo}; branch kept`,
       }),
     ])
     expect(heldManualReport.kept[0]).not.toHaveProperty("archiveRef")
@@ -3806,7 +3806,7 @@ describe("a queue is the selected origin branch carrying config", () => {
           branch: advancedBranch,
           reason: "advanced",
           detail:
-            "current tip " +
+            `local ref ${fs.realpathSync(join(repo, ".git"))}#refs/heads/${advancedBranch}: current tip ` +
             advanced +
             " differs from requested tip " +
             saved.get(advancedBranch) +
@@ -3967,7 +3967,8 @@ describe("a queue is the selected origin branch carrying config", () => {
         ],
         output.io,
       )
-      const refused = `current tip ${tip} differs from recorded change tip ${recorded}`
+      const localRef = issueMode ? "" : `local ref ${fs.realpathSync(join(repo, ".git"))}#refs/heads/${branch}: `
+      const refused = `${localRef}current tip ${tip} differs from recorded change tip ${recorded}`
       if (mode === "absent main") {
         // Unknown ancestry refuses by name: with no published main there is nothing to count against.
         expect(code, output.stdout()).toBe(2)
