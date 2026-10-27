@@ -50,7 +50,13 @@ function project(verbs?: (root: string) => Readonly<Record<string, readonly stri
 /** A `resolve` provider that logs each raw it is asked (untracked, beside the declaration), then runs `body`. */
 const resolving = (body: string): string =>
   project((root) => ({
-    resolve: ["sh", "-c", `printf '%s\\n' "$1" >> ${JSON.stringify(join(root, ".calls"))}; ${body}`, "resolve", "<raw>"],
+    resolve: [
+      "sh",
+      "-c",
+      `printf '%s\\n' "$1" >> ${JSON.stringify(join(root, ".calls"))}; ${body}`,
+      "resolve",
+      "<raw>",
+    ],
   }))
 
 const calls = (root: string): string[] =>
