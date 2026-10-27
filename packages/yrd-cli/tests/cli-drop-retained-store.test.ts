@@ -7,7 +7,7 @@
  * @consumer yrd drop cleanup of retained/cold component stores.
  * @testonly none
  */
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, expect, it } from "vitest"
@@ -173,6 +173,19 @@ it("exits 1 when a nested retained store keeps the branch", async () => {
     observed.io,
   )
   expect(code, observed.stderr() + observed.stdout()).toBe(1)
+  const kept = (JSON.parse(observed.stdout()) as { kept: { detail: string }[] }).kept[0]!
+  const identity = `${realpathSync(world.store)}#refs/heads/${world.branch}`
+  expect(kept.detail).toContain(identity)
+  expect(kept.detail).toMatch(/branch moved|differs from requested tip|advanced/u)
+  const text = capture(world.store)
+  expect(
+    await runYrdProcess(
+      ["bun", "yrd", "drop", world.branch, "--local", "--tip", mainTip, "--submitter", "fixture"],
+      text.io,
+    ),
+  ).toBe(1)
+  expect(text.stdout()).toContain(identity)
+  expect(text.stdout()).toContain(kept.detail)
   expect((await gitIn(world.store)(["rev-parse", `refs/heads/${world.branch}`])).trim()).toBe(world.tip)
 })
 

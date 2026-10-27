@@ -5,7 +5,7 @@
  * @consumer Authors retiring one local branch after a merged landing
  * @testonly none
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, expect, it } from "vitest"
@@ -101,5 +101,18 @@ it("retires the merged branch and refuses the unmerged one with a named rule and
   expect(kept.stdout, "the receipt must name the rule that kept the branch").toMatch(
     /differs from requested tip|advanced/,
   )
+  const identity = `${realpathSync(join(repo, ".git"))}#refs/heads/topic-kept`
+  expect(kept.stdout).toContain(identity)
+  const keptJSON = capture(repo)
+  expect(
+    await runYrdProcess(
+      ["bun", "yrd", "drop", "topic-kept", "--local", "--tip", staleTip, "--submitter", "fixture", "--json"],
+      keptJSON.io,
+    ),
+  ).toBe(1)
+  const detail = (JSON.parse(keptJSON.stdout()) as { kept: { detail: string }[] }).kept[0]!.detail
+  expect(detail).toContain(identity)
+  expect(kept.stdout).toContain(detail)
+  expect((await git(["rev-parse", "refs/heads/topic-kept"])).trim()).not.toBe(staleTip)
   expect(kept.exit, `kept a branch but exited ${kept.exit}:\n${kept.stderr}\n${kept.stdout}`).not.toBe(0)
 }, 60_000)

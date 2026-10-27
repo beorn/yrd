@@ -8,7 +8,7 @@
  * removing nothing; it must name the component, its oid and a command that runs there.
  * @testonly none
  */
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, expect, it } from "vitest"
@@ -287,6 +287,20 @@ it("names the component that holds a branch absent in the superproject, and fail
   expect(report.detail).toContain(`vendor/child holds refs/heads/task/component-only at ${tip}; retire it there: `)
   expect(report.detail).toContain("resolved its repository from the cwd (30527)")
   expect(report.detail).not.toContain("already gone")
+  expect((await child(["rev-parse", "refs/heads/task/component-only"])).trim()).toBe(tip)
+
+  // The checkout's gitfile points into the root's module store; a kept receipt must name that store.
+  const staleTip = (await child(["rev-parse", `${tip}^`])).trim()
+  const identity = `${realpathSync(join(repo, ".git", "modules", "vendor", "child"))}#refs/heads/task/component-only`
+  const keptJSON = capture(join(repo, "vendor/child"))
+  const keptArgs = ["bun", "yrd", "drop", "task/component-only", "--local", "--tip", staleTip, "--submitter", "fixture"]
+  expect(await runYrdProcess([...keptArgs, "--json"], keptJSON.io)).toBe(1)
+  const keptDetail = (JSON.parse(keptJSON.stdout()) as { kept: { detail: string }[] }).kept[0]!.detail
+  expect(keptDetail).toContain(identity)
+  expect(keptDetail).toMatch(/branch moved|differs from requested tip|advanced/u)
+  const keptText = capture(join(repo, "vendor/child"))
+  expect(await runYrdProcess(keptArgs, keptText.io)).toBe(1)
+  expect(keptText.stdout()).toContain(keptDetail)
   expect((await child(["rev-parse", "refs/heads/task/component-only"])).trim()).toBe(tip)
 
   // The hint is a cure: the printed command, run as printed in the component, retires the branch its published
