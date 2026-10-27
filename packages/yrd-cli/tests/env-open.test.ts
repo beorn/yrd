@@ -1371,6 +1371,45 @@ describe("yrd env open --issue asks the project's issues interface before it wri
   }
 
   /**
+   * @failure A landed CLI still runs a linked checkout's older provider; its failure names no working retry.
+   * @level l2 (real linked checkout, provider subprocess and primary-checkout retry)
+   * @consumer callers opening issue work from a stale checkout
+   * @testonly none
+   */
+  it("names a working primary-checkout retry when a stale checkout runs an older issues provider", async () => {
+    const w = await world(":")
+    const issue = "31009-stale-provider"
+    writeFileSync(
+      join(w.work, "provider.ts"),
+      "console.error(\"old provider: unknown command 'resolve'\"); process.exit(1)\n",
+    )
+    await w.git(["add", "provider.ts"])
+    await w.git(["commit", "--quiet", "-m", "retain the older provider"])
+    await declareIssues(w, `resolve: ${JSON.stringify([process.execPath, "./provider.ts", "<raw>"])}\n`)
+    const stale = join(dirname(w.work), "stale slot")
+    await w.git(["worktree", "add", "--quiet", "--detach", stale, "HEAD"])
+
+    writeFileSync(join(w.work, "provider.ts"), "console.log(JSON.stringify({ keys: [process.argv[2]] }))\n")
+    await w.git(["add", "provider.ts"])
+    await w.git(["commit", "--quiet", "-m", "update the primary checkout's provider"])
+    await w.git(["push", "--quiet", "origin", "main"])
+
+    const run = capture(stale)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", issue], run.io)).not.toBe(0)
+    expect(run.stderr()).toContain("old provider: unknown command 'resolve'")
+    expect(run.stderr()).toContain(stale)
+    const retryCommand = `(cd ${shellQuote(w.work)} && yrd ${["env", "open", "--issue", issue].map(shellQuote).join(" ")})`
+    expect(run.stderr()).toContain(retryCommand)
+    expect(run.stdout()).toBe("")
+    expect((await w.git(["branch", "--list", `task/${issue}`])).trim()).toBe("")
+    expect(existsSync(join(w.work, ".bays", issue))).toBe(false)
+
+    const retry = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", issue], retry.io)).toBe(0)
+    expect((await w.git(["log", "-1", "--format=%B", `task/${issue}`])).trim()).toContain(`Refs: ${issue}`)
+  })
+
+  /**
    * @failure 30516: `yrd env open --issue <ref>` wrote a `Refs: <ref>` bind commit, a branch and a worktree for a
    *          key no issue has (2026-10-21, a mis-slugged key, bind commit c5687305), because the binding was
    *          reconciled only against branch and commit bindings and never against the project's issues interface.

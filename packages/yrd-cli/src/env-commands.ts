@@ -477,7 +477,7 @@ export function environmentStampUnreadable(name: string): boolean {
  * none declaring `resolve`, has no store to ask: that is said on stderr and the open proceeds as before. Yrd
  * still learns nothing of hh's bead model; it runs the verb the project declared, within the display read's bound.
  */
-async function requireResolvableIssue(root: string, issue: string, io: YrdCliIO): Promise<void> {
+async function requireResolvableIssue(root: string, issue: string, io: YrdCliIO, git: Git): Promise<void> {
   const outcome = await runIssuesVerb({
     verb: "resolve",
     args: [issue],
@@ -493,9 +493,20 @@ async function requireResolvableIssue(root: string, issue: string, io: YrdCliIO)
     )
     return
   }
+  let recovery = ""
+  try {
+    const primary = (await registeredWorktrees(git))[0]
+    if (primary?.head !== undefined && resolve(primary.path) !== resolve(root)) {
+      recovery =
+        ` If this checkout's issues provider is stale, retry from the primary checkout: ` +
+        `(${formatYrdCommand(io, ["env", "open", "--issue", issue], primary.path)})`
+    }
+  } catch (error) {
+    recovery = ` Primary-checkout recovery could not be read from Git at ${root}: ${error instanceof Error ? error.message : String(error)}`
+  }
   throw new Error(
     `yrd env open: --issue ${issue} does not resolve to an issue through the issues interface declared by ${root}, ` +
-      `so no environment, branch or Refs commit was created: ${outcome.message}`,
+      `so no environment, branch or Refs commit was created: ${outcome.message}${recovery}`,
   )
 }
 
@@ -544,7 +555,9 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   ).trim()
   if (name === "") throw new Error("yrd: --bay needs a name")
   const branch = commit === undefined ? `task/${name}` : undefined
-  if (options.issue !== undefined) await requireResolvableIssue(root, options.issue, io)
+  if (options.issue !== undefined) {
+    await requireResolvableIssue(root, options.issue, io, gitIn(root, undefined, selection))
+  }
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process, selection)
   const resolvedBase =
