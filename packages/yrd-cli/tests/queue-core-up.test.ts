@@ -7305,6 +7305,8 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     const stalled = writes.filter(({ document }) => document.error?.code === "queue-relaunch-stalled")
     expect(announced.length, "relaunch-wait announcements published").toBeGreaterThan(0)
     expect(stalled.length, "relaunch-stalled pages published").toBeGreaterThan(0)
+    expect(String(stalled[0]?.document.error?.cause ?? "")).toContain("next landing tick")
+    expect(String(stalled[0]?.document.error?.cause ?? "")).toContain("landing-batch")
     for (const { document } of writes) expectRunner(document)
   }, 30_000)
 

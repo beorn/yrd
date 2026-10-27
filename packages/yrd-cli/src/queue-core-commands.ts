@@ -3780,6 +3780,7 @@ export async function coreQueueCommand(
               `This process runs from ${superproject}${relaunchSource === undefined ? "" : ` and the declared source resolves to ${projectedRoot ?? "unavailable"}`}. ` +
               `${sourceError === undefined ? "" : `Source read failed: ${sourceError}. `}` +
               `No queue round is running and none will until every moved path holds its target. ` +
+              `The next landing tick carries ${awaited.map((component) => component.path).join(", ")}; landing-batch is only the 30-minute unconditional pass. ` +
               `Once it does the service relaunches on its own — no restart, and nothing to delete.`
             log?.warn?.(why, {
               checkout: primaryReading?.checkoutPath,
