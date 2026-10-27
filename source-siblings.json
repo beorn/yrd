@@ -34,6 +34,13 @@
       "commit": "530b6b79db3bc7676a62970c5f424a6bcd0e7cb7",
       "directory": "packages/removely",
       "pack": true
+    },
+    {
+      "name": "@bearly/flock",
+      "repository": "beorn/bearly",
+      "commit": "66ae83e6bece1f3720609fd34d05bcded8a8e6a5",
+      "directory": "packages/flock",
+      "pack": true
     }
   ]
 }
