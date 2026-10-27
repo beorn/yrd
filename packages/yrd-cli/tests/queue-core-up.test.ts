@@ -716,7 +716,6 @@ describe("yrd queue up, the service", () => {
         }
         return []
       }
-      const started = performance.now()
       try {
         expect(
           await coreQueueCommand(
@@ -735,7 +734,10 @@ describe("yrd queue up, the service", () => {
                         .filter((row) => row.kind === "local-branch-retirement")
                         .map((row) => row.branch),
                     )
-                    expect(expected.every((branch) => completed.has(branch))).toBe(true)
+                    expect(
+                      expected.every((branch) => completed.has(branch)),
+                      `${label}: every root is accounted for`,
+                    ).toBe(true)
                   },
                   { timeout: 120_000 },
                 )
@@ -749,14 +751,6 @@ describe("yrd queue up, the service", () => {
       } finally {
         stop.abort()
       }
-      console.info(
-        JSON.stringify({
-          nativeKeep: label,
-          population: expected.length,
-          elapsedMs: performance.now() - started,
-          postEnvironmentHistoryReads: historyReads.length,
-        }),
-      )
       return { rows: journal().slice(prior), stderr: run.stderr() }
     }
     try {
