@@ -1675,11 +1675,14 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       const marker = join(dirname(path), "late-host-use.txt")
       const output = capture(fixture.work)
       output.io.liveEnvironmentUse = async () => (existsSync(marker) ? [{ path, reason: "new active owner" }] : [])
+      let preparations = 0
       await expect(
         closeEnvironment(path, { json: true }, output.io, undefined, "delegate", async () => {
-          if (phase === "final preparation") writeFileSync(marker, "active")
+          preparations += 1
+          if (phase === "final preparation" && preparations === 2) writeFileSync(marker, "active")
         }),
       ).rejects.toThrow(`live use: new active owner (${path})`)
+      expect(preparations).toBe(2)
       expect(existsSync(marker)).toBe(true)
       expect(existsSync(path)).toBe(true)
       expect(await fixture.git(["worktree", "list", "--porcelain", "-z"])).toContain(path)
