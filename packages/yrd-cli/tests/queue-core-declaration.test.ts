@@ -7237,7 +7237,9 @@ describe("drop --local --release-checkout", () => {
       const held = JSON.parse(preview.stdout()) as ReleaseReport
       // A pid waived by identity is named with the identity that cleared it; the other stays uncleared.
       // sshd-session, not gpg-agent: hosted Yrd CI runs the published removely, which predates gpg-agent.
-      expect(preview.stderr()).toContain("identity-cleared unreadable PIDs: pid 777 sshd-session (EACCES) as sshd-session")
+      expect(preview.stderr()).toContain(
+        "identity-cleared unreadable PIDs: pid 777 sshd-session (EACCES) as sshd-session",
+      )
       expect(held.needsDelegation[0]?.detail).toContain("pid 424242 session-host (EACCES)")
       expect(held.needsDelegation[0]?.detail).not.toContain("pid 777")
       expect(held.needsDelegation).toHaveLength(1)
