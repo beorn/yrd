@@ -304,7 +304,8 @@ async function consumeCloseRequests(
   )
   const closes = readable.flatMap(({ file, request }) => (request.intent === "close" ? [{ file, request }] : []))
   // 29772 (@cto c8d7113d): releases go first, on their own budget. The tip is read before any census: a moved
-  // or gone branch retires the request as stale-reference and is never a coverage attempt; a held release
+  // or gone branch retires the request as stale-reference, an unreadable one as unreadable, and neither is a
+  // coverage attempt; a held release
   // (readable holder, live use, a refused protection) retires at once with its reason; only an incomplete
   // census retries, up to MAX_COVERAGE_ATTEMPTS rounds.
   let releaseAttempted = 0
@@ -325,12 +326,13 @@ async function consumeCloseRequests(
     try {
       current = await input.readTip(request.path, branch)
     } catch (cause) {
+      // A tip the round cannot read is not a moved branch (@cto 585d1eac): its own class, cause named.
       journal(
         file,
         request,
         request.path,
-        "stale-reference",
-        `${request.path} cannot be read: ${String(cause)}; nothing applied`,
+        "unreadable",
+        `refs/heads/${branch} in ${request.path} cannot be read: ${String(cause)}; nothing applied, the branch and its checkout kept`,
       )
       dropCloseRequest(file)
       continue

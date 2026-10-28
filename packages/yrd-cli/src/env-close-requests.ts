@@ -235,7 +235,7 @@ export function writeReleaseRequest(
 function refuseForeignWriter(file: string, standing: StoredEnvRequest, uid: number): void {
   if (standing.uid !== uid) {
     throw new Error(
-      `close request ${file} was written by uid ${standing.uid}, not this caller's ${uid}; ` +
+      `${standing.intent === "release-checkout" ? "release" : "close"} request ${file} was written by uid ${standing.uid}, not this caller's ${uid}; ` +
         `refusing to reuse a file this process does not own; inspect it before retrying`,
     )
   }

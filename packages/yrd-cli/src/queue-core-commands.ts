@@ -1948,10 +1948,12 @@ export async function coreQueueCommand(
                 .join("\n"),
           )
           // 29772 (@cto c8d7113d): a hold this caller cannot certify never exits 0. Queued is 4, as env close;
-          // an uncertified preview is 1, and its detail names --apply as the cure.
+          // an uncertified preview is 1, and its detail names --apply as the cure. An --apply that kept any
+          // row did not do what was asked: 1 (@cto 585d1eac); a preview reporting the same hold stays 0.
           if (report.failed.length > 0) return 1
           if (report.delegated.length > 0) return ENV_CLOSE_QUEUED_EXIT
-          return report.needsDelegation.length > 0 ? 1 : 0
+          if (report.needsDelegation.length > 0) return 1
+          return report.apply && report.kept.length > 0 ? 1 : 0
         } finally {
           log.finish()
         }

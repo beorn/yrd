@@ -1225,14 +1225,11 @@ export async function releaseRetainedCheckouts(
       // same-UID pid, reruns this release under the same admission. The census
       // receipt and this reader's privilege facts stay in the detail, and the
       // uncleared pids stay named: an unreadable pid is never treated as absent.
+      // What became of the hold is appended once the delegation is decided.
       const census = admission.census
       const detail =
         `needs-delegation: ${admission.refusal}; census ${census.mechanism}: ${census.rows} readable, ${census.unreadable} unreadable, ${census.uncleared} uncleared. ` +
-        `This caller cannot certify the release (this reader: ${readerPrivilegeFacts()}); ` +
-        (input.workdir === undefined && request.apply === true
-          ? "this round could not certify it either"
-          : "--apply files a release request for the queue's own round, whose census reads every same-UID pid") +
-        `. The admission there is unchanged: a process holding the checkout still refuses`
+        `This caller cannot certify the release (this reader: ${readerPrivilegeFacts()})`
       if (!needsDelegation.some((held) => held.repo === row.repo && held.path === row.path)) {
         needsDelegation.push({ ...row, reason: "needs-delegation", detail: publicText(detail) })
       }
@@ -1311,6 +1308,39 @@ export async function releaseRetainedCheckouts(
     io.stderr(
       `yrd: retained checkout ${candidate.checkout}: status --porcelain=v2 -z (all untracked), HEAD ${after.head}, index, .agent-lease.json and Git lock unchanged\n`,
     )
+  }
+  // An uncertified census's outcome is written only after the delegation decision (@cto 585d1eac): the
+  // promise of a filed request stands only beside a filed request, and an --apply that filed nothing
+  // names the hold that stopped it.
+  const describeUndelegated = () => {
+    if (needsDelegation.length === 0 || delegated.length > 0) return
+    const isHeld = (row: Row) =>
+      needsDelegation.some(
+        (held) => held.repo === row.repo && held.path === row.path && row.detail?.startsWith(held.detail ?? "\0"),
+      )
+    const others = [...kept.filter((row) => !isHeld(row)), ...failed]
+    const outcome =
+      request.apply !== true
+        ? "--apply files a release request for the queue's own round, whose census reads every same-UID pid. The admission there is unchanged: a process holding the checkout still refuses"
+        : input.workdir === undefined
+          ? "this round could not certify it either. The admission there is unchanged: a process holding the checkout still refuses"
+          : `not filed: ${
+              others.length > 0
+                ? others
+                    .map((row) => `${row.path || "."} ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`)
+                    .join("; ")
+                : "the census became uncertified only after this release began"
+            }; a release request is filed only when an uncertified census is the only hold`
+    for (const held of needsDelegation) {
+      const base = held.detail ?? held.reason
+      const described = publicText(`${base}; ${outcome}`)
+      for (const row of kept) {
+        if (row.repo === held.repo && row.path === held.path && row.detail?.startsWith(base) === true) {
+          row.detail = `${described}${row.detail.slice(base.length)}`
+        }
+      }
+      held.detail = described
+    }
   }
   try {
     for (const reader of ["liveEnvironmentUse", "localBranchProtections"] as const) {
@@ -1690,6 +1720,8 @@ export async function releaseRetainedCheckouts(
     }
   } catch (cause) {
     failed.push({ ...rootRow, reason: "failed", detail: publicText(String(cause)) })
+  } finally {
+    describeUndelegated()
   }
   return report
 }
