@@ -6,16 +6,26 @@
  * @consumer yrd drop --local custody message and recovery command.
  * Also (30277): a drop run in the superproject for a branch only a component holds reports success while
  * removing nothing; it must name the component, its oid and a command that runs there.
+ * Also (31457): origin retirement leaves the store's own refs/remotes/origin/<branch> at the retired tip, so a
+ * reader of that store keeps paging on a branch the queue already retired.
  * @testonly none
  */
-import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, expect, it } from "vitest"
-import { createEventQueue, createEventStore, readBranchHistory, readConfig } from "@yrd/queue-core"
+import { afterAll, expect, it, vi } from "vitest"
+import {
+  createEventQueue,
+  createEventStore,
+  readBranchHistory,
+  readConfig,
+  retireOriginBranch,
+  submit,
+} from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
+import { workdirOf } from "../src/workdir.ts"
 
 const roots: string[] = []
 afterAll(() => {
@@ -123,6 +133,154 @@ it("30683: a never-submitted branch's dropped event starts its chain at origin a
     ),
     repeated.stderr(),
   ).toBe(0)
+})
+
+// 31457: origin retirement publishes through the Gitomic backend, not `git push`, so git never updates the
+// store's tracking ref the way `git push --delete` would; dark-work then re-paged on the retired branch's
+// stale refs/remotes/origin/ ref (task/29936-hab-plan-exits-4-five-seats at 7ba97ae4, 2026-10-28).
+async function publishedBranch(prefix: string) {
+  const root = mkdtempSync(join(tmpdir(), prefix))
+  roots.push(root)
+  const remote = join(root, "remote.git")
+  const repo = join(root, "repo")
+  const seed = gitIn(root)
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["clone", "--quiet", remote, repo])
+  const git = gitIn(repo)
+  await git(["config", "user.name", "yrd test"])
+  await git(["config", "user.email", "yrd@test.invalid"])
+  writeFileSync(join(repo, ".yrd.yml"), 'checks:\n  - verify: {run: "true"}\n')
+  await git(["add", "."])
+  await git(["commit", "--quiet", "-m", "queue"])
+  await git(["push", "--quiet", "origin", "main"])
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+  if (config === undefined) throw new Error("fixture lost .yrd.yml")
+  await createEventQueue(
+    createEventStore(repo, "origin", git.selection),
+    "main",
+    target,
+    config,
+    new Date("2020-01-01T00:00:00.000Z"),
+  )
+  await git(["checkout", "--quiet", "-b", "task/published"])
+  writeFileSync(join(repo, "held.txt"), "held\n")
+  await git(["add", "."])
+  await git(["commit", "--quiet", "-m", "held"])
+  const tip = (await git(["rev-parse", "HEAD"])).trim()
+  await git(["push", "--quiet", "origin", "task/published"])
+  await git(["checkout", "--quiet", "main"])
+  const tracking = "refs/remotes/origin/task/published"
+  const trackingHead = async () => (await git(["for-each-ref", "--format=%(objectname)", tracking])).trim()
+  // The CLI's event store is Yrd's private replica of this origin: a separate repository from the checkout.
+  const replica = async () => {
+    const path = join(await workdirOf(git), "repo")
+    expect(existsSync(join(path, ".git"))).toBe(true)
+    expect(realpathSync(path)).not.toBe(realpathSync(repo))
+  }
+  return { repo, git, target, tip, tracking, trackingHead, replica }
+}
+
+it("31457: origin retirement deletes the store's tracking ref at the retired tip; a retry clears a stale one", async () => {
+  const { repo, git, tip, tracking, trackingHead, replica } = await publishedBranch("yrd-drop-retire-tracking-")
+  expect(await trackingHead()).toBe(tip)
+
+  const retired = capture(repo)
+  expect(
+    await runYrdProcess(["bun", "yrd", "drop", "task/published", "--reason", "abandon published work"], retired.io),
+    retired.stderr(),
+  ).toBe(0)
+  await replica()
+  expect((await git(["ls-remote", "origin", "refs/heads/task/published"])).trim()).toBe("")
+  expect(await trackingHead()).toBe("")
+
+  // A branch retired before this cure keeps its stale tracking ref; the completed-drop retry removes it.
+  await git(["update-ref", tracking, tip])
+  const repeated = capture(repo)
+  expect(
+    await runYrdProcess(
+      ["bun", "yrd", "drop", "task/published", "--retire", "--tip", tip, "--reason", "repeat completed drop"],
+      repeated.io,
+    ),
+    repeated.stderr(),
+  ).toBe(0)
+  expect(await trackingHead()).toBe("")
+})
+
+it("31457: withdraw deletes the caller's tracking ref at the retired tip", async () => {
+  const { repo, git, tip, trackingHead, replica } = await publishedBranch("yrd-withdraw-tracking-")
+  await submit(git, "origin", {
+    branch: "task/published",
+    submitter: "@dev/10",
+    target: { branch: "main", remote: "origin" },
+  })
+  expect(await trackingHead()).toBe(tip)
+  const withdrawn = capture(repo)
+  expect(
+    await runYrdProcess(
+      ["bun", "yrd", "withdraw", "task/published", "--reason", "withdraw published work"],
+      withdrawn.io,
+    ),
+    withdrawn.stderr(),
+  ).toBe(0)
+  expect(withdrawn.stderr()).not.toContain("retirement incomplete")
+  await replica()
+  expect((await git(["ls-remote", "origin", "refs/heads/task/published"])).trim()).toBe("")
+  expect(await trackingHead()).toBe("")
+})
+
+it("31457: retireOriginBranch deletes the tracking ref only after its readbacks pass", async () => {
+  const { repo, git, tip, trackingHead } = await publishedBranch("yrd-retire-origin-tracking-")
+  await git(["push", "--quiet", "origin", `${tip}:refs/heads/main`])
+  const store = createEventStore(repo, "origin", git.selection)
+  const publish = store.backend.publish
+  if (publish === undefined) throw new Error("fixture backend lacks publish")
+  const input = {
+    branch: "task/published",
+    head: tip,
+    authority: { kind: "published-main", ref: "refs/heads/main", tip },
+  } as const
+  // A publish that keeps the branch fails the absent readback: the retirement throws and the tracking ref stays.
+  const keeping = {
+    ...store.backend,
+    publish: ((root, updates, remote) =>
+      publish.call(
+        store.backend,
+        root,
+        updates.filter((update) => update.oid !== null),
+        remote,
+      )) as typeof publish,
+  }
+  const refused = await retireOriginBranch({ ...store, backend: keeping }, input).then(
+    () => "retired",
+    (error: unknown) => String(error),
+  )
+  expect(refused).toContain("removal did not read back absent")
+  expect(await trackingHead()).toBe(tip)
+
+  await retireOriginBranch(store, input)
+  expect((await git(["ls-remote", "origin", "refs/heads/task/published"])).trim()).toBe("")
+  expect(await trackingHead()).toBe("")
+})
+
+it("31457: a tracking ref at another oid survives the retirement, named on stderr", async () => {
+  const { repo, git, target, tip, tracking, trackingHead } = await publishedBranch("yrd-drop-retire-moved-tracking-")
+  await git(["update-ref", tracking, target])
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+  try {
+    const retired = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "drop", "task/published", "--reason", "abandon published work"], retired.io),
+      retired.stderr(),
+    ).toBe(0)
+    expect((await git(["ls-remote", "origin", "refs/heads/task/published"])).trim()).toBe("")
+    expect(await trackingHead()).toBe(target)
+    expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
+      `yrd: kept ${tracking} at ${target}; the retired head was ${tip}`,
+    ])
+  } finally {
+    warn.mockRestore()
+  }
 })
 
 it("refuses loudly and keeps the branch when origin will not take the dropped event", async () => {

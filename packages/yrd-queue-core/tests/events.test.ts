@@ -91,7 +91,12 @@ function issueEffectEvent(effect: Readonly<Record<string, unknown>>, id = EFFECT
   return { ...event("notified", id, [["Issue-Effect", JSON.stringify(effect)]], [A]), writer: QUEUE_RUN_WRITER }
 }
 
-function remoteMemStore(repo: string) {
+function remoteMemStore(name: string) {
+  // A real, empty repository with no remotes: a retirement's local tracking-ref step (31457) runs Git there and
+  // finds no tracking namespace, as a store whose remote is not a configured remote of the checkout would.
+  const repo = mkdtempSync(join(tmpdir(), `${name}-`))
+  const init = spawnSync("git", ["init", "--quiet", repo], { encoding: "utf8" })
+  if (init.status !== 0) throw new Error(`git init ${repo}: ${init.stderr}`)
   const backend = createMemBackend()
   const localRefs = backend.listRefs
   const localPublish = backend.publish
@@ -2610,7 +2615,7 @@ describe("the queue-format boundary", () => {
     if (fault === "absent-unkept") expect(String(refusal)).toContain(`no event on ${ref}@${ending} keeps ${base}`)
     if (fault === "ending-final") {
       expect(String(refusal)).toContain("change moved during retirement")
-      expect(String(refusal)).toContain(`git -C 'retire-ending-final' branch '${branchName}' '${head}'`)
+      expect(String(refusal)).toContain(`git -C '${store.repo}' branch '${branchName}' '${head}'`)
     }
     expect((await listRefs(branchRef, store)).get(branchRef) ?? null).toBe(expectedBranch)
     expect((await listRefs(ref, store)).get(ref)).toBe(ending)
@@ -5314,7 +5319,7 @@ describe("the queue-format boundary", () => {
   it("refuses an absent queue when reading remote ops", async () => {
     const { store, location } = remoteMemStore("yrd-absent-ops-queue")
     await expect(readEventOps(location, gitIn(store.repo), "lab", A)).rejects.toThrow(
-      /yrd-absent-ops-queue: required queue ref refs\/yrd\/lab\/queue is missing/u,
+      /yrd-absent-ops-queue-\w+: required queue ref refs\/yrd\/lab\/queue is missing/u,
     )
   })
 

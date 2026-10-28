@@ -2287,11 +2287,14 @@ export async function coreQueueCommand(
         retirementCount = await dropCommitCount(git, request.retire.tip, countTarget)
       }
       let dropped: Awaited<ReturnType<typeof drop>>
+      // The event store is Yrd's private replica; the caller's checkout holds the tracking ref its readers see (31457).
+      const trackingRepo = repositoryHere(io.cwd)
       try {
         dropped = await drop(eventStore, {
           queue: config.target.branch,
           branch: request.branch,
           by: request.by,
+          ...(trackingRepo === undefined ? {} : { trackingRepo }),
           ...(request.retire === undefined ? {} : { retire: request.retire }),
           protections: async (tip, issue) =>
             (await readBranchProtections(io, { repo, branch: request.branch, tip, issue })).protections,
@@ -2549,11 +2552,13 @@ export async function coreQueueCommand(
       }
     }
     case "withdraw": {
+      const trackingRepo = repositoryHere(io.cwd)
       try {
         const taken = await withdraw(git, config.target.remote, {
           branch: request.branch,
           by: request.by,
           target: config.target,
+          ...(trackingRepo === undefined ? {} : { trackingRepo }),
           protections: async (tip, issue) =>
             (await readBranchProtections(io, { repo, branch: request.branch, tip, issue })).protections,
           ...(request.reason === undefined ? {} : { reason: request.reason }),

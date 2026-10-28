@@ -3,7 +3,7 @@ import { createHash } from "node:crypto"
 
 import { shellQuote } from "git-super/shell-command"
 import { Conflict, RetriesExhausted } from "./git.ts"
-import { retireOriginBranch } from "./origin-branch-retirement.ts"
+import { dropTrackingRefs, retireOriginBranch } from "./origin-branch-retirement.ts"
 import { readCommitSubmodules, type CommitGitlink } from "git-super/commit-graph"
 import { listRefs, openEvents } from "./git.ts"
 import { publishWithTransientRetry } from "./transient-push.ts"
@@ -1347,6 +1347,8 @@ export type DropRequest = Readonly<{
   retire?: Readonly<{ tip: string }>
   /** Optional host policy; absence means a standalone caller with no host policy. */
   protections?: (head: string, issue?: string) => Promise<readonly string[]>
+  /** The caller's checkout, whose tracking ref goes with an origin retirement (31457). */
+  trackingRepo?: string
 }>
 export type Dropped = Readonly<{
   queue: string
@@ -2984,6 +2986,8 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
       const held = await publishedMainHolds(wanted)
       // A rerun after the branch went: an event on the unchanged chain keeps the exact tip (30683).
       if (held !== undefined || history.some((event) => event.links.includes(wanted))) {
+        // A branch retired before 31457 kept its tracking ref; the rerun removes it at the proven tip only.
+        await dropTrackingRefs(store, request.trackingRepo, branch, wanted)
         return {
           queue,
           branch,
@@ -3096,6 +3100,7 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
       authority:
         mainCustody === undefined ? { kind: "event", ref, tip: eventTip } : { kind: "published-main", ...mainCustody },
       protections: protections === undefined ? undefined : () => protections(keptHead, state.issue),
+      ...(request.trackingRepo === undefined ? {} : { trackingRepo: request.trackingRepo }),
     })
     await deleteCandidateRefsForShas(gitIn(store.repo, undefined, store.selection), store.repo, store.remote, [
       keptHead,
@@ -3199,6 +3204,8 @@ async function dropBranch(store: QueueLocation, request: DropRequest): Promise<D
     return { queue, branch, ref, event: written, head: keptHead, ...(await retire(written, head)) }
   }
   if (head !== undefined) {
+    // The append above leased and deleted origin's branch at head; its tracking ref goes too (31457).
+    await dropTrackingRefs(store, request.trackingRepo, branch, head)
     await deleteCandidateRefsForShas(gitIn(store.repo, undefined, store.selection), store.repo, store.remote, [head])
   }
   return { queue, branch, ref, event: written, head: keptHead, ...(main === undefined ? {} : { main }) }

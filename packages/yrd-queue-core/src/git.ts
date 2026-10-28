@@ -1252,6 +1252,17 @@ export async function configValue(git: Git, name: string): Promise<string | unde
   }
 }
 
+/** Every `git config --get-regexp` match, NUL-separated "key\nvalue" entries; exit 1 (no match) is undefined. */
+export async function configMatches(git: Git, pattern: string): Promise<string | undefined> {
+  try {
+    const out = await git(["config", "--null", "--get-regexp", pattern])
+    return out === "" ? undefined : out
+  } catch (error) {
+    if (isExit(error, 1)) return undefined
+    throw error
+  }
+}
+
 /** Every best common ancestor; criss-cross histories can have more than one. */
 export async function mergeBases(git: Git, left: string, right: string): Promise<readonly string[]> {
   try {

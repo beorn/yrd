@@ -13,6 +13,8 @@ export type WithdrawRequest = Readonly<{
   reason?: string
   recipient?: string
   protections?: (head: string, issue?: string) => Promise<readonly string[]>
+  /** The caller's checkout, whose tracking ref goes with the origin retirement (31457). */
+  trackingRepo?: string
 }>
 
 export type WithdrawnChange = Readonly<{
@@ -104,6 +106,7 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
       head,
       authority: { kind: "event", ref, tip: record },
       protections: protections === undefined ? undefined : () => protections(head, state.issue),
+      ...(request.trackingRepo === undefined ? {} : { trackingRepo: request.trackingRepo }),
     })
     remoteRemoved = true
     await deleteCandidateRefsForShas(gitIn(root, undefined, selectionFor(git)), root, remote, [head])
