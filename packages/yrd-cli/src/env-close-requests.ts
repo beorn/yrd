@@ -150,8 +150,10 @@ export function writeCloseRequest(
   const standing = readCloseRequest(file)
   if (standing !== undefined) {
     refuseForeignWriter(file, standing, request.uid)
+    if (standing.intent !== "close") {
+      throw new Error(`close request ${file} reads as intent ${standing.intent}; inspect it before retrying`)
+    }
     if (
-      standing.intent !== "close" ||
       standing.path !== request.path ||
       !sameOptions(standing.options, request.options) ||
       standing.ending?.remote !== request.ending?.remote ||

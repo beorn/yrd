@@ -1238,6 +1238,25 @@ export async function coreQueueCommand(
         env,
         selection,
         onEnvironmentClosed: teller,
+        // 29772: the round reruns a delegated release itself, --apply, under the same admission.
+        releaseCheckout: (filed) =>
+          releaseRetainedCheckouts({
+            repo: filed.path,
+            git: gitIn(filed.path, undefined, selection, { env }),
+            selection,
+            env,
+            io,
+            log: retirementLog,
+            queue: config.target.branch,
+            remote: config.target.remote,
+            sameIssue: issueComparer({
+              projectRoot: filed.path,
+              cwd: filed.path,
+              ...(env === undefined ? {} : { env }),
+              stderr: (text) => io.stderr(text),
+            }),
+            request: { ...filed.release, apply: true },
+          }),
       }).finally(() => teller.flush())
       await retireMergedComponentAuthors({
         authors: componentAuthors,
