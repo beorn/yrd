@@ -13,6 +13,10 @@
  * (26990 ruling 5). `coverageAttempts` is the consumer's own bound on a round
  * whose close also could not take a complete census; the requester never writes
  * it.
+ *
+ * A delegated `drop --release-checkout` (29772) files its intent in the same
+ * store: same census, same admission, same consumer. Every writer names its
+ * `intent`; the file's key says which intent it must carry (@cto c8d7113d).
  */
 
 import { createHash } from "node:crypto"
@@ -23,6 +27,12 @@ import { atomicWriteFileSync } from "@bearly/durable-file"
 /** The one predicate a delegated close runs under: the direct verb's own admission. */
 export const ENV_CLOSE_PREDICATE = "direct-admission"
 
+/** What a request asks the round to do. A close-keyed file without it is a legacy close (every file before 29772). */
+export type EnvRequestIntent = "close" | "release-checkout"
+
+/** A release request's suffix, so its key never collides with a path-derived close key (`-<8 hex>.json`). */
+const RELEASE_REQUEST_SUFFIX = ".release.json"
+
 /** The request directory under the run's existing state dir, never a new config key. */
 export const ENV_CLOSE_REQUEST_DIRNAME = "env-close-requests"
 
@@ -32,6 +42,7 @@ export const MAX_COVERAGE_ATTEMPTS = 3
 export type EnvCloseRequestOptions = Readonly<{ retain?: string; noRehome?: boolean; preserve?: boolean }>
 
 export type EnvCloseRequest = Readonly<{
+  intent: "close"
   name: string
   path: string
   requester: string
@@ -49,6 +60,29 @@ export type EnvCloseRequest = Readonly<{
 export type StoredCloseRequest = EnvCloseRequest & Readonly<{ coverageAttempts?: number }>
 
 /**
+ * A delegated `drop --release-checkout`: the caller's census could not certify
+ * the retained checkout, so the queue's round reruns the same release under the
+ * same admission. `path` is the repository the direct verb was given; the
+ * round finds the retained checkout from it exactly as the direct verb does.
+ */
+export type EnvReleaseRequest = Readonly<{
+  intent: "release-checkout"
+  name: string
+  path: string
+  requester: string
+  /** The requester's real uid: a sanity check between files, never authority. */
+  uid: number
+  at: string
+  predicate: typeof ENV_CLOSE_PREDICATE
+  release: Readonly<{ branch: string; tip: string; issue: string; reason: string; by: string; submodules: boolean }>
+}>
+
+export type StoredReleaseRequest = EnvReleaseRequest & Readonly<{ coverageAttempts?: number }>
+
+/** Any standing request; `intent` says which. */
+export type StoredEnvRequest = StoredCloseRequest | StoredReleaseRequest
+
+/**
  * A request for this path already STANDS with a different ending or different options. The caller refuses to
  * overwrite it — but that refusal is a NO-OP, not a failure: nothing was written and nothing was lost. The
  * class carries the standing file and request so a reporter names them from the class, never from message
@@ -57,7 +91,7 @@ export type StoredCloseRequest = EnvCloseRequest & Readonly<{ coverageAttempts?:
 export class CloseRequestAlreadyStandsError extends Error {
   constructor(
     readonly file: string,
-    readonly standing: StoredCloseRequest,
+    readonly standing: StoredEnvRequest,
     message: string,
   ) {
     super(message)
@@ -85,6 +119,19 @@ export function closeRequestFile(workdir: string, path: string): string {
   return join(closeRequestsDirectory(workdir), `${basename(path)}-${digest}.json`)
 }
 
+/** A release request's name: the repository's basename plus a digest of its path and branch. */
+export function releaseRequestFile(workdir: string, path: string, branch: string): string {
+  const digest = createHash("sha256").update(`${path}\0${branch}`).digest("hex").slice(0, 8)
+  return join(closeRequestsDirectory(workdir), `${basename(path)}-${digest}${RELEASE_REQUEST_SUFFIX}`)
+}
+
+/** The slot a request occupies, derived from its intent. */
+export function envRequestFile(workdir: string, request: StoredEnvRequest): string {
+  return request.intent === "release-checkout"
+    ? releaseRequestFile(workdir, request.path, request.release.branch)
+    : closeRequestFile(workdir, request.path)
+}
+
 /**
  * Write the request, tmp+rename, or match the one that already stands.
  *
@@ -102,11 +149,9 @@ export function writeCloseRequest(
   const file = closeRequestFile(workdir, request.path)
   const standing = readCloseRequest(file)
   if (standing !== undefined) {
-    if (standing.uid !== request.uid) {
-      throw new Error(
-        `close request ${file} was written by uid ${standing.uid}, not this caller's ${request.uid}; ` +
-          `refusing to reuse a file this process does not own; inspect it before retrying`,
-      )
+    refuseForeignWriter(file, standing, request.uid)
+    if (standing.intent !== "close") {
+      throw new Error(`close request ${file} reads as intent ${standing.intent}; inspect it before retrying`)
     }
     if (
       standing.path !== request.path ||
@@ -140,8 +185,64 @@ export function writeCloseRequest(
   return { file, alreadyStood: false }
 }
 
+/**
+ * Write a release request, or match the one that already stands for the same
+ * repository and branch. A standing request asking for a different tip, issue,
+ * reason or recursion is a conflict, never overwritten; the first requester
+ * survives a same-intent re-file, as a close does. A write failure is loud and
+ * names what was kept: the caller then exits nonzero, never 0.
+ */
+export function writeReleaseRequest(
+  workdir: string,
+  request: EnvReleaseRequest,
+): Readonly<{ file: string; alreadyStood: boolean }> {
+  const file = releaseRequestFile(workdir, request.path, request.release.branch)
+  const standing = readCloseRequest(file)
+  if (standing !== undefined) {
+    refuseForeignWriter(file, standing, request.uid)
+    if (
+      standing.intent !== "release-checkout" ||
+      standing.path !== request.path ||
+      standing.release.branch !== request.release.branch ||
+      standing.release.tip !== request.release.tip ||
+      standing.release.issue !== request.release.issue ||
+      standing.release.reason !== request.release.reason ||
+      standing.release.submodules !== request.release.submodules
+    ) {
+      throw new CloseRequestAlreadyStandsError(
+        file,
+        standing,
+        `a release request for ${standing.path} already stands at ${file} from ${standing.requester} (${standing.at}) ` +
+          `as ${JSON.stringify(standing.intent === "release-checkout" ? standing.release : standing.intent)}; ` +
+          `this request asks for ${JSON.stringify(request.release)}; resolve the standing request before filing another`,
+      )
+    }
+    return { file, alreadyStood: true }
+  }
+  try {
+    publishCloseRequest(file, request)
+  } catch (cause) {
+    throw new Error(
+      `release request for ${request.release.branch} in ${request.path} could not be written to ${file}: ` +
+        `${cause instanceof Error ? cause.message : String(cause)}; nothing was released; the branch and its checkout were kept; ` +
+        `make ${dirname(file)} writable, or run the same drop from a context that can read every same-UID pid`,
+      { cause },
+    )
+  }
+  return { file, alreadyStood: false }
+}
+
+function refuseForeignWriter(file: string, standing: StoredEnvRequest, uid: number): void {
+  if (standing.uid !== uid) {
+    throw new Error(
+      `${standing.intent === "release-checkout" ? "release" : "close"} request ${file} was written by uid ${standing.uid}, not this caller's ${uid}; ` +
+        `refusing to reuse a file this process does not own; inspect it before retrying`,
+    )
+  }
+}
+
 /** Read one request file. A malformed file is refused loudly; an absent one may be `undefined`. */
-export function readCloseRequest(file: string): StoredCloseRequest | undefined {
+export function readCloseRequest(file: string): StoredEnvRequest | undefined {
   let text: string
   try {
     text = readFileSync(file, "utf8")
@@ -233,13 +334,13 @@ export function dropCloseRequest(file: string): void {
   removeFile(file)
 }
 
-function requireStaged(staged: string): StoredCloseRequest {
+function requireStaged(staged: string): StoredEnvRequest {
   const stored = readCloseRequest(staged)
   if (stored === undefined) throw new Error(`staged close request ${staged} disappeared while it was being consumed`)
   return stored
 }
 
-function publishCloseRequest(file: string, request: StoredCloseRequest): void {
+function publishCloseRequest(file: string, request: StoredEnvRequest): void {
   atomicWriteFileSync(file, `${JSON.stringify(request)}\n`)
 }
 
@@ -258,7 +359,7 @@ function sameOptions(left: EnvCloseRequestOptions, right: EnvCloseRequestOptions
 }
 
 /** Strict, loud validation: a request this process cannot read is named, never guessed at. */
-function parseCloseRequest(parsed: unknown, file: string): StoredCloseRequest {
+function parseCloseRequest(parsed: unknown, file: string): StoredEnvRequest {
   const bad = (why: string): Error =>
     new Error(`close request ${file} is malformed: ${why}; inspect it before retrying`)
   if (typeof parsed !== "object" || parsed === null) throw bad("not an object")
@@ -268,10 +369,52 @@ function parseCloseRequest(parsed: unknown, file: string): StoredCloseRequest {
     if (typeof value !== "string" || value === "") throw bad(`${key} must be a non-empty string`)
     return value
   }
+  // The key decides the intent the file must carry (@cto c8d7113d): a release-keyed file names it or is refused;
+  // a close-keyed file names "close" or nothing, the legacy shape of every file filed before 29772.
+  const releaseKeyed = basename(file).endsWith(RELEASE_REQUEST_SUFFIX)
+  if (releaseKeyed && raw.intent !== "release-checkout") {
+    throw bad(`a release-keyed file must carry intent "release-checkout", read ${JSON.stringify(raw.intent)}`)
+  }
+  if (!releaseKeyed && raw.intent !== undefined && raw.intent !== "close") {
+    throw bad(`a close-keyed file carries intent "close" or none (a legacy close), read ${JSON.stringify(raw.intent)}`)
+  }
   if (raw.predicate !== ENV_CLOSE_PREDICATE) {
     throw bad(`predicate must be ${JSON.stringify(ENV_CLOSE_PREDICATE)}, read ${JSON.stringify(raw.predicate)}`)
   }
   if (typeof raw.uid !== "number" || !Number.isSafeInteger(raw.uid)) throw bad("uid must be a safe integer")
+  const uid = raw.uid
+  const attempts = raw.coverageAttempts
+  if (attempts !== undefined && (typeof attempts !== "number" || !Number.isSafeInteger(attempts) || attempts < 0)) {
+    throw bad("coverageAttempts must be a non-negative safe integer")
+  }
+  if (releaseKeyed) {
+    if (typeof raw.release !== "object" || raw.release === null) throw bad("release must be an object")
+    const release = raw.release as Record<string, unknown>
+    const field = (key: string): string => {
+      const value = release[key]
+      if (typeof value !== "string" || value === "") throw bad(`release.${key} must be a non-empty string`)
+      return value
+    }
+    if (typeof release.submodules !== "boolean") throw bad("release.submodules must be a boolean")
+    return {
+      intent: "release-checkout",
+      name: text("name"),
+      path: text("path"),
+      requester: text("requester"),
+      uid,
+      at: text("at"),
+      predicate: ENV_CLOSE_PREDICATE,
+      release: {
+        branch: field("branch"),
+        tip: field("tip"),
+        issue: field("issue"),
+        reason: field("reason"),
+        by: field("by"),
+        submodules: release.submodules,
+      },
+      ...(attempts === undefined ? {} : { coverageAttempts: attempts }),
+    }
+  }
   const options = raw.options
   if (typeof options !== "object" || options === null) throw bad("options must be an object")
   const rawOptions = options as Record<string, unknown>
@@ -283,10 +426,6 @@ function parseCloseRequest(parsed: unknown, file: string): StoredCloseRequest {
   }
   if (rawOptions.preserve !== undefined && typeof rawOptions.preserve !== "boolean") {
     throw bad("options.preserve must be a boolean")
-  }
-  const attempts = raw.coverageAttempts
-  if (attempts !== undefined && (typeof attempts !== "number" || !Number.isSafeInteger(attempts) || attempts < 0)) {
-    throw bad("coverageAttempts must be a non-negative safe integer")
   }
   let ending: EnvCloseRequest["ending"]
   if (raw.ending !== undefined) {
@@ -307,10 +446,11 @@ function parseCloseRequest(parsed: unknown, file: string): StoredCloseRequest {
     ending = { remote: value.remote, queue: value.queue, branch: value.branch, event: value.event }
   }
   return {
+    intent: "close",
     name: text("name"),
     path: text("path"),
     requester: text("requester"),
-    uid: raw.uid,
+    uid,
     at: text("at"),
     predicate: ENV_CLOSE_PREDICATE,
     options: {

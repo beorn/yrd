@@ -7134,12 +7134,13 @@ describe("drop --local --release-checkout", () => {
     expect(await fixture.git(["for-each-ref", "refs/archive/"])).toBe("")
   })
   /** @failure A sandboxed caller's incomplete census holds a clean merged
-   * branch forever with no named cure (29772): the held receipt must carry
-   * the uncleared pids, the census receipt, and the capable-context re-run
-   * command — while still retiring nothing.
+   * branch forever with no reachable cure (29772): the preview hold must carry
+   * the uncleared pids and the census receipt, and name the cure a confined
+   * caller can take — --apply files a release request for the queue's own
+   * round (@cto c8d7113d) — never its own command as a re-run.
    * @level l2 @consumer releaseRetainedCheckouts callers, including the CLI
    */
-  it("29772: an uncleared unreadable pid holds the release and the receipt names the capable-context cure", async () => {
+  it("29772: an uncleared unreadable pid holds the preview and the receipt names the --apply delegation cure", async () => {
     const fixture = await releaseWorld()
     const actual = await vi.importActual<typeof import("removely")>("removely")
     const observed = await actual.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2000 })
@@ -7177,10 +7178,12 @@ describe("drop --local --release-checkout", () => {
       expect(detail).toContain("pid 424242 session-host (EACCES)")
       // …the census receipt rides along…
       expect(detail).toContain("census proc: 0 readable, 1 unreadable, 1 uncleared")
-      // …and the cure is the exact re-run from a capable context.
-      expect(detail).toContain(`yrd 'drop' 'task/29600-retained' '--local' '--tip' '${fixture.tip}'`)
-      expect(detail).toContain("--release-checkout")
-      expect(detail).toContain("can read every same-UID pid")
+      // …and the cure is the one a confined caller can take: --apply files a
+      // release request for the queue's own round, whose census reads every pid.
+      expect(detail).toContain("--apply files a release request for the queue's own round")
+      expect(detail).not.toContain(`yrd 'drop' 'task/29600-retained'`)
+      expect(report.needsDelegation).toHaveLength(1)
+      expect(report.delegated).toHaveLength(0)
       // 30417: the cure names the discriminator that separates a capable reader
       // from a blind one, and carries this process's own observed value, so a
       // caller cannot mistake the hold for a host-wide /proc restriction.
@@ -7188,6 +7191,240 @@ describe("drop --local --release-checkout", () => {
       expect(detail).toMatch(/this reader: NoNewPrivs=(0|1|absent|unreadable), CapEff=/u)
       expect(detail).not.toContain("outside any sandbox restricting /proc reads")
       // Nothing was archived or deleted under an uncertified census.
+      expect(await fixture.git(["for-each-ref", "refs/archive/"])).toBe("")
+      expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
+  /** @failure The uncertified hold exits 0, so a caller reads "done" while the branch stays (29772); a queued
+   * release must read as queued (4), a re-file must match the standing request, and a store this caller
+   * cannot write must fail loud and nonzero with nothing released (@cto c8d7113d tool-surface rows).
+   * @level l2 @consumer every caller of `yrd drop --release-checkout`, scripts reading its exit code
+   */
+  it("29772: the CLI exits 1 on an uncertified preview, 4 when --apply queues, and fails loud when the store is unwritable", async () => {
+    const fixture = await releaseWorld()
+    const actual = await vi.importActual<typeof import("removely")>("removely")
+    const observed = await actual.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2000 })
+    const spy = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue({
+      ...observed,
+      rows: [],
+      coverage: {
+        ...observed.coverage,
+        complete: false,
+        unreadable: [
+          {
+            pid: 424242,
+            uid: typeof process.getuid === "function" ? process.getuid() : 0,
+            comm: "session-host",
+            denied: ["cwd"],
+            issues: [{ source: "cwd", resource: "cwd", reason: "denied", code: "EACCES" }],
+          },
+          {
+            pid: 777,
+            uid: typeof process.getuid === "function" ? process.getuid() : 0,
+            comm: "gpg-agent",
+            denied: ["cwd"],
+            issues: [{ source: "cwd", resource: "cwd", reason: "denied", code: "EACCES" }],
+          },
+        ],
+      },
+    } as never)
+    let store: string | undefined
+    try {
+      const preview = releaseCapture(fixture.repo)
+      expect(await runYrdProcess(fixture.argv, preview.io), preview.stderr()).toBe(1)
+      const held = JSON.parse(preview.stdout()) as ReleaseReport
+      // A pid waived by identity is named with the identity that cleared it; the other stays uncleared.
+      expect(preview.stderr()).toContain("identity-cleared unreadable PIDs: pid 777 gpg-agent (EACCES) as gpg-agent")
+      expect(held.needsDelegation[0]?.detail).toContain("pid 424242 session-host (EACCES)")
+      expect(held.needsDelegation[0]?.detail).not.toContain("pid 777")
+      expect(held.needsDelegation).toHaveLength(1)
+      expect(held.delegated).toHaveLength(0)
+      const applied = releaseCapture(fixture.repo)
+      expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(4)
+      const queued = JSON.parse(applied.stdout()) as ReleaseReport
+      expect(queued.delegated).toHaveLength(1)
+      const file = queued.delegated[0]?.file ?? ""
+      store = dirname(file)
+      expect(existsSync(file)).toBe(true)
+      // Re-filing the same release matches the standing request: still queued, still one file.
+      const again = releaseCapture(fixture.repo)
+      expect(await runYrdProcess([...fixture.argv, "--apply"], again.io), again.stderr()).toBe(4)
+      expect(again.stderr()).toContain("release request already stood")
+      expect(readdirSync(store)).toEqual([file.slice(store.length + 1)])
+      // A store this caller cannot write fails loud, never 0 and never 4, and releases nothing.
+      unlinkSync(file)
+      chmodSync(store, 0o500)
+      const blocked = releaseCapture(fixture.repo)
+      expect(await runYrdProcess([...fixture.argv, "--apply"], blocked.io), blocked.stderr()).toBe(1)
+      const refused = JSON.parse(blocked.stdout()) as ReleaseReport
+      expect(refused.delegated).toHaveLength(0)
+      expect(refused.removed).toHaveLength(0)
+      expect(refused.failed).toHaveLength(1)
+      expect(refused.failed[0]?.detail).toContain("could not be written")
+      expect(refused.failed[0]?.detail).toContain("nothing was released")
+      expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+    } finally {
+      if (store !== undefined) chmodSync(store, 0o700)
+      spy.mockRestore()
+    }
+  }, 30_000)
+
+  /** @failure With --apply, a confined caller whose census is incomplete still
+   * cannot release the checkout itself, so the release must be delegated: one
+   * durable release request, keyed apart from a close request for the same
+   * path and carrying its intent, lands in the queue's request store, and
+   * nothing is retired or archived by the caller (29772, @cto c8d7113d).
+   * @level l2 @consumer releaseRetainedCheckouts callers, including the CLI
+   */
+  /** @failure 29772 (@cto 585d1eac a): a mixed hold under --apply files nothing, yet the needs-delegation
+   * detail promised a release request; the detail must say the request was not filed and name the other hold.
+   * @level l2 @consumer the confined seat reading why its --apply did not queue
+   */
+  it("29772: a mixed hold under --apply files no request and the needs-delegation detail names the other hold", async () => {
+    const fixture = await releaseWorld(true, true)
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-29772-mixed-hold-"))
+    const actual = await vi.importActual<typeof import("removely")>("removely")
+    const observed = await actual.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2000 })
+    const spy = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue({
+      ...observed,
+      rows: [],
+      coverage: {
+        ...observed.coverage,
+        complete: false,
+        unreadable: [
+          {
+            pid: 424242,
+            uid: typeof process.getuid === "function" ? process.getuid() : 0,
+            comm: "session-host",
+            denied: ["cwd"],
+            issues: [{ source: "cwd", resource: "cwd", reason: "denied", code: "EACCES" }],
+          },
+        ],
+      },
+    } as never)
+    try {
+      const output = releaseCapture(fixture.repo)
+      const report = await releaseRetainedCheckouts({
+        repo: fixture.repo,
+        git: fixture.git,
+        selection: fixture.git.selection,
+        io: output.io,
+        log: { write: vi.fn() },
+        queue: "main",
+        remote: "origin",
+        workdir,
+        sameIssue: async (a, b) => (a === b ? { same: true } : { same: false, resolved: true }),
+        request: {
+          branch: fixture.branch,
+          tip: fixture.tip,
+          issue: "29600",
+          reason: "retain checkout",
+          by: "fixture",
+          submodules: true,
+          apply: true,
+        },
+      })
+      expect(report.delegated).toEqual([])
+      expect(report.removed).toEqual([])
+      expect(report.kept).toContainEqual(expect.objectContaining({ path: "modules/child", reason: "unreached" }))
+      const held = report.kept.find((row) => row.reason === "held")
+      expect(held?.detail).toContain("needs-delegation")
+      expect(held?.detail).toContain("pid 424242 session-host (EACCES)")
+      expect(held?.detail).toContain("not filed: ")
+      expect(held?.detail).toContain("unreached")
+      expect(held?.detail).not.toContain("--apply files a release request")
+      expect(report.needsDelegation[0]?.detail).toContain("not filed: ")
+      expect(existsSync(join(workdir, "state", "yrd", "env-close-requests"))).toBe(false)
+      expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+    } finally {
+      spy.mockRestore()
+    }
+  }, 60_000)
+
+  /** @failure 29772 (@cto 585d1eac d): an --apply that kept a row did not do what was asked, yet exited 0; a
+   * preview that finds the same hold reports it and exits 0.
+   * @level l2 @consumer scripts and seats reading the exit code of drop --release-checkout --apply
+   */
+  it("29772: --apply that keeps a live-use hold exits 1; the same hold in a preview exits 0", async () => {
+    const fixture = await releaseWorld()
+    const { spy } = await permitCensus()
+    try {
+      for (const apply of [false, true]) {
+        const output = releaseCapture(fixture.repo)
+        output.io.liveEnvironmentUse = async () => [{ path: fixture.repo, reason: "fixture live use" }]
+        expect(await runYrdProcess([...fixture.argv, ...(apply ? ["--apply"] : [])], output.io), output.stderr()).toBe(
+          apply ? 1 : 0,
+        )
+        const report = JSON.parse(output.stdout()) as ReleaseReport
+        expect(report.removed).toEqual([])
+        expect(report.kept).toEqual([
+          expect.objectContaining({ reason: "held", detail: expect.stringContaining("live use: fixture live use") }),
+        ])
+        expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+      }
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
+
+  it("29772: --apply with an uncleared unreadable pid files one release request for the queue's own round", async () => {
+    const fixture = await releaseWorld()
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-29772-release-request-"))
+    const actual = await vi.importActual<typeof import("removely")>("removely")
+    const observed = await actual.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2000 })
+    const uncleared = {
+      pid: 424242,
+      uid: typeof process.getuid === "function" ? process.getuid() : 0,
+      comm: "session-host",
+      denied: ["cwd"] as const,
+      issues: [{ source: "cwd" as const, resource: "cwd", reason: "denied" as const, code: "EACCES" }],
+    }
+    const spy = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue({
+      ...observed,
+      rows: [],
+      coverage: { ...observed.coverage, complete: false, unreadable: [uncleared] },
+    } as never)
+    try {
+      const output = releaseCapture(fixture.repo)
+      const report = await releaseRetainedCheckouts({
+        repo: fixture.repo,
+        git: fixture.git,
+        selection: fixture.git.selection,
+        io: output.io,
+        log: { write: vi.fn() },
+        queue: "main",
+        remote: "origin",
+        workdir,
+        sameIssue: async (a, b) => (a === b ? { same: true } : { same: false, resolved: true }),
+        request: {
+          branch: fixture.branch,
+          tip: fixture.tip,
+          issue: "29600",
+          reason: "retain checkout",
+          by: "fixture",
+          apply: true,
+        },
+      })
+      expect(report.removed).toHaveLength(0)
+      expect(report.failed).toHaveLength(0)
+      expect(report.delegated).toHaveLength(1)
+      const queued = report.delegated[0]
+      const store = join(workdir, "state", "yrd", "env-close-requests")
+      expect(queued?.file.startsWith(`${store}/`)).toBe(true)
+      expect(queued?.file.endsWith(".release.json")).toBe(true)
+      expect(readdirSync(store)).toHaveLength(1)
+      const filed = JSON.parse(readFileSync(queued?.file ?? "", "utf8")) as Record<string, unknown>
+      expect(filed).toMatchObject({
+        intent: "release-checkout",
+        path: fixture.repo,
+        predicate: "direct-admission",
+        release: { branch: fixture.branch, tip: fixture.tip, issue: "29600", reason: "retain checkout" },
+      })
+      // The pid stays named in the caller's receipt even though the round decides.
+      expect(queued?.detail).toContain("pid 424242 session-host (EACCES)")
+      expect(queued?.detail).toContain("queued")
       expect(await fixture.git(["for-each-ref", "refs/archive/"])).toBe("")
       expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
     } finally {
@@ -7529,8 +7766,8 @@ describe("drop --local --release-checkout", () => {
       const { spy } = await permitCensus()
       try {
         const applied = releaseCapture(fixture.repo)
-        // A kept row is reported, not failed.
-        expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(0)
+        // A kept row is reported, not failed; an --apply that kept it did not release and exits 1 (@cto 585d1eac).
+        expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(1)
         const report = JSON.parse(applied.stdout()) as ReleaseReport
         expect(report.removed).toEqual([])
         expect(report.kept).toEqual([
@@ -7561,7 +7798,9 @@ describe("drop --local --release-checkout", () => {
         const path =
           kind === "ancestor" ? dirname(fixture.repo) : kind === "equal" ? fixture.repo : join(fixture.repo, "work")
         output.io.liveEnvironmentUse = async () => [{ path, reason: "declared live owner" }]
-        expect(await runYrdProcess([...fixture.argv, "--apply"], output.io), output.stderr()).toBe(0)
+        expect(await runYrdProcess([...fixture.argv, "--apply"], output.io), output.stderr()).toBe(
+          kind === "ancestor" ? 0 : 1,
+        )
         const report = JSON.parse(output.stdout()) as ReleaseReport
         expect(report.failed).toEqual([])
         if (kind === "ancestor") {
@@ -7646,18 +7885,25 @@ describe("drop --local --release-checkout", () => {
         expect(
           await runYrdProcess([...fixture.argv, ...(kind === "preview host" ? [] : ["--apply"])], output.io),
           output.stderr(),
-        ).toBe(failed ? 1 : 0)
+        ).toBe(failed || kind === "moved" || kind === "late entrant" ? 1 : kind === "delegation" ? 4 : 0)
         const report = JSON.parse(output.stdout()) as ReleaseReport
         expect(output.stdout()).not.toContain("fixture-secret")
         expect(output.stdout()).not.toContain("fixture-user")
         expect(report.removed).toEqual([])
-        expect(failed ? report.failed : report.kept).toHaveLength(1)
-        expect(failed ? report.kept : report.failed).toEqual([])
-        const outcomeRow = (failed ? report.failed : report.kept)[0]
+        // 29772 (@cto c8d7113d): an uncertified census under --apply is queued for the round (exit 4), never a
+        // hold that exits 0; every other unsuccessful kind keeps its row.
+        const outcomes = failed ? report.failed : kind === "delegation" ? report.delegated : report.kept
+        expect(outcomes).toHaveLength(1)
+        for (const other of [report.failed, report.kept, report.delegated]) {
+          if (other !== outcomes) expect(other).toEqual([])
+        }
+        const outcomeRow = outcomes[0]
         expect(outcomeRow).not.toHaveProperty("archiveRef")
         const beforeApply =
           kind === "moved" || kind === "cwd" || kind === "delegation" || kind === "host" || kind === "preview host"
-        if (beforeApply && !failed) expect(outcomeRow?.detail).toContain("; branch kept")
+        if (beforeApply && !failed) {
+          expect(outcomeRow?.detail).toContain(kind === "delegation" ? "queued release request" : "; branch kept")
+        }
         expect(outcomeRow?.detail).toMatch(
           kind === "moved"
             ? /tip|moved/

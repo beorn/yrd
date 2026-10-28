@@ -32,8 +32,8 @@ import {
   CloseRequestAlreadyStandsError,
   ENV_CLOSE_PREDICATE,
   MAX_COVERAGE_ATTEMPTS,
-  closeRequestFile,
   dropCloseRequest,
+  envRequestFile,
   listCloseRequests,
   listStagedCloseRequests,
   readCloseRequest,
@@ -43,7 +43,8 @@ import {
   unstageCloseRequest,
   writeCloseRequest,
   type EnvCloseRequest,
-  type StoredCloseRequest,
+  type StoredEnvRequest,
+  type StoredReleaseRequest,
 } from "./env-close-requests.ts"
 import { environmentProvenance } from "./env-cleanup-provenance.ts"
 import {
@@ -84,6 +85,25 @@ type CachedEnvironment = {
 const SWEEP_INSPECTION_BATCH = 8
 // Each route yields after one locked close, including a kept result or a throw.
 const CLOSE_ATTEMPTS_PER_ROUTE = 1
+// A delegated release unblocks a seat now; it has its own budget, ahead of the close backlog (29772).
+const RELEASE_ATTEMPTS_PER_ROUND = 1
+
+/** One row of a release receipt, as `releaseRetainedCheckouts` reports it. */
+type ReleaseRoundRow = Readonly<{ repo: string; branch: string; reason: string; detail?: string }>
+
+/**
+ * The round's own run of a delegated `drop --release-checkout` (29772): the same release, `--apply`, under the
+ * same admission, from the context whose census reads every same-UID pid. The queue command supplies it.
+ */
+export type ReleaseCheckoutRound = (request: StoredReleaseRequest) => Promise<
+  Readonly<{
+    removed: readonly ReleaseRoundRow[]
+    alreadyRetired: readonly ReleaseRoundRow[]
+    kept: readonly ReleaseRoundRow[]
+    failed: readonly ReleaseRoundRow[]
+    needsDelegation: readonly ReleaseRoundRow[]
+  }>
+>
 // Covers opening through the first commit, including time waiting for review.
 const FRESH_ENVIRONMENT_GRACE_MS = 24 * 60 * 60 * 1000
 
@@ -163,6 +183,8 @@ async function consumeCloseRequests(
     io: YrdCliIO
     outcome: Pick<QueueRunOutcome, "run" | "log">
     onEnvironmentClosed?: (closed: ClosedEnvironment) => Promise<void>
+    releaseCheckout?: ReleaseCheckoutRound
+    readTip: (repository: string, branch: string) => Promise<string | undefined>
   }>,
 ): Promise<
   Readonly<{ attempted: number; closed: number; handled: ReadonlySet<string>; proofs: readonly WorktreeRemovalProof[] }>
@@ -171,14 +193,17 @@ async function consumeCloseRequests(
   const { workdir, registry, worktrees, io, outcome } = input
   const journal = (
     file: string,
-    request: StoredCloseRequest | undefined,
+    request: StoredEnvRequest | undefined,
     path: string,
     result: string,
     why: string,
     fingerprint?: string,
     timing?: Readonly<{ started_at: string; elapsed_ms: number }>,
   ): void => {
-    const diagnostic = result === "retired" ? `close not performed: ${why}` : why
+    const diagnostic =
+      result === "retired"
+        ? `${request?.intent === "release-checkout" ? "release" : "close"} not performed: ${why}`
+        : why
     appendFileSync(
       outcome.log,
       `${JSON.stringify({
@@ -190,18 +215,30 @@ async function consumeCloseRequests(
         path,
         ...(request === undefined
           ? { requestFile: file }
-          : {
-              request: {
-                requester: request.requester,
-                at: request.at,
-                options: request.options,
-                path: request.path,
-                head: request.head,
-                ...(request.ending === undefined ? {} : { ending: request.ending }),
-                ...(fingerprint === undefined ? {} : { fingerprint }),
-                ...(request.coverageAttempts === undefined ? {} : { coverageAttempts: request.coverageAttempts }),
-              },
-            }),
+          : request.intent === "release-checkout"
+            ? {
+                request: {
+                  intent: request.intent,
+                  requester: request.requester,
+                  at: request.at,
+                  path: request.path,
+                  release: request.release,
+                  ...(request.coverageAttempts === undefined ? {} : { coverageAttempts: request.coverageAttempts }),
+                },
+              }
+            : {
+                request: {
+                  intent: request.intent,
+                  requester: request.requester,
+                  at: request.at,
+                  options: request.options,
+                  path: request.path,
+                  head: request.head,
+                  ...(request.ending === undefined ? {} : { ending: request.ending }),
+                  ...(fingerprint === undefined ? {} : { fingerprint }),
+                  ...(request.coverageAttempts === undefined ? {} : { coverageAttempts: request.coverageAttempts }),
+                },
+              }),
         result,
         why: diagnostic,
         ...timing,
@@ -214,7 +251,7 @@ async function consumeCloseRequests(
   // name every staged row, then put it back (its slot free) so this round
   // re-evaluates it existence-first, or drop it when a re-request stands.
   for (const staged of listStagedCloseRequests(workdir)) {
-    let interrupted: StoredCloseRequest | undefined
+    let interrupted: StoredEnvRequest | undefined
     try {
       interrupted = readCloseRequest(staged)
     } catch (cause) {
@@ -222,7 +259,7 @@ async function consumeCloseRequests(
       continue
     }
     if (interrupted === undefined) continue
-    const slot = closeRequestFile(workdir, interrupted.path)
+    const slot = envRequestFile(workdir, interrupted)
     if (!unstageCloseRequest(staged, slot)) {
       journal(
         slot,
@@ -244,7 +281,7 @@ async function consumeCloseRequests(
   }
   // Read cheap intent metadata before choosing the oldest batch; filenames do not encode request age.
   // CLOSE_ATTEMPTS_PER_ROUTE bounds locked closes. Unreadable files are named and left standing without a slot.
-  const readable: Array<{ file: string; request: StoredCloseRequest }> = []
+  const readable: Array<{ file: string; request: StoredEnvRequest }> = []
   for (const file of listCloseRequests(workdir)) {
     try {
       const standing = readCloseRequest(file)
@@ -262,12 +299,136 @@ async function consumeCloseRequests(
     const age = a.request.at === b.request.at ? 0 : a.request.at < b.request.at ? -1 : 1
     return age || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
   })
+  const releases = readable.flatMap(({ file, request }) =>
+    request.intent === "release-checkout" ? [{ file, request }] : [],
+  )
+  const closes = readable.flatMap(({ file, request }) => (request.intent === "close" ? [{ file, request }] : []))
+  // 29772 (@cto c8d7113d): releases go first, on their own budget. The tip is read before any census: a moved
+  // or gone branch retires the request as stale-reference, an unreadable one as unreadable, and neither is a
+  // coverage attempt; a held release
+  // (readable holder, live use, a refused protection) retires at once with its reason; only an incomplete
+  // census retries, up to MAX_COVERAGE_ATTEMPTS rounds.
+  let releaseAttempted = 0
+  for (const { file, request } of releases) {
+    if (releaseAttempted >= RELEASE_ATTEMPTS_PER_ROUND) break
+    const { branch, tip } = request.release
+    if (input.releaseCheckout === undefined) {
+      journal(
+        file,
+        request,
+        request.path,
+        "kept",
+        `this round has no release reader; ${releases.length} release request(s) left standing for a round that has one`,
+      )
+      break
+    }
+    let current: string | undefined
+    try {
+      current = await input.readTip(request.path, branch)
+    } catch (cause) {
+      // A tip the round cannot read is not a moved branch (@cto 585d1eac): its own class, cause named.
+      journal(
+        file,
+        request,
+        request.path,
+        "unreadable",
+        `refs/heads/${branch} in ${request.path} cannot be read: ${String(cause)}; nothing applied, the branch and its checkout kept`,
+      )
+      dropCloseRequest(file)
+      continue
+    }
+    if (current !== tip) {
+      journal(
+        file,
+        request,
+        request.path,
+        "stale-reference",
+        `refs/heads/${branch} is ${current ?? "absent"}, not the requested tip ${tip}; nothing applied`,
+      )
+      dropCloseRequest(file)
+      continue
+    }
+    releaseAttempted++
+    const staged = stageCloseRequest(file)
+    const startedAt = Date.now()
+    const timing = { started_at: new Date(startedAt).toISOString(), elapsed_ms: 0 }
+    const rows = (list: readonly ReleaseRoundRow[]): string =>
+      list
+        .map((row) => `${row.repo} ${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`)
+        .join("; ")
+    let report: Awaited<ReturnType<ReleaseCheckoutRound>>
+    try {
+      report = await input.releaseCheckout(request).finally(() => {
+        timing.elapsed_ms = Date.now() - startedAt
+      })
+    } catch (cause) {
+      journal(file, request, request.path, "retired", `${String(cause)}; branch and checkout kept`, undefined, timing)
+      dropCloseRequest(staged)
+      continue
+    }
+    if (
+      report.failed.length === 0 &&
+      report.needsDelegation.length > 0 &&
+      report.kept.length === report.needsDelegation.length
+    ) {
+      const attempts = (request.coverageAttempts ?? 0) + 1
+      const retried = { ...request, coverageAttempts: attempts }
+      if (attempts >= MAX_COVERAGE_ATTEMPTS) {
+        journal(
+          file,
+          retried,
+          request.path,
+          "retired",
+          `coverage refused ${attempts} times; last: ${rows(report.needsDelegation)}`,
+          undefined,
+          timing,
+        )
+        dropCloseRequest(staged)
+      } else {
+        journal(
+          file,
+          retried,
+          request.path,
+          "kept",
+          `coverage refused ${attempts} of ${MAX_COVERAGE_ATTEMPTS}; retried next round: ${rows(report.needsDelegation)}`,
+          undefined,
+          timing,
+        )
+        restoreCloseRequest(staged, file, attempts)
+      }
+      continue
+    }
+    if (report.failed.length > 0 || report.kept.length > 0) {
+      journal(
+        file,
+        request,
+        request.path,
+        "retired",
+        `held: ${rows([...report.failed, ...report.kept])}; branch kept`,
+        undefined,
+        timing,
+      )
+      dropCloseRequest(staged)
+      continue
+    }
+    journal(
+      file,
+      request,
+      request.path,
+      "released",
+      `${rows([...report.removed, ...report.alreadyRetired])}; checkout bytes kept`,
+      undefined,
+      timing,
+    )
+    dropCloseRequest(staged)
+  }
+  if (closes.length === 0) return { attempted: 0, closed: 0, handled: new Set(), proofs }
   let inventory = await environmentInventory(registry, worktrees, workdir)
   let inventoryStale = false
   let attempted = 0
   let closed = 0
   const handled = new Set<string>()
-  for (const { file, request } of readable) {
+  for (const { file, request } of closes) {
     if (attempted >= CLOSE_ATTEMPTS_PER_ROUTE) {
       break
     }
@@ -714,6 +875,7 @@ async function fileTerminalCloseRequests(
         requester,
         uid,
         at: new Date().toISOString(),
+        intent: "close",
         predicate: ENV_CLOSE_PREDICATE,
         options: { noRehome: true },
         head: row.head,
@@ -863,6 +1025,8 @@ async function cleanupEnvironments(
     selection: GitSelection
     /** Told about each environment this run closed; telling never gates the close. */
     onEnvironmentClosed?: (closed: ClosedEnvironment) => Promise<void>
+    /** Runs a delegated `drop --release-checkout` in this round (29772); absent, release requests stay standing. */
+    releaseCheckout?: ReleaseCheckoutRound
   }>,
   cache: Map<string, CachedEnvironment>,
   progress: CleanupProgress,
@@ -1169,6 +1333,9 @@ async function cleanupEnvironments(
     io,
     outcome,
     ...(input.onEnvironmentClosed === undefined ? {} : { onEnvironmentClosed: input.onEnvironmentClosed }),
+    ...(input.releaseCheckout === undefined ? {} : { releaseCheckout: input.releaseCheckout }),
+    readTip: (repository, branch) =>
+      refAt(gitIn(repository, undefined, input.selection, { env: input.env }), `refs/heads/${branch}`),
   })
   proofs.push(...requests.proofs)
   closed += requests.closed
