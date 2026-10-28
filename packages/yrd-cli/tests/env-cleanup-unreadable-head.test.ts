@@ -218,7 +218,11 @@ it("attempts a seat's own request before older automatic filings, at the measure
   const w = await world()
   const uid = process.getuid?.()
   if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
-  const request = (path: string, at: string, ending?: { remote: string; queue: string; branch: string; event: string }) =>
+  const request = (
+    path: string,
+    at: string,
+    ending?: { remote: string; queue: string; branch: string; event: string },
+  ) =>
     writeCloseRequest(w.workdir, {
       name: path.split("/").at(-1)!,
       path,
