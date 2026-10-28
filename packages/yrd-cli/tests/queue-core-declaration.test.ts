@@ -7197,6 +7197,69 @@ describe("drop --local --release-checkout", () => {
       spy.mockRestore()
     }
   }, 30_000)
+  /** @failure The uncertified hold exits 0, so a caller reads "done" while the branch stays (29772); a queued
+   * release must read as queued (4), a re-file must match the standing request, and a store this caller
+   * cannot write must fail loud and nonzero with nothing released (@cto c8d7113d tool-surface rows).
+   * @level l2 @consumer every caller of `yrd drop --release-checkout`, scripts reading its exit code
+   */
+  it("29772: the CLI exits 1 on an uncertified preview, 4 when --apply queues, and fails loud when the store is unwritable", async () => {
+    const fixture = await releaseWorld()
+    const actual = await vi.importActual<typeof import("removely")>("removely")
+    const observed = await actual.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2000 })
+    const spy = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue({
+      ...observed,
+      rows: [],
+      coverage: {
+        ...observed.coverage,
+        complete: false,
+        unreadable: [
+          {
+            pid: 424242,
+            uid: typeof process.getuid === "function" ? process.getuid() : 0,
+            comm: "session-host",
+            denied: ["cwd"],
+            issues: [{ source: "cwd", resource: "cwd", reason: "denied", code: "EACCES" }],
+          },
+        ],
+      },
+    } as never)
+    let store: string | undefined
+    try {
+      const preview = releaseCapture(fixture.repo)
+      expect(await runYrdProcess(fixture.argv, preview.io), preview.stderr()).toBe(1)
+      const held = JSON.parse(preview.stdout()) as ReleaseReport
+      expect(held.needsDelegation).toHaveLength(1)
+      expect(held.delegated).toHaveLength(0)
+      const applied = releaseCapture(fixture.repo)
+      expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(4)
+      const queued = JSON.parse(applied.stdout()) as ReleaseReport
+      expect(queued.delegated).toHaveLength(1)
+      const file = queued.delegated[0]?.file ?? ""
+      store = dirname(file)
+      expect(existsSync(file)).toBe(true)
+      // Re-filing the same release matches the standing request: still queued, still one file.
+      const again = releaseCapture(fixture.repo)
+      expect(await runYrdProcess([...fixture.argv, "--apply"], again.io), again.stderr()).toBe(4)
+      expect(again.stderr()).toContain("release request already stood")
+      expect(readdirSync(store)).toEqual([file.slice(store.length + 1)])
+      // A store this caller cannot write fails loud, never 0 and never 4, and releases nothing.
+      unlinkSync(file)
+      chmodSync(store, 0o500)
+      const blocked = releaseCapture(fixture.repo)
+      expect(await runYrdProcess([...fixture.argv, "--apply"], blocked.io), blocked.stderr()).toBe(1)
+      const refused = JSON.parse(blocked.stdout()) as ReleaseReport
+      expect(refused.delegated).toHaveLength(0)
+      expect(refused.removed).toHaveLength(0)
+      expect(refused.failed).toHaveLength(1)
+      expect(refused.failed[0]?.detail).toContain("could not be written")
+      expect(refused.failed[0]?.detail).toContain("nothing was released")
+      expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+    } finally {
+      if (store !== undefined) chmodSync(store, 0o700)
+      spy.mockRestore()
+    }
+  }, 30_000)
+
   /** @failure With --apply, a confined caller whose census is incomplete still
    * cannot release the checkout itself, so the release must be delegated: one
    * durable release request, keyed apart from a close request for the same

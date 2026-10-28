@@ -84,7 +84,13 @@ import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand, endingCode } from "../src/queue-core-commands.ts"
 import { environmentInventory } from "../src/env-commands.ts"
-import { closeRequestFile, listCloseRequests, stageCloseRequest, writeCloseRequest } from "../src/env-close-requests.ts"
+import {
+  closeRequestFile,
+  listCloseRequests,
+  stageCloseRequest,
+  writeCloseRequest,
+  writeReleaseRequest,
+} from "../src/env-close-requests.ts"
 import { workdirOf } from "../src/workdir.ts"
 import { changesSuffix } from "../src/watch-list.tsx"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
@@ -1535,6 +1541,142 @@ describe("yrd queue up, the service", () => {
       roundCensus.mockRestore()
     }
   }, 120_000)
+
+  describe("delegated release requests (29772)", () => {
+    // A confined seat's --apply files the release; the round, whose census reads every same-UID pid, runs it.
+    async function filedRelease(name: string) {
+      const w = await world()
+      await w.git(["config", "yrd.workdir", w.workdir])
+      await redeclare(w, "setup: ':'\n")
+      await w.git(["fetch", "--quiet", "origin", "main"])
+      await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+      const workdir = await workdirOf(w.git, { cwd: w.work })
+      const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+      const opened = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", name, "--json"], opened.io),
+        opened.stderr(),
+      ).toBe(0)
+      const environment = (JSON.parse(opened.stdout()) as { path: string }).path
+      const branch = `task/29772-${name}`
+      const inEnv = gitIn(environment)
+      const commit = async (message: string) => {
+        writeFileSync(join(environment, "payload.txt"), `${message}\n`)
+        await inEnv(["add", "payload.txt"])
+        await inEnv(["-c", "user.name=fixture", "-c", "user.email=fixture@test.invalid", "commit", "--quiet", "-m", message])
+        return (await inEnv(["rev-parse", "HEAD"])).trim()
+      }
+      await inEnv(["checkout", "--quiet", "-b", branch])
+      const tip = await commit("private committed work")
+      const uid = process.getuid?.()
+      if (uid === undefined) throw new Error("this queue case needs a real unix uid")
+      const { file } = writeReleaseRequest(workdir, {
+        intent: "release-checkout",
+        name: basename(w.work),
+        path: w.work,
+        requester: "@dev/luna5",
+        uid,
+        at: new Date().toISOString(),
+        predicate: "direct-admission",
+        release: { branch, tip, issue: "29772", reason: "retain checkout", by: "@dev/luna5", submodules: false },
+      })
+      return { w, workdir, environment, branch, tip, file, inEnv, commit }
+    }
+    async function oneRound(w: Awaited<ReturnType<typeof world>>, workdir: string) {
+      const roundCensus = vi
+        .spyOn(removely, "inspectProcessCwds")
+        .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+      const stop = new AbortController()
+      const run = capture(w.work)
+      run.io.liveEnvironmentUse = async () => []
+      run.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
+      try {
+        const exit = await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        )
+        const rows = allCleanupRows(workdir).filter(
+          (row) => (row.request as { intent?: string } | undefined)?.intent === "release-checkout",
+        )
+        return { exit, run, rows }
+      } finally {
+        stop.abort()
+        roundCensus.mockRestore()
+      }
+    }
+
+    /**
+     * @failure 29772: a release request no caller here could certify stands forever, so the seat's branch is
+     *          never released; the round must run it under its own complete census and keep the checkout bytes.
+     * @level   l2
+     * @consumer a Landlock-confined seat whose own census cannot read a same-UID pid
+     * @testonly none
+     */
+    it("releases the branch in the round and keeps the checkout bytes", async () => {
+      const filed = await filedRelease("released")
+      const { exit, run, rows } = await oneRound(filed.w, filed.workdir)
+      expect(exit, run.stderr()).toBe(0)
+      expect(rows.map((row) => row.result), JSON.stringify(rows)).toEqual(["released"])
+      expect(String(rows[0]?.why)).toContain("checkout bytes kept")
+      expect(existsSync(filed.file), run.stderr()).toBe(false)
+      expect(listCloseRequests(filed.workdir)).toEqual([])
+      expect(await filed.w.git(["for-each-ref", `refs/heads/${filed.branch}`])).toBe("")
+      expect(readFileSync(join(filed.environment, "payload.txt"), "utf8")).toBe("private committed work\n")
+      expect((await filed.inEnv(["rev-parse", "HEAD"])).trim()).toBe(filed.tip)
+    }, 120_000)
+
+    /**
+     * @failure 29772: the round's release admits a checkout a readable process still holds, or retries it
+     *          forever; a readable holder retires the request at once, the holder named, the branch kept.
+     * @level   l2
+     * @consumer the seat whose live process is inside the checkout
+     * @testonly none
+     */
+    it("retires the request at once, holder named, when a readable process holds the checkout", async () => {
+      const filed = await filedRelease("held")
+      const actual = await vi.importActual<typeof import("removely")>("removely")
+      const observed = await actual.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+      const template = observed.rows.find((row) => row.sources.cwd?.availability === "readable")
+      if (template === undefined || idleCensus === undefined) throw new Error("this case needs a readable census row")
+      vi.mocked(removely.inspectProcessCensus).mockResolvedValue({
+        ...idleCensus,
+        rows: [
+          {
+            ...template,
+            pid: 4343,
+            ppid: 1,
+            sources: { ...template.sources, cwd: { availability: "readable", value: filed.environment } },
+          },
+        ],
+      } as never)
+      const { exit, run, rows } = await oneRound(filed.w, filed.workdir)
+      expect(exit, run.stderr()).toBe(0)
+      expect(rows.map((row) => row.result), JSON.stringify(rows)).toEqual(["retired"])
+      expect(String(rows[0]?.why)).toContain(`process 4343 has CWD ${filed.environment}`)
+      expect(existsSync(filed.file), run.stderr()).toBe(false)
+      expect((await filed.w.git(["rev-parse", `refs/heads/${filed.branch}`])).trim()).toBe(filed.tip)
+    }, 120_000)
+
+    /**
+     * @failure 29772: the round releases a branch that moved after the request was filed, retiring work the
+     *          requester never saw; the tip is read first and a moved branch retires the request untouched.
+     * @level   l2
+     * @consumer the seat that kept working on the branch after filing
+     * @testonly none
+     */
+    it("retires the request as stale-reference, nothing applied, when the branch moved after filing", async () => {
+      const filed = await filedRelease("moved")
+      const moved = await filed.commit("work after the request")
+      const { exit, run, rows } = await oneRound(filed.w, filed.workdir)
+      expect(exit, run.stderr()).toBe(0)
+      expect(rows.map((row) => row.result), JSON.stringify(rows)).toEqual(["stale-reference"])
+      expect(String(rows[0]?.why)).toContain(`is ${moved}, not the requested tip ${filed.tip}`)
+      expect(existsSync(filed.file), run.stderr()).toBe(false)
+      expect((await filed.w.git(["rev-parse", `refs/heads/${filed.branch}`])).trim()).toBe(moved)
+    }, 120_000)
+  })
 
   /**
    * @failure 22894 fix 1: the cursor sweep's census pre-check passes and its own
