@@ -19,6 +19,7 @@ import { afterAll, expect, it, vi } from "vitest"
 import { createEnvironmentCleanup } from "../src/env-cleanup.ts"
 import { closeRequestFile, listCloseRequests, writeCloseRequest } from "../src/env-close-requests.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
+import * as envCommands from "../src/env-commands.ts"
 import type { QueueConfig } from "@yrd/queue-core"
 import { testGitIn } from "../../../tests/support/test-git-in.ts"
 
@@ -74,7 +75,7 @@ async function world(): Promise<
   return { env, git, head, repo, workdir }
 }
 
-async function runRound(w: Awaited<ReturnType<typeof world>>, run: string): Promise<void> {
+async function runRound(w: Awaited<ReturnType<typeof world>>, run: string): Promise<number> {
   const census = vi
     .spyOn(removely, "inspectProcessCwds")
     .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
@@ -103,6 +104,7 @@ async function runRound(w: Awaited<ReturnType<typeof world>>, run: string): Prom
       selection: w.git.selection,
       outcome: { run, log: join(w.workdir, "journal.jsonl"), merged: [], target: w.head } as never,
     })
+    return census.mock.calls.length
   } finally {
     census.mockRestore()
   }
@@ -212,6 +214,62 @@ it.each([
     expect(existsSync(closeRequestFile(w.workdir, path))).toBe(false)
   }
   expect(listCloseRequests(w.workdir)).toEqual(expectedStanding)
+  const deferred = cleanupRows(w.workdir).filter((row) => row.result === "deferred")
+  expect(deferred.map((row) => row.path)).toEqual(olderFirst ? newer : [...newer.slice(1), w.env])
+  expect(deferred.every((row) => row.why === "cap")).toBe(true)
+  await runRound(w, "cleanup-next-oldest-request")
+  const nextClosed = cleanupRows(w.workdir).filter(
+    (row) => row.run === "cleanup-next-oldest-request" && row.result === "closed" && row.request !== undefined,
+  )
+  expect(nextClosed.map((row) => row.path)).toEqual([olderFirst ? newer[0] : newer[1]])
+})
+
+it("clears fifteen gone tail intents after the cap using no further inventory, census or attempt", async () => {
+  const w = await world()
+  const uid = process.getuid?.()
+  if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
+  for (const [index, path] of [
+    w.env,
+    ...Array.from({ length: 15 }, (_, n) => join(w.repo, ".bays", `gone-${n}`)),
+  ].entries()) {
+    writeCloseRequest(w.workdir, {
+      intent: "close",
+      name: path.split("/").at(-1)!,
+      path,
+      requester: "@dev/3",
+      uid,
+      at: new Date(Date.UTC(2026, 9, 15, 0, 0, index)).toISOString(),
+      predicate: "direct-admission",
+      options: { noRehome: true },
+      head: w.head,
+    })
+  }
+  const inventory = vi.spyOn(envCommands, "environmentInventory")
+  let inventoryAtAttempt = 0
+  let censusAtAttempt = 0
+  let attempts = 0
+  vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
+    attempts++
+    inventoryAtAttempt = inventory.mock.calls.length
+    censusAtAttempt = vi.mocked(removely.inspectProcessCwds).mock.calls.length
+    callIo.stdout(JSON.stringify({ closed: path }))
+    return 0
+  })
+  // Only the consumer target is registered; no independent sweep close can add calls.
+  try {
+    const censusAfter = await runRound(w, "post-cap-local-tail")
+    expect(listCloseRequests(w.workdir)).toEqual([])
+    expect(cleanupRows(w.workdir).filter((row) => row.result === "already-removed")).toHaveLength(15)
+    expect(attempts).toBe(1)
+    expect(inventory.mock.calls.length).toBe(inventoryAtAttempt)
+    expect(censusAfter).toBe(censusAtAttempt)
+  } finally {
+    inventory.mockRestore()
+    vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
+      callIo.stdout(JSON.stringify({ closed: path }))
+      return 0
+    })
+  }
 })
 
 it("drops gone and stale requests without spending the one consumer close attempt", async () => {
