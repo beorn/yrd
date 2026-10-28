@@ -7278,6 +7278,98 @@ describe("drop --local --release-checkout", () => {
    * nothing is retired or archived by the caller (29772, @cto c8d7113d).
    * @level l2 @consumer releaseRetainedCheckouts callers, including the CLI
    */
+  /** @failure 29772 (@cto 585d1eac a): a mixed hold under --apply files nothing, yet the needs-delegation
+   * detail promised a release request; the detail must say the request was not filed and name the other hold.
+   * @level l2 @consumer the confined seat reading why its --apply did not queue
+   */
+  it("29772: a mixed hold under --apply files no request and the needs-delegation detail names the other hold", async () => {
+    const fixture = await releaseWorld(true, true)
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-29772-mixed-hold-"))
+    const actual = await vi.importActual<typeof import("removely")>("removely")
+    const observed = await actual.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2000 })
+    const spy = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue({
+      ...observed,
+      rows: [],
+      coverage: {
+        ...observed.coverage,
+        complete: false,
+        unreadable: [
+          {
+            pid: 424242,
+            uid: typeof process.getuid === "function" ? process.getuid() : 0,
+            comm: "session-host",
+            denied: ["cwd"],
+            issues: [{ source: "cwd", resource: "cwd", reason: "denied", code: "EACCES" }],
+          },
+        ],
+      },
+    } as never)
+    try {
+      const output = releaseCapture(fixture.repo)
+      const report = await releaseRetainedCheckouts({
+        repo: fixture.repo,
+        git: fixture.git,
+        selection: fixture.git.selection,
+        io: output.io,
+        log: { write: vi.fn() },
+        queue: "main",
+        remote: "origin",
+        workdir,
+        sameIssue: async (a, b) => (a === b ? { same: true } : { same: false, resolved: true }),
+        request: {
+          branch: fixture.branch,
+          tip: fixture.tip,
+          issue: "29600",
+          reason: "retain checkout",
+          by: "fixture",
+          submodules: true,
+          apply: true,
+        },
+      })
+      expect(report.delegated).toEqual([])
+      expect(report.removed).toEqual([])
+      expect(report.kept).toContainEqual(expect.objectContaining({ path: "modules/child", reason: "unreached" }))
+      const held = report.kept.find((row) => row.reason === "held")
+      expect(held?.detail).toContain("needs-delegation")
+      expect(held?.detail).toContain("pid 424242 session-host (EACCES)")
+      expect(held?.detail).toContain("not filed: ")
+      expect(held?.detail).toContain("unreached")
+      expect(held?.detail).not.toContain("--apply files a release request")
+      expect(report.needsDelegation[0]?.detail).toContain("not filed: ")
+      expect(existsSync(join(workdir, "state", "yrd", "env-close-requests"))).toBe(false)
+      expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+    } finally {
+      spy.mockRestore()
+    }
+  }, 60_000)
+
+  /** @failure 29772 (@cto 585d1eac d): an --apply that kept a row did not do what was asked, yet exited 0; a
+   * preview that finds the same hold reports it and exits 0.
+   * @level l2 @consumer scripts and seats reading the exit code of drop --release-checkout --apply
+   */
+  it("29772: --apply that keeps a live-use hold exits 1; the same hold in a preview exits 0", async () => {
+    const fixture = await releaseWorld()
+    const { spy } = await permitCensus()
+    try {
+      for (const apply of [false, true]) {
+        const output = releaseCapture(fixture.repo)
+        output.io.liveEnvironmentUse = async () => [{ path: fixture.repo, reason: "fixture live use" }]
+        expect(
+          await runYrdProcess([...fixture.argv, ...(apply ? ["--apply"] : [])], output.io),
+          output.stderr(),
+        ).toBe(apply ? 1 : 0)
+        const report = JSON.parse(output.stdout()) as ReleaseReport
+        expect(report.removed).toEqual([])
+        expect(report.kept).toEqual([
+          expect.objectContaining({ reason: "held", detail: expect.stringContaining("live use: fixture live use") }),
+        ])
+        expect((await fixture.git(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${fixture.branch}`)
+      }
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
+
   it("29772: --apply with an uncleared unreadable pid files one release request for the queue's own round", async () => {
     const fixture = await releaseWorld()
     const workdir = mkdtempSync(join(tmpdir(), "yrd-29772-release-request-"))

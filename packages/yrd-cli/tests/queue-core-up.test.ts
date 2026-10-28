@@ -1681,6 +1681,35 @@ describe("yrd queue up, the service", () => {
      * @consumer the seat that kept working on the branch after filing
      * @testonly none
      */
+    /**
+     * @failure 29772 (@cto 585d1eac b): a tip the round cannot read (lock, permission, I/O) was journaled as
+     *          stale-reference, so an operator concludes the branch moved; it is its own class, cause named.
+     * @level   l2
+     * @consumer the operator reading the round's journal
+     * @testonly none
+     */
+    it("retires the request as unreadable, cause named, when the branch tip cannot be read", async () => {
+      const filed = await filedRelease("unreadable")
+      const actual = await vi.importActual<typeof import("@yrd/queue-core")>("@yrd/queue-core")
+      const refAt = vi.spyOn(queueCore, "refAt").mockImplementation(async (git, ref, kind) => {
+        if (ref === `refs/heads/${filed.branch}`) throw new Error("fixture: cannot read the ref while it is locked")
+        return actual.refAt(git, ref, kind)
+      })
+      let round: Awaited<ReturnType<typeof oneRound>>
+      try {
+        round = await oneRound(filed.w, filed.workdir)
+      } finally {
+        refAt.mockRestore()
+      }
+      const { exit, run, rows } = round
+      expect(exit, run.stderr()).toBe(0)
+      expect(rows.map((row) => row.result), JSON.stringify(rows)).toEqual(["unreadable"])
+      expect(String(rows[0]?.why)).toContain("fixture: cannot read the ref while it is locked")
+      expect(String(rows[0]?.why)).toContain("nothing applied")
+      expect(existsSync(filed.file), run.stderr()).toBe(false)
+      expect((await filed.w.git(["rev-parse", `refs/heads/${filed.branch}`])).trim()).toBe(filed.tip)
+    }, 120_000)
+
     it("retires the request as stale-reference, nothing applied, when the branch moved after filing", async () => {
       const filed = await filedRelease("moved")
       const moved = await filed.commit("work after the request")
