@@ -56,12 +56,78 @@ const context = {
   target: "merge-oid",
   merged: ["task/one"],
 }
+/** @failure Checkout cleanup starves a merged issue update until reload drops it. @level l2 @consumer Post-merge tracker updates and cleanup handoff @testonly none */
+it.each(["drain", "stop"] as const)(
+  "updates a merged issue while earlier cleanup is held, then %s owns cleanup disposal",
+  async (ending) => {
+    const root = world()
+    const firstIssue = join(root, "first-issue")
+    const secondIssue = join(root, "second-issue")
+    writeFileSync(firstIssue, "wip")
+    writeFileSync(secondIssue, "wip")
+    const release = Promise.withResolvers<void>()
+    const started: string[] = []
+    const finished: string[] = []
+    const errors: string[] = []
+    const stop = new AbortController()
+    let active = 0
+    let maxActive = 0
+    const runner = createPostMerge({
+      workdir: root,
+      cwd: root,
+      ...(ending === "stop" ? { stop: stop.signal } : {}),
+      cleanup: async (c) => {
+        active++
+        maxActive = Math.max(maxActive, active)
+        started.push(c.target)
+        if (c.target === context.target) await release.promise
+        finished.push(c.target)
+        active--
+      },
+      report: (message) => errors.push(message),
+    })
+    const update = (issue: string) => ["sh", "-c", 'printf done > "$1"', "provider", issue]
+    let closing: Promise<void> | undefined
+    try {
+      runner.nudge({ ...context, update: update(firstIssue) })
+      await vi.waitFor(() => expect(started).toEqual([context.target]), { timeout: 10000 })
+      expect(readFileSync(firstIssue, "utf8")).toBe("done")
+      runner.nudge({ ...context, target: "second", merged: ["task/two"], update: update(secondIssue) })
+      // Observe the provider's settled artifact, not merely a child that has
+      // started writing: shutdown must occur after its update completed.
+      await vi.waitFor(
+        () => {
+          const attempts = readdirSync(join(root, "post-merge"))
+            .filter((name) => name.endsWith(".json"))
+            .map((name) => attemptAt(join(root, "post-merge", name)))
+          expect(attempts.find((attempt) => attempt.target === "second")?.status).toBe("succeeded")
+        },
+        { timeout: 10000 },
+      )
+      expect(readFileSync(secondIssue, "utf8")).toBe("done")
+      expect(started).toEqual([context.target])
+      expect(finished).toEqual([])
+      if (ending === "stop") stop.abort()
+      closing = runner[Symbol.asyncDispose]()
+    } finally {
+      release.resolve()
+      await (closing ?? runner[Symbol.asyncDispose]())
+    }
+    expect(maxActive, "cleanup callbacks remain serial").toBe(1)
+    expect(finished, "active cleanup finishes; a handoff skips unstarted cleanup").toEqual(
+      ending === "stop" ? [context.target] : [context.target, "second"],
+    )
+    const dropped = errors.filter((message) => message.includes("task/two"))
+    expect(dropped, "handoff reports exactly the unstarted cleanup context").toHaveLength(ending === "stop" ? 1 : 0)
+  },
+)
 /** @failure Stop silently drops coalesced merged branch names, so branch triage cannot recover pending cleanup. @level l2 @consumer Yrd service handoff @testonly none */
 it.each([
   { removed: false, ending: "drain" },
   { removed: true, ending: "drain" },
   { removed: false, ending: "stop" },
   { removed: false, ending: "close" },
+  { removed: false, ending: "abort" },
 ] as const)(
   "coalesces catch-up and honors current provider configuration (removed=$removed, ending=$ending)",
   async ({ removed, ending }) => {
@@ -103,7 +169,8 @@ it.each([
       updateDue: false,
     })
     expect(cleaned).toEqual([])
-    if (ending !== "close") writeFileSync(release, "go")
+    if (ending !== "close" && ending !== "abort") writeFileSync(release, "go")
+    if (ending === "abort") stop.abort()
     if (ending === "stop") {
       await vi.waitFor(() => expect(completed).toEqual(["merge-oid"]), { timeout: 10000 })
       // Observe pump's stop reporting before invoking close, which has its own
@@ -115,12 +182,17 @@ it.each([
     }
     await runner[Symbol.asyncDispose]()
     if (ending !== "drain") {
-      expect(cleaned, "pending cleanup does not run after handoff").toEqual(["merge-oid"])
-      expect(completed, "active cleanup finishes before disposal returns").toEqual(["merge-oid"])
+      expect(cleaned, "pending cleanup does not run after handoff").toEqual(ending === "abort" ? [] : ["merge-oid"])
+      expect(completed, "active cleanup finishes before disposal returns").toEqual(
+        ending === "abort" ? [] : ["merge-oid"],
+      )
       const dropped = errors.filter((line) => line.includes("task/two") || line.includes("task/three"))
       expect(dropped, "one report identifies the coalesced pending branches").toHaveLength(1)
       expect(dropped[0]).toContain("task/two")
       expect(dropped[0]).toContain("task/three")
+      if (ending === "abort") {
+        expect(errors.some((line) => line.includes("task/one") && line.includes("cleanup dropped"))).toBe(true)
+      }
       return
     }
     expect(cleaned).toEqual(["merge-oid", "third"])
