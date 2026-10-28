@@ -1858,7 +1858,7 @@ describe("yrd queue up, the service", () => {
     [
       { bay: "21122-merge", closes: true, linkedRoot: false },
       { bay: "21122-personal", closes: false, linkedRoot: false },
-      { bay: "21122-merge", closes: true, linkedRoot: true },
+      { bay: "21122-merge", closes: true, linkedRoot: true, requester: "@dev/13" },
       // AC1: an exact merged job is terminal even inside the ordinary opening grace.
       { bay: "21122-merge", closes: true, linkedRoot: false, fresh: true },
       { bay: "21122-merge", closes: false, linkedRoot: false, fresh: true, advanced: true },
@@ -1866,6 +1866,7 @@ describe("yrd queue up, the service", () => {
       { bay: "21122-merge", closes: false, linkedRoot: false, failingReader: true },
       { bay: "21122-merge", closes: false, linkedRoot: false, invalidReader: true },
     ].map((row) => ({
+      requester: undefined as string | undefined,
       fresh: false,
       advanced: false,
       liveUse: false,
@@ -1875,7 +1876,7 @@ describe("yrd queue up, the service", () => {
     })),
   )(
     "a merge closes only its original environment ($bay, linked root $linkedRoot, fresh $fresh, advanced $advanced, live use $liveUse, failed reader $failingReader, invalid reader $invalidReader)",
-    async ({ bay, closes, linkedRoot, fresh, advanced, liveUse, failingReader, invalidReader }) => {
+    async ({ bay, closes, linkedRoot, fresh, advanced, liveUse, failingReader, invalidReader, requester }) => {
       const w = await world()
       if (linkedRoot) {
         const physical = join(dirname(w.work), "physical-bays")
@@ -1944,7 +1945,7 @@ describe("yrd queue up, the service", () => {
                 stop.abort()
               },
             },
-            { json: true, workdir },
+            { json: true, workdir, env: { ...process.env, YRD_DEFAULT_SUBMITTER: requester } },
           ),
           run.stderr(),
         ).toBe(0)
@@ -1963,6 +1964,7 @@ describe("yrd queue up, the service", () => {
         if (closes) {
           expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeDefined()
           expect(closed?.path).toBe(environment.path)
+          expect(closed?.request).toMatchObject({ requester: requester ?? "yrd" })
         } else {
           expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeUndefined()
         }

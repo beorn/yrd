@@ -268,16 +268,15 @@ async function consumeCloseRequests(
   let closed = 0
   const handled = new Set<string>()
   for (const { file, request } of readable) {
-    if (attempted >= CLOSE_ATTEMPTS_PER_ROUTE) {
-      break
-    }
+    // Cheap dispositions: missing path, absent registration, held registration, or changed HEAD.
+    // After admission fills, use the captured inventory; refreshing it would spawn Git for a deferred row.
     handled.add(request.path)
     if (!existsSync(request.path)) {
       journal(file, request, request.path, "already-removed", `${request.path} is gone; the request is satisfied`)
       dropCloseRequest(file)
       continue
     }
-    if (inventoryStale) {
+    if (inventoryStale && attempted < CLOSE_ATTEMPTS_PER_ROUTE) {
       inventory = await environmentInventory(registry, worktrees, workdir)
       inventoryStale = false
     }
@@ -312,6 +311,11 @@ async function consumeCloseRequests(
         fingerprint,
       )
       dropCloseRequest(file)
+      continue
+    }
+    if (attempted >= CLOSE_ATTEMPTS_PER_ROUTE) {
+      handled.delete(request.path)
+      journal(file, request, request.path, "deferred", "cap")
       continue
     }
     // Stage before the close so two consumers cannot both act on one request and
@@ -654,7 +658,8 @@ async function fileTerminalCloseRequests(
   if (input.terminal.length === 0) return
   const terminal = new Set(input.terminal)
   const uid = typeof globalThis.process.getuid === "function" ? globalThis.process.getuid() : -1
-  const requester = requesterOf(input.env ?? globalThis.process.env)
+  const filedBy = requesterOf(input.env ?? globalThis.process.env)
+  const requester = filedBy === "unknown" ? "yrd" : filedBy
   for (const row of input.rows) {
     if (row.branch === undefined || !terminal.has(row.branch)) continue
     if (row.hold !== null) continue
