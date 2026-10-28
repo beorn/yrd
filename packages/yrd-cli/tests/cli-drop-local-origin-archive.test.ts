@@ -6,6 +6,8 @@
  * @consumer yrd drop --local custody message and recovery command.
  * Also (30277): a drop run in the superproject for a branch only a component holds reports success while
  * removing nothing; it must name the component, its oid and a command that runs there.
+ * Also (31457): origin retirement leaves the store's own refs/remotes/origin/<branch> at the retired tip, so a
+ * reader of that store keeps paging on a branch the queue already retired.
  * @testonly none
  */
 import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
@@ -123,6 +125,69 @@ it("30683: a never-submitted branch's dropped event starts its chain at origin a
     ),
     repeated.stderr(),
   ).toBe(0)
+})
+
+// 31457: origin retirement publishes through the Gitomic backend, not `git push`, so git never updates the
+// store's tracking ref the way `git push --delete` would; dark-work then re-paged on the retired branch's
+// stale refs/remotes/origin/ ref (task/29936-hab-plan-exits-4-five-seats at 7ba97ae4, 2026-10-28).
+it("31457: origin retirement deletes the store's tracking ref at the retired tip; a retry clears a stale one", async () => {
+  const root = mkdtempSync(join(tmpdir(), "yrd-drop-retire-tracking-"))
+  roots.push(root)
+  const remote = join(root, "remote.git")
+  const repo = join(root, "repo")
+  const seed = gitIn(root)
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["clone", "--quiet", remote, repo])
+  const git = gitIn(repo)
+  await git(["config", "user.name", "yrd test"])
+  await git(["config", "user.email", "yrd@test.invalid"])
+  writeFileSync(join(repo, ".yrd.yml"), 'checks:\n  - verify: {run: "true"}\n')
+  await git(["add", "."])
+  await git(["commit", "--quiet", "-m", "queue"])
+  await git(["push", "--quiet", "origin", "main"])
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+  if (config === undefined) throw new Error("fixture lost .yrd.yml")
+  await createEventQueue(
+    createEventStore(repo, "origin", git.selection),
+    "main",
+    target,
+    config,
+    new Date("2020-01-01T00:00:00.000Z"),
+  )
+  await git(["checkout", "--quiet", "-b", "task/published"])
+  writeFileSync(join(repo, "held.txt"), "held\n")
+  await git(["add", "."])
+  await git(["commit", "--quiet", "-m", "held"])
+  const tip = (await git(["rev-parse", "HEAD"])).trim()
+  await git(["push", "--quiet", "origin", "task/published"])
+  await git(["checkout", "--quiet", "main"])
+  const tracking = "refs/remotes/origin/task/published"
+  const trackingHead = async () => (await git(["for-each-ref", "--format=%(objectname)", tracking])).trim()
+  expect(await trackingHead()).toBe(tip)
+
+  const retired = capture(repo)
+  expect(
+    await runYrdProcess(
+      ["bun", "yrd", "drop", "task/published", "--reason", "abandon published work"],
+      retired.io,
+    ),
+    retired.stderr(),
+  ).toBe(0)
+  expect((await git(["ls-remote", "origin", "refs/heads/task/published"])).trim()).toBe("")
+  expect(await trackingHead()).toBe("")
+
+  // A branch retired before this cure keeps its stale tracking ref; the completed-drop retry removes it.
+  await git(["update-ref", tracking, tip])
+  const repeated = capture(repo)
+  expect(
+    await runYrdProcess(
+      ["bun", "yrd", "drop", "task/published", "--retire", "--tip", tip, "--reason", "repeat completed drop"],
+      repeated.io,
+    ),
+    repeated.stderr(),
+  ).toBe(0)
+  expect(await trackingHead()).toBe("")
 })
 
 it("refuses loudly and keeps the branch when origin will not take the dropped event", async () => {
