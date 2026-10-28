@@ -7801,7 +7801,9 @@ describe("drop --local --release-checkout", () => {
         // hold that exits 0; every other unsuccessful kind keeps its row.
         const outcomes = failed ? report.failed : kind === "delegation" ? report.delegated : report.kept
         expect(outcomes).toHaveLength(1)
-        for (const other of [report.failed, report.kept, report.delegated]) if (other !== outcomes) expect(other).toEqual([])
+        for (const other of [report.failed, report.kept, report.delegated]) {
+          if (other !== outcomes) expect(other).toEqual([])
+        }
         const outcomeRow = outcomes[0]
         expect(outcomeRow).not.toHaveProperty("archiveRef")
         const beforeApply =
