@@ -4,7 +4,7 @@ import { readCommitSubmodules } from "git-super/commit-graph"
 import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
 import { shellQuote } from "git-super/shell-command"
 import { createGitWorktreeStore } from "git-super/worktree"
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { inspectCheckoutGitMetadata, verifyRetainedCopy } from "git-super"
 import type { GitWorktreeStore } from "git-super/worktree"
 import {
@@ -53,6 +53,7 @@ import { originHead, retainedComponentStoreHere } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
 import { admitEnvironmentClose, validateLiveEnvironmentUses } from "./env-close-holders.ts"
 import { formatYrdCommand } from "./command-format.ts"
+import { ENV_CLOSE_PREDICATE, requesterOf, writeReleaseRequest } from "./env-close-requests.ts"
 
 /** Ordinary cleanup permits an explicitly standalone host; missing wiring is not that declaration. */
 export async function readBranchProtections(
@@ -1150,6 +1151,11 @@ export async function releaseRetainedCheckouts(
     queue: string
     remote: string
     sameIssue: SameIssue
+    /**
+     * The queue workdir a confined caller's `--apply` files its release request under (29772). The queue's
+     * own round passes none: it IS the context the request waits for, so its hold stays a hold.
+     */
+    workdir?: string
     request: Readonly<{
       branch: string
       tip: string
@@ -1179,6 +1185,10 @@ export async function releaseRetainedCheckouts(
     alreadyRetired: Row[] = [],
     kept: Row[] = [],
     failed: Row[] = []
+  /** Checkouts whose census this caller could not certify; a separate list so the exit code can name them. */
+  const needsDelegation: Row[] = []
+  /** Releases filed for the queue's own round instead (exit 4: queued, not released yet). */
+  const delegated: (Row & { file: string })[] = []
   const excluded: { repo: string; path: string; reason: string }[] = []
   const evidence: LocalBranchProtectionResult["evidence"][number][] = []
   const rootRow: Row = {
@@ -1207,38 +1217,26 @@ export async function releaseRetainedCheckouts(
   }
   const protect = async ({ row, checkout }: Candidate): Promise<readonly string[]> => {
     const admission = await admitEnvironmentClose(checkout, io)
-    if (admission.kind !== "admitted") {
-      // The drop path has no delegation target of its own, so the hold must
-      // name the cure that exists: the same command re-run from a context
-      // whose census can read every same-UID pid (e.g. outside a sandbox that
-      // sets NoNewPrivs=1 or otherwise denies same-UID cwd reads). The census
-      // receipt and this reader's own privilege facts ride along so the
-      // capable context can compare coverage; the uncleared pids stay named
-      // in the refusal — an unreadable pid is never treated as absent.
+    if (admission.kind === "needs-delegation") {
+      // A confined caller cannot certify the release, and re-running its own
+      // command from where it stands reaches the same blind census (29772).
+      // The cure it CAN take is the one env close already has: --apply files a
+      // release request, and the queue's own round, whose census reads every
+      // same-UID pid, reruns this release under the same admission. The census
+      // receipt and this reader's privilege facts stay in the detail, and the
+      // uncleared pids stay named: an unreadable pid is never treated as absent.
       const census = admission.census
-      const rerun = formatYrdCommand(
-        io,
-        [
-          "drop",
-          request.branch,
-          "--local",
-          "--tip",
-          request.tip,
-          "--issue",
-          request.issue,
-          "--reason",
-          request.reason,
-          "--release-checkout",
-          ...(request.submodules === true ? ["--submodules"] : []),
-          ...(request.apply === true ? ["--apply"] : []),
-        ],
-        input.repo,
-      )
-      return [
+      const detail =
         `needs-delegation: ${admission.refusal}; census ${census.mechanism}: ${census.rows} readable, ${census.unreadable} unreadable, ${census.uncleared} uncleared. ` +
-          `This caller cannot certify the release; re-run from a context that can read every same-UID pid (outside any sandbox that sets NoNewPrivs=1 or otherwise denies same-UID cwd reads; this reader: ${readerPrivilegeFacts()}): ${rerun}. ` +
-          `The admission there is unchanged: a process holding the checkout still refuses`,
-      ]
+        `This caller cannot certify the release (this reader: ${readerPrivilegeFacts()}); ` +
+        (input.workdir === undefined && request.apply === true
+          ? "this round could not certify it either"
+          : "--apply files a release request for the queue's own round, whose census reads every same-UID pid") +
+        `. The admission there is unchanged: a process holding the checkout still refuses`
+      if (!needsDelegation.some((held) => held.repo === row.repo && held.path === row.path)) {
+        needsDelegation.push({ ...row, reason: "needs-delegation", detail: publicText(detail) })
+      }
+      return [detail]
     }
     if (io.liveEnvironmentUse === undefined) {
       throw new Error(RELEASE_CHECKOUT_NEEDS_LAUNCHER)
@@ -1294,6 +1292,8 @@ export async function releaseRetainedCheckouts(
     alreadyRetired,
     kept,
     failed,
+    needsDelegation,
+    delegated,
     excluded,
     evidence,
     receipts,
@@ -1533,6 +1533,39 @@ export async function releaseRetainedCheckouts(
           detail: `${heldDetail}; branch kept`,
         })
       }
+    }
+    if (
+      request.apply === true &&
+      input.workdir !== undefined &&
+      failed.length === 0 &&
+      needsDelegation.length > 0 &&
+      kept.length === needsDelegation.length
+    ) {
+      // Every hold is an uncertified census and nothing else refused: delegate the WHOLE release, never a
+      // part, so the round reruns it from the same exact tip (@cto c8d7113d). A store this caller cannot
+      // write throws here, loudly, and the CLI exits nonzero with the branch and checkout kept.
+      const { file, alreadyStood } = writeReleaseRequest(input.workdir, {
+        intent: "release-checkout",
+        name: basename(input.repo),
+        path: input.repo,
+        requester: requesterOf(input.env ?? globalThis.process.env),
+        uid: typeof globalThis.process.getuid === "function" ? globalThis.process.getuid() : -1,
+        at: new Date().toISOString(),
+        predicate: ENV_CLOSE_PREDICATE,
+        release: {
+          branch: request.branch,
+          tip: request.tip,
+          issue: request.issue,
+          reason: request.reason,
+          by: request.by,
+          submodules: request.submodules === true,
+        },
+      })
+      const queued = `${alreadyStood ? "release request already stood" : "queued release request"} ${file} for the queue's own round (exit 4 means queued, not released yet); it journals the outcome under ${join(input.workdir, "logs", "post-merge")}`
+      for (const held of needsDelegation) delegated.push({ ...held, file, detail: `${held.detail ?? held.reason}; ${queued}` })
+      kept.length = 0
+      io.stderr(`yrd: drop --release-checkout ${request.branch}: ${queued}\n`)
+      return report
     }
     if (kept.length > 0 || failed.length > 0) return report
     if (!request.apply) {

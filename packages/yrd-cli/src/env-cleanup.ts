@@ -714,6 +714,7 @@ async function fileTerminalCloseRequests(
         requester,
         uid,
         at: new Date().toISOString(),
+        intent: "close",
         predicate: ENV_CLOSE_PREDICATE,
         options: { noRehome: true },
         head: row.head,
