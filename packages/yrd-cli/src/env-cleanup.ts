@@ -178,6 +178,7 @@ async function consumeCloseRequests(
     fingerprint?: string,
     timing?: Readonly<{ started_at: string; elapsed_ms: number }>,
   ): void => {
+    const diagnostic = result === "retired" ? `close not performed: ${why}` : why
     appendFileSync(
       outcome.log,
       `${JSON.stringify({
@@ -202,11 +203,11 @@ async function consumeCloseRequests(
               },
             }),
         result,
-        why,
+        why: diagnostic,
         ...timing,
       })}\n`,
     )
-    io.stderr(`yrd: environment close request ${file}: ${result}: ${why}\n`)
+    io.stderr(`yrd: environment close request ${file}: ${result}: ${diagnostic}\n`)
   }
   // Staging exists so a crash mid-close leaves the row in a named place. That
   // place needs a reader, or the request is orphaned and unjournaled forever:
@@ -497,13 +498,31 @@ async function consumeCloseRequests(
       }
       continue
     }
+    const custody =
+      typeof parsed === "object" &&
+      parsed !== null &&
+      "reason" in parsed &&
+      parsed.reason === "component-custody" &&
+      "custody" in parsed &&
+      typeof parsed.custody === "object" &&
+      parsed.custody !== null
+        ? (parsed.custody as Readonly<Record<string, unknown>>)
+        : undefined
+    const keptReason = `kept: ${output.trim()}`
+    const custodyReason =
+      custody === undefined
+        ? undefined
+        : `${keptReason}; environment remains registered; elapsed_ms=${timing.elapsed_ms}; ` +
+          (custody.status === "blocked"
+            ? `cure: land or push ${String(custody.component)}, then re-request`
+            : "GitSuper custody proof budget or input could not be verified; inspect the reported proof failure before re-requesting")
     journal(
       file,
       request,
       request.path,
       "retired",
       typeof parsed === "object" && parsed !== null && "kept" in parsed
-        ? `kept: ${output.trim()}`
+        ? (custodyReason ?? keptReason)
         : `unproven close result ${output.trim()}`,
       fingerprint,
       timing,

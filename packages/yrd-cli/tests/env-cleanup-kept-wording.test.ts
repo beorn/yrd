@@ -35,6 +35,7 @@ import * as removely from "removely"
 import type { QueueConfig } from "@yrd/queue-core"
 import { remoteUrl } from "@yrd/queue-core"
 import { createEnvironmentCleanup } from "../src/env-cleanup.ts"
+import { closeEnvironment } from "../src/env-commands.ts"
 import { writeCloseRequest } from "../src/env-close-requests.ts"
 import { writeEnvOpenRecord } from "../src/env-open-record.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
@@ -405,3 +406,65 @@ it("persists a refused registry even when the retained cursor points past a shru
     census.mockResolvedValue({ mechanism: "proc", complete: true, rows: [], unreadable: [] })
   }
 })
+
+// #31360: consuming an intent is not a completed close. Exercise the existing request consumer,
+// with the direct verb results observed in production and its other unsuccessful terminal shapes.
+it.each(["unknown", "blocked", "native-exit", "malformed", "unproven"] as const)(
+  "reports a terminal %s close request as not performed while the environment stays registered",
+  async (kind) => {
+    const w = await world(new Date().toISOString())
+    const uid = process.getuid?.()
+    if (uid === undefined) throw new Error("this close-request case needs a real unix uid")
+    const file = writeCloseRequest(w.workdir, {
+      name: "env-fresh",
+      path: w.env,
+      requester: "requester",
+      uid,
+      at: new Date().toISOString(),
+      predicate: "direct-admission",
+      options: { noRehome: true },
+      head: w.head,
+    }).file
+    const custody = {
+      component: "ag",
+      source: "surviving primary Git graph",
+      status: kind,
+      detail: kind === "blocked" ? "component commit has no surviving witness" : "shared proof deadline is exhausted",
+      ...(kind === "blocked" ? { oid: w.head } : {}),
+    }
+    const output =
+      kind === "unknown" || kind === "blocked"
+        ? JSON.stringify({ kept: w.env, reason: "component-custody", custody })
+        : kind === "malformed"
+          ? "not-json"
+          : kind === "native-exit"
+            ? "teardown failed"
+            : JSON.stringify({ unexpected: true })
+    vi.mocked(closeEnvironment).mockImplementationOnce(async (_path, _options, io) => {
+      io.stdout(output)
+      return kind === "native-exit" ? 1 : 0
+    })
+
+    const rows = await runRound(w, createEnvironmentCleanup(), "terminal-" + kind, [])
+    const retired = rows.find((row) => row.result === "retired" && row.path === w.env)
+    expect(retired, JSON.stringify(rows)).toBeDefined()
+    const why = String(retired?.why)
+    expect(why).toMatch(/^close not performed:/)
+    expect(rows.filter((row) => row.result === "closed")).toEqual([])
+    expect(existsSync(file), "terminal intent is consumed once, never retried").toBe(false)
+    expect(existsSync(w.env), "no removal was certified").toBe(true)
+    expect(await w.git(["worktree", "list", "--porcelain"])).toContain("worktree " + w.env)
+    expect((retired?.request as { coverageAttempts?: number }).coverageAttempts).toBeUndefined()
+    if (kind === "unknown" || kind === "blocked") {
+      expect(why).toContain(custody.detail)
+      expect(why).toContain(custody.source)
+      expect(why).toContain("environment remains registered")
+      expect(why).toMatch(/elapsed_ms=\d+/)
+      if (kind === "unknown") expect(why).toContain("GitSuper custody proof budget")
+      else {
+        expect(why).toContain(w.head)
+        expect(why).toContain("land or push ag, then re-request")
+      }
+    }
+  },
+)
