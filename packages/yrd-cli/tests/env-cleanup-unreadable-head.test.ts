@@ -5,6 +5,8 @@
  * @failure 29587: newer lexical head requests overtake an older ninth request; equal times need a deterministic tie.
  * @failure 31184: each cleanup route gets one close attempt per invocation; stale/gone requests do not consume it,
  *   and request and sweep routes preserve independent progress across invocations.
+ * @failure 31447: oldest-first put a seat's own close request behind every older automatic filing for an ended
+ *   environment (rank 175 of 177 on 2026-10-28), so a seat waited hours for one attempt per round.
  * @level l2
  * @consumer the queue round's post-judgment environment cleanup
  * @reach fs-walk <fixture-only: close-request and environment directories the fixture makes under the OS temp root>
@@ -210,6 +212,42 @@ it.each([
     expect(existsSync(closeRequestFile(w.workdir, path))).toBe(false)
   }
   expect(listCloseRequests(w.workdir)).toEqual(expectedStanding)
+})
+
+it("attempts a seat's own request before older automatic filings, at the measured request times", async () => {
+  const w = await world()
+  const uid = process.getuid?.()
+  if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
+  const request = (path: string, at: string, ending?: { remote: string; queue: string; branch: string; event: string }) =>
+    writeCloseRequest(w.workdir, {
+      name: path.split("/").at(-1)!,
+      path,
+      requester: ending === undefined ? "@dev/luna5" : "unknown",
+      uid,
+      at,
+      predicate: "direct-admission",
+      options: { noRehome: true },
+      head: w.head,
+      ...(ending === undefined ? {} : { ending }),
+    }).file
+  // Measured 2026-10-28 12:00 PDT on the live queue workdir: the round's filings for ended environments stood from
+  // 09:14:49.891Z; @dev/luna5's env close request was filed at 18:44:58.154Z with 167 automatic requests ahead.
+  // Each `at` is that file's real write time (mtime minus at was 0 s for every automatic file), not a stale stamp.
+  const automatic: string[] = []
+  for (const [index, at] of ["2026-10-28T09:14:49.891Z", "2026-10-28T09:14:50.465Z"].entries()) {
+    const path = join(w.repo, ".bays", `a-ended-${index}`)
+    await w.git(["worktree", "add", "--quiet", "--detach", path, "HEAD"])
+    automatic.push(
+      request(path, at, { remote: "origin", queue: "main", branch: `task/ended-${index}`, event: "e".repeat(40) }),
+    )
+  }
+  const seat = request(w.env, "2026-10-28T18:44:58.154Z")
+  await runRound(w, "cleanup-seat-request-first")
+  const closed = cleanupRows(w.workdir).filter((row) => row.result === "closed" && row.request !== undefined)
+  expect(closed.map((row) => row.path)).toEqual([w.env])
+  expect(existsSync(seat)).toBe(false)
+  // Within the automatic class, oldest first still holds: both stand for later rounds.
+  expect(listCloseRequests(w.workdir)).toEqual([...automatic].sort())
 })
 
 it("drops gone and stale requests without spending the one consumer close attempt", async () => {
