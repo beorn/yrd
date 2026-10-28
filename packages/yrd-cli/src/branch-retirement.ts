@@ -1562,7 +1562,9 @@ export async function releaseRetainedCheckouts(
         },
       })
       const queued = `${alreadyStood ? "release request already stood" : "queued release request"} ${file} for the queue's own round (exit 4 means queued, not released yet); it journals the outcome under ${join(input.workdir, "logs", "post-merge")}`
-      for (const held of needsDelegation) delegated.push({ ...held, file, detail: `${held.detail ?? held.reason}; ${queued}` })
+      for (const held of needsDelegation) {
+        delegated.push({ ...held, file, detail: `${held.detail ?? held.reason}; ${queued}` })
+      }
       kept.length = 0
       io.stderr(`yrd: drop --release-checkout ${request.branch}: ${queued}\n`)
       return report

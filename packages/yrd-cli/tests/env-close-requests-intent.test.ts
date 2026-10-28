@@ -33,7 +33,14 @@ function release(tip: string): EnvReleaseRequest {
     uid,
     at: "2026-10-28T18:00:00.000Z",
     predicate: "direct-admission",
-    release: { branch: "task/29772-fixture", tip, issue: "29772", reason: "retain checkout", by: "@dev/luna5", submodules: false },
+    release: {
+      branch: "task/29772-fixture",
+      tip,
+      issue: "29772",
+      reason: "retain checkout",
+      by: "@dev/luna5",
+      submodules: false,
+    },
   }
 }
 
@@ -90,7 +97,9 @@ it("refuses loud a file whose key and intent disagree", () => {
   const releaseFile = releaseRequestFile(workdir, path, "task/29772-fixture")
   const { intent: _intent, ...unnamed } = release("b".repeat(40))
   writeFileSync(releaseFile, `${JSON.stringify(unnamed)}\n`)
-  expect(() => readCloseRequest(releaseFile)).toThrow(/malformed: a release-keyed file must carry intent "release-checkout"/u)
+  expect(() => readCloseRequest(releaseFile)).toThrow(
+    /malformed: a release-keyed file must carry intent "release-checkout"/u,
+  )
   const closeFile = closeRequestFile(workdir, path)
   writeFileSync(closeFile, `${JSON.stringify(release("b".repeat(40)))}\n`)
   expect(() => readCloseRequest(closeFile)).toThrow(/malformed: a close-keyed file carries intent "close" or none/u)

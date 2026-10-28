@@ -1563,7 +1563,16 @@ describe("yrd queue up, the service", () => {
       const commit = async (message: string) => {
         writeFileSync(join(environment, "payload.txt"), `${message}\n`)
         await inEnv(["add", "payload.txt"])
-        await inEnv(["-c", "user.name=fixture", "-c", "user.email=fixture@test.invalid", "commit", "--quiet", "-m", message])
+        await inEnv([
+          "-c",
+          "user.name=fixture",
+          "-c",
+          "user.email=fixture@test.invalid",
+          "commit",
+          "--quiet",
+          "-m",
+          message,
+        ])
         return (await inEnv(["rev-parse", "HEAD"])).trim()
       }
       await inEnv(["checkout", "--quiet", "-b", branch])
@@ -1618,7 +1627,10 @@ describe("yrd queue up, the service", () => {
       const filed = await filedRelease("released")
       const { exit, run, rows } = await oneRound(filed.w, filed.workdir)
       expect(exit, run.stderr()).toBe(0)
-      expect(rows.map((row) => row.result), JSON.stringify(rows)).toEqual(["released"])
+      expect(
+        rows.map((row) => row.result),
+        JSON.stringify(rows),
+      ).toEqual(["released"])
       expect(String(rows[0]?.why)).toContain("checkout bytes kept")
       expect(existsSync(filed.file), run.stderr()).toBe(false)
       expect(listCloseRequests(filed.workdir)).toEqual([])
@@ -1653,7 +1665,10 @@ describe("yrd queue up, the service", () => {
       } as never)
       const { exit, run, rows } = await oneRound(filed.w, filed.workdir)
       expect(exit, run.stderr()).toBe(0)
-      expect(rows.map((row) => row.result), JSON.stringify(rows)).toEqual(["retired"])
+      expect(
+        rows.map((row) => row.result),
+        JSON.stringify(rows),
+      ).toEqual(["retired"])
       expect(String(rows[0]?.why)).toContain(`process 4343 has CWD ${filed.environment}`)
       expect(existsSync(filed.file), run.stderr()).toBe(false)
       expect((await filed.w.git(["rev-parse", `refs/heads/${filed.branch}`])).trim()).toBe(filed.tip)
@@ -1671,7 +1686,10 @@ describe("yrd queue up, the service", () => {
       const moved = await filed.commit("work after the request")
       const { exit, run, rows } = await oneRound(filed.w, filed.workdir)
       expect(exit, run.stderr()).toBe(0)
-      expect(rows.map((row) => row.result), JSON.stringify(rows)).toEqual(["stale-reference"])
+      expect(
+        rows.map((row) => row.result),
+        JSON.stringify(rows),
+      ).toEqual(["stale-reference"])
       expect(String(rows[0]?.why)).toContain(`is ${moved}, not the requested tip ${filed.tip}`)
       expect(existsSync(filed.file), run.stderr()).toBe(false)
       expect((await filed.w.git(["rev-parse", `refs/heads/${filed.branch}`])).trim()).toBe(moved)

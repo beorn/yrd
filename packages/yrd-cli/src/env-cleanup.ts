@@ -43,7 +43,6 @@ import {
   unstageCloseRequest,
   writeCloseRequest,
   type EnvCloseRequest,
-  type StoredCloseRequest,
   type StoredEnvRequest,
   type StoredReleaseRequest,
 } from "./env-close-requests.ts"
@@ -228,18 +227,18 @@ async function consumeCloseRequests(
                 },
               }
             : {
-              request: {
-                intent: request.intent,
-                requester: request.requester,
-                at: request.at,
-                options: request.options,
-                path: request.path,
-                head: request.head,
-                ...(request.ending === undefined ? {} : { ending: request.ending }),
-                ...(fingerprint === undefined ? {} : { fingerprint }),
-                ...(request.coverageAttempts === undefined ? {} : { coverageAttempts: request.coverageAttempts }),
-              },
-            }),
+                request: {
+                  intent: request.intent,
+                  requester: request.requester,
+                  at: request.at,
+                  options: request.options,
+                  path: request.path,
+                  head: request.head,
+                  ...(request.ending === undefined ? {} : { ending: request.ending }),
+                  ...(fingerprint === undefined ? {} : { fingerprint }),
+                  ...(request.coverageAttempts === undefined ? {} : { coverageAttempts: request.coverageAttempts }),
+                },
+              }),
         result,
         why: diagnostic,
         ...timing,
@@ -326,7 +325,13 @@ async function consumeCloseRequests(
     try {
       current = await input.readTip(request.path, branch)
     } catch (cause) {
-      journal(file, request, request.path, "stale-reference", `${request.path} cannot be read: ${String(cause)}; nothing applied`)
+      journal(
+        file,
+        request,
+        request.path,
+        "stale-reference",
+        `${request.path} cannot be read: ${String(cause)}; nothing applied`,
+      )
       dropCloseRequest(file)
       continue
     }
@@ -346,7 +351,9 @@ async function consumeCloseRequests(
     const startedAt = Date.now()
     const timing = { started_at: new Date(startedAt).toISOString(), elapsed_ms: 0 }
     const rows = (list: readonly ReleaseRoundRow[]): string =>
-      list.map((row) => `${row.repo} ${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`).join("; ")
+      list
+        .map((row) => `${row.repo} ${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`)
+        .join("; ")
     let report: Awaited<ReturnType<ReleaseCheckoutRound>>
     try {
       report = await input.releaseCheckout(request).finally(() => {
