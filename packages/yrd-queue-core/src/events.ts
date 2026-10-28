@@ -3486,8 +3486,11 @@ export async function readEventQueueWithChanges(
 export async function listChangeHistories(
   store: QueueLocation,
   queue: string,
-  options: Readonly<{ knownQueue?: EventQueue }> = {},
-): Promise<ChangeHistories> {
+  options: Readonly<{ branches: "all" | readonly string[]; knownQueue?: EventQueue }>,
+): Promise<ChangeHistories & Readonly<{ branches: "all" | readonly string[]; errors: ReadonlyMap<string, Error> }>> {
+  if (options?.branches !== "all" && !Array.isArray(options?.branches)) {
+    throw new TypeError('listChangeHistories requires explicit branches: "all" or a branch array')
+  }
   if (options.knownQueue === undefined) {
     if ((await queueFormat(store, queue)) !== "event") {
       throw new Error(`queue ${queue} in ${store.repo} has no event queue chain`)
@@ -3497,13 +3500,37 @@ export async function listChangeHistories(
     assertQueueLocation(store, queue, options.knownQueue)
   }
   const prefixes = [`${queueRefPrefix(queue)}/changes/`, archivedChangesPrefix(queue)]
-  const chains = await readEventChains(prefixes, store)
-  return projectChangeHistories(chains, prefixes, store.repo)
+  const errors = new Map<string, Error>()
+  if (options.branches === "all") {
+    const chains = await readEventChains(prefixes, store)
+    return { branches: "all", ...projectChangeHistories(chains, prefixes, store.repo), errors }
+  }
+  const branches = [...new Set<string>(options.branches)]
+  const refs = branches.flatMap((branch) => [changesRef(queue, branch), `${archivedChangesPrefix(queue)}${branch}`])
+  // An empty exact cohort must never turn into a prefix read. Acquire once, before isolating projections.
+  const chains = refs.length === 0 ? new Map<string, Event[]>() : await readEventChains(refs, store)
+  const histories = new Map<string, ChangeHistory>()
+  const invalid = new Map<string, InvalidChangeHistory>()
+  for (const branch of branches) {
+    const selected = new Map<string, readonly Event[]>()
+    for (const ref of [changesRef(queue, branch), `${archivedChangesPrefix(queue)}${branch}`]) {
+      const events = chains.get(ref)
+      if (events !== undefined) selected.set(ref, events)
+    }
+    try {
+      const projected = projectChangeHistories(selected, prefixes, store.repo)
+      for (const [name, history] of projected.histories) histories.set(name, history)
+      for (const [name, defect] of projected.invalid) invalid.set(name, defect)
+    } catch (cause) {
+      errors.set(branch, cause instanceof Error ? cause : new Error(String(cause)))
+    }
+  }
+  return { branches, histories, invalid, errors }
 }
 
 /** Branch projections for an event queue. */
 export async function listChanges(store: QueueLocation, queue: string): Promise<ReadonlyMap<string, EventChange>> {
-  const { histories, invalid } = await listChangeHistories(store, queue)
+  const { histories, invalid } = await listChangeHistories(store, queue, { branches: "all" })
   for (const [branch, defect] of invalid) {
     throw new Error(`${branch}: ${defect.error}`)
   }

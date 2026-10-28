@@ -93,6 +93,7 @@ import {
   changesRef,
   readChangeEvents,
   readBranchHistory,
+  listChangeHistories,
   readEventQueue,
   readEventOps,
   readEventOpsWithRefs,
@@ -4157,9 +4158,16 @@ export async function coreQueueCommand(
                 const branches = new Set(
                   inventory.rows.flatMap((row) => (row.branch === undefined ? [] : [row.branch])),
                 )
+                const histories = await listChangeHistories(eventStore, declared.config.target.branch, {
+                  branches: [...branches],
+                })
                 for (const branch of branches) {
                   try {
-                    const { history } = await readBranchHistory(eventStore, declared.config.target.branch, branch)
+                    const error = histories.errors.get(branch)
+                    if (error !== undefined) throw error
+                    const defect = histories.invalid.get(branch)
+                    if (defect !== undefined) throw new Error(`${defect.ref}@${defect.tip}: ${defect.error}`)
+                    const history = histories.histories.get(branch)
                     if (history?.state.status !== "merged") continue
                     if (history.state.commit === undefined || history.state.tip === undefined) {
                       throw new Error("merged history has no exact submitted head and event tip")

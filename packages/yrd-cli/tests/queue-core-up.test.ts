@@ -832,6 +832,7 @@ describe("yrd queue up, the service", () => {
       mechanism: "proc",
       rows: [],
     })
+    const startupHistories = vi.spyOn(queueCore, "listChangeHistories")
     try {
       const stop = new AbortController()
       const first = capture(w.work)
@@ -860,6 +861,22 @@ describe("yrd queue up, the service", () => {
       expect(merged.status).toBe("merged")
       expect(merged.issue).toBeUndefined()
       expect(existsSync(environment), "merge is durable while its pending cleanup is interrupted").toBe(true)
+      // Another registered terminal branch makes startup's acquisition contract observable (31428).
+      const olderBranch = "task/restart-older"
+      const olderPath = join(workdir, "environments", "restart-older")
+      await w.git(["worktree", "add", "--quiet", "-b", olderBranch, olderPath, head])
+      const queueTip = (await readEventQueue(store, "main")).tip
+      if (queueTip === null) throw new Error("fixture queue has no tip")
+      await (
+        await openEvents({ ...store, ref: `refs/yrd-archive/main/${olderBranch}`, writer: "fixture" })
+      ).append(
+        [
+          changeInput("opened", { queueTip, at: new Date(), commit: head, by: "fixture" }),
+          changeInput("merged", { queueTip, at: new Date(), commit: head }),
+        ],
+        { expect: null },
+      )
+      startupHistories.mockClear()
       writeFileSync(release, "go")
       const restarted = capture(w.work)
       restarted.io.localBranchProtections = async () => ({
@@ -889,6 +906,17 @@ describe("yrd queue up, the service", () => {
       await w.git(["fetch", "--quiet", "origin", "main"])
       expect(await w.git(["merge-base", "--is-ancestor", head, "origin/main"])).toBe("")
       expect(existsSync(environment), restarted.stderr()).toBe(false)
+      const startupSelections = startupHistories.mock.calls.flatMap((args) =>
+        Array.isArray(args[2]?.branches) ? [args[2].branches] : [],
+      )
+      expect(startupSelections).toHaveLength(1)
+      expect(startupSelections[0]).toEqual(expect.arrayContaining([branch, olderBranch]))
+      const attempts = readdirSync(join(workdir, "post-merge"))
+        .filter((name) => name.endsWith(".json"))
+        .map((name) => JSON.parse(readFileSync(join(workdir, "post-merge", name), "utf8")))
+      expect(attempts).toContainEqual(
+        expect.objectContaining({ merged: expect.arrayContaining([branch, olderBranch]) }),
+      )
       expect(allCleanupRows(workdir).some((row) => row.path === environment && row.result === "filed")).toBe(true)
       expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim(), "hold retains the released author ref").toBe(
         head,
@@ -910,6 +938,7 @@ describe("yrd queue up, the service", () => {
       )
     } finally {
       writeFileSync(release, "go")
+      startupHistories.mockRestore()
       census.mockRestore()
     }
   }, 120_000)

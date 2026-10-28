@@ -4743,6 +4743,84 @@ describe("the queue-format boundary", () => {
     expect((await listChanges(location, "lab")).get(branch)).toMatchObject({ status: "merged", merge: head, tip })
   })
 
+  /** @failure Startup serially fetches every environment history, or one hot/cold conflict blinds healthy recovery.
+   * @level l1 @consumer queue-up's interrupted provider and environment cleanup recovery (31428)
+   * Existing listing tests select the whole queue, not one exact registered cohort.
+   */
+  it("acquires one exact history cohort and isolates each branch projection", async () => {
+    const { store, location } = remoteMemStore("yrd-startup-cohort")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const head = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const queueTip = await seedEventQueue(location, "lab", head, at)
+    const knownQueue = await readEventQueue(location, "lab")
+    for (const [branch, cold] of [
+      ["task/hot", false],
+      ["task/cold", true],
+      ["task/dual", false],
+      ["task/unselected", false],
+    ] as const) {
+      const ref = cold ? `refs/yrd-archive/lab/${branch}` : changesRef("lab", branch)
+      await (
+        await openEvents({ ...store, ref })
+      ).append(
+        [
+          changeInput("opened", { queueTip, at, commit: head, by: "fixture" }),
+          changeInput("merged", { queueTip, at, commit: head }),
+        ],
+        { expect: null },
+      )
+    }
+    const dualTip = (await store.backend.listRefs!(store.repo, changesRef("lab", "task/dual"))).get(
+      changesRef("lab", "task/dual"),
+    )!
+    await store.backend.publish!(store.repo, [
+      { ref: "refs/yrd-archive/lab/task/dual", expect: "0".repeat(40), oid: dualTip },
+    ])
+    await (
+      await openEvents({ ...store, ref: changesRef("lab", "task/broken") })
+    ).append([changeInput("failed", { queueTip, at, reason: "no opened event" })], { expect: null })
+    const branches = ["task/hot", "task/cold", "task/dual", "task/broken", "task/missing"]
+    const fetch = vi.spyOn(location.backend, "fetchRefs")
+    try {
+      const selected = await listChangeHistories(location, "lab", { knownQueue, branches })
+      expect(selected.branches).toEqual(branches)
+      expect([...selected.histories.keys()]).toEqual(["task/hot", "task/cold"])
+      for (const branch of ["task/hot", "task/cold"]) {
+        expect(selected.histories.get(branch)?.state).toMatchObject({ status: "merged", commit: head })
+      }
+      expect(selected.histories.has("task/unselected")).toBe(false)
+      expect(selected.histories.has("task/missing")).toBe(false)
+      expect(selected.invalid.get("task/broken")?.error).toContain("needs an open change")
+      expect(selected.errors.get("task/dual")).toBeInstanceOf(Conflict)
+      expect(fetch).toHaveBeenCalledTimes(1)
+      expect(new Set(fetch.mock.calls[0]![1])).toEqual(
+        new Set(branches.flatMap((branch) => [changesRef("lab", branch), `refs/yrd-archive/lab/${branch}`])),
+      )
+      // The old detail-reader contract is the compatibility reference, with explicit healthy results above.
+      for (const branch of ["task/hot", "task/cold"]) {
+        expect(selected.histories.get(branch)).toEqual((await readBranchHistory(location, "lab", branch)).history)
+      }
+      await expect(listChangeHistories(location, "lab", { knownQueue, branches: "all" })).rejects.toThrow(
+        /both hot and cold/,
+      )
+      fetch.mockClear()
+      expect(await listChangeHistories(location, "lab", { knownQueue, branches: [] })).toEqual({
+        branches: [],
+        histories: new Map(),
+        invalid: new Map(),
+        errors: new Map(),
+      })
+      expect(fetch).not.toHaveBeenCalled()
+      fetch.mockRejectedValue(new Error("cohort acquisition unavailable"))
+      await expect(listChangeHistories(location, "lab", { knownQueue, branches })).rejects.toThrow(
+        "cohort acquisition unavailable",
+      )
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
   it("reuses only a validated queue read from the same location", async () => {
     const first = remoteMemStore("yrd-event-first")
     const second = remoteMemStore("yrd-event-second")
@@ -4750,14 +4828,16 @@ describe("the queue-format boundary", () => {
     const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
     await seedEventQueue(first.location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
     const queue = await readEventQueue(first.location, "lab")
-    expect(await listChangeHistories(first.location, "lab", { knownQueue: queue })).toEqual({
+    expect(await listChangeHistories(first.location, "lab", { branches: "all", knownQueue: queue })).toEqual({
+      branches: "all",
+      errors: new Map(),
       histories: new Map(),
       invalid: new Map(),
     })
-    await expect(listChangeHistories(second.location, "lab", { knownQueue: queue })).rejects.toThrow(
+    await expect(listChangeHistories(second.location, "lab", { branches: "all", knownQueue: queue })).rejects.toThrow(
       /validated queue.*same location/,
     )
-    await expect(listChangeHistories(first.location, "other", { knownQueue: queue })).rejects.toThrow(
+    await expect(listChangeHistories(first.location, "other", { branches: "all", knownQueue: queue })).rejects.toThrow(
       /validated queue.*same location/,
     )
     // Ops reuse has the same identity contract; fresh-ops tests never pass a projection.
@@ -4776,7 +4856,12 @@ describe("the queue-format boundary", () => {
         /validated queue.*same location/,
       )
     }
-    expect(await listChangeHistories(first.location, "lab")).toEqual({ histories: new Map(), invalid: new Map() })
+    expect(await listChangeHistories(first.location, "lab", { branches: "all" })).toEqual({
+      branches: "all",
+      errors: new Map(),
+      histories: new Map(),
+      invalid: new Map(),
+    })
   })
 
   /** @failure A listing decodes the same queue history twice; reuse must still acquire fresh authority.
@@ -4856,7 +4941,12 @@ describe("the queue-format boundary", () => {
     await legacyPause.append([input("paused")], { expect: null })
     const { queue, histories, invalid } = await readEventQueueWithChanges(location, "lab")
     expect(queue).toEqual(await readEventQueue(location, "lab"))
-    expect({ histories, invalid }).toEqual(await listChangeHistories(location, "lab", { knownQueue: queue }))
+    expect(await listChangeHistories(location, "lab", { branches: "all", knownQueue: queue })).toEqual({
+      branches: "all",
+      errors: new Map(),
+      histories,
+      invalid,
+    })
     expect([...histories.keys()]).toEqual(["task/42"])
   })
 

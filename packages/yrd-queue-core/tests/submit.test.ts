@@ -238,7 +238,7 @@ describe("event submit", () => {
     const refs = await remoteRefs(w)
     expect(refs).toContain(hot)
     expect(refs).not.toContain(cold)
-    const history = (await listChangeHistories(location, "main")).histories.get(branch)
+    const history = (await listChangeHistories(location, "main", { branches: "all" })).histories.get(branch)
     expect(history?.events.slice(0, prior.events.length).map((event) => event.id)).toEqual(
       prior.events.map((event) => event.id),
     )
@@ -321,7 +321,7 @@ describe("event submit", () => {
     const refs = await remoteRefs(w)
     expect(refs).toContain(hot)
     expect(refs).not.toContain(cold)
-    const history = (await listChangeHistories(location, "main")).histories.get(branch)
+    const history = (await listChangeHistories(location, "main", { branches: "all" })).histories.get(branch)
     expect(history?.events.map((event) => event.type)).toEqual(["opened", "merged", "opened"])
     expect(history?.state).toMatchObject({ status: "queued", commit: second })
   })
@@ -1371,7 +1371,7 @@ describe("event submit", () => {
     expect(submitted).toMatchObject({ head, retry: false })
     expect(await remoteRefs(w)).toContain("refs/heads/task/one")
     expect(await remoteRefs(w)).toContain(changesRef("main", "task/one"))
-    const history = (await listChangeHistories(store(w), "main")).histories.get("task/one")
+    const history = (await listChangeHistories(store(w), "main", { branches: "all" })).histories.get("task/one")
     expect(history?.events.map((event) => event.type)).toEqual(["opened"])
     expect(history?.state).toMatchObject({
       commit: head,
@@ -1390,7 +1390,9 @@ describe("event submit", () => {
     const again = await submit(w.git, "origin", request)
     expect(again).toMatchObject({ head, retry: true, opened: first.opened })
     expect(
-      (await listChangeHistories(store(w), "main")).histories.get("task/retry")?.events.map((event) => event.type),
+      (await listChangeHistories(store(w), "main", { branches: "all" })).histories
+        .get("task/retry")
+        ?.events.map((event) => event.type),
     ).toEqual(["opened"])
   })
 
@@ -1460,7 +1462,7 @@ describe("event submit", () => {
       // The landed probe returned the staged event, so this append published ONCE and never re-ran.
       expect(published).toBe(1)
       expect(await readStatus(store(w), "main", branch)).toMatchObject({ status: "queued" })
-      const history = (await listChangeHistories(store(w), "main")).histories.get(branch)
+      const history = (await listChangeHistories(store(w), "main", { branches: "all" })).histories.get(branch)
       expect(history?.events.map((event) => event.type)).toEqual(["opened"])
       expect(history?.events[0]?.id).toBe(submitted.opened)
     } finally {
@@ -1522,7 +1524,9 @@ describe("event submit", () => {
       expect(replayed).toMatchObject({ head, retry: true })
       expect(uploads).toBe(1)
       expect(
-        (await listChangeHistories(store(w), "main")).histories.get(branch)?.events.map((event) => event.type),
+        (await listChangeHistories(store(w), "main", { branches: "all" })).histories
+          .get(branch)
+          ?.events.map((event) => event.type),
       ).toEqual(["opened"])
     } finally {
       restoreStderr()
@@ -1600,20 +1604,26 @@ describe("event submit", () => {
     const first = await submit(w.git, "origin", request)
     expect(first.admission).toMatchObject({ kind: "cannot-judge", reason })
     expect(first.admissionWarning).toMatchObject({ reason })
-    const firstHistory = (await listChangeHistories(store(w), "main")).histories.get(request.branch)
+    const firstHistory = (await listChangeHistories(store(w), "main", { branches: "all" })).histories.get(
+      request.branch,
+    )
     expect(firstHistory?.events.map((event) => event.type)).toEqual(["opened", "admission-warning"])
     expect(firstHistory?.state).toMatchObject({ status: "queued", commit: head })
     const retry = await submit(w.git, "origin", request)
     expect(retry.retry).toBe(true)
     expect(retry.admissionWarning).toBeUndefined()
-    expect((await listChangeHistories(store(w), "main")).histories.get(request.branch)?.events).toHaveLength(2)
+    expect(
+      (await listChangeHistories(store(w), "main", { branches: "all" })).histories.get(request.branch)?.events,
+    ).toHaveLength(2)
     await w.git(["checkout", "--quiet", request.branch])
     await w.git(["commit", "--quiet", "--allow-empty", "-m", "next attempt"])
     const next = await submit(w.git, "origin", request)
     expect(next.admissionWarning?.event).toBeDefined()
     expect(next.admissionWarning?.event).not.toBe(first.admissionWarning?.event)
     expect(
-      (await listChangeHistories(store(w), "main")).histories.get(request.branch)?.events.map((event) => event.type),
+      (await listChangeHistories(store(w), "main", { branches: "all" })).histories
+        .get(request.branch)
+        ?.events.map((event) => event.type),
     ).toEqual(["opened", "admission-warning", "cancelled", "opened", "admission-warning"])
   })
 
@@ -1631,7 +1641,9 @@ describe("event submit", () => {
       })
       expect(submitted.admission).toEqual({ kind: "warn", reason })
       expect(submitted.admissionWarning?.event).toBeDefined()
-      const history = (await listChangeHistories(store(w), "main")).histories.get("task/policy-warning")
+      const history = (await listChangeHistories(store(w), "main", { branches: "all" })).histories.get(
+        "task/policy-warning",
+      )
       expect(history?.events.map((event) => event.type)).toEqual(["opened", "admission-warning"])
       expect(history?.events.at(-1)?.props).toContainEqual(["Warning-Kind", "policy-warning"])
       const encoded = history?.events.at(-1)?.props.find(([key]) => key === "Admission-Output")?.[1]
@@ -1658,7 +1670,9 @@ describe("event submit", () => {
       })
       expect(changed.retry).toBe(true)
       expect(changed.admissionWarning?.event).toBeDefined()
-      expect((await listChangeHistories(store(w), "main")).histories.get("task/policy-warning")?.events).toHaveLength(3)
+      expect(
+        (await listChangeHistories(store(w), "main", { branches: "all" })).histories.get("task/policy-warning")?.events,
+      ).toHaveLength(3)
     },
   )
 
@@ -1675,7 +1689,9 @@ describe("event submit", () => {
     expect(submitted.admission).toEqual({ kind: "admitted" })
     expect(submitted.admissionWarning).toBeUndefined()
     expect(
-      (await listChangeHistories(store(w), "main")).histories.get("task/admitted")?.events.map((event) => event.type),
+      (await listChangeHistories(store(w), "main", { branches: "all" })).histories
+        .get("task/admitted")
+        ?.events.map((event) => event.type),
     ).toEqual(["opened"])
   })
 
@@ -1745,7 +1761,9 @@ describe("event submit", () => {
       target: { branch: "main", remote: "origin" },
     })
     expect(result).toMatchObject({ head: second, retry: false })
-    const events = (await listChangeHistories(store(w), "main")).histories.get("task/advance")?.events
+    const events = (await listChangeHistories(store(w), "main", { branches: "all" })).histories.get(
+      "task/advance",
+    )?.events
     expect(events?.map((event) => event.type)).toEqual(["opened", "cancelled", "opened"])
     expect((await readStatus(store(w), "main", "task/advance")).commit).toBe(second)
     expect(first).not.toBe(second)

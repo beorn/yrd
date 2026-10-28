@@ -1113,7 +1113,9 @@ export async function eventQueueRun(
   }
   operational = await withRemoteSeam("prePick", () => readOps())
   let queueState = operational.queue
-  const { histories, invalid } = await withRemoteSeam("prePick", () => listChangeHistories(store, queue))
+  const { histories, invalid } = await withRemoteSeam("prePick", () =>
+    listChangeHistories(store, queue, { branches: "all" }),
+  )
   // 27198: ONE queue-level `notify-floors` snapshot per run, before any ending
   // delivery. The first snapshot is a migration: it mints every declared name at
   // the queue's created instant, and refuses loudly unless the declared name set
