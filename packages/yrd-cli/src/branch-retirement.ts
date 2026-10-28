@@ -1327,7 +1327,9 @@ export async function releaseRetainedCheckouts(
           : `not filed: ${
               others.length > 0
                 ? others
-                    .map((row) => `${row.path || "."} ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`)
+                    .map(
+                      (row) => `${row.path || "."} ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`,
+                    )
                     .join("; ")
                 : "the census became uncertified only after this release began"
             }; a release request is filed only when an uncertified census is the only hold`

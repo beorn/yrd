@@ -1703,7 +1703,10 @@ describe("yrd queue up, the service", () => {
       }
       const { exit, run, rows } = round
       expect(exit, run.stderr()).toBe(0)
-      expect(rows.map((row) => row.result), JSON.stringify(rows)).toEqual(["unreadable"])
+      expect(
+        rows.map((row) => row.result),
+        JSON.stringify(rows),
+      ).toEqual(["unreadable"])
       expect(String(rows[0]?.why)).toContain("fixture: cannot read the ref while it is locked")
       expect(String(rows[0]?.why)).toContain("nothing applied")
       expect(existsSync(filed.file), run.stderr()).toBe(false)

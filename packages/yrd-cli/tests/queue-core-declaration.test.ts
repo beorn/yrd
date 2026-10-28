@@ -7354,10 +7354,9 @@ describe("drop --local --release-checkout", () => {
       for (const apply of [false, true]) {
         const output = releaseCapture(fixture.repo)
         output.io.liveEnvironmentUse = async () => [{ path: fixture.repo, reason: "fixture live use" }]
-        expect(
-          await runYrdProcess([...fixture.argv, ...(apply ? ["--apply"] : [])], output.io),
-          output.stderr(),
-        ).toBe(apply ? 1 : 0)
+        expect(await runYrdProcess([...fixture.argv, ...(apply ? ["--apply"] : [])], output.io), output.stderr()).toBe(
+          apply ? 1 : 0,
+        )
         const report = JSON.parse(output.stdout()) as ReleaseReport
         expect(report.removed).toEqual([])
         expect(report.kept).toEqual([
