@@ -7223,7 +7223,7 @@ describe("drop --local --release-checkout", () => {
           {
             pid: 777,
             uid: typeof process.getuid === "function" ? process.getuid() : 0,
-            comm: "gpg-agent",
+            comm: "sshd-session",
             denied: ["cwd"],
             issues: [{ source: "cwd", resource: "cwd", reason: "denied", code: "EACCES" }],
           },
@@ -7236,7 +7236,10 @@ describe("drop --local --release-checkout", () => {
       expect(await runYrdProcess(fixture.argv, preview.io), preview.stderr()).toBe(1)
       const held = JSON.parse(preview.stdout()) as ReleaseReport
       // A pid waived by identity is named with the identity that cleared it; the other stays uncleared.
-      expect(preview.stderr()).toContain("identity-cleared unreadable PIDs: pid 777 gpg-agent (EACCES) as gpg-agent")
+      // sshd-session, not gpg-agent: hosted Yrd CI runs the published removely, which predates gpg-agent.
+      expect(preview.stderr()).toContain(
+        "identity-cleared unreadable PIDs: pid 777 sshd-session (EACCES) as sshd-session",
+      )
       expect(held.needsDelegation[0]?.detail).toContain("pid 424242 session-host (EACCES)")
       expect(held.needsDelegation[0]?.detail).not.toContain("pid 777")
       expect(held.needsDelegation).toHaveLength(1)
