@@ -39,7 +39,7 @@ import { formatYrdCommand } from "./command-format.ts"
 import { createPostMerge, readPostMergeIssueDiagnostics } from "./post-merge.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup, type ClosedEnvironment } from "./env-cleanup.ts"
-import { environmentInventory } from "./env-commands.ts"
+import { ENV_CLOSE_QUEUED_EXIT, environmentInventory } from "./env-commands.ts"
 import {
   captureMergedComponentAuthors,
   retireMergedComponentAuthors,
@@ -1239,6 +1239,25 @@ export async function coreQueueCommand(
         env,
         selection,
         onEnvironmentClosed: teller,
+        // 29772: the round reruns a delegated release itself, --apply, under the same admission.
+        releaseCheckout: (filed) =>
+          releaseRetainedCheckouts({
+            repo: filed.path,
+            git: gitIn(filed.path, undefined, selection, { env }),
+            selection,
+            env,
+            io,
+            log: retirementLog,
+            queue: config.target.branch,
+            remote: config.target.remote,
+            sameIssue: issueComparer({
+              projectRoot: filed.path,
+              cwd: filed.path,
+              ...(env === undefined ? {} : { env }),
+              stderr: (text) => io.stderr(text),
+            }),
+            request: { ...filed.release, apply: true },
+          }),
       }).finally(() => teller.flush())
       await retireMergedComponentAuthors({
         authors: componentAuthors,
@@ -1914,21 +1933,28 @@ export async function coreQueueCommand(
             queue: config.target.branch,
             remote: config.target.remote,
             sameIssue,
+            workdir,
             request: { ...request, issue: request.issue, reason: request.reason },
           })
           emit(
             io,
             options.json,
             report,
-            `checkout release in ${authorRepo}: eligible ${report.eligible.length}, retired ${report.removed.length}, already retired ${report.alreadyRetired.length}, kept ${report.kept.length}, failed ${report.failed.length}; ${report.apply ? "applied" : "preview; use --apply"}\n` +
-              [...report.eligible, ...report.removed, ...report.kept, ...report.failed]
+            `checkout release in ${authorRepo}: eligible ${report.eligible.length}, retired ${report.removed.length}, already retired ${report.alreadyRetired.length}, kept ${report.kept.length}, queued ${report.delegated.length}, failed ${report.failed.length}; ${report.apply ? "applied" : "preview; use --apply"}\n` +
+              [...report.eligible, ...report.removed, ...report.kept, ...report.delegated, ...report.failed]
                 .map(
                   (row) =>
                     `${row.repo} ${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`,
                 )
                 .join("\n"),
           )
-          return report.failed.length === 0 ? 0 : 1
+          // 29772 (@cto c8d7113d): a hold this caller cannot certify never exits 0. Queued is 4, as env close;
+          // an uncertified preview is 1, and its detail names --apply as the cure. An --apply that kept any
+          // row did not do what was asked: 1 (@cto 585d1eac); a preview reporting the same hold stays 0.
+          if (report.failed.length > 0) return 1
+          if (report.delegated.length > 0) return ENV_CLOSE_QUEUED_EXIT
+          if (report.needsDelegation.length > 0) return 1
+          return report.apply && report.kept.length > 0 ? 1 : 0
         } finally {
           log.finish()
         }

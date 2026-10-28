@@ -193,6 +193,7 @@ it("keeps a standing close request when the refusal's own class arrives on the f
     requester: "@dev/luna2",
     uid,
     at: new Date().toISOString(),
+    intent: "close",
     predicate: "direct-admission",
     options: { noRehome: true },
     head,

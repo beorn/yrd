@@ -1617,6 +1617,7 @@ function queueDelegatedClose(
     requester: requesterOf(globalThis.process.env),
     uid: typeof globalThis.process.getuid === "function" ? globalThis.process.getuid() : -1,
     at: new Date().toISOString(),
+    intent: "close",
     predicate: ENV_CLOSE_PREDICATE,
     options: chosen,
     head,
