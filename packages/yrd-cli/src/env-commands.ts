@@ -544,13 +544,19 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     // with --bay/--issue and no argument. Offering only `rev-parse HEAD`
     // answered a question the caller had not asked: it resolves to a commit
     // and detaches, discarding the branch identity they named.
-    const resolved = await refAt(gitIn(root, undefined, selection), commit)
+    // A decimal issue id is all hex, and git reads a short all-hex string as an object prefix too: the ref probe
+    // rethrew its blob/tree error in place of this message (31210, @cto f847cdae), so an all-hex argument is not probed.
+    const issueId = /^\d+$/u.test(commit)
+    const resolved = /^[0-9a-f]+$/u.test(commit) ? undefined : await refAt(gitIn(root, undefined, selection), commit)
     throw new Error(
       `yrd env open takes an exact commit object ID as its argument, not '${commit}'.` +
+        (issueId ? ` To open an environment for issue ${commit}: yrd env open --issue ${commit}.` : "") +
         (resolved === undefined ? "" : ` '${commit}' is a ref here, and this argument never accepts one.`) +
         ` To open or adopt a branch, pass --bay <name> or --issue <ref> with no argument;` +
         ` the branch it opens or adopts is always task/<name>.` +
-        ` To retain an exact commit detached, resolve one first with git rev-parse ${resolved === undefined ? "HEAD" : commit}.`,
+        (issueId
+          ? ""
+          : ` To retain an exact commit detached, resolve one first with git rev-parse ${resolved === undefined ? "HEAD" : commit}.`),
     )
   }
   const target = commit === undefined ? await originHead(gitIn(root, undefined, selection)) : "HEAD"
@@ -573,10 +579,18 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       ? await resolveBaseSha(git, target, io)
       : { sha: commit, baseSource: "commit" as const, originUnreachable: false }
   const base = resolvedBase.sha
-  if (commit !== undefined && (await refAt(git, commit)) !== commit) {
-    throw new Error(
-      `yrd env open: commit ${commit} is not a commit object in ${root}; fetch that commit before opening it`,
-    )
+  if (commit !== undefined) {
+    // A ^{commit} peel of a blob or tree rethrew git's own error in place of this refusal (31210, @cto 21ebb13f):
+    // read presence with no peel ("blob" kind), then the object's type.
+    if ((await refAt(git, `${commit}^{object}`, "blob")) === undefined) {
+      throw new Error(
+        `yrd env open: commit ${commit} is not a commit object in ${root}; fetch that commit before opening it`,
+      )
+    }
+    const type = (await git(["cat-file", "-t", commit])).trim()
+    if (type !== "commit") {
+      throw new Error(`yrd env open: commit ${commit} is a ${type} object, not a commit, in ${root}`)
+    }
   }
   const config = await readConfig(
     git,

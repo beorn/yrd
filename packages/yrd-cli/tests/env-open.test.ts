@@ -1168,12 +1168,14 @@ describe("yrd env open says which input selects which path", () => {
     const w = await world("true")
     // An issue id is all decimal digits, and once the store is large enough some id is a unique object prefix
     // (in /hh/dev, 31189 is a blob and 31210 a tree). Write deterministic blobs until one's oid opens with five.
+    // About 1 in 10 qualifies; 400 misses in a row is a broken fixture, so it fails loudly instead of looping.
     let id: string | undefined
-    for (let n = 0; id === undefined; n++) {
+    for (let n = 0; id === undefined && n < 400; n++) {
       writeFileSync(join(w.work, "BLOB"), `31210 object-prefix fixture ${n}\n`)
       const oid = (await w.git(["hash-object", "-w", "BLOB"])).trim()
       if (/^\d{5}/u.test(oid)) id = oid.slice(0, 5)
     }
+    if (id === undefined) throw new Error("31210 fixture: no blob in 400 opened with five decimal digits")
     expect((await w.git(["cat-file", "-t", id])).trim()).toBe("blob")
     const run = capture(w.work)
 
@@ -1181,9 +1183,44 @@ describe("yrd env open says which input selects which path", () => {
 
     const refusal = run.stderr()
     // The defect: the "is a ref here" probe read the id as an object prefix and its git error replaced the guidance.
-    expect(refusal).not.toMatch(/expected commit type|dereferences to|rev-parse --verify/u)
+    expect(refusal).not.toMatch(/expected commit type|dereferences to|rev-parse/u)
     expect(refusal).toContain(`yrd env open --issue ${id}`)
     expect(existsSync(join(w.work, ".bays", id))).toBe(false)
+  })
+
+  it("still names a ref argument as a ref (31210 control)", async () => {
+    const w = await world("true")
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "main"], run.io)).toBe(2)
+
+    expect(run.stderr()).toContain("'main' is a ref here")
+    expect(run.stderr()).not.toContain("--issue main")
+  })
+
+  it("refuses a full object id that is not a commit by naming its type, never a git error (31210)", async () => {
+    const w = await world("true")
+    writeFileSync(join(w.work, "BLOB"), "31210 full-oid fixture\n")
+    const blob = (await w.git(["hash-object", "-w", "BLOB"])).trim()
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", blob], run.io)).toBe(2)
+
+    // The second site of the same defect: the ^{commit} peel's error replaced the not-a-commit refusal.
+    expect(run.stderr()).not.toMatch(/rev-parse|dereferences to/u)
+    expect(run.stderr()).toContain(`commit ${blob} is a blob object, not a commit`)
+    expect(existsSync(join(w.work, ".bays"))).toBe(false)
+  })
+
+  it("still tells a missing full commit id to fetch it first (31210 control)", async () => {
+    const w = await world("true")
+    const missing = "1".repeat(40)
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", missing], run.io)).toBe(2)
+
+    expect(run.stderr()).toContain(`commit ${missing} is not a commit object`)
+    expect(run.stderr()).toContain("fetch that commit before opening it")
   })
 })
 
