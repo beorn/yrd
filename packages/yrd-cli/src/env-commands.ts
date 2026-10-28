@@ -1637,8 +1637,21 @@ function queueDelegatedClose(
     options: chosen,
     head,
   }
-  const { file, alreadyStood } = writeCloseRequest(workdir, request)
+  const queued = writeCloseRequest(workdir, request)
+  const { file } = queued
   const journalDir = join(workdir, "logs", "post-merge")
+  if (queued.alreadyStood) {
+    const { standing } = queued
+    io.stderr(
+      `yrd: env close ${path}: ` +
+        (standing.options.noRehome === true && chosen.noRehome !== true
+          ? "your default close asked for rehome; "
+          : "") +
+        `standing request from ${standing.requester} at ${standing.at} closes ` +
+        `${standing.options.noRehome === true ? "without" : "with"} rehome under ending ${JSON.stringify(standing.ending)}; ` +
+        `it stands unchanged\n`,
+    )
+  }
   io.stderr(
     `yrd: env close ${path}: ${admission.refusal}; this caller cannot certify the close; ` +
       `queued request ${file} (exit 4 means queued, not closed yet) for the queue's own round, which reads every same-UID pid, unlinks ${file} when consumed, and journals the outcome under ${journalDir}\n`,
@@ -1650,7 +1663,17 @@ function queueDelegatedClose(
           reason: "incomplete-census",
           request: file,
           census: admission.census,
-          ...(alreadyStood ? { alreadyQueued: true } : {}),
+          ...(queued.alreadyStood
+            ? {
+                alreadyQueued: true,
+                standing: {
+                  requester: queued.standing.requester,
+                  at: queued.standing.at,
+                  options: queued.standing.options,
+                  ending: queued.standing.ending,
+                },
+              }
+            : {}),
         })}\n`
       : `queued environment close for ${path} (exit 4 means queued, not closed yet): ${admission.refusal}; a context that can read every same-UID pid will close it, unlink ${file} when consumed, and journal the outcome under ${journalDir}; request ${file}\n`,
   )

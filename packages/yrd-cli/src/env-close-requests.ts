@@ -137,15 +137,18 @@ export function envRequestFile(workdir: string, request: StoredEnvRequest): stri
  *
  * Idempotent for a re-request with the same path and options: the FIRST
  * requester and time survive, because the request is an intent and re-filing it
- * changes nothing. A standing request for the same path with DIFFERENT options
- * is a conflict, named with its requester and options, never overwritten. A file
+ * changes nothing. An undeclared default close can also observe a standing
+ * close without retain/preserve; its recorded options and ending still stand.
+ * Other different options are a conflict, never overwritten. A file
  * this process cannot read, or one written by another uid, is refused loudly by
  * name: silent overwrite would hide a foreign writer (NO SILENT ERRORS).
  */
 export function writeCloseRequest(
   workdir: string,
   request: EnvCloseRequest,
-): Readonly<{ file: string; alreadyStood: boolean }> {
+): Readonly<
+  { file: string; alreadyStood: false } | { file: string; alreadyStood: true; standing: StoredCloseRequest }
+> {
   const file = closeRequestFile(workdir, request.path)
   const standing = readCloseRequest(file)
   if (standing !== undefined) {
@@ -155,11 +158,12 @@ export function writeCloseRequest(
     }
     if (
       standing.path !== request.path ||
-      !sameOptions(standing.options, request.options) ||
-      standing.ending?.remote !== request.ending?.remote ||
-      standing.ending?.queue !== request.ending?.queue ||
-      standing.ending?.branch !== request.ending?.branch ||
-      standing.ending?.event !== request.ending?.event
+      (!defaultCloseMatchesStanding(request, standing) &&
+        (!sameOptions(standing.options, request.options) ||
+          standing.ending?.remote !== request.ending?.remote ||
+          standing.ending?.queue !== request.ending?.queue ||
+          standing.ending?.branch !== request.ending?.branch ||
+          standing.ending?.event !== request.ending?.event))
     ) {
       throw new CloseRequestAlreadyStandsError(
         file,
@@ -169,7 +173,7 @@ export function writeCloseRequest(
           `resolve the standing request before filing another`,
       )
     }
-    return { file, alreadyStood: true }
+    return { file, alreadyStood: true, standing }
   }
   try {
     publishCloseRequest(file, request)
@@ -356,6 +360,18 @@ function removeFile(file: string): void {
 
 function sameOptions(left: EnvCloseRequestOptions, right: EnvCloseRequestOptions): boolean {
   return left.retain === right.retain && left.noRehome === right.noRehome && left.preserve === right.preserve
+}
+
+/** Default observation preserves the recorded close conditions; it declares no replacement. */
+function defaultCloseMatchesStanding(request: EnvCloseRequest, standing: StoredCloseRequest): boolean {
+  return (
+    request.options.retain === undefined &&
+    request.options.noRehome === undefined &&
+    request.options.preserve === undefined &&
+    request.ending === undefined &&
+    standing.options.retain === undefined &&
+    standing.options.preserve === undefined
+  )
 }
 
 /** Strict, loud validation: a request this process cannot read is named, never guessed at. */

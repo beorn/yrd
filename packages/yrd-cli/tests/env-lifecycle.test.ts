@@ -42,11 +42,13 @@ import { closeEnvironment } from "../src/env-commands.ts"
 import * as publicCli from "../src/index.ts"
 import { admitEnvironmentClose, environmentCwdHolder } from "../src/env-close-holders.ts"
 import {
+  CloseRequestAlreadyStandsError,
   closeRequestFile,
   closeRequestsDirectory,
   listCloseRequests,
   readCloseRequest,
   requesterOf,
+  writeCloseRequest,
 } from "../src/env-close-requests.ts"
 import { workdirOf } from "../src/workdir.ts"
 import { environmentProvenance } from "../src/env-cleanup-provenance.ts"
@@ -2527,20 +2529,39 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     },
   )
 
-  it.runIf(process.platform === "linux")(
-    "queues the close for a capable context when this caller's census is incomplete (22894 T1)",
-    async () => {
+  it.runIf(process.platform === "linux").each(["default", "automatic"] as const)(
+    "queues the close for a capable context when this caller's census is incomplete (22894 T1, %s intent)",
+    async (intent) => {
       const w = await world(":")
       const state = join(dirname(w.work), "state")
       await w.git(["config", "yrd.workdir", state])
       const head = (await w.git(["rev-parse", "HEAD"])).trim()
       const { path } = await openEnvironment(w.work, head)
       const workdir = await workdirOf(w.git, { cwd: w.work })
+      const file = closeRequestFile(workdir, path)
+      const requester = intent === "automatic" ? "@dev/automatic" : requesterOf(process.env)
+      if (intent === "automatic") {
+        // The product's automatic close has conditions the public default cannot declare (31345).
+        writeCloseRequest(workdir, {
+          intent: "close",
+          name: basename(path),
+          path,
+          requester,
+          uid: process.getuid!(),
+          at: "2026-10-28T06:07:53.790Z",
+          predicate: "direct-admission",
+          options: { noRehome: true },
+          head,
+          ending: { remote: "origin", queue: "main", branch: "task/automatic-close", event: "recorded-ending" },
+        })
+      }
+      const original = readCloseRequest(file)
+      const originalBytes = original === undefined ? undefined : readFileSync(file, "utf8")
+      const originalMtime = original === undefined ? undefined : statSync(file).mtimeMs
       processCensus.mockResolvedValue(await incompleteCensus())
       const run = capture(w.work)
       expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], run.io), run.stderr()).toBe(4)
       const receipt = JSON.parse(run.stdout()) as Record<string, unknown>
-      const file = closeRequestFile(workdir, path)
       expect(receipt, run.stderr()).toMatchObject({
         queued: path,
         reason: "incomplete-census",
@@ -2555,21 +2576,53 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       expect(readCloseRequest(file)).toMatchObject({
         name: basename(path),
         path,
-        requester: requesterOf(process.env),
+        requester,
         intent: "close",
         predicate: "direct-admission",
-        options: {},
+        options: intent === "automatic" ? { noRehome: true } : {},
         head,
       })
+      if (original !== undefined) {
+        expect(receipt).toMatchObject({
+          alreadyQueued: true,
+          standing: {
+            requester: original.requester,
+            at: original.at,
+            options: original.intent === "close" ? original.options : undefined,
+            ending: original.intent === "close" ? original.ending : undefined,
+          },
+        })
+        expect(readCloseRequest(file)).toEqual(original)
+        expect(readFileSync(file, "utf8")).toBe(originalBytes)
+        expect(statSync(file).mtimeMs).toBe(originalMtime)
+        expect(run.stderr()).toContain("default close asked for rehome")
+        expect(run.stderr()).toContain("without rehome")
+        expect(run.stderr()).toContain(original.requester)
+        expect(run.stderr()).toContain(original.at)
+        expect(run.stderr()).toContain("recorded-ending")
+        expect(run.stderr()).toContain("stands unchanged")
+      } else {
+        expect(receipt).not.toHaveProperty("standing")
+      }
       // The request is intent, never a removal: the environment is untouched.
       expect(existsSync(path)).toBe(true)
       expect(await w.git(["worktree", "list", "--porcelain"])).toContain(path)
       // Re-filing the same intent is idempotent (create-or-match), and the first
       // requester and time survive.
       const standing = readCloseRequest(file)
+      if (standing?.intent !== "close") throw new Error("expected the filed close intent")
       const again = capture(w.work)
       expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], again.io), again.stderr()).toBe(4)
-      expect(JSON.parse(again.stdout())).toMatchObject({ queued: path, alreadyQueued: true })
+      expect(JSON.parse(again.stdout())).toMatchObject({
+        queued: path,
+        alreadyQueued: true,
+        standing: {
+          requester: standing.requester,
+          at: standing.at,
+          options: standing.options,
+          ...(standing.ending === undefined ? {} : { ending: standing.ending }),
+        },
+      })
       expect(readCloseRequest(file)).toEqual(standing)
       const human = capture(w.work)
       expect(await runYrdProcess(["bun", "yrd", "env", "close", path], human.io), human.stderr()).toBe(4)
@@ -2587,8 +2640,15 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
         conflict.stderr(),
       ).toBe(2)
       expect(conflict.stderr()).toContain("already stands")
-      expect(conflict.stderr()).toContain(requesterOf(process.env))
+      expect(conflict.stderr()).toContain(requester)
       expect(readCloseRequest(file)).toEqual(standing)
+      if (intent === "default") {
+        // An explicit internal option remains a declaration, unlike the public default.
+        expect(() => writeCloseRequest(workdir, { ...standing, options: { noRehome: true } })).toThrow(
+          CloseRequestAlreadyStandsError,
+        )
+        expect(readCloseRequest(file)).toEqual(standing)
+      }
     },
   )
 

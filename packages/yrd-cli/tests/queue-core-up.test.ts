@@ -30,6 +30,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -87,6 +88,7 @@ import { environmentInventory } from "../src/env-commands.ts"
 import {
   closeRequestFile,
   listCloseRequests,
+  readCloseRequest,
   stageCloseRequest,
   writeCloseRequest,
   writeReleaseRequest,
@@ -2195,6 +2197,7 @@ describe("yrd queue up, the service", () => {
       open: ["--bay", "21122-issue-job", "--issue", "21122-issue-job"],
       unlinkRecord: false,
       closes: true,
+      observeStanding: process.platform === "linux",
       why: undefined,
     },
     {
@@ -2216,7 +2219,7 @@ describe("yrd queue up, the service", () => {
     },
   ])(
     "opening lifetime $label",
-    async ({ leaf, open, unlinkRecord, closes, why, generalSweepCloses }) => {
+    async ({ leaf, open, unlinkRecord, closes, why, generalSweepCloses, observeStanding }) => {
       const w = await world()
       await w.git(["config", "yrd.workdir", w.workdir])
       await redeclare(w, "setup: ':'\n")
@@ -2271,6 +2274,16 @@ describe("yrd queue up, the service", () => {
       const stop = new AbortController()
       const run = capture(w.work)
       if (generalSweepCloses) run.io.liveEnvironmentUse = vi.fn(async () => [])
+      const completeCensus = observeStanding
+        ? await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+        : undefined
+      if (completeCensus !== undefined) {
+        vi.mocked(removely.inspectProcessCensus).mockResolvedValue({
+          ...completeCensus,
+          coverage: { ...completeCensus.coverage, complete: false },
+        })
+      }
+      let observedStanding: ReturnType<typeof readCloseRequest>
       try {
         expect(
           await coreQueueCommand(
@@ -2282,6 +2295,40 @@ describe("yrd queue up, the service", () => {
               stop: stop.signal,
               afterRound: async (outcome) => {
                 await waitForEnvironmentCleanup(workdir, outcome.run)
+                if (completeCensus !== undefined && observedStanding === undefined) {
+                  const file = closeRequestFile(workdir, environment.path)
+                  const standing = readCloseRequest(file)
+                  if (standing?.intent !== "close") throw new Error("expected the automatic close intent to stand")
+                  expect(standing).toMatchObject({
+                    head: environmentHead,
+                    options: { noRehome: true },
+                    ending: { remote: (await w.git(["remote", "get-url", "origin"])).trim(), queue: "main", branch },
+                  })
+                  expect(existsSync(environment.path)).toBe(true)
+                  const bytes = readFileSync(file, "utf8")
+                  const mtime = statSync(file).mtimeMs
+                  const observe = capture(w.work)
+                  expect(
+                    await runYrdProcess(["bun", "yrd", "env", "close", environment.path, "--json"], observe.io),
+                    observe.stderr(),
+                  ).toBe(4)
+                  expect(JSON.parse(observe.stdout())).toMatchObject({
+                    queued: environment.path,
+                    alreadyQueued: true,
+                    standing: {
+                      requester: standing.requester,
+                      at: standing.at,
+                      options: standing.options,
+                      ending: standing.ending,
+                    },
+                  })
+                  expect(readCloseRequest(file)).toEqual(standing)
+                  expect(readFileSync(file, "utf8")).toBe(bytes)
+                  expect(statSync(file).mtimeMs).toBe(mtime)
+                  observedStanding = standing
+                  vi.mocked(removely.inspectProcessCensus).mockResolvedValue(completeCensus)
+                  return
+                }
                 stop.abort()
               },
             },
@@ -2304,6 +2351,18 @@ describe("yrd queue up, the service", () => {
           expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeDefined()
           expect(closed?.path).toBe(environment.path)
           expect(closed?.request).toBeTypeOf("object")
+          if (observeStanding) {
+            if (observedStanding?.intent !== "close") {
+              throw new Error("public close never observed the automatic intent")
+            }
+            expect(closed?.request).toMatchObject({
+              requester: observedStanding.requester,
+              at: observedStanding.at,
+              head: environmentHead,
+              options: { noRehome: true },
+              ending: observedStanding.ending,
+            })
+          }
         } else if (generalSweepCloses) {
           expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeDefined()
           expect(closed?.request, "independent sweep files no MERGED request").toBeUndefined()
