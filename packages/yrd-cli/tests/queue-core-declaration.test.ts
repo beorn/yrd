@@ -7767,8 +7767,8 @@ describe("drop --local --release-checkout", () => {
       const { spy } = await permitCensus()
       try {
         const applied = releaseCapture(fixture.repo)
-        // A kept row is reported, not failed.
-        expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(0)
+        // A kept row is reported, not failed; an --apply that kept it did not release and exits 1 (@cto 585d1eac).
+        expect(await runYrdProcess([...fixture.argv, "--apply"], applied.io), applied.stderr()).toBe(1)
         const report = JSON.parse(applied.stdout()) as ReleaseReport
         expect(report.removed).toEqual([])
         expect(report.kept).toEqual([
@@ -7799,7 +7799,9 @@ describe("drop --local --release-checkout", () => {
         const path =
           kind === "ancestor" ? dirname(fixture.repo) : kind === "equal" ? fixture.repo : join(fixture.repo, "work")
         output.io.liveEnvironmentUse = async () => [{ path, reason: "declared live owner" }]
-        expect(await runYrdProcess([...fixture.argv, "--apply"], output.io), output.stderr()).toBe(0)
+        expect(await runYrdProcess([...fixture.argv, "--apply"], output.io), output.stderr()).toBe(
+          kind === "ancestor" ? 0 : 1,
+        )
         const report = JSON.parse(output.stdout()) as ReleaseReport
         expect(report.failed).toEqual([])
         if (kind === "ancestor") {
@@ -7884,7 +7886,7 @@ describe("drop --local --release-checkout", () => {
         expect(
           await runYrdProcess([...fixture.argv, ...(kind === "preview host" ? [] : ["--apply"])], output.io),
           output.stderr(),
-        ).toBe(failed ? 1 : kind === "delegation" ? 4 : 0)
+        ).toBe(failed || kind === "moved" || kind === "late entrant" ? 1 : kind === "delegation" ? 4 : 0)
         const report = JSON.parse(output.stdout()) as ReleaseReport
         expect(output.stdout()).not.toContain("fixture-secret")
         expect(output.stdout()).not.toContain("fixture-user")
