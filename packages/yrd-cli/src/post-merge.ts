@@ -408,7 +408,7 @@ async function closeMergedIssues(
   return { outcomes, queue: completed }
 }
 
-/** Private sequential housekeeping. Derived attempt evidence never supplies replay authority. */
+/** Serial provider writes and serial cleanup have independent lifetimes; attempt evidence is never replay authority. */
 export function createPostMerge<C extends Context>(
   options: Readonly<{
     workdir: string
@@ -462,7 +462,17 @@ export function createPostMerge<C extends Context>(
   const process = createProcess({ cwd: options.cwd, env: options.env })
   let pending: C | undefined
   let active: Promise<void> | undefined
+  let cleanupPending: C | undefined
+  let cleanupActive: Promise<void> | undefined
   let closing = false
+  const coalesce = (previous: C | undefined, context: C): C =>
+    previous === undefined
+      ? context
+      : {
+          ...context,
+          merged: [...new Set([...previous.merged, ...context.merged])],
+          updateDue: (context.updateDue ?? true) || (previous.updateDue ?? true),
+        }
   // The existing service stays resident: keep only its last validated snapshot across sequential attempts.
   let completedQueue: Readonly<{ branch: string; value: EventQueue }> | undefined
   const dropPending = (): void => {
@@ -472,6 +482,40 @@ export function createPostMerge<C extends Context>(
         ": pending post-merge attempt dropped during shutdown; startup catch-up handles remaining environment rows; branches without rows need branch triage",
     )
     pending = undefined
+  }
+  const dropCleanupPending = (): void => {
+    if (cleanupPending === undefined) return
+    options.report(
+      JSON.stringify(cleanupPending.merged) +
+        ": pending post-merge cleanup dropped during shutdown; startup catch-up handles remaining environment rows; branches without rows need branch triage",
+    )
+    cleanupPending = undefined
+  }
+  const pumpCleanup = async (): Promise<void> => {
+    while (cleanupPending !== undefined && !options.stop?.aborted) {
+      const next = cleanupPending
+      cleanupPending = undefined
+      try {
+        await options.cleanup(next)
+      } catch (error) {
+        options.report(
+          "post-merge cleanup failed for " + next.target + "; retained for the next catch-up: " + String(error),
+        )
+      }
+    }
+    if (options.stop?.aborted) dropCleanupPending()
+  }
+  const startCleanup = (): void => {
+    cleanupActive = pumpCleanup()
+      .catch((error) => options.report("post-merge cleanup failed: " + String(error)))
+      .finally(() => {
+        cleanupActive = undefined
+        if (cleanupPending !== undefined && !options.stop?.aborted) startCleanup()
+      })
+  }
+  const scheduleCleanup = (context: C): void => {
+    cleanupPending = coalesce(cleanupPending, context)
+    if (cleanupActive === undefined) startCleanup()
   }
   const attempt = async (context: C): Promise<void> => {
     const id = new Date().toISOString().replaceAll(":", "-") + "-" + randomUUID()
@@ -601,13 +645,9 @@ export function createPostMerge<C extends Context>(
           JSON.stringify({ ...provenance, ...settled, issueActions, endedAt: new Date().toISOString() }) + "\n",
         )
       })
-      try {
-        await options.cleanup(context)
-      } catch (error) {
-        options.report(
-          "post-merge cleanup failed for " + context.target + "; retained for the next catch-up: " + String(error),
-        )
-      }
+      // Its own provider has settled; earlier cleanup must not hold up the
+      // next provider. The separate cleanup lifetime still owns serial drain.
+      scheduleCleanup(context)
     }
   }
   const pump = async (): Promise<void> => {
@@ -628,14 +668,7 @@ export function createPostMerge<C extends Context>(
   }
   const nudge = (context: C): void => {
     if (closing) return
-    pending =
-      pending === undefined
-        ? context
-        : {
-            ...context,
-            merged: [...new Set([...pending.merged, ...context.merged])],
-            updateDue: (context.updateDue ?? true) || (pending.updateDue ?? true),
-          }
+    pending = coalesce(pending, context)
     if (active !== undefined) return
     start()
   }
@@ -644,11 +677,15 @@ export function createPostMerge<C extends Context>(
   }
   const close = async (): Promise<void> => {
     closing = true
+    // Production reload aborts first. Without abort, an active provider's
+    // finally may still offer its own cleanup; both lifetimes drain below.
     if (options.stop !== undefined) {
       dropPending()
+      dropCleanupPending()
       await process.close()
     }
     await drain()
+    while (cleanupActive !== undefined) await cleanupActive
     await process.close()
   }
   return { nudge, recover, [Symbol.asyncDispose]: close }

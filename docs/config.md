@@ -70,7 +70,8 @@ After a merge round releases its lock, Yrd runs `update` with exactly the config
 
 - It passes nothing about the merge: no range, no merge arguments, no stdin, no environment facts. The command finds its own position.
 - It has a 120-second limit, separate from the 10-second issue display reads. A stuck command does not hold up later rounds.
-- The service runs one attempt at a time and coalesces the rest into one pending catch-up. Startup schedules one fresh catch-up.
+- The service runs one provider attempt at a time and coalesces the rest into one pending catch-up. Startup schedules one fresh catch-up.
+- Cleanup runs serially after its own provider settles; waiting on older cleanup does not delay the next provider attempt.
 - Each attempt writes `<workdir>/post-merge/*.json` with its stdout and stderr logs, command, times, exit and timeout. These are for inspection only; no later decision reads them.
 
 ## Notifications
