@@ -3,8 +3,8 @@
  *   without consuming them, so 8+ unreadable head files refill the batch every round and a valid later request is
  *   never consumed.
  * @failure 29587: newer lexical head requests overtake an older ninth request; equal times need a deterministic tie.
- * @failure 29979: consumeCloseRequests broke after one close and sliced before dropping already-removed/stale rows,
- *   so standing close requests drained at 1 per round instead of up to ENVIRONMENT_BATCH (8) or the 45 s time budget.
+ * @failure 31184: each cleanup route gets one close attempt per invocation; stale/gone requests do not consume it,
+ *   and request and sweep routes preserve independent progress across invocations.
  * @level l2
  * @consumer the queue round's post-judgment environment cleanup
  * @reach fs-walk <fixture-only: close-request and environment directories the fixture makes under the OS temp root>
@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import * as removely from "removely"
+import { PrivateStoreRefusalError } from "git-super/worktree"
 import { afterAll, expect, it, vi } from "vitest"
 import { createEnvironmentCleanup } from "../src/env-cleanup.ts"
 import { closeRequestFile, listCloseRequests, writeCloseRequest } from "../src/env-close-requests.ts"
@@ -172,7 +173,7 @@ it("reads past unreadable head requests and consumes a valid later request in on
 it.each([
   { scenario: "oldest request beyond eight newer filenames", newerAt: "2026-10-15T00:00:01.000Z", olderFirst: true },
   { scenario: "filename tie-break for equal request times", newerAt: "2026-10-15T00:00:00.000Z", olderFirst: false },
-])("closes up to eight requests in order using $scenario", async ({ newerAt, olderFirst }) => {
+])("closes only the oldest request in order using $scenario", async ({ newerAt, olderFirst }) => {
   const w = await world()
   const uid = process.getuid?.()
   if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
@@ -198,60 +199,20 @@ it.each([
   // All eight newer names precede the old intent, so sorting only the selected batch cannot pass this case.
   expect(listCloseRequests(w.workdir).at(-1)).toBe(older)
   await runRound(w, "cleanup-request-order")
-  const expectedClosed = olderFirst ? [w.env, ...newer.slice(0, 7)] : newer
-  const expectedStanding = olderFirst ? closeRequestFile(w.workdir, newer[7]!) : older
-  const closed = cleanupRows(w.workdir).filter((row) => row.result === "closed")
+  const expectedClosed = olderFirst ? [w.env] : [newer[0]!]
+  const expectedStanding = olderFirst
+    ? newer.map((path) => closeRequestFile(w.workdir, path))
+    : [...newer.slice(1).map((path) => closeRequestFile(w.workdir, path)), older]
+  // The independent sweep may close a different target; this is the request route's order and allowance.
+  const closed = cleanupRows(w.workdir).filter((row) => row.result === "closed" && row.request !== undefined)
   expect(closed.map((row) => row.path)).toEqual(expectedClosed)
   for (const path of expectedClosed) {
     expect(existsSync(closeRequestFile(w.workdir, path))).toBe(false)
   }
-  expect(listCloseRequests(w.workdir)).toEqual([expectedStanding])
+  expect(listCloseRequests(w.workdir)).toEqual(expectedStanding)
 })
 
-it("stops after two close attempts when each close advances Date by 30 s past the 45 s budget", async () => {
-  const w = await world()
-  const uid = process.getuid?.()
-  if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
-  const paths = [w.env]
-  for (let index = 1; index < 4; index++) {
-    const path = join(w.repo, ".bays", `env-timed-${index}`)
-    await w.git(["worktree", "add", "--quiet", "--detach", path, "HEAD"])
-    paths.push(path)
-  }
-  for (const [index, path] of paths.entries()) {
-    writeCloseRequest(w.workdir, {
-      name: path.split("/").at(-1)!,
-      path,
-      requester: "@dev/12",
-      uid,
-      at: `2026-10-15T00:00:0${index}.000Z`,
-      predicate: "direct-admission",
-      options: { noRehome: true },
-      head: w.head,
-    })
-  }
-  vi.useFakeTimers({ toFake: ["Date"] })
-  vi.setSystemTime(new Date("2026-10-18T00:00:00.000Z"))
-  vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
-    vi.setSystemTime(Date.now() + 30_000)
-    callIo.stdout(JSON.stringify({ closed: path }))
-    return 0
-  })
-  try {
-    await runRound(w, "cleanup-time-budget")
-  } finally {
-    vi.useRealTimers()
-    vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
-      callIo.stdout(JSON.stringify({ closed: path }))
-      return 0
-    })
-  }
-  const closed = cleanupRows(w.workdir).filter((row) => row.result === "closed")
-  expect(closed.map((row) => row.path)).toEqual(paths.slice(0, 2))
-  expect(listCloseRequests(w.workdir)).toEqual(paths.slice(2).map((path) => closeRequestFile(w.workdir, path)))
-})
-
-it("drops already-removed and stale requests in front without reducing the eight closes in that round", async () => {
+it("drops gone and stale requests without spending the one consumer close attempt", async () => {
   const w = await world()
   const uid = process.getuid?.()
   if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
@@ -282,7 +243,7 @@ it("drops already-removed and stale requests in front without reducing the eight
   }
 
   const valid = [w.env]
-  for (let index = 1; index < 9; index++) {
+  for (let index = 1; index < 4; index++) {
     const path = join(w.repo, ".bays", `z-valid-${index}`)
     await w.git(["worktree", "add", "--quiet", "--detach", path, "HEAD"])
     valid.push(path)
@@ -295,11 +256,99 @@ it("drops already-removed and stale requests in front without reducing the eight
   const rows = cleanupRows(w.workdir)
   expect(rows.filter((row) => row.result === "already-removed")).toHaveLength(4)
   expect(rows.filter((row) => row.result === "stale")).toHaveLength(4)
-  expect(rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual(valid.slice(0, 8))
-  expect(listCloseRequests(w.workdir)).toEqual([closeRequestFile(w.workdir, valid[8]!)])
+  expect(rows.filter((row) => row.result === "closed" && row.request !== undefined).map((row) => row.path)).toEqual([
+    valid[0],
+  ])
+  expect(listCloseRequests(w.workdir)).toEqual(valid.slice(1).map((path) => closeRequestFile(w.workdir, path)))
 })
 
-it("re-reads the inventory after an attempt so a second environment whose HEAD moved during the first close retires as stale uncharged", async () => {
+it("lets a kept consumer request leave the independent sweep close available for another environment", async () => {
+  const w = await world()
+  await w.git(["remote", "add", "origin", w.repo])
+  await w.git(["fetch", "--quiet", "origin", "main"])
+  const uid = process.getuid?.()
+  if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
+  const eligible = join(w.repo, ".bays", "z-sweep-eligible")
+  await w.git(["worktree", "add", "--quiet", "--detach", eligible, "HEAD"])
+  writeCloseRequest(w.workdir, {
+    name: "env-valid",
+    path: w.env,
+    requester: "@dev/12",
+    uid,
+    at: "2026-10-15T00:00:00.000Z",
+    predicate: "direct-admission",
+    options: { noRehome: true },
+    head: w.head,
+  })
+  const attempts: string[] = []
+  vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
+    attempts.push(path)
+    if (path === w.env) {
+      throw new Error("private store kept", {
+        cause: new PrivateStoreRefusalError("worktree removal would destroy a private submodule store"),
+      })
+    }
+    callIo.stdout(JSON.stringify({ closed: path }))
+    return 0
+  })
+  try {
+    await runRound(w, "kept-request-independent-sweep")
+  } finally {
+    vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
+      callIo.stdout(JSON.stringify({ closed: path }))
+      return 0
+    })
+  }
+  const rows = cleanupRows(w.workdir).filter((row) => row.run === "kept-request-independent-sweep")
+  expect(attempts).toEqual([w.env, eligible])
+  expect(rows.some((row) => row.result === "kept" && row.path === w.env)).toBe(true)
+  expect(rows.some((row) => row.result === "closed" && row.path === eligible)).toBe(true)
+  expect(rows.some((row) => row.result === "closed" && row.path === w.env)).toBe(false)
+  expect(existsSync(closeRequestFile(w.workdir, w.env))).toBe(true)
+})
+
+it("counts a refused sweep close as its route attempt and resumes at the next eligible row", async () => {
+  const w = await world()
+  await w.git(["remote", "add", "origin", w.repo])
+  await w.git(["fetch", "--quiet", "origin", "main"])
+  const second = join(w.repo, ".bays", "z-second-sweep")
+  await w.git(["worktree", "add", "--quiet", "-b", "task/second-sweep", second, "HEAD"])
+  const attempts: string[] = []
+  vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
+    attempts.push(path)
+    if (path === w.env) {
+      throw new Error("private store kept", {
+        cause: new PrivateStoreRefusalError("worktree removal would destroy a private submodule store"),
+      })
+    }
+    callIo.stdout(JSON.stringify({ closed: path }))
+    return 0
+  })
+  try {
+    await runRound(w, "sweep-refused-first")
+    expect(attempts).toEqual([w.env])
+    vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
+      attempts.push(path)
+      callIo.stdout(JSON.stringify({ closed: path }))
+      return 0
+    })
+    await runRound(w, "sweep-next-row")
+  } finally {
+    vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
+      callIo.stdout(JSON.stringify({ closed: path }))
+      return 0
+    })
+  }
+  expect(attempts).toEqual([w.env, second])
+  const rows = cleanupRows(w.workdir)
+  expect(rows.some((row) => row.run === "sweep-refused-first" && row.result === "kept" && row.path === w.env)).toBe(
+    true,
+  )
+  expect(rows.some((row) => row.run === "sweep-refused-first" && row.result === "closed")).toBe(false)
+  expect(rows.some((row) => row.run === "sweep-next-row" && row.result === "closed" && row.path === second)).toBe(true)
+})
+
+it("rechecks a pending request next round after its HEAD moves during the first close", async () => {
   const w = await world()
   const uid = process.getuid?.()
   if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
@@ -317,18 +366,8 @@ it("re-reads the inventory after an attempt so a second environment whose HEAD m
 
   const second = join(w.repo, ".bays", "env-second-moved")
   await w.git(["worktree", "add", "--quiet", "--detach", second, "HEAD"])
-  const rest: string[] = []
-  for (let index = 0; index < 7; index++) {
-    const path = join(w.repo, ".bays", `env-rest-${index}`)
-    await w.git(["worktree", "add", "--quiet", "--detach", path, "HEAD"])
-    rest.push(path)
-  }
-
   request(w.env, "2026-10-15T00:00:00.000Z")
   const secondFile = request(second, "2026-10-15T00:00:01.000Z")
-  for (const [index, path] of rest.entries()) {
-    request(path, `2026-10-15T00:00:0${index + 2}.000Z`)
-  }
 
   const attemptedPaths: string[] = []
   vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
@@ -344,6 +383,7 @@ it("re-reads the inventory after an attempt so a second environment whose HEAD m
   })
   try {
     await runRound(w, "cleanup-refresh-inventory-per-attempt")
+    await runRound(w, "cleanup-refresh-inventory-next-round")
   } finally {
     vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
       callIo.stdout(JSON.stringify({ closed: path }))
@@ -357,10 +397,10 @@ it("re-reads the inventory after an attempt so a second environment whose HEAD m
   expect(String(staleRows[0]?.why)).toContain(`registered HEAD moved from ${w.head} to `)
   expect(existsSync(secondFile)).toBe(false)
   expect(attemptedPaths).not.toContain(second)
-  expect(rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([w.env, ...rest])
+  expect(rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([w.env])
 })
 
-it("skips the general sweep when round 1 closes a request, preserves the cursor on the eligible unrecorded row, and closes it in round 2", async () => {
+it("gives consumer and sweep separate attempts while pending requests and the sweep cursor progress", async () => {
   const w = await world()
   await w.git(["remote", "add", "origin", w.repo])
   await w.git(["fetch", "--quiet", "origin", "main"])
@@ -368,12 +408,26 @@ it("skips the general sweep when round 1 closes a request, preserves the cursor 
   if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
   const eligible = join(w.repo, ".bays", "z-eligible-unrecorded")
   await w.git(["worktree", "add", "--quiet", "--detach", eligible, "HEAD"])
+  const secondEligible = join(w.repo, ".bays", "z-second-eligible")
+  await w.git(["worktree", "add", "--quiet", "--detach", secondEligible, "HEAD"])
+  const pending = join(w.repo, ".bays", "env-pending")
+  await w.git(["worktree", "add", "--quiet", "--detach", pending, "HEAD"])
   writeCloseRequest(w.workdir, {
     name: "env-valid",
     path: w.env,
     requester: "@dev/12",
     uid,
     at: "2026-10-15T00:00:00.000Z",
+    predicate: "direct-admission",
+    options: { noRehome: true },
+    head: w.head,
+  })
+  writeCloseRequest(w.workdir, {
+    name: "env-pending",
+    path: pending,
+    requester: "@dev/12",
+    uid,
+    at: "2026-10-15T00:00:01.000Z",
     predicate: "direct-admission",
     options: { noRehome: true },
     head: w.head,
@@ -429,15 +483,15 @@ it("skips the general sweep when round 1 closes a request, preserves the cursor 
     cursorEnv: string
     reported: Record<string, string>
   }
-  expect(stateAfterRound1.cursorEnv).toBe("z-eligible-unrecorded")
+  expect(stateAfterRound1.cursorEnv).toBe("z-second-eligible")
   const round1Rows = cleanupRows(w.workdir).filter((row) => row.run === "round-1-closes-request")
-  expect(round1Rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([w.env])
-  const round1Obs = round1Rows.find((row) => row.kind === "observation" && row.result === undefined)
-  expect(round1Obs?.why).toBe("general sweep skipped: 1 request closes this round")
+  expect(round1Rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([w.env, eligible])
+  expect(listCloseRequests(w.workdir)).toEqual([closeRequestFile(w.workdir, pending)])
 
   await runCleanupRound("round-2-closes-eligible-unrecorded")
   const round2Rows = cleanupRows(w.workdir).filter((row) => row.run === "round-2-closes-eligible-unrecorded")
-  expect(round2Rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([eligible])
+  expect(round2Rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([pending, secondEligible])
+  expect(listCloseRequests(w.workdir)).toEqual([])
 })
 
 it("stops the general sweep cursor on the second eligible row after one sweep removal", async () => {
