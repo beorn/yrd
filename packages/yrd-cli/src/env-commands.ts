@@ -95,6 +95,8 @@ export type EnvOpenOptions = Readonly<{
 }>
 export type EnvCloseOptions = Readonly<{
   json?: boolean
+  /** Read admission only; no lifecycle writes or removal-side proofs. */
+  dryRun?: boolean
   retain?: string
   noRehome?: boolean
   /** Internal automatic-cleanup policy; never inferred from manual close flags. */
@@ -846,12 +848,18 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
   return 0
 }
 
+/** One status read shared by the cleanliness check and the read-only preserve preview. */
+async function environmentDirt(git: Git): Promise<readonly string[]> {
+  const dirty = (await git(["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"])).trim()
+  return dirty === "" ? [] : dirty.split("\n")
+}
+
 /** Refuse before running user teardown; a dirty tree is work, not garbage. */
 async function requireClean(git: Git, path: string, hint = ""): Promise<void> {
-  const dirty = (await git(["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"])).trim()
-  if (dirty !== "") {
+  const dirty = await environmentDirt(git)
+  if (dirty.length > 0) {
     throw new Error(
-      `environment ${path} is dirty; preserve or commit these changes before continuing${hint}:\n${dirty}`,
+      `environment ${path} is dirty; preserve or commit these changes before continuing${hint}:\n${dirty.join("\n")}`,
     )
   }
 }
@@ -1229,6 +1237,9 @@ export async function closeEnvironment(
   await assertNoLiveEnvironmentUse(path, io)
   const admission = await admitEnvironmentClose(path, io, censusSource)
   if (admission.kind === "needs-delegation") {
+    if (options.dryRun === true) {
+      throw uncertified(path, admission, "in preview; a real close would file a queue close request instead")
+    }
     if (onIncompleteCensus === "refuse") throw uncertified(path, admission)
     return queueDelegatedClose(path, options, io, workdir, commit, admission)
   }
@@ -1304,7 +1315,7 @@ export async function closeEnvironment(
     )
   }
   if (options.preserve === true) {
-    await preserve("before teardown")
+    if (options.dryRun !== true) await preserve("before teardown")
   } else {
     await requireClean(treeGit, path, " — or re-run with --preserve to keep this exact state in a durable ref first")
   }
@@ -1317,6 +1328,40 @@ export async function closeEnvironment(
       unknownNotifyEvents: (unknown) => warnUnknownNotifyEvents(path, "env close", unknown, io),
     },
   )
+  if (options.dryRun === true) {
+    const preview = {
+      dryRun: true,
+      path,
+      head: commit,
+      admitted: true,
+      checked: [
+        "registration",
+        "roots",
+        "lock",
+        "private-content",
+        "live-use",
+        "census",
+        options.preserve === true ? "preserve" : "clean",
+      ],
+      notChecked: ["component-custody", "retention", "remote-reread", "teardown"],
+      preserve: {
+        requested: options.preserve === true,
+        dirty: options.preserve === true ? await environmentDirt(treeGit) : [],
+      },
+      teardown: config?.teardown ?? null,
+      liveEnvironmentUseChecked: io.liveEnvironmentUse !== undefined,
+    }
+    if (options.json === true) io.stdout(`${JSON.stringify(preview)}\n`)
+    else {
+      io.stdout(
+        `dry-run: ${path} would be admitted; component custody, retention and teardown are proved only by the real close.\n`,
+      )
+      io.stdout(
+        `preserve: ${preview.preserve.requested ? JSON.stringify(preview.preserve.dirty) : "not requested"}\nteardown: ${preview.teardown ?? "(none)"}\n`,
+      )
+    }
+    return 0
+  }
   await beforeRemove?.()
   if (config?.teardown !== undefined) {
     const artifacts = join(workdir, "logs", "environments", basename(path), runId())

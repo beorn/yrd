@@ -1704,6 +1704,12 @@ function buildProgram(
     .command("close <path>")
     .description("run teardown and remove a clean, unlocked environment, retaining its submodule stores")
     .addHelpSection(
+      "Preview (--dry-run):",
+      "Read the same admission checks without changing anything. The environment would be admitted; " +
+        "component custody, retention and teardown are proved only by the real close. " +
+        "Remote re-read is also not performed. An incomplete census fails without filing a close request.",
+    )
+    .addHelpSection(
       "When this caller's same-UID CWD census cannot read every pid:",
       "The close is not certified and not refused: the request is queued under the queue workdir " +
         "(`state/yrd/env-close-requests/`) and the queue's own round, whose census reads every pid, " +
@@ -1722,6 +1728,7 @@ function buildProgram(
       "--preserve",
       `preserve a dirty environment's uncommitted root and component bytes before teardown, then preserve again after a successful teardown before removal (otherwise a dirty environment is refused); either save retains its custody refs and author branches`,
     )
+    .option("--dry-run", "preview admission and intended preservation/teardown without changing refs or files")
     .option("--json", "emit stable JSON")
     .action(async (path, options) => setExit(await closeEnvironment(path, options, io)))
 
