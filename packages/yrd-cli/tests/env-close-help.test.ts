@@ -52,6 +52,12 @@ function queuedSection(text: string): string {
  * before a planner relies on the sweep's "kept" reasoning.
  */
 describe("the env close help says what a queued close does to a hold", () => {
+  it("names the read-only preview and the removal proofs it cannot perform", async () => {
+    const text = await help("env", "close", "/tmp/unused")
+    expect(text).toContain("--dry-run")
+    expect(text).toMatch(/component custody.*retention.*teardown.*real close/is)
+  })
+
   it("names direct admission, the ancestry-only keep, and the recorded hold", async () => {
     const section = queuedSection(await help("env", "close", "/tmp/unused"))
     expect(section).not.toBe("")

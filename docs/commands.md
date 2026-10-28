@@ -33,7 +33,7 @@ yrd check <name...>                                 run the named checks here, n
 yrd env open ([commit] | --bay <name> | --issue <ref>) [--hold [reason]]
     keep a commit checked out, or open a task branch; prints the path
 yrd env list                                        this repository's environments
-yrd env close <path> [--retain <directory>]         run teardown and remove a clean, unlocked environment
+yrd env close <path> [--retain <directory>] [--preserve] [--dry-run]  close an environment or preview its admission
 yrd drop ...                                        retire branches whose tips main or an event keeps; see below
 ```
 
@@ -124,5 +124,6 @@ An environment is a separate Git worktree for one branch or commit.
 - With `--issue`, a first commit with a `Refs:` trailer records the binding before setup. A matching binding adds nothing; a conflicting one refuses.
 - `--hold [reason]` locks the worktree before setup, so a later failure leaves it locked. The reason defaults to `manual`. `env list --json` reports it as `hold` (`null` when unlocked). It is free text, not proof of ownership. `git worktree unlock <path>` clears it.
 - `yrd env close` runs teardown from the environment's current commit, then removes it. It refuses a held, dirty, locked, unregistered or out-of-root path, and keeps the environment if teardown fails. Submodule stores are kept.
+- `close --dry-run` reads those admission checks and reports `admitted`, `checked` and `notChecked` (`--json` gives the machine view). It changes no refs or files and files no close request. Component custody, retention, remote re-read and teardown remain unproved until the real close. With `--preserve`, it reports dirty entries without saving them.
 - `close` also refuses while a submodule marked `private = true` in `.gitmodules` is checked out in the environment.
 - In a superproject, `git super status`, `git super diff` and `git super push` work across submodule boundaries.

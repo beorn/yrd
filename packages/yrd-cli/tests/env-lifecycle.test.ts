@@ -899,6 +899,69 @@ describe("yrd env open prepares the retained environment", () => {
 })
 
 describe("yrd env close preserves anything it cannot safely remove", () => {
+  /** @failure A preview reaches teardown/removal or preservation, or promises removal without custody proof.
+   * @level l2 @consumer WIP cleanup callers inspecting an environment before any delete
+   */
+  it.each([false, true])("previews admission without lifecycle writes (preserve=%s)", async (preserve) => {
+    const teardown = preserve ? "printf touched > ../preview-teardown-ran.txt" : undefined
+    const w = await world(":", teardown)
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openEnvironment(w.work, head)
+    if (preserve) writeFileSync(join(path, "root-dirt.txt"), "keep these bytes\n")
+    const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
+    const refs = await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])
+    for (const json of [true, false]) {
+      const output = capture(w.work)
+      output.io.liveEnvironmentUse = async () => []
+      expect(
+        await runYrdProcess(
+          [
+            "bun",
+            "yrd",
+            "env",
+            "close",
+            path,
+            "--dry-run",
+            ...(preserve ? ["--preserve"] : []),
+            ...(json ? ["--json"] : []),
+          ],
+          output.io,
+        ),
+        output.stderr(),
+      ).toBe(0)
+      if (json) {
+        expect(JSON.parse(output.stdout())).toMatchObject({
+          dryRun: true,
+          path: realpathSync(path),
+          head,
+          admitted: true,
+          checked: [
+            "registration",
+            "roots",
+            "lock",
+            "private-content",
+            "live-use",
+            "census",
+            preserve ? "preserve" : "clean",
+          ],
+          notChecked: ["component-custody", "retention", "remote-reread", "teardown"],
+          preserve: { requested: preserve, dirty: preserve ? ["?? root-dirt.txt"] : [] },
+          teardown: teardown ?? null,
+          liveEnvironmentUseChecked: true,
+        })
+        expect(JSON.parse(output.stdout())).not.toHaveProperty("wouldRemove")
+      } else {
+        expect(output.stdout()).toContain("would be admitted")
+        expect(output.stdout()).toMatch(/component custody.*retention.*teardown.*real close/is)
+      }
+      expect(existsSync(path)).toBe(true)
+      expect(await w.git(["worktree", "list", "--porcelain", "-z"])).toBe(registration)
+      expect(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(refs)
+      expect(existsSync(join(dirname(path), "preview-teardown-ran.txt"))).toBe(false)
+      if (preserve) expect(readFileSync(join(path, "root-dirt.txt"), "utf8")).toBe("keep these bytes\n")
+    }
+  })
+
   /**
    * @failure 28120: symlinked environment paths missed kernel-resolved cwd holders.
    * @level l1 (real filesystem symlink at the shared containment boundary)
@@ -1640,9 +1703,14 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     expect(existsSync(join(path, "root-dirt.txt"))).toBe(true)
   })
 
-  it.each(["held", "unavailable", "malformed"] as const)(
-    "preserves an environment before teardown when host live-use evidence is %s",
-    async (evidence) => {
+  it.each([
+    ["held", false],
+    ["unavailable", false],
+    ["malformed", false],
+    ["held", true],
+  ] as const)(
+    "preserves an environment before teardown when host live-use evidence is %s (dryRun=%s)",
+    async (evidence, dryRun) => {
       const fixture = await world(":", "printf touched > ../host-use-teardown-ran.txt")
       const { path } = await openEnvironment(fixture.work, (await fixture.git(["rev-parse", "HEAD"])).trim())
       const registration = await fixture.git(["worktree", "list", "--porcelain", "-z"])
@@ -1653,7 +1721,13 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
         if (evidence === "malformed") return [{ path: "relative/owner", reason: "invalid host use" }]
         return [{ path: join(path, "nested"), reason: "active owner" }]
       })
-      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], output.io), output.stderr()).toBe(2)
+      expect(
+        await runYrdProcess(
+          ["bun", "yrd", "env", "close", path, "--json", ...(dryRun ? ["--dry-run"] : [])],
+          output.io,
+        ),
+        output.stderr(),
+      ).toBe(2)
       expect(output.stderr()).toContain(
         evidence === "held"
           ? `live use: active owner (${join(path, "nested")})`
@@ -2434,6 +2508,25 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
    * @level   l1 (injected incomplete census at the existing process-census boundary)
    * @consumer every seat whose sandbox scopes ptrace over other same-UID pids
    */
+  it.runIf(process.platform === "linux")(
+    "preview refuses an incomplete census without filing a close request",
+    async () => {
+      const w = await world(":")
+      const state = join(dirname(w.work), "preview-state")
+      await w.git(["config", "yrd.workdir", state])
+      const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+      const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
+      processCensus.mockResolvedValue(await incompleteCensus())
+      const output = capture(w.work)
+      await expect(closeEnvironment(path, { json: true, dryRun: true }, output.io)).rejects.toThrow(
+        "a real close would file a queue close request instead",
+      )
+      expect(existsSync(closeRequestFile(state, path))).toBe(false)
+      expect(await w.git(["worktree", "list", "--porcelain", "-z"])).toBe(registration)
+      expect(existsSync(path)).toBe(true)
+    },
+  )
+
   it.runIf(process.platform === "linux")(
     "queues the close for a capable context when this caller's census is incomplete (22894 T1)",
     async () => {
