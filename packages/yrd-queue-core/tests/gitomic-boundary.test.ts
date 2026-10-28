@@ -75,6 +75,10 @@ describe("the Yrd Gitomic boundary", () => {
       // The gitlink carrier (fae9be0590, 25823): an object-only fetch of the component pin it carries, proving the queue
       // can fetch it, and a read of the local refs/heads/<branch> it would create. Neither reads or writes a queue ref.
       "pin-carrier.ts": ["fetch", "for-each-ref"],
+      // A retired branch's local remote-tracking ref (31457, @cto 87e2523f): refs/remotes/<remote>/<branch> in the
+      // store and the caller's checkout, deleted at the retired head's expected OID after origin's branch is gone,
+      // as `git push --delete` would. Never a queue ref.
+      "origin-branch-retirement.ts": ["update-ref"],
       // Preview custody (27510, @cto eb147b05, a130eadf): refs/yrd/preview/<clone>/<subject>/<candidate-root> in the
       // AUTHOR's own root and component stores, never a queue ref. Every delete is at its expected OID: the superseded
       // prior root, a failed attempt's own anchors (root, components), a retired root, a retired subject's root and an
