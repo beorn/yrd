@@ -5222,8 +5222,9 @@ describe("yrd queue up, the service", () => {
             JSON.parse(readFileSync(join(w.workdir, "post-merge", name), "utf8")) as { merged: readonly string[] },
         )
       expect(
-        mixedAttempts.some((attempt) => mixed.every(({ branch }) => attempt.merged.includes(branch))),
-        "the pending round attempt carries both actual merges",
+        // Provider progress is independent of the held cleanup; the rounds may settle in separate attempts.
+        mixed.every(({ branch }) => mixedAttempts.some((attempt) => attempt.merged.includes(branch))),
+        "provider attempts cover both actual merges",
       ).toBe(true)
       const roundCleanupHeaders = readdirSync(startupRetirement)
         .filter((name) => name.endsWith(".jsonl"))
