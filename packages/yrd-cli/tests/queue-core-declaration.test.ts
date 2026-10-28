@@ -7792,18 +7792,23 @@ describe("drop --local --release-checkout", () => {
         expect(
           await runYrdProcess([...fixture.argv, ...(kind === "preview host" ? [] : ["--apply"])], output.io),
           output.stderr(),
-        ).toBe(failed ? 1 : 0)
+        ).toBe(failed ? 1 : kind === "delegation" ? 4 : 0)
         const report = JSON.parse(output.stdout()) as ReleaseReport
         expect(output.stdout()).not.toContain("fixture-secret")
         expect(output.stdout()).not.toContain("fixture-user")
         expect(report.removed).toEqual([])
-        expect(failed ? report.failed : report.kept).toHaveLength(1)
-        expect(failed ? report.kept : report.failed).toEqual([])
-        const outcomeRow = (failed ? report.failed : report.kept)[0]
+        // 29772 (@cto c8d7113d): an uncertified census under --apply is queued for the round (exit 4), never a
+        // hold that exits 0; every other unsuccessful kind keeps its row.
+        const outcomes = failed ? report.failed : kind === "delegation" ? report.delegated : report.kept
+        expect(outcomes).toHaveLength(1)
+        for (const other of [report.failed, report.kept, report.delegated]) if (other !== outcomes) expect(other).toEqual([])
+        const outcomeRow = outcomes[0]
         expect(outcomeRow).not.toHaveProperty("archiveRef")
         const beforeApply =
           kind === "moved" || kind === "cwd" || kind === "delegation" || kind === "host" || kind === "preview host"
-        if (beforeApply && !failed) expect(outcomeRow?.detail).toContain("; branch kept")
+        if (beforeApply && !failed) {
+          expect(outcomeRow?.detail).toContain(kind === "delegation" ? "queued release request" : "; branch kept")
+        }
         expect(outcomeRow?.detail).toMatch(
           kind === "moved"
             ? /tip|moved/
