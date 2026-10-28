@@ -1163,12 +1163,13 @@ export async function closeEnvironment(
       `environment ${path} is outside environment roots ${roots.join(" or ")}; nothing was removed. Retire a worktree outside these roots with your repository's own worktree cleanup (git worktree remove), not yrd env close`,
     )
   }
+  const treeGit = gitIn(path, process, selection)
   if (registered.locked !== undefined) {
+    const lockPath = join((await treeGit(["rev-parse", "--absolute-git-dir"])).trim(), "locked")
     throw new Error(
-      `environment ${path} is locked${registered.locked === "" ? "" : `: ${registered.locked}`}; resolve its owner before closing it`,
+      `environment ${path} is locked${registered.locked === "" ? "" : `: ${registered.locked}`}; lock file ${lockPath}; release the hold with git worktree unlock ${shellQuote(path)} before closing it`,
     )
   }
-  const treeGit = gitIn(path, process, selection)
   const commit = (await treeGit(["rev-parse", "HEAD"])).trim()
   // #27120 AC1/AC3 (ruling ii): R1 refuses while ANY private byte the close could destroy is still
   // there — the checkout is initialized, OR it was emptied and the private store still sits in this
