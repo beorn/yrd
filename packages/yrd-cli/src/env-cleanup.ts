@@ -295,9 +295,12 @@ async function consumeCloseRequests(
   }
   if (readable.length === 0) return { attempted: 0, closed: 0, handled: new Set(), proofs }
   readable.sort((a, b) => {
-    // Writers use UTC ISO times; retries retain the original intent time.
+    // A seat's own request (no `ending`) goes before the round's automatic filings for ended environments, so a
+    // seat waits only behind other seats (31447, @cto 212b4ba9). Writers use UTC ISO times; retries retain the
+    // original intent time.
+    const seat = Number(a.request.ending !== undefined) - Number(b.request.ending !== undefined)
     const age = a.request.at === b.request.at ? 0 : a.request.at < b.request.at ? -1 : 1
-    return age || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
+    return seat || age || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
   })
   const releases = readable.flatMap(({ file, request }) =>
     request.intent === "release-checkout" ? [{ file, request }] : [],
