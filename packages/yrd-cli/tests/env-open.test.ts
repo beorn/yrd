@@ -1163,6 +1163,28 @@ describe("yrd env open says which input selects which path", () => {
     expect(run.stderr()).toContain("not-a-ref-at-all")
     expect(run.stderr()).toContain("git rev-parse")
   })
+
+  it("refuses a decimal issue id that is also an object prefix with the --issue spelling, never a git error (31210)", async () => {
+    const w = await world("true")
+    // An issue id is all decimal digits, and once the store is large enough some id is a unique object prefix
+    // (in /hh/dev, 31189 is a blob and 31210 a tree). Write deterministic blobs until one's oid opens with five.
+    let id: string | undefined
+    for (let n = 0; id === undefined; n++) {
+      writeFileSync(join(w.work, "BLOB"), `31210 object-prefix fixture ${n}\n`)
+      const oid = (await w.git(["hash-object", "-w", "BLOB"])).trim()
+      if (/^\d{5}/u.test(oid)) id = oid.slice(0, 5)
+    }
+    expect((await w.git(["cat-file", "-t", id])).trim()).toBe("blob")
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", id], run.io)).toBe(2)
+
+    const refusal = run.stderr()
+    // The defect: the "is a ref here" probe read the id as an object prefix and its git error replaced the guidance.
+    expect(refusal).not.toMatch(/expected commit type|dereferences to|rev-parse --verify/u)
+    expect(refusal).toContain(`yrd env open --issue ${id}`)
+    expect(existsSync(join(w.work, ".bays", id))).toBe(false)
+  })
 })
 
 /**
