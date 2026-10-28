@@ -298,7 +298,9 @@ async function consumeCloseRequests(
     // A seat's own request (no `ending`) goes before the round's automatic filings for ended environments, so a
     // seat waits only behind other seats (31447, @cto 212b4ba9). Writers use UTC ISO times; retries retain the
     // original intent time.
-    const seat = Number(a.request.ending !== undefined) - Number(b.request.ending !== undefined)
+    // A release request is always a seat's own; only a close carries `ending`.
+    const automatic = (request: StoredEnvRequest) => request.intent === "close" && request.ending !== undefined
+    const seat = Number(automatic(a.request)) - Number(automatic(b.request))
     const age = a.request.at === b.request.at ? 0 : a.request.at < b.request.at ? -1 : 1
     return seat || age || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
   })

@@ -226,6 +226,7 @@ it("attempts a seat's own request before older automatic filings, at the measure
     ending?: { remote: string; queue: string; branch: string; event: string },
   ) =>
     writeCloseRequest(w.workdir, {
+      intent: "close",
       name: path.split("/").at(-1)!,
       path,
       requester: ending === undefined ? "@dev/luna5" : "unknown",
