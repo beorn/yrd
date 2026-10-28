@@ -283,3 +283,46 @@ it("a throwing tell is named tell-failed and never undoes the close", async () =
   expect(failed, JSON.stringify(rows)).toBeDefined()
   expect(String(failed?.why)).toContain("telling about it failed: fixture tell boom")
 })
+
+it("journals elapsed close time for independent request and sweep attempts", async () => {
+  const w = await world(OLD)
+  const sweepEnv = join(w.repo, ".bays", "sweep-env")
+  await w.git(["worktree", "add", "--quiet", "-b", "task/sweep", sweepEnv, "HEAD"])
+  const uid = process.getuid?.()
+  if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
+  writeCloseRequest(w.workdir, {
+    name: "env-fresh",
+    path: w.env,
+    requester: "@dev/4",
+    uid,
+    at: "2026-10-16T21:25:42.050Z",
+    predicate: "direct-admission",
+    options: { noRehome: true },
+    head: w.head,
+  })
+
+  vi.useFakeTimers({ toFake: ["Date"] })
+  vi.setSystemTime(new Date("2026-10-28T12:00:00.000Z"))
+  vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
+    vi.setSystemTime(Date.now() + 17)
+    callIo.stdout(JSON.stringify({ closed: path }))
+    return 0
+  })
+  try {
+    const rows = await runRound(w, "timed-independent-routes", [w.branch, "task/sweep"])
+    expect(rows.find((row) => row.closed !== undefined && row.charged !== undefined)).toMatchObject({
+      consumer: { attempted: 1, closed: 1 },
+      sweep: { attempted: 1, closed: 1 },
+    })
+    const attempts = rows.filter((row) => row.result === "closed")
+    expect(attempts.map((row) => row.path)).toEqual([w.env, sweepEnv])
+    expect(attempts.map((row) => row.started_at)).toEqual(["2026-10-28T12:00:00.000Z", "2026-10-28T12:00:00.017Z"])
+    expect(attempts.map((row) => row.elapsed_ms)).toEqual([17, 17])
+  } finally {
+    vi.useRealTimers()
+    vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
+      callIo.stdout(JSON.stringify({ closed: path }))
+      return 0
+    })
+  }
+})

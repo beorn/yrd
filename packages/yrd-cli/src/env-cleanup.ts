@@ -81,8 +81,9 @@ type CachedEnvironment = {
  * work is ~14 s, and the git spawns stay far below 400 (an instrumented read of
  * this path measured 4 per row).
  */
-const ENVIRONMENT_BATCH = 8
-const CLOSE_REQUEST_BUDGET_MS = 45_000
+const SWEEP_INSPECTION_BATCH = 8
+// Each route yields after one locked close, including a kept result or a throw.
+const CLOSE_ATTEMPTS_PER_ROUTE = 1
 // Covers opening through the first commit, including time waiting for review.
 const FRESH_ENVIRONMENT_GRACE_MS = 24 * 60 * 60 * 1000
 
@@ -142,7 +143,7 @@ function reportedFromState(parsed: unknown): Map<string, string> {
  * census could not certify the close (22894). This round IS the capable context:
  * it runs the SAME `closeEnvironment` lifecycle the direct verb runs, under the
  * direct admission predicate (clean, unlocked, no holder, ancestry not required),
- * up to ENVIRONMENT_BATCH expensive attempts or CLOSE_REQUEST_BUDGET_MS per round.
+ * up to CLOSE_ATTEMPTS_PER_ROUTE locked close attempts per invocation.
  *
  * Retirement is loud and bounded. Existence is checked FIRST, so a path already
  * gone is an `already-removed` row and never a close attempt (23162: freshness at
@@ -163,7 +164,9 @@ async function consumeCloseRequests(
     outcome: Pick<QueueRunOutcome, "run" | "log">
     onEnvironmentClosed?: (closed: ClosedEnvironment) => Promise<void>
   }>,
-): Promise<Readonly<{ closed: number; handled: ReadonlySet<string>; proofs: readonly WorktreeRemovalProof[] }>> {
+): Promise<
+  Readonly<{ attempted: number; closed: number; handled: ReadonlySet<string>; proofs: readonly WorktreeRemovalProof[] }>
+> {
   const proofs: WorktreeRemovalProof[] = []
   const { workdir, registry, worktrees, io, outcome } = input
   const journal = (
@@ -173,6 +176,7 @@ async function consumeCloseRequests(
     result: string,
     why: string,
     fingerprint?: string,
+    timing?: Readonly<{ started_at: string; elapsed_ms: number }>,
   ): void => {
     appendFileSync(
       outcome.log,
@@ -199,6 +203,7 @@ async function consumeCloseRequests(
             }),
         result,
         why,
+        ...timing,
       })}\n`,
     )
     io.stderr(`yrd: environment close request ${file}: ${result}: ${why}\n`)
@@ -237,7 +242,7 @@ async function consumeCloseRequests(
     )
   }
   // Read cheap intent metadata before choosing the oldest batch; filenames do not encode request age.
-  // ENVIRONMENT_BATCH and CLOSE_REQUEST_BUDGET_MS bound expensive handling. Unreadable files are named and left standing without a slot.
+  // CLOSE_ATTEMPTS_PER_ROUTE bounds locked closes. Unreadable files are named and left standing without a slot.
   const readable: Array<{ file: string; request: StoredCloseRequest }> = []
   for (const file of listCloseRequests(workdir)) {
     try {
@@ -250,7 +255,7 @@ async function consumeCloseRequests(
       journal(file, undefined, file, "unreadable", String(cause))
     }
   }
-  if (readable.length === 0) return { closed: 0, handled: new Set(), proofs }
+  if (readable.length === 0) return { attempted: 0, closed: 0, handled: new Set(), proofs }
   readable.sort((a, b) => {
     // Writers use UTC ISO times; retries retain the original intent time.
     const age = a.request.at === b.request.at ? 0 : a.request.at < b.request.at ? -1 : 1
@@ -258,12 +263,11 @@ async function consumeCloseRequests(
   })
   let inventory = await environmentInventory(registry, worktrees, workdir)
   let inventoryStale = false
-  const startedAt = Date.now()
   let attempted = 0
   let closed = 0
   const handled = new Set<string>()
   for (const { file, request } of readable) {
-    if (attempted >= ENVIRONMENT_BATCH || (attempted > 0 && Date.now() - startedAt >= CLOSE_REQUEST_BUDGET_MS)) {
+    if (attempted >= CLOSE_ATTEMPTS_PER_ROUTE) {
       break
     }
     handled.add(request.path)
@@ -318,6 +322,8 @@ async function consumeCloseRequests(
     let exit: YrdCliExitCode
     let output = ""
     let closedProof: WorktreeRemovalProof | undefined
+    const closeStartedAt = Date.now()
+    const timing = { started_at: new Date(closeStartedAt).toISOString(), elapsed_ms: 0 }
     try {
       exit = await closeEnvironment(
         request.path,
@@ -366,7 +372,9 @@ async function consumeCloseRequests(
           closedProof = proof
           proofs.push(proof)
         },
-      )
+      ).finally(() => {
+        timing.elapsed_ms = Date.now() - closeStartedAt
+      })
     } catch (cause) {
       if (cause instanceof IncompleteCensusError) {
         const attempts = (request.coverageAttempts ?? 0) + 1
@@ -379,6 +387,7 @@ async function consumeCloseRequests(
             "retired",
             `coverage refused ${attempts} times; last: ${cause.refusal}`,
             fingerprint,
+            timing,
           )
           dropCloseRequest(staged)
         } else {
@@ -389,6 +398,7 @@ async function consumeCloseRequests(
             "kept",
             `coverage refused ${attempts} of ${MAX_COVERAGE_ATTEMPTS}; retried next round: ${cause.refusal}`,
             fingerprint,
+            timing,
           )
           restoreCloseRequest(staged, file, attempts)
         }
@@ -413,6 +423,7 @@ async function consumeCloseRequests(
             "retired",
             `a private submodule store refused the close ${attempts} times; last: ${named}`,
             fingerprint,
+            timing,
           )
           dropCloseRequest(staged)
         } else {
@@ -423,18 +434,27 @@ async function consumeCloseRequests(
             "kept",
             `a private submodule store refused the close ${attempts} of ${MAX_COVERAGE_ATTEMPTS}; retried next round: ${named}`,
             fingerprint,
+            timing,
           )
           restoreCloseRequest(staged, file, attempts)
         }
         continue
       }
-      journal(file, request, request.path, "retired", String(cause), fingerprint)
+      journal(file, request, request.path, "retired", String(cause), fingerprint, timing)
       dropCloseRequest(staged)
       continue
     }
     const failed = failedRetirements(output, request.path)
     if (exit !== 0 && failed === undefined) {
-      journal(file, request, request.path, "retired", `native close exited ${exit}: ${output.trim()}`, fingerprint)
+      journal(
+        file,
+        request,
+        request.path,
+        "retired",
+        `native close exited ${exit}: ${output.trim()}`,
+        fingerprint,
+        timing,
+      )
       dropCloseRequest(staged)
       continue
     }
@@ -442,7 +462,7 @@ async function consumeCloseRequests(
     try {
       parsed = JSON.parse(output)
     } catch {
-      journal(file, request, request.path, "retired", `malformed close result ${output.trim()}`, fingerprint)
+      journal(file, request, request.path, "retired", `malformed close result ${output.trim()}`, fingerprint, timing)
       dropCloseRequest(staged)
       continue
     }
@@ -454,6 +474,7 @@ async function consumeCloseRequests(
         "closed",
         `closed at the request of ${request.requester}${failed === undefined ? "" : `; branch retirement failed: ${failed.join("; ")}`}`,
         fingerprint,
+        timing,
       )
       dropCloseRequest(staged)
       closed++
@@ -485,10 +506,11 @@ async function consumeCloseRequests(
         ? `kept: ${output.trim()}`
         : `unproven close result ${output.trim()}`,
       fingerprint,
+      timing,
     )
     dropCloseRequest(staged)
   }
-  return { closed, handled, proofs }
+  return { attempted, closed, handled, proofs }
 }
 
 /**
@@ -861,7 +883,12 @@ async function cleanupEnvironments(
   }
   let closed = 0
   let kept = 0
-  const record = (path: string, result: string, why: string): void => {
+  const record = (
+    path: string,
+    result: string,
+    why: string,
+    timing?: Readonly<{ started_at: string; elapsed_ms: number }>,
+  ): void => {
     // A kept folder is written once per CHANGE of reason, never once per round (#29679 row 5, log-retention
     // ruling "Not archival"): a live registry reprinted ~50 unchanged keeps every 2 minutes, which is writer
     // volume and buries the rows that moved. The count still advances (`preserve`'s kept++), so the round's
@@ -880,13 +907,14 @@ async function cleanupEnvironments(
       path,
       result,
       why,
+      ...timing,
     }
     appendFileSync(outcome.log, `${JSON.stringify(row)}\n`)
     io.stderr(`yrd: environment ${path}: ${result}: ${why}\n`)
   }
-  const preserve = (path: string, why: string): void => {
+  const preserve = (path: string, why: string, timing?: Readonly<{ started_at: string; elapsed_ms: number }>): void => {
     kept++
-    record(path, "kept", why)
+    record(path, "kept", why, timing)
   }
   /** The service's own coverage receipt; the CWD ruling requires rows, unreadable and uncleared from this process. */
   let censusReceipt:
@@ -1132,186 +1160,194 @@ async function cleanupEnvironments(
   const offset = inventory.rows.length === 0 ? 0 : progress.cursor % inventory.rows.length
   const ordered = [...inventory.rows.slice(offset), ...inventory.rows.slice(0, offset)]
   let charged = 0
+  let sweepAttempted = 0
   let stoppedAt = -1
-  if (requests.closed === 0) {
-    for (const [index, row] of ordered.entries()) {
-      try {
-        if (requests.handled.has(row.path)) {
-          // This round already ran the direct close lifecycle for this path under a
-          // filed request; evaluating it again here only repeats the census.
+  for (const [index, row] of ordered.entries()) {
+    let closeTiming: Readonly<{ started_at: string; elapsed_ms: number }> | undefined
+    try {
+      if (requests.handled.has(row.path)) {
+        // This round already ran the direct close lifecycle for this path under a
+        // filed request; evaluating it again here only repeats the census.
+        continue
+      }
+      let entry = cache.get(row.path)
+      if (entry === undefined) {
+        entry = { paths: [], branches: [] }
+        cache.set(row.path, entry)
+      }
+      const holder = busy(row.path, snapshot)
+      if (entry.hold !== row.hold || entry.busy !== holder) entry.expensiveKey = undefined
+      entry.hold = row.hold
+      entry.busy = holder
+      if (row.hold !== null) throw new Error(`held${row.hold === "" ? "" : `: ${row.hold}`}`)
+      // Opening-record lookup spawns Git too: protected rows consume the batch.
+      if (charged >= SWEEP_INSPECTION_BATCH) {
+        stoppedAt = index
+        break
+      }
+      charged++
+      const openingGit = gitIn(row.path, undefined, git.selection, { env: input.env })
+      const openingDir = (await openingGit(["rev-parse", "--absolute-git-dir"])).trim()
+      const opening = readEnvOpenRecord(openingDir)
+      throwIfStandingLifetime(opening)
+      const protection = automaticKeep(row.path, opening)
+      if (protection !== undefined) throw new Error(protection)
+      const treeGit = gitIn(row.path, undefined, git.selection, { env: input.env })
+      const head = row.head
+      if (head === undefined) throw new Error(`registered environment ${row.path} has no HEAD`)
+      if (entry.paths.length === 0) {
+        for (const resource of ["index", "logs/HEAD"]) {
+          const path = (await treeGit(["rev-parse", "--git-path", resource])).trim()
+          if (path === "") throw new Error(`environment ${row.path}: Git returned no ${resource} path`)
+          entry.paths.push({ path: resolve(row.path, path), optional: false })
+        }
+      }
+      const ownLog = entry.paths[1]
+      if (ownLog === undefined) throw new Error(`environment ${row.path}: HEAD reflog identity absent`)
+      const bindingKey = async (): Promise<string> =>
+        JSON.stringify([
+          head,
+          row.branch,
+          config.blob,
+          identity(ownLog),
+          await Promise.all(
+            [...new Set([...(row.branch === undefined ? [] : [row.branch]), ...entry.branches])].map(async (branch) => [
+              branch,
+              (await historyOf(branch)).history?.events.at(-1)?.id,
+            ]),
+          ),
+        ])
+      const key = await bindingKey()
+      if (entry.bindingKey !== key) {
+        entry.bindingKey = key
+        entry.expensiveKey = undefined
+      }
+      if (holder !== undefined) throw new Error(holder)
+      const expensiveKey = (): string =>
+        JSON.stringify([
+          head,
+          row.branch,
+          config.blob,
+          outcome.target,
+          entry.bindingKey,
+          entry.paths.map((file) => [file.path, identity(file)]),
+        ])
+      if (entry.expensiveKey === expensiveKey()) {
+        if (entry.verdict !== undefined) throw new Error(entry.verdict)
+      } else {
+        try {
+          await proveEnvironmentRemovable({
+            path: row.path,
+            head,
+            repo,
+            env: input.env,
+            target: outcome.target,
+            originBranch: config.target.branch,
+            treeGit,
+            entry,
+            ancestor,
+          })
+          entry.verdict = undefined
+          entry.expensiveKey = expensiveKey()
+        } catch (cause) {
+          entry.verdict = String(cause)
+          entry.expensiveKey = entry.retryRemoteProof ? undefined : expensiveKey()
+          throw cause
+        }
+      }
+      // A kept or refused close spends this route's allowance too.
+      if (sweepAttempted >= CLOSE_ATTEMPTS_PER_ROUTE) {
+        preserve(row.path, "eligible; yielding to the next queue round before removal")
+        stoppedAt = index
+        break
+      }
+      const freshHolder = busy(row.path, await census())
+      if (freshHolder !== undefined) throw new Error(freshHolder)
+      const current = (await environmentInventory(registry, registryGit, workdir)).rows.find(
+        (entry) => entry.path === row.path,
+      )
+      if (current === undefined || current.hold !== null || current.head !== head) {
+        throw new Error("registration, hold or HEAD changed before close")
+      }
+      const finalOpening = readEnvOpenRecord(openingDir)
+      throwIfStandingLifetime(finalOpening)
+      const finalProtection = automaticKeep(row.path, finalOpening)
+      if (finalProtection !== undefined) throw new Error(finalProtection)
+      let output = ""
+      let closedProof: WorktreeRemovalProof | undefined
+      const closeStartedAt = Date.now()
+      const timing = { started_at: new Date(closeStartedAt).toISOString(), elapsed_ms: 0 }
+      closeTiming = timing
+      sweepAttempted++
+      const exit = await closeEnvironment(
+        row.path,
+        {
+          json: true,
+          noRehome: true,
+          componentCustody: { primaryRoot, targetBranch: config.target.branch },
+        },
+        {
+          ...io,
+          cwd: registry,
+          stdout: (text) => {
+            output += text
+          },
+        },
+        undefined,
+        // A sweep close is not asked for by anyone: an uncertifiable census is
+        // the pre-22894 loud refusal, never a filed request (22894).
+        "refuse",
+        undefined,
+        (proof) => {
+          closedProof = proof
+          proofs.push(proof)
+        },
+      ).finally(() => {
+        timing.elapsed_ms = Date.now() - closeStartedAt
+      })
+      const failed = failedRetirements(output, row.path)
+      if (exit !== 0 && failed === undefined) {
+        // #27120 AC2: a refusal that names a class is still a refusal — the environment stays — but the
+        // sweep reports it as one named class with its retire path, never as a per-seat note. A refusal
+        // that names nothing still falls through to the loud throw below.
+        const named = namedCloseRefusal(output)
+        if (named !== undefined) {
+          preserve(row.path, named, timing)
           continue
         }
-        let entry = cache.get(row.path)
-        if (entry === undefined) {
-          entry = { paths: [], branches: [] }
-          cache.set(row.path, entry)
-        }
-        const holder = busy(row.path, snapshot)
-        if (entry.hold !== row.hold || entry.busy !== holder) entry.expensiveKey = undefined
-        entry.hold = row.hold
-        entry.busy = holder
-        if (row.hold !== null) throw new Error(`held${row.hold === "" ? "" : `: ${row.hold}`}`)
-        // Opening-record lookup spawns Git too: protected rows consume the batch.
-        if (charged >= ENVIRONMENT_BATCH) {
-          stoppedAt = index
-          break
-        }
-        charged++
-        const openingGit = gitIn(row.path, undefined, git.selection, { env: input.env })
-        const openingDir = (await openingGit(["rev-parse", "--absolute-git-dir"])).trim()
-        const opening = readEnvOpenRecord(openingDir)
-        throwIfStandingLifetime(opening)
-        const protection = automaticKeep(row.path, opening)
-        if (protection !== undefined) throw new Error(protection)
-        const treeGit = gitIn(row.path, undefined, git.selection, { env: input.env })
-        const head = row.head
-        if (head === undefined) throw new Error(`registered environment ${row.path} has no HEAD`)
-        if (entry.paths.length === 0) {
-          for (const resource of ["index", "logs/HEAD"]) {
-            const path = (await treeGit(["rev-parse", "--git-path", resource])).trim()
-            if (path === "") throw new Error(`environment ${row.path}: Git returned no ${resource} path`)
-            entry.paths.push({ path: resolve(row.path, path), optional: false })
-          }
-        }
-        const ownLog = entry.paths[1]
-        if (ownLog === undefined) throw new Error(`environment ${row.path}: HEAD reflog identity absent`)
-        const bindingKey = async (): Promise<string> =>
-          JSON.stringify([
-            head,
-            row.branch,
-            config.blob,
-            identity(ownLog),
-            await Promise.all(
-              [...new Set([...(row.branch === undefined ? [] : [row.branch]), ...entry.branches])].map(
-                async (branch) => [branch, (await historyOf(branch)).history?.events.at(-1)?.id],
-              ),
-            ),
-          ])
-        const key = await bindingKey()
-        if (entry.bindingKey !== key) {
-          entry.bindingKey = key
-          entry.expensiveKey = undefined
-        }
-        if (holder !== undefined) throw new Error(holder)
-        const expensiveKey = (): string =>
-          JSON.stringify([
-            head,
-            row.branch,
-            config.blob,
-            outcome.target,
-            entry.bindingKey,
-            entry.paths.map((file) => [file.path, identity(file)]),
-          ])
-        if (entry.expensiveKey === expensiveKey()) {
-          if (entry.verdict !== undefined) throw new Error(entry.verdict)
-        } else {
-          try {
-            await proveEnvironmentRemovable({
-              path: row.path,
-              head,
-              repo,
-              env: input.env,
-              target: outcome.target,
-              originBranch: config.target.branch,
-              treeGit,
-              entry,
-              ancestor,
-            })
-            entry.verdict = undefined
-            entry.expensiveKey = expensiveKey()
-          } catch (cause) {
-            entry.verdict = String(cause)
-            entry.expensiveKey = entry.retryRemoteProof ? undefined : expensiveKey()
-            throw cause
-          }
-        }
-        // One close per round lets the queue judge a waiting merge before another removal.
-        if (closed > 0) {
-          preserve(row.path, "eligible; yielding to the next queue round before removal")
-          stoppedAt = index
-          break
-        }
-        const freshHolder = busy(row.path, await census())
-        if (freshHolder !== undefined) throw new Error(freshHolder)
-        const current = (await environmentInventory(registry, registryGit, workdir)).rows.find(
-          (entry) => entry.path === row.path,
-        )
-        if (current === undefined || current.hold !== null || current.head !== head) {
-          throw new Error("registration, hold or HEAD changed before close")
-        }
-        const finalOpening = readEnvOpenRecord(openingDir)
-        throwIfStandingLifetime(finalOpening)
-        const finalProtection = automaticKeep(row.path, finalOpening)
-        if (finalProtection !== undefined) throw new Error(finalProtection)
-        let output = ""
-        let closedProof: WorktreeRemovalProof | undefined
-        const exit = await closeEnvironment(
-          row.path,
-          {
-            json: true,
-            noRehome: true,
-            componentCustody: { primaryRoot, targetBranch: config.target.branch },
-          },
-          {
-            ...io,
-            cwd: registry,
-            stdout: (text) => {
-              output += text
-            },
-          },
-          undefined,
-          // A sweep close is not asked for by anyone: an uncertifiable census is
-          // the pre-22894 loud refusal, never a filed request (22894).
-          "refuse",
-          undefined,
-          (proof) => {
-            closedProof = proof
-            proofs.push(proof)
-          },
-        )
-        const failed = failedRetirements(output, row.path)
-        if (exit !== 0 && failed === undefined) {
-          // #27120 AC2: a refusal that names a class is still a refusal — the environment stays — but the
-          // sweep reports it as one named class with its retire path, never as a per-seat note. A refusal
-          // that names nothing still falls through to the loud throw below.
-          const named = namedCloseRefusal(output)
-          if (named !== undefined) {
-            preserve(row.path, named)
-            continue
-          }
-          throw new Error(`native close exited ${exit}: ${output}`)
-        }
-        const result: unknown = JSON.parse(output)
-        if (typeof result !== "object" || result === null) throw new Error(`malformed close result ${output}`)
-        if ("closed" in result && result.closed === row.path) {
-          closed++
-          cache.delete(row.path)
-          record(
-            row.path,
-            "closed",
-            `native retained removal proof accepted${failed === undefined ? "" : `; branch retirement failed: ${failed.join("; ")}`}`,
-          )
-          // Telling never gates the close (29720): the close is already
-          // committed, so a telling failure is named here, at the source, and
-          // never rethrown into the sweep's keep bookkeeping.
-          try {
-            await input.onEnvironmentClosed?.({
-              ...(row.branch === undefined ? {} : { branch: row.branch }),
-              head,
-              path: row.path,
-              ...(closedProof === undefined ? {} : { proof: closedProof }),
-            })
-          } catch (cause) {
-            record(row.path, "tell-failed", `closed, but telling about it failed: ${reasonText(cause)}`)
-          }
-        } else if ("kept" in result && result.kept === row.path) preserve(row.path, output.trim())
-        else throw new Error(`unproven close result ${output}`)
-      } catch (cause) {
-        preserve(row.path, namedPrivateStoreRefusal(cause, row.path) ?? reasonText(cause))
+        throw new Error(`native close exited ${exit}: ${output}`)
       }
+      const result: unknown = JSON.parse(output)
+      if (typeof result !== "object" || result === null) throw new Error(`malformed close result ${output}`)
+      if ("closed" in result && result.closed === row.path) {
+        closed++
+        cache.delete(row.path)
+        record(
+          row.path,
+          "closed",
+          `native retained removal proof accepted${failed === undefined ? "" : `; branch retirement failed: ${failed.join("; ")}`}`,
+          timing,
+        )
+        // Telling never gates the close (29720): the close is already
+        // committed, so a telling failure is named here, at the source, and
+        // never rethrown into the sweep's keep bookkeeping.
+        try {
+          await input.onEnvironmentClosed?.({
+            ...(row.branch === undefined ? {} : { branch: row.branch }),
+            head,
+            path: row.path,
+            ...(closedProof === undefined ? {} : { proof: closedProof }),
+          })
+        } catch (cause) {
+          record(row.path, "tell-failed", `closed, but telling about it failed: ${reasonText(cause)}`)
+        }
+      } else if ("kept" in result && result.kept === row.path) preserve(row.path, output.trim(), timing)
+      else throw new Error(`unproven close result ${output}`)
+    } catch (cause) {
+      preserve(row.path, namedPrivateStoreRefusal(cause, row.path) ?? reasonText(cause), closeTiming)
     }
-    progress.cursor = stoppedAt < 0 ? 0 : (offset + stoppedAt) % inventory.rows.length
   }
+  progress.cursor = stoppedAt < 0 ? 0 : (offset + stoppedAt) % inventory.rows.length
   // The state is written in the same step as the round row that reports what the round did, so a
   // restart resumes at the next environment (ruling 27723) with the map the round actually wrote.
   persistState()
@@ -1325,12 +1361,13 @@ async function cleanupEnvironments(
       registry,
       closed,
       kept,
+      consumer: { attempted: requests.attempted, closed: requests.closed },
+      sweep: { attempted: sweepAttempted, closed: closed - requests.closed },
       charged,
       deferred: inventory.rows.length - charged,
       remaining: inventory.rows.length - closed,
       ms: Date.now() - startedAt,
       lookups,
-      ...(requests.closed > 0 ? { why: `general sweep skipped: ${requests.closed} request closes this round` } : {}),
       ...(censusReceipt === undefined ? {} : { census: censusReceipt }),
     })}\n`,
   )
