@@ -2556,6 +2556,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
         name: basename(path),
         path,
         requester: requesterOf(process.env),
+        intent: "close",
         predicate: "direct-admission",
         options: {},
         head,

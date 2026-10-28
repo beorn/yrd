@@ -49,13 +49,18 @@ export async function assertNoLiveEnvironmentUse(path: string, io: YrdCliIO): Pr
 /** Shared admission policy: identity-cleared denials are evidence, an unexplained gap is not. */
 export function processCwdCoverage(snapshot: ProcessCwdProjection) {
   const uncleared = snapshot.unreadable.filter((entry) => clearedByIdentity(entry) === undefined)
+  // A pid cleared by identity is a waiver, so it is named with the identity that cleared it (29772 row 3).
+  const cleared = snapshot.unreadable.flatMap((entry) => {
+    const identity = clearedByIdentity(entry)
+    return identity === undefined ? [] : [`${unreadableLabel(entry)} as ${identity}`]
+  })
   const refusal =
     uncleared.length > 0
       ? `same-UID process CWD census ${snapshot.mechanism} could not read ${uncleared.map(unreadableLabel).join(", ")}; a holder among them cannot be ruled out`
       : !snapshot.complete && snapshot.unreadable.length === 0
         ? `same-UID process CWD census ${snapshot.mechanism} incomplete: no readable coverage`
         : undefined
-  return { uncleared, refusal }
+  return { uncleared, cleared, refusal }
 }
 
 /** Name denial evidence without printing the identity argv, which can contain secrets. */
@@ -149,10 +154,10 @@ export async function admitEnvironmentClose(
   } else {
     snapshot = await inspectProcessCwds({ deadlineMs: 2_000 })
   }
-  io.stderr(
-    `yrd: env close ${snapshot.mechanism === "proc" ? "same-UID holders inspected; other-UID holders are not inspectable" : "lsof cwd holders inspected; UID scope and ancestry are unproven"}; exempt PIDs: ${[...exempt].join(", ")}. This scan is non-atomic: a process can enter after the check.\n`,
-  )
   const coverage = processCwdCoverage(snapshot)
+  io.stderr(
+    `yrd: env close ${snapshot.mechanism === "proc" ? "same-UID holders inspected; other-UID holders are not inspectable" : "lsof cwd holders inspected; UID scope and ancestry are unproven"}; exempt PIDs: ${[...exempt].join(", ")}; identity-cleared unreadable PIDs: ${coverage.cleared.length === 0 ? "none" : coverage.cleared.join(", ")}. This scan is non-atomic: a process can enter after the check.\n`,
+  )
   const holder = environmentCwdHolder(path, snapshot, exempt)
   if (coverage.refusal !== undefined) {
     // A READABLE holder inside the path is a refusal, exactly as before: the

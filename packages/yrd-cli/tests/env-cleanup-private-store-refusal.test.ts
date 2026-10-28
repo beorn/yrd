@@ -93,6 +93,7 @@ it("keeps the close request standing and continues when a private store refuses 
     requester: "@dev/luna2",
     uid,
     at: new Date().toISOString(),
+    intent: "close",
     predicate: "direct-admission",
     options: { noRehome: true },
     head: w.head,
