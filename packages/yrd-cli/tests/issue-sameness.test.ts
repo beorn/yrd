@@ -205,8 +205,9 @@ describe("witnessed issue identity after rename (31306)", () => {
     const otherRaw = await same(bound, { kind: "witnessed", raw: "another-old-path", key: "k-other-witness" })
     expect(otherRaw).toMatchObject({ same: false, resolved: true })
     const otherWhy = "why" in otherRaw ? otherRaw.why : ""
-    for (const fact of ["old-path", "another-old-path", "k-bound", "k-other-witness", "provider offline"])
+    for (const fact of ["old-path", "another-old-path", "k-bound", "k-other-witness", "provider offline"]) {
       expect(otherWhy).toContain(fact)
+    }
   })
 })
 

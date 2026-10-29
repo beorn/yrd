@@ -124,8 +124,9 @@ export function parseIssuesDeclaration(text: string, where: string): IssuesDecla
     }
     if (key === "alias") {
       for (const name of ["raw", "key"]) {
-        if (!argv.includes(`<${name}>`))
+        if (!argv.includes(`<${name}>`)) {
           throw refuse(`alias lacks <${name}>; include both <raw> and <key> as whole argv elements`)
+        }
       }
     } else if (ISSUES_WRITE_VERBS.has(key) && !argv.includes("<id>")) {
       throw refuse(`write verb ${key} lacks <id>; add <id> where the provider takes its replay key`)

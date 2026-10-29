@@ -86,8 +86,21 @@ A failed check's log is on the machine running the queue.
 A change can name an issue, from `--issue` or from a trailer in the branch's commits.
 
 - Submit scans the branch's own history back to its merge base with the queue branch. The first `Closes:`, `Fixes:`, `Resolves:` or `Refs:` trailer wins.
-- The binding survives later commits and branch renames. Two different bindings refuse and name both. `--issue` must match an existing binding.
+- The binding survives later commits and branch renames. Different spellings are one issue when the project's `issues.yml` resolve command returns the same opaque key. `--issue` follows this comparison too.
+- `yrd env open --issue` retains the raw reference and, when resolution returns one key, records `Issue-Binding: {"raw":"RAW","key":"KEY"}` in the same commit. A witnessed reference checks live identity even when its spelling is unchanged. An unavailable resolution may use only that exact raw's witness, reporting the provider failure; ambiguity or a different live key authorizes no provider write.
+- A renamed legacy reference has no witness. If the other spelling resolves to one live key, Yrd prints the project's declared [alias repair](#alias-repair) and the resubmit command. Run the repair, then resubmit the unchanged branch; no commit-message rewrite is needed.
 - `yrd queue show <branch> --project-root <root>` shows up to four of the newest issues through the project's `issues.yml` `view` command, after the queue result. Each read has a 10-second limit, and a failed read names its issue without hiding the others. Issue keys are opaque, and these reads never decide anything. `show --all` makes no issue reads.
+
+## Alias repair
+
+The optional `alias` entry in `issues.yml` is an argv template that Yrd prints to repair an unresolved reference. It is declaration data, not a command run by `yrd issues`; Yrd never executes it automatically.
+
+```yaml
+resolve: [tracker, resolve, <raw>, --json]
+alias: [tracker, add-alias, <key>, <raw>]
+```
+
+Both `<key>` and `<raw>` must occur as whole argv entries; other placeholders and embedded substitutions refuse. `<key>` is the one live resolved opaque key, and `<raw>` is the unresolved spelling. Yrd quotes each substituted argument for the shell and reads the template from the same committed declaration that supplied that key. With no template, it says `this project declares no "alias" repair template in issues.yml`; it does not invent a repair command. The provider's resolve result remains `{keys: [...]}`.
 
 ## Withdraw
 

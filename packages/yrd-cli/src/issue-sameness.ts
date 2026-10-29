@@ -114,9 +114,9 @@ export function issueComparer(input: IssueComparerInput): SameIssue {
         declarationCommit: missing.target.declaration.commit,
       })
       if (!reading.ok) detail += `; alias repair declaration could not be read: ${reading.message}`
-      else if (reading.definition.alias === undefined)
+      else if (reading.definition.alias === undefined) {
         detail += '; this project declares no "alias" repair template in issues.yml'
-      else {
+      } else {
         const argv = substituteArgv(reading.definition.alias, { raw: missing.raw, key: missing.target.key })
         detail += `\nAlias repair:\n${argv.map(shellQuote).join(" ")}\n`
       }

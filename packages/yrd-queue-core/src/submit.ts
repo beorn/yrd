@@ -23,6 +23,7 @@ import { existsSync, mkdirSync, mkdtempSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { localMainsAtPin } from "git-super/local-main"
 import { pushRefUpdates } from "git-super/push"
+import { shellQuote } from "git-super/shell-command"
 import { publishWithTransientRetry, retryTransientPush, transientPush5xxOf } from "./transient-push.ts"
 import { discardWorktree, removeWorktreeRunScaffold } from "./worktree.ts"
 import { refuseMovedPrivateGitlinks } from "./private-submodules.ts"
@@ -1584,15 +1585,17 @@ export async function issueOf(
       bound.reference.kind === "raw-only" &&
       candidate.binding.kind === "raw-only" &&
       bound.reference.raw === candidate.binding.raw
-    )
+    ) {
       continue
+    }
     {
       const judged = sameIssue === undefined ? undefined : await sameIssue(bound.reference, candidate.binding)
       // The first spelling stays the binding: a second spelling of one issue is no conflict (31060).
       if (judged?.same === true) {
         // Retain an actual witness encountered later, so a subsequent contradictory fact cannot erase it.
-        if (bound.reference.kind === "raw-only" && candidate.binding.kind === "witnessed")
+        if (bound.reference.kind === "raw-only" && candidate.binding.kind === "witnessed") {
           bound.reference = candidate.binding
+        }
         continue
       }
       const trailer = candidate.trailer ?? "Refs/Resolves"
@@ -1601,6 +1604,9 @@ export async function issueOf(
           (judged?.resolved === true
             ? `${judged.why ?? `${binding.issue} and ${issue} resolve to different issues`}; `
             : `Yrd compares issue keys exactly, so it cannot tell whether two keys name one issue; ` +
+              (bound.reference.kind === "raw-only" && candidate.binding.kind === "raw-only"
+                ? "no provider-key witness was recorded for either raw reference; "
+                : "") +
               (judged === undefined ? "" : `${judged.why}; `)) +
           `the second binding is a ${trailer} trailer, and a Refs or Resolves trailer always binds; ` +
           `keep a follow-up link without binding it with a "Follow-up: ${issue}" line` +
@@ -1608,7 +1614,7 @@ export async function issueOf(
             ? "; "
             : `, or, if both keys name one issue, preserve Git history and repair their issue-store alias; ` +
               `a bind commit made by yrd env open carries the --issue value exactly as given, so a split between two spellings can start there; `) +
-          `preserve Git history; then resubmit ${branch}`,
+          `preserve Git history; then resubmit ${branch}: yrd submit ${shellQuote(branch)}`,
       )
     }
   }
@@ -1622,11 +1628,11 @@ export async function issueOf(
         `declared issue ${declared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}; ` +
           (judged?.resolved === true
             ? `${judged.why ?? `${declared} and ${binding.issue} resolve to different issues`}; ` +
-              `omit --issue to use the binding; preserve Git history; then resubmit ${branch}`
+              `omit --issue to use the binding; preserve Git history; then resubmit ${branch}: yrd submit ${shellQuote(branch)}`
             : `Yrd compares issue keys exactly, so the declared value must equal the binding; ` +
               (judged === undefined ? "" : `${judged.why}; `) +
               `omit --issue to use the binding, or pass it exactly as bound: ${binding.issue}; ` +
-              `preserve Git history; then resubmit ${branch}`),
+              `preserve Git history; then resubmit ${branch}: yrd submit ${shellQuote(branch)}`),
       )
     }
     return binding
@@ -1714,11 +1720,12 @@ async function* issueFieldsOf(
     const witnesses: Extract<IssueBinding, { kind: "witnessed" }>[] = []
     for (const entry of metadata.split("\u001e").filter((value) => value.trim() !== "")) {
       const field = /^[ \t]*Issue-Binding[ \t]*:[ \t]*([\s\S]*)$/iu.exec(entry)
-      if (field === null)
+      if (field === null || field[1] === undefined) {
         throw new TypeError(`invalid Issue-Binding in ${branch} at ${commit}: ${JSON.stringify(entry)}`)
+      }
       let value: unknown
       try {
-        value = JSON.parse(field[1]!)
+        value = JSON.parse(field[1])
       } catch (cause) {
         throw new TypeError(`invalid Issue-Binding JSON in ${branch} at ${commit}: ${field[1]}`, { cause })
       }

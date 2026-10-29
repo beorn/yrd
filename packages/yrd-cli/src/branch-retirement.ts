@@ -1439,18 +1439,20 @@ export async function releaseRetainedCheckouts(
         if (recordedReference !== undefined) {
           for (const reference of references.slice(1)) {
             const judged = await input.sameIssue(recordedReference, reference)
-            if (!judged.same)
+            if (!judged.same) {
               throw new Error(
                 `${repository}@${commit}: conflicting exact-tip issue bindings${samenessDetail(recordedReference.raw, reference.raw, judged)}`,
               )
+            }
           }
         }
       }
       const bindingDetail = `${repository}@${commit}: exact-tip issue binding ${recordedIssue ?? "absent"}`
       const matchesIssue = async (name: string): Promise<boolean> => {
         // Explicit opaque identity wins even if an embedding host ignores recordedIssue and returns a numeric name.
-        if (recordedReference !== undefined)
+        if (recordedReference !== undefined) {
           return (await input.sameIssue(recordedReference, { kind: "raw-only", raw: request.issue })).same
+        }
         const key = io.branchIssue?.({ branch: name, recordedIssue })
         return (
           key !== undefined &&
