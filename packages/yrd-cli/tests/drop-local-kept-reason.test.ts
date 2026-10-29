@@ -116,3 +116,13 @@ it("retires the merged branch and refuses the unmerged one with a named rule and
   expect((await git(["rev-parse", "refs/heads/topic-kept"])).trim()).not.toBe(staleTip)
   expect(kept.exit, `kept a branch but exited ${kept.exit}:\n${kept.stderr}\n${kept.stdout}`).not.toBe(0)
 }, 60_000)
+
+// #31083: `--discard` needs an actor and a reason, but its help named neither; an author spent two attempts finding
+// --submitter and --reason (@dev/luna5, 2026-10-27). The held keep's human line is pinned in cli-drop-local-origin-archive.
+it("names --submitter and --reason in the --discard help", async () => {
+  const help = capture(process.cwd())
+  await runYrdProcess(["bun", "yrd", "drop", "--help"], help.io).catch(() => undefined)
+  const discardHelp = help.stdout().replace(/\s+/gu, " ").match(/--discard (.*?) --release-checkout/u)?.[1] ?? ""
+  expect(discardHelp, help.stdout()).toContain("--reason")
+  expect(discardHelp).toContain("--submitter")
+})

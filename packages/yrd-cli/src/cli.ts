@@ -1515,7 +1515,7 @@ function buildProgram(
       .option("--local", "keep the exact tip in an event or on main, then retire its local branch; requires --tip")
       .option(
         "--discard",
-        "with --local or --retire, intentionally lose unmerged component content after its decision is logged and read back",
+        "with --local or --retire and --tip, intentionally lose unmerged component content after its decision is logged and read back; requires --reason <why> and --submitter <agent> (or YRD_DEFAULT_SUBMITTER), else the branch is kept",
       )
       .option(
         "--release-checkout",

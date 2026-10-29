@@ -484,6 +484,23 @@ it("names the component that holds a branch absent in the superproject, and fail
   expect(nestedCode, nested.stderr()).toBe(0)
   expect((JSON.parse(nested.stdout()) as { detail?: string }).detail).toContain("already gone")
 
+  // #31083: a discard with no --reason is kept by the guard, and the human line says why, not only "kept 1".
+  await child(["checkout", "--quiet", "-b", "task/discard-me"])
+  writeFileSync(join(repo, "vendor/child", "LOSE.md"), "unmerged\n")
+  await child(["add", "LOSE.md"])
+  await child(["commit", "--quiet", "-m", "unmerged component work"])
+  const discardTip = (await child(["rev-parse", "HEAD"])).trim()
+  await child(["checkout", "--quiet", "--detach"])
+  const reasonless = capture(join(repo, "vendor/child"))
+  const reasonlessCode = await runYrdProcess(
+    ["bun", "yrd", "drop", "task/discard-me", "--local", "--tip", discardTip, "--discard", "--submitter", "fixture"],
+    reasonless.io,
+  )
+  expect(reasonlessCode, `${reasonless.stderr()}\n${reasonless.stdout()}`).toBe(1)
+  expect(reasonless.stdout()).toContain("kept 1")
+  expect(reasonless.stdout()).toContain("discard requires an actor and reason")
+  expect((await child(["rev-parse", "refs/heads/task/discard-me"])).trim()).toBe(discardTip)
+
   // Absent in the superproject and in every component: still the ruled idempotent no-op (28385 area 11).
   const absent = capture(repo)
   const absentCode = await runYrdProcess(
