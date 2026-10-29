@@ -126,6 +126,7 @@ export type PersistedCustodyRefusal = Readonly<{
   branch?: string
   targetBranch: string
   endingEvent?: string
+  component?: string
   fingerprint: string
   why: string
   recordedAt: string
@@ -199,6 +200,7 @@ function custodyRefusalsFromState(parsed: unknown): Map<string, PersistedCustody
       typeof record.targetBranch !== "string" ||
       record.targetBranch.trim() === "" ||
       (record.endingEvent !== undefined && typeof record.endingEvent !== "string") ||
+      (record.component !== undefined && (typeof record.component !== "string" || record.component.trim() === "")) ||
       typeof record.fingerprint !== "string" ||
       !/^[0-9a-f]{64}$/u.test(record.fingerprint) ||
       typeof record.why !== "string" ||
@@ -211,12 +213,57 @@ function custodyRefusalsFromState(parsed: unknown): Map<string, PersistedCustody
       ...(record.branch === undefined ? {} : { branch: record.branch }),
       targetBranch: record.targetBranch,
       ...(record.endingEvent === undefined ? {} : { endingEvent: record.endingEvent }),
+      ...(record.component === undefined ? {} : { component: record.component }),
       fingerprint: record.fingerprint,
       why: record.why,
       recordedAt: record.recordedAt,
     })
   }
   return refusals
+}
+
+function extractComponentCustody(parsed: unknown): Readonly<Record<string, unknown>> | undefined {
+  return typeof parsed === "object" &&
+    parsed !== null &&
+    "reason" in parsed &&
+    parsed.reason === "component-custody" &&
+    "custody" in parsed &&
+    typeof parsed.custody === "object" &&
+    parsed.custody !== null
+    ? (parsed.custody as Readonly<Record<string, unknown>>)
+    : undefined
+}
+
+function blockedCustodyRefusalRecord(
+  custody: Readonly<Record<string, unknown>> | undefined,
+  input: Readonly<{
+    head: string
+    branch?: string
+    targetBranch: string
+    endingEvent?: string
+    why: string
+  }>,
+): PersistedCustodyRefusal | undefined {
+  if (
+    custody === undefined ||
+    custody.status !== "blocked" ||
+    typeof custody.component !== "string" ||
+    custody.component.trim() === "" ||
+    typeof custody.fingerprint !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(custody.fingerprint)
+  ) {
+    return undefined
+  }
+  return {
+    head: input.head,
+    ...(input.branch === undefined ? {} : { branch: input.branch }),
+    targetBranch: input.targetBranch,
+    ...(input.endingEvent === undefined ? {} : { endingEvent: input.endingEvent }),
+    component: custody.component,
+    fingerprint: custody.fingerprint,
+    why: input.why,
+    recordedAt: new Date().toISOString(),
+  }
 }
 
 /**
@@ -736,16 +783,7 @@ async function consumeCloseRequests(
       }
       continue
     }
-    const custody =
-      typeof parsed === "object" &&
-      parsed !== null &&
-      "reason" in parsed &&
-      parsed.reason === "component-custody" &&
-      "custody" in parsed &&
-      typeof parsed.custody === "object" &&
-      parsed.custody !== null
-        ? (parsed.custody as Readonly<Record<string, unknown>>)
-        : undefined
+    const custody = extractComponentCustody(parsed)
     const keptReason = `kept: ${output.trim()}`
     const custodyReason =
       custody === undefined
@@ -758,25 +796,15 @@ async function consumeCloseRequests(
       typeof parsed === "object" && parsed !== null && "kept" in parsed
         ? (custodyReason ?? keptReason)
         : `unproven close result ${output.trim()}`
-    if (
-      custody !== undefined &&
-      custody.status === "blocked" &&
-      typeof custody.fingerprint === "string" &&
-      /^[0-9a-f]{64}$/u.test(custody.fingerprint)
-    ) {
-      input.custodyRefusals.set(request.path, {
-        head: request.head,
-        ...(ending?.branch === undefined
-          ? current.branch === undefined
-            ? {}
-            : { branch: current.branch }
-          : { branch: ending.branch }),
-        targetBranch: ending?.queue ?? input.targetBranch,
-        ...(ending?.event === undefined ? {} : { endingEvent: ending.event }),
-        fingerprint: custody.fingerprint,
-        why: `close not performed: ${retiredWhy}`,
-        recordedAt: new Date().toISOString(),
-      })
+    const blockedRefusal = blockedCustodyRefusalRecord(custody, {
+      head: request.head,
+      branch: ending?.branch ?? current.branch,
+      targetBranch: ending?.queue ?? input.targetBranch,
+      endingEvent: ending?.event,
+      why: `close not performed: ${retiredWhy}`,
+    })
+    if (blockedRefusal !== undefined) {
+      input.custodyRefusals.set(request.path, blockedRefusal)
     } else {
       input.custodyRefusals.delete(request.path)
     }
@@ -900,7 +928,11 @@ async function fileTerminalCloseRequests(
     env?: NodeJS.ProcessEnv
     custodyRefusals: Map<string, PersistedCustodyRefusal>
     suppressed: Set<string>
-    inspectCustodyFreshness: (path: string, targetBranch: string) => Promise<ComponentCustodyFreshness>
+    inspectCustodyFreshness: (
+      path: string,
+      targetBranch: string,
+      component: string,
+    ) => Promise<ComponentCustodyFreshness>
     record: (path: string, result: string, why: string) => void
     preserve: (path: string, why: string) => void
     automaticKeep: (path: string, opening: EnvOpenRecordRead, terminal?: boolean) => string | undefined
@@ -980,11 +1012,12 @@ async function fileTerminalCloseRequests(
           prior.head !== row.head ||
           prior.branch !== row.branch ||
           prior.targetBranch !== ending.queue ||
-          (prior.endingEvent !== undefined && prior.endingEvent !== ending.event)
+          (prior.endingEvent !== undefined && prior.endingEvent !== ending.event) ||
+          prior.component === undefined
         ) {
           input.custodyRefusals.delete(row.path)
         } else {
-          const freshness = await input.inspectCustodyFreshness(row.path, ending.queue)
+          const freshness = await input.inspectCustodyFreshness(row.path, ending.queue, prior.component)
           if (freshness.status === "ok" && freshness.fingerprint === prior.fingerprint) {
             input.suppressed.add(row.path)
             input.preserve(row.path, `unchanged since ${prior.recordedAt}: ${prior.why}`)
@@ -1413,7 +1446,7 @@ async function cleanupEnvironments(
     env: input.env,
     custodyRefusals: progress.custodyRefusals,
     suppressed: startupSuppressed,
-    inspectCustodyFreshness: async (path, targetBranch) => {
+    inspectCustodyFreshness: async (path, targetBranch, component) => {
       if (resolvedPrimaryRoot === undefined) {
         const primary = (await registeredWorktrees(registryGit))[0]
         if (primary === undefined) {
@@ -1425,10 +1458,14 @@ async function cleanupEnvironments(
         }
         resolvedPrimaryRoot = primary.path
       }
-      return createLocalGitWorktreeStore({ repo: registry, env: input.env }).inspectComponentCustodyFreshness(path, {
-        primaryRoot: resolvedPrimaryRoot,
-        targetBranch,
-      })
+      return createLocalGitWorktreeStore({ repo: registry, env: input.env }).inspectComponentCustodyFreshness(
+        path,
+        {
+          primaryRoot: resolvedPrimaryRoot,
+          targetBranch,
+        },
+        { component },
+      )
     },
     record,
     preserve,
@@ -1690,28 +1727,15 @@ async function cleanupEnvironments(
           record(row.path, "tell-failed", `closed, but telling about it failed: ${reasonText(cause)}`)
         }
       } else if ("kept" in result && result.kept === row.path) {
-        const custody =
-          "reason" in result &&
-          result.reason === "component-custody" &&
-          "custody" in result &&
-          typeof result.custody === "object" &&
-          result.custody !== null
-            ? (result.custody as Readonly<Record<string, unknown>>)
-            : undefined
-        if (
-          custody !== undefined &&
-          custody.status === "blocked" &&
-          typeof custody.fingerprint === "string" &&
-          /^[0-9a-f]{64}$/u.test(custody.fingerprint)
-        ) {
-          progress.custodyRefusals.set(row.path, {
-            head,
-            ...(row.branch === undefined ? {} : { branch: row.branch }),
-            targetBranch: config.target.branch,
-            fingerprint: custody.fingerprint,
-            why: output.trim(),
-            recordedAt: new Date().toISOString(),
-          })
+        const custody = extractComponentCustody(result)
+        const blockedRefusal = blockedCustodyRefusalRecord(custody, {
+          head,
+          branch: row.branch,
+          targetBranch: config.target.branch,
+          why: output.trim(),
+        })
+        if (blockedRefusal !== undefined) {
+          progress.custodyRefusals.set(row.path, blockedRefusal)
         } else if (custody !== undefined) {
           progress.custodyRefusals.delete(row.path)
         }

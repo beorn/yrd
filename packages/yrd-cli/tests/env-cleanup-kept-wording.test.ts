@@ -480,7 +480,7 @@ it.each(["unknown", "blocked", "native-exit", "malformed", "unproven"] as const)
  */
 async function attachAlphaSubmodule(
   w: Awaited<ReturnType<typeof world>>,
-): Promise<Readonly<{ alphaPrimary: string; alphaEnv: string; head: string }>> {
+): Promise<Readonly<{ alphaPrimary: string; alphaEnv: string; betaPrimary: string; betaEnv: string; head: string }>> {
   const subRoot = realpathSync(mkdtempSync(join(tmpdir(), "yrd-cleanup-sub-")))
   roots.push(subRoot)
   const seed = gitIn(subRoot)
@@ -497,8 +497,22 @@ async function attachAlphaSubmodule(
   await alphaGit(["commit", "--quiet", "-m", "seed alpha"])
   await alphaGit(["push", "--quiet", "origin", "main"])
 
+  const betaBare = join(subRoot, "beta.git")
+  const betaSeed = join(subRoot, "beta-seed")
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", betaBare])
+  await seed(["clone", "--quiet", betaBare, betaSeed])
+  const betaGit = gitIn(betaSeed)
+  await betaGit(["config", "user.email", "cleanup@yrd.test"])
+  await betaGit(["config", "user.name", "yrd"])
+  await betaGit(["checkout", "--quiet", "-b", "main"])
+  writeFileSync(join(betaSeed, "beta.ts"), "export const beta = 1\n")
+  await betaGit(["add", "beta.ts"])
+  await betaGit(["commit", "--quiet", "-m", "seed beta"])
+  await betaGit(["push", "--quiet", "origin", "main"])
+
   await w.git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", alphaBare, "packages/alpha"])
-  await w.git(["commit", "--quiet", "-m", "add packages/alpha"])
+  await w.git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", betaBare, "vendor/beta"])
+  await w.git(["commit", "--quiet", "-m", "add packages/alpha and vendor/beta"])
   await w.git(["push", "--quiet", "origin", "main"])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["-C", w.env, "reset", "--hard", head])
@@ -506,21 +520,27 @@ async function attachAlphaSubmodule(
   return {
     alphaPrimary: join(w.repo, "packages/alpha"),
     alphaEnv: join(w.env, "packages/alpha"),
+    betaPrimary: join(w.repo, "vendor/beta"),
+    betaEnv: join(w.env, "vendor/beta"),
     head,
   }
 }
 
-it("suppresses startup refiling of an unchanged blocked component-custody refusal across service starts while ignoring unrelated primary noise, and recovers on witness publication, component change, HEAD change, pending request, or fresh terminal work", async () => {
+it("suppresses startup refiling of an unchanged blocked component-custody refusal across service starts while ignoring W(C') advances in other primary components, and recovers on W(C) publication, component change, v1 record, HEAD change, pending request, or fresh terminal work", async () => {
   const openedAt = new Date().toISOString()
   const w0 = await world(openedAt)
   const sub = await attachAlphaSubmodule(w0)
   const w = { ...w0, head: sub.head }
 
   const store = createLocalGitWorktreeStore({ repo: w.repo })
-  const initialFreshness = await store.inspectComponentCustodyFreshness(w.env, {
-    primaryRoot: w.repo,
-    targetBranch: "main",
-  })
+  const initialFreshness = await store.inspectComponentCustodyFreshness(
+    w.env,
+    {
+      primaryRoot: w.repo,
+      targetBranch: "main",
+    },
+    { component: "packages/alpha" },
+  )
   expect(initialFreshness).toMatchObject({
     status: "ok",
     fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/u),
@@ -590,9 +610,23 @@ it("suppresses startup refiling of an unchanged blocked component-custody refusa
   expect(kept2, JSON.stringify(start2)).toHaveLength(1)
   expect(String(kept2[0]?.why)).toBe(`unchanged since ${recordedAt1}: ${state1.custodyRefusals?.[w.env]?.why}`)
 
-  // Start 2b: another unchanged restart does not reprint the unchanged kept row either (#29679 deduplication).
+  // Start 2b: advancing W(C') ("vendor/beta" primary refs/heads/main, refs/remotes/origin/main, refs/yrd/pins/*,
+  // simulating a vendor/* service reload merge on origin/main while w.env is blocked on "packages/alpha")
+  // leaves the "packages/alpha"-scoped fingerprint unchanged and suppresses refiling (#31206 Option A).
+  const betaPrimaryHead = (await w.git(["-C", sub.betaPrimary, "rev-parse", "HEAD"])).trim()
+  const betaPrimaryTree = (await w.git(["-C", sub.betaPrimary, "rev-parse", "HEAD^{tree}"])).trim()
+  const betaAdvance = (
+    await w.git(["-C", sub.betaPrimary, "commit-tree", betaPrimaryTree, "-p", betaPrimaryHead, "-m", "advance beta"])
+  ).trim()
+  await w.git(["-C", sub.betaPrimary, "update-ref", "refs/heads/main", betaAdvance])
+  await w.git(["-C", sub.betaPrimary, "update-ref", "refs/remotes/origin/main", betaAdvance])
+  await w.git(["-C", sub.betaPrimary, "update-ref", `refs/yrd/pins/${betaAdvance}`, betaAdvance])
   const start2b = await runRound(w, createEnvironmentCleanup(), "custody-start-2b", [w.branch])
-  expect(closeMock.mock.calls.length - baseCalls).toBe(1)
+  expect(
+    closeMock.mock.calls.length - baseCalls,
+    "advancing W(vendor/beta) on main does not refile an environment blocked on packages/alpha",
+  ).toBe(1)
+  expect(start2b.filter((row) => row.result === "filed" && row.path === w.env)).toEqual([])
   expect(start2b.filter((row) => row.result === "kept" && row.path === w.env)).toEqual([])
   expect(start2b.find((row) => row.run === "custody-start-2b" && "kept" in row)?.kept).toBe(1)
 
@@ -632,10 +666,14 @@ it("suppresses startup refiling of an unchanged blocked component-custody refusa
   // AC3 recovery arm 2 — Meaningful witness/publication change (publishing a yrd pin in the primary witness store)
   // changes the freshness fingerprint, invalidates the stored refusal, refiles, and calls closeEnvironment.
   await w.git(["-C", sub.alphaPrimary, "update-ref", `refs/yrd/pins/${alphaNoise}`, alphaNoise])
-  const afterWitnessFreshness = await store.inspectComponentCustodyFreshness(w.env, {
-    primaryRoot: w.repo,
-    targetBranch: "main",
-  })
+  const afterWitnessFreshness = await store.inspectComponentCustodyFreshness(
+    w.env,
+    {
+      primaryRoot: w.repo,
+      targetBranch: "main",
+    },
+    { component: "packages/alpha" },
+  )
   expect(afterWitnessFreshness.status).toBe("ok")
   if (afterWitnessFreshness.status !== "ok") throw new Error("expected witness freshness ok")
   expect(afterWitnessFreshness.fingerprint).not.toBe(initialFreshness.fingerprint)
@@ -651,10 +689,14 @@ it("suppresses startup refiling of an unchanged blocked component-custody refusa
 
   // AC3 recovery arm 3 — Candidate component change (new ref in w.env's packages/alpha) invalidates and refiles.
   await w.git(["-C", sub.alphaEnv, "update-ref", "refs/heads/local-wip", alphaPrimaryHead])
-  const afterComponentFreshness = await store.inspectComponentCustodyFreshness(w.env, {
-    primaryRoot: w.repo,
-    targetBranch: "main",
-  })
+  const afterComponentFreshness = await store.inspectComponentCustodyFreshness(
+    w.env,
+    {
+      primaryRoot: w.repo,
+      targetBranch: "main",
+    },
+    { component: "packages/alpha" },
+  )
   expect(afterComponentFreshness.status).toBe("ok")
   if (afterComponentFreshness.status !== "ok") throw new Error("expected component freshness ok")
   closeMock.mockImplementationOnce(async (_path, _options, io) => {
@@ -665,19 +707,44 @@ it("suppresses startup refiling of an unchanged blocked component-custody refusa
   expect(closeMock.mock.calls.length - baseCalls, "component ref change refiles and calls closeEnvironment").toBe(4)
   expect(start4.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
 
-  // Test (c) — Schema version bump invalidates stored fingerprint and refiles.
+  // Test (c) / @cto (5) — A v1 record (holding an unscoped v1 hash or missing component field) never matches at startup and refiles.
+  const fullUnscopedFreshness = await store.inspectComponentCustodyFreshness(
+    w.env,
+    {
+      primaryRoot: w.repo,
+      targetBranch: "main",
+    },
+    { component: "." },
+  )
+  if (fullUnscopedFreshness.status !== "ok") throw new Error("expected full unscoped freshness ok")
   const currentState = JSON.parse(readFileSync(stateFile, "utf8")) as {
-    custodyRefusals: Record<string, { fingerprint: string }>
+    custodyRefusals: Record<string, { component?: string; fingerprint: string }>
   }
-  currentState.custodyRefusals[w.env]!.fingerprint = "f".repeat(64)
+  currentState.custodyRefusals[w.env]!.fingerprint = fullUnscopedFreshness.fingerprint
   writeFileSync(stateFile, JSON.stringify(currentState) + "\n")
   closeMock.mockImplementationOnce(async (_path, _options, io) => {
     io.stdout(blockedOutput(afterComponentFreshness.fingerprint))
     return 0
   })
-  const start5 = await runRound(w, createEnvironmentCleanup(), "custody-start-5-schema-bump", [w.branch])
-  expect(closeMock.mock.calls.length - baseCalls, "schema bump invalidates stored fingerprint and refiles").toBe(5)
-  expect(start5.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
+  const start5a = await runRound(w, createEnvironmentCleanup(), "custody-start-5a-unscoped-hash", [w.branch])
+  expect(closeMock.mock.calls.length - baseCalls, "unscoped hash never matches at startup and refiles").toBe(5)
+  expect(start5a.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
+
+  const stateMissingComponent = JSON.parse(readFileSync(stateFile, "utf8")) as {
+    custodyRefusals: Record<string, { component?: string; fingerprint: string }>
+  }
+  delete stateMissingComponent.custodyRefusals[w.env]!.component
+  writeFileSync(stateFile, JSON.stringify(stateMissingComponent) + "\n")
+  closeMock.mockImplementationOnce(async (_path, _options, io) => {
+    io.stdout(blockedOutput(afterComponentFreshness.fingerprint))
+    return 0
+  })
+  const start5b = await runRound(w, createEnvironmentCleanup(), "custody-start-5b-v1-no-component", [w.branch])
+  expect(
+    closeMock.mock.calls.length - baseCalls,
+    "v1 record missing component never matches at startup and refiles",
+  ).toBe(6)
+  expect(start5b.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
 
   // AC3 recovery arm 4 — Interrupted pending request (in .processing/) drains on next start even when fingerprint matches.
   const uid = process.getuid?.() ?? -1
@@ -698,7 +765,7 @@ it("suppresses startup refiling of an unchanged blocked component-custody refusa
     return 0
   })
   const start6 = await runRound(w, createEnvironmentCleanup(), "custody-start-6-interrupted", [w.branch])
-  expect(closeMock.mock.calls.length - baseCalls, "interrupted staged request drains on Start 6").toBe(6)
+  expect(closeMock.mock.calls.length - baseCalls, "interrupted staged request drains on Start 6").toBe(7)
   expect(start6.some((row) => row.result === "interrupted" && row.path === w.env)).toBe(true)
 
   // Test (d) — Pre/post mismatch at refusal time yields status: "blocked" without fingerprint -> not cached, next start refiles.
@@ -712,7 +779,7 @@ it("suppresses startup refiling of an unchanged blocked component-custody refusa
     return 0
   })
   await runRound(w, createEnvironmentCleanup(), "custody-start-7a-prepost-mismatch", [w.branch])
-  expect(closeMock.mock.calls.length - baseCalls).toBe(7)
+  expect(closeMock.mock.calls.length - baseCalls).toBe(8)
   const stateAfterMismatch = JSON.parse(readFileSync(stateFile, "utf8")) as {
     custodyRefusals?: Record<string, unknown>
   }
@@ -722,7 +789,7 @@ it("suppresses startup refiling of an unchanged blocked component-custody refusa
     return 0
   })
   await runRound(w, createEnvironmentCleanup(), "custody-start-7b-refiles", [w.branch])
-  expect(closeMock.mock.calls.length - baseCalls, "blocked without fingerprint refiles on the next start").toBe(8)
+  expect(closeMock.mock.calls.length - baseCalls, "blocked without fingerprint refiles on the next start").toBe(9)
 
   // AC4 + @cto 0c9b2fcd A — When inspectComponentCustodyFreshness returns status: "unknown" at startup
   // (env component's objects/info/alternates is a symlink), fileTerminalCloseRequests falls through to
@@ -751,7 +818,7 @@ it("suppresses startup refiling of an unchanged blocked component-custody refusa
     expect(
       closeMock.mock.calls.length - baseCalls,
       "unknown freshness falls through to writeCloseRequest and runs the full proof",
-    ).toBe(9)
+    ).toBe(10)
     expect(start8.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
     expect(start8.some((row) => row.result === "retired" && row.path === w.env)).toBe(true)
   } finally {
@@ -770,7 +837,7 @@ it("suppresses startup refiling of an unchanged blocked component-custody refusa
     return 0
   })
   const start9 = await runRound(wAdvanced, createEnvironmentCleanup(), "custody-start-9-head-moved", [w.branch])
-  expect(closeMock.mock.calls.length - baseCalls, "changed HEAD invalidates stored refusal and refiles").toBe(10)
+  expect(closeMock.mock.calls.length - baseCalls, "changed HEAD invalidates stored refusal and refiles").toBe(11)
   expect(start9.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
 })
 
