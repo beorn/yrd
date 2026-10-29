@@ -8086,6 +8086,40 @@ describe("drop --local --release-checkout", () => {
   )
 
   /**
+   * @failure A detached submodule tip with two issue bindings that are not the requested issue fails the whole drop instead of landing in excluded[].
+   * @level l2 @consumer A caller previewing drop --local --release-checkout --submodules when an unrelated component tip names two other issues
+   */
+  it("excludes a detached submodule whose two exact-tip bindings are not the requested issue", async () => {
+    const fixture = await releaseWorld(true, false, {
+      issue: "29600",
+      childBindings: ["beorn/flexily#4", "#26474"],
+    })
+    const { spy } = await permitCensus()
+    try {
+      const childGit = gitIn(fixture.child!)
+      const childTip = (await childGit(["rev-parse", "HEAD"])).trim()
+      await childGit(["checkout", "--quiet", "--detach", childTip])
+      await childGit(["branch", "-D", fixture.branch])
+      const preview = releaseCapture(fixture.repo)
+      expect(await runYrdProcess(fixture.argv, preview.io), preview.stdout() + preview.stderr()).toBe(0)
+      const report = JSON.parse(preview.stdout()) as ReleaseReport
+      expect(report.failed, JSON.stringify(report)).toEqual([])
+      expect(report.eligible).toEqual([
+        expect.objectContaining({ path: "", branch: fixture.branch, head: fixture.tip }),
+      ])
+      expect(report.excluded).toEqual([
+        {
+          repo: fixture.child,
+          path: "modules/child",
+          reason: `${fixture.child}@${childTip}: conflicting exact-tip issue bindings: beorn/flexily#4, #26474; no current attached branch mapping to the requested issue`,
+        },
+      ])
+    } finally {
+      spy.mockRestore()
+    }
+  }, 60_000)
+
+  /**
    * @failure A standalone linked worktree of a component store refuses drop --local --release-checkout or attempts to write a component event chain (29770).
    * @level l2 @consumer Seats releasing retained standalone component worktrees after merge, or previewing/refusing unmerged component worktrees
    */

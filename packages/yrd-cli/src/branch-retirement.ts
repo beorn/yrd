@@ -1609,6 +1609,9 @@ export async function releaseRetainedCheckouts(
         `yrd: release inspection ${repository}@${commit}: attached ${attached?.branch ?? "none"} at ${attached?.head ?? "unreadable"}\n`,
       )
       let recordedIssue: string | undefined
+      // Two bindings throw only when one names the requested issue, or this checkout
+      // is the branch's own repository. Any other detached component is excluded (1ac2ecb7).
+      let unrelatedConflict: string | undefined
       if (branch === undefined) {
         const bindings = new Set<string>()
         try {
@@ -1619,9 +1622,18 @@ export async function releaseRetainedCheckouts(
           throw new Error(`${repository}@${commit}: cannot read exact-tip issue binding: ${String(cause)}`, { cause })
         }
         if (bindings.size > 1) {
-          throw new Error(`${repository}@${commit}: conflicting exact-tip issue bindings: ${[...bindings].join(", ")}`)
+          let includesRequested = false
+          for (const name of bindings) {
+            if ((await input.sameIssue(name, request.issue)).same) includesRequested = true
+          }
+          const listed = [...bindings].join(", ")
+          if (includesRequested || path === "") {
+            throw new Error(`${repository}@${commit}: conflicting exact-tip issue bindings: ${listed}`)
+          }
+          unrelatedConflict = `${repository}@${commit}: conflicting exact-tip issue bindings: ${listed}; no current attached branch mapping to the requested issue`
+        } else {
+          recordedIssue = bindings.values().next().value
         }
-        recordedIssue = bindings.values().next().value
       }
       const bindingDetail = `${repository}@${commit}: exact-tip issue binding ${recordedIssue ?? "absent"}`
       const matchesIssue = async (name: string): Promise<boolean> => {
@@ -1631,7 +1643,12 @@ export async function releaseRetainedCheckouts(
       }
       let resumed: string | undefined
       const detachedBranches: string[] = []
-      if (attached !== undefined && attached.branch === undefined && branch === undefined) {
+      if (
+        unrelatedConflict === undefined &&
+        attached !== undefined &&
+        attached.branch === undefined &&
+        branch === undefined
+      ) {
         const rootNamedTip = await refAt(git, `refs/heads/${request.branch}`)
         // With no binding, preserve the existing root-name recovery precedence (30683).
         // Explicit bindings instead resolve actual pinned refs before an absence-only replay fallback (30704).
@@ -1655,7 +1672,9 @@ export async function releaseRetainedCheckouts(
           }
         }
       }
-      if (
+      if (unrelatedConflict !== undefined) {
+        excluded.push({ repo: repository, path, reason: unrelatedConflict })
+      } else if (
         branch !== undefined ||
         resumed !== undefined ||
         detachedBranches.length > 0 ||
