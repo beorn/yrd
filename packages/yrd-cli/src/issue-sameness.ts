@@ -3,7 +3,7 @@ import { ISSUE_DISPLAY_TIMEOUT_MS } from "./issue-resolver.ts"
 import { ISSUES_CODES } from "./issues/declaration.ts"
 import { runIssuesVerb } from "./issues/run.ts"
 
-type Resolution = Readonly<{ key: string } | { why: string }>
+type Resolution = Readonly<{ key: string } | { why: string; ambiguous: boolean }>
 
 export type IssueComparerInput = Readonly<{
   /** The project whose `issues.yml` declares `resolve`. */
@@ -17,10 +17,9 @@ export type IssueComparerInput = Readonly<{
 }>
 
 /**
- * One command's issue comparer (31060). Byte-equal keys are one issue with no provider call. Differing keys ask
- * the project's declared `resolve` verb once per distinct raw key, memoized for this invocation only. Two keys
- * are one issue only when each resolves to exactly one key and those keys are equal. Any other outcome is no
- * answer: the caller compares exactly and names what resolve returned. Keys stay opaque; Yrd parses no issue syntax.
+ * One command's issue comparer. Only byte-equal legacy raws skip the provider. A witnessed raw always asks live
+ * identity, and can supply its exact raw's key only when live resolution is unavailable, never ambiguous or
+ * different. The per-command map memoizes provider transport only; witness facts stay in the required inputs.
  */
 export function issueComparer(input: IssueComparerInput): SameIssue {
   const resolutions = new Map<string, Promise<Resolution>>()
@@ -33,23 +32,63 @@ export function issueComparer(input: IssueComparerInput): SameIssue {
     return reading
   }
   return async (a, b) => {
-    if (a === b) return { same: true }
-    const [left, right] = await Promise.all([resolveOnce(a), resolveOnce(b)])
-    if ("key" in left && "key" in right) {
-      return left.key === right.key ? { same: true } : { same: false, resolved: true }
+    if (a.kind === "raw-only" && b.kind === "raw-only" && a.raw === b.raw) return { same: true }
+    const resolved: [Resolution, Resolution] = await Promise.all([resolveOnce(a.raw), resolveOnce(b.raw)])
+    if (a.raw === b.raw && a.kind === "witnessed" && b.kind === "witnessed" && a.key !== b.key) {
+      return {
+        same: false,
+        resolved: true,
+        why: `conflicting Issue-Binding witnesses for ${a.raw}: ${a.key} and ${b.key}`,
+      }
     }
-    const why = [left, right].flatMap((resolution) => ("why" in resolution ? [resolution.why] : []))
-    return { same: false, resolved: false, why: why.join("; ") }
+    const bindings = [a, b] as const
+    const provenance: string[] = []
+    for (const index of [0, 1] as const) {
+      const binding = bindings[index]
+      const peer = bindings[index === 0 ? 1 : 0]
+      const live = resolved[index]
+      const witness =
+        binding.kind === "witnessed"
+          ? binding.key
+          : binding.raw === peer.raw && peer.kind === "witnessed"
+            ? peer.key
+            : undefined
+      if ("key" in live) {
+        if (witness !== undefined && live.key !== witness) {
+          return {
+            same: false,
+            resolved: true,
+            why: `${binding.raw} resolves live to ${live.key}, but its Issue-Binding witnesses ${witness}`,
+          }
+        }
+      } else if (!live.ambiguous && witness !== undefined) {
+        resolved[index] = { key: witness }
+        provenance.push(`${live.why}; using witnessed key ${witness} for exact raw ${binding.raw}`)
+      }
+    }
+    const [left, right] = resolved
+    if ("key" in left && "key" in right) {
+      return left.key === right.key
+        ? {
+            same: true,
+            key: left.key,
+            ...(provenance.length === 0 ? {} : { why: [...new Set(provenance)].join("; ") }),
+          }
+        : { same: false, resolved: true }
+    }
+    const why = [...provenance, ...[left, right].flatMap((resolution) => ("why" in resolution ? [resolution.why] : []))]
+    return { same: false, resolved: false, why: [...new Set(why)].join("; ") }
   }
 }
 
 /** Appended to a mismatch receipt: what the comparer said beyond the two spellings it names. */
 export function samenessDetail(a: string, b: string, judged: Awaited<ReturnType<SameIssue>>): string {
   if (judged.same) return ""
-  return judged.resolved ? `; ${a} and ${b} resolve to different issues` : `; ${judged.why}`
+  if (judged.why !== undefined) return `; ${judged.why}`
+  return `; ${a} and ${b} resolve to different issues`
 }
 
-async function resolveRaw(input: IssueComparerInput, raw: string): Promise<Resolution> {
+export async function resolveRaw(input: IssueComparerInput, raw: string): Promise<Resolution> {
   let said = ""
   const outcome = await runIssuesVerb({
     verb: "resolve",
@@ -66,6 +105,7 @@ async function resolveRaw(input: IssueComparerInput, raw: string): Promise<Resol
   if (!outcome.ok) {
     if (outcome.code === ISSUES_CODES.declarationMissing || outcome.code === ISSUES_CODES.unsupported) {
       return {
+        ambiguous: false,
         why: `${raw} was not checked against an issues store, because ${input.projectRoot} declares none for it: ${outcome.message}`,
       }
     }
@@ -74,12 +114,18 @@ async function resolveRaw(input: IssueComparerInput, raw: string): Promise<Resol
       .map((text) => text.trim())
       .filter((text) => text !== "")
       .at(-1)
-    return { why: `resolve ${raw}: ${outcome.message}${line === undefined ? "" : `; the provider said: ${line}`}` }
+    return {
+      ambiguous: false,
+      why: `resolve ${raw}: ${outcome.message}${line === undefined ? "" : `; the provider said: ${line}`}`,
+    }
   }
   const keys = (outcome.envelope.result as { keys: readonly string[] }).keys
   const [key] = keys
   if (keys.length !== 1 || key === undefined) {
-    return { why: `resolve ${raw} returned ${keys.length} keys (${keys.join(", ")}), not one issue` }
+    return {
+      ambiguous: keys.length > 1,
+      why: `resolve ${raw} returned ${keys.length} keys (${keys.join(", ")}), not one issue`,
+    }
   }
   return { key }
 }

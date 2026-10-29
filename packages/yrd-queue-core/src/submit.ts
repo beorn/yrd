@@ -296,11 +296,16 @@ export type AdmissionOutcome = Readonly<
  * `why` says what it returned.
  */
 export type IssueSameness = Readonly<
-  { same: true } | { same: false; resolved: true } | { same: false; resolved: false; why: string }
+  | { same: true; key?: string; why?: string }
+  | { same: false; resolved: true; why?: string }
+  | { same: false; resolved: false; why: string }
 >
 
-/** Asked only for byte-unequal keys. */
-export type SameIssue = (a: string, b: string) => Promise<IssueSameness>
+/** A decoded binding's provenance is explicit; absence is a legacy raw-only record, never a guessed witness. */
+export type IssueBinding = Readonly<{ kind: "witnessed"; raw: string; key: string } | { kind: "raw-only"; raw: string }>
+
+/** Witnessed equal spellings also ask live identity, so reusing a path cannot silently retarget a binding. */
+export type SameIssue = (a: IssueBinding, b: IssueBinding) => Promise<IssueSameness>
 
 export type IssueResolution = Readonly<{
   issue: string

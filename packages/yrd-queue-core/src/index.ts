@@ -248,6 +248,7 @@ export type {
   IssueResolution,
   IssueSameness,
   SameIssue,
+  IssueBinding,
   Submitted,
   Prepared,
   SubmitGitlink,

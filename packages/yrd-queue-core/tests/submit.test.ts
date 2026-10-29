@@ -93,6 +93,84 @@ function store(w: World) {
   return createEventStore(w.work, "origin", selectionFor(w.git))
 }
 describe("event submit", () => {
+  /** @failure 31306 A1/A2: the shared Git decoder must classify each record and check its same-commit raw.
+   * @level l2 @consumer yrd submit and its binding readers
+   * Existing binding tests carry no Issue-Binding metadata and cannot expose a mismatched or dropped witness.
+   */
+  it.each(["Refs", "Resolves", "Closes", "Fixes"])(
+    "decodes witnessed and legacy %s bindings (31306)",
+    async (trailer) => {
+      const w = await world(false)
+      const branch = "task/witness-decode"
+      await branchWithCommit(w, branch, "change.txt")
+      await w.git(["checkout", "--quiet", branch])
+      const raw = "old-path"
+      const key = "opaque\nkey"
+      await w.git([
+        "commit",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        `bind\n\n${trailer}: ${raw}\nIssue-Binding: ${JSON.stringify({ raw, key })}`,
+      ])
+      const witnessed = (await w.git(["rev-parse", "HEAD"])).trim()
+      await w.git(["commit", "--quiet", "--allow-empty", "-m", `legacy\n\n${trailer}: legacy-path`])
+      const legacy = (await w.git(["rev-parse", "HEAD"])).trim()
+      const found = []
+      for await (const binding of issueBindingsOf(w.git, [`${w.target}..${legacy}`], branch)) found.push(binding)
+      expect(found).toEqual([
+        { issue: raw, commit: witnessed, trailer, binding: { kind: "witnessed", raw, key } },
+        { issue: "legacy-path", commit: legacy, trailer, binding: { kind: "raw-only", raw: "legacy-path" } },
+      ])
+    },
+  )
+
+  it("a witness naming no same-commit reference is a typed refusal naming both raws and the commit (31306)", async () => {
+    const w = await world(false)
+    const branch = "task/witness-mismatch"
+    await branchWithCommit(w, branch, "change.txt")
+    await w.git(["checkout", "--quiet", branch])
+    await w.git([
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      `bind\n\nRefs: actual-raw\nIssue-Binding: ${JSON.stringify({ raw: "different-raw", key: "opaque" })}`,
+    ])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const read = async () => {
+      for await (const binding of issueBindingsOf(w.git, [`${w.target}..${head}`], branch)) void binding
+    }
+    const error = await read().then(
+      () => new Error("invalid witness was accepted"),
+      (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause))),
+    )
+    expect(error).toBeInstanceOf(TypeError)
+    for (const fact of [head, "actual-raw", "different-raw"]) expect(error.message).toContain(fact)
+  })
+
+  it("conflicting same-raw witnesses are retained as separate facts by the one decoder (31306)", async () => {
+    const w = await world(false)
+    const branch = "task/witness-conflict"
+    await branchWithCommit(w, branch, "change.txt")
+    await w.git(["checkout", "--quiet", branch])
+    const raw = "one-raw"
+    await w.git([
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      `bind\n\nRefs: ${raw}\nIssue-Binding: ${JSON.stringify({ raw, key: "one-key" })}\nIssue-Binding: ${JSON.stringify({ raw, key: "another-key" })}`,
+    ])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const found = []
+    for await (const binding of issueBindingsOf(w.git, [`${w.target}..${head}`], branch)) found.push(binding)
+    expect(found).toEqual([
+      { issue: raw, commit: head, trailer: "Refs", binding: { kind: "witnessed", raw, key: "one-key" } },
+      { issue: raw, commit: head, trailer: "Refs", binding: { kind: "witnessed", raw, key: "another-key" } },
+    ])
+  })
+
   /** @failure 28187: submit creates a registered candidate inside the inherited habitat scratch root.
    * @level l2 @consumer Yrd submit verification
    * Existing submit tests verify composition but never observe the live worktree's location.
