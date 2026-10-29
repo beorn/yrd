@@ -898,6 +898,73 @@ describe("yrd env open prepares the retained environment", () => {
     // And the retained bay's tracked lockfile is byte-identical to the candidate's.
     expect(readFileSync(join(bay, "bun.lock"), "utf8")).toBe(locked)
   })
+
+  /**
+   * @failure 31669: `yrd env open` exited 2 on historical commits whose lockfile had transitive
+   *          registry resolver drift under a newer Bun version while workspace manifests matched,
+   *          even though the unfrozen re-resolve succeeded and restored `bun.lock` to HEAD.
+   * @level l2 (`yrd env open --json` through `runSetup` and `inspectFrozenLockfile`)
+   * @consumer seats and benchmark runners provisioning historical commits via `yrd env open`
+   */
+  it("accepts and records transitive lockfile resolver drift on env open while keeping bun.lock at HEAD (31669)", async () => {
+    const w = await world("bun ./setup.mjs --frozen-lockfile")
+    await w.git(["checkout", "--quiet", "main"])
+    const beforeLock = `${JSON.stringify(
+      {
+        lockfileVersion: 1,
+        packages: { "@esbuild/linux-x64": ["@esbuild/linux-x64@0.25.12", {}] },
+        workspaces: { "": { dependencies: { vitepress: "1.6.3" }, name: "fixture-root" } },
+      },
+      null,
+      2,
+    )}\n`
+    const afterLock = `${JSON.stringify(
+      {
+        lockfileVersion: 1,
+        packages: { "@esbuild/linux-x64": ["@esbuild/linux-x64@0.21.5", {}] },
+        workspaces: { "": { dependencies: { vitepress: "1.6.3" }, name: "fixture-root" } },
+      },
+      null,
+      2,
+    )}\n`
+    writeFileSync(
+      join(w.work, "package.json"),
+      `${JSON.stringify({ dependencies: { vitepress: "1.6.3" }, name: "fixture-root", version: "0.0.0" }, null, 2)}\n`,
+    )
+    writeFileSync(join(w.work, "bun.lock"), beforeLock)
+    writeFileSync(
+      join(w.work, "setup.mjs"),
+      [
+        'import { writeFileSync } from "node:fs"',
+        "if (process.argv.includes('--frozen-lockfile')) {",
+        "  console.error('error: lockfile had changes, but lockfile is frozen')",
+        "  process.exit(1)",
+        "}",
+        `writeFileSync("bun.lock", ${JSON.stringify(afterLock)})`,
+        'writeFileSync("setup-ready.txt", "installed\\n")',
+      ].join("\n"),
+    )
+    await w.git(["add", "package.json", "bun.lock", "setup.mjs"])
+    await w.git(["commit", "--quiet", "-m", "commit Bun 1.4.3 lockfile"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const run = capture(w.work)
+
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "transitive-drift", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+
+    const opened = JSON.parse(run.stdout()) as { path: string }
+    expect(readFileSync(join(opened.path, "setup-ready.txt"), "utf8")).toBe("installed\n")
+    expect(readFileSync(join(opened.path, "bun.lock"), "utf8")).toBe(beforeLock)
+    expect(run.stderr()).toContain("transitive-drift: setup accepted transitive lockfile resolver drift")
+    expect(run.stderr()).toContain("frozen-lockfile-drift.log")
+    const logMatch = /diagnosis ([^\s)]+frozen-lockfile-drift\.log)/u.exec(run.stderr())
+    expect(logMatch?.[1]).toBeDefined()
+    expect(readFileSync(logMatch![1]!, "utf8")).toContain(
+      "@esbuild/linux-x64: @esbuild/linux-x64@0.25.12 -> @esbuild/linux-x64@0.21.5",
+    )
+  })
 })
 
 describe("yrd env close preserves anything it cannot safely remove", () => {

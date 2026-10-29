@@ -18,7 +18,7 @@
  */
 
 import { shellQuote } from "git-super/shell-command"
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { createGitWorkspace, worktreeHomeRoot, type ProvisionedBay } from "@yrd/bay"
 import {
@@ -772,20 +772,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
         tree,
       })
     } catch (error) {
-      if (!(error instanceof SetupFailed)) throw error
-      const result = error.ran.result
-      const output = readFileSync(result.log, "utf8").trim() || "(setup produced no output)"
-      const why = result.why === undefined ? "" : ` (${result.why})`
-      // 26906: SetupFailed carries lockfile-diagnosis.ts's forensics (which dependency moved, and the
-      // rollback that keeps the retained bay byte-identical), but THIS report rebuilds the failure text
-      // from the ran result and the log alone -- so without this line the one thing that names the
-      // frozen refusal's cause is dropped exactly where a seat needs it.
-      const diagnosis = error.diagnosis === undefined ? "" : `\n${error.diagnosis}`
-      throw new Error(
-        `environment setup ${result.result} in preserved bay ${path}: exit ${String(result.exit)}${why}\n` +
-          `command: ${setup}\n${output}\nlog ${result.log}${diagnosis}`,
-        { cause: error },
-      )
+      handleOpenSetupFailure(error, { artifacts, io, name, path, setup })
     }
   }
   const reused = provisioned.adoption !== "fresh" && provisioned.adoption !== "detached"
@@ -822,6 +809,45 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
 }
 
 /** The registered inventory shared by listing and automatic environment closure. */
+function handleOpenSetupFailure(
+  error: unknown,
+  context: Readonly<{ artifacts: string; io: YrdCliIO; name: string; path: string; setup: string }>,
+): void {
+  if (!(error instanceof SetupFailed)) throw error
+  const transitiveMatch =
+    error.diagnosis === undefined
+      ? null
+      : /^transitive-only lockfile drift: (\d+) package locator\(s\) moved with unchanged workspace manifests$/mu.exec(
+          error.diagnosis,
+        )
+  if (transitiveMatch !== null && error.diagnosis !== undefined) {
+    // 31669: historical commits whose lockfile was written under an older Bun resolver fail
+    // `--frozen-lockfile` when transitive package deduplication shifts while workspace manifests
+    // and local dependencies stay identical. `frozenLockfileDiagnosis` already completed the
+    // unfrozen setup (`exit 0`) and restored `bun.lock` to HEAD's bytes; record the drift log
+    // and announce it on stderr without failing `env open`.
+    const driftLog = join(context.artifacts, "logs", "frozen-lockfile-drift.log")
+    writeFileSync(driftLog, `${error.diagnosis}\n`)
+    context.io.stderr(
+      `${context.name}: setup accepted transitive lockfile resolver drift (${transitiveMatch[1]} package locator(s) moved with unchanged workspace manifests; unfrozen setup exited 0 and bun.lock was restored to HEAD; diagnosis ${driftLog})\n`,
+    )
+    return
+  }
+  const result = error.ran.result
+  const output = readFileSync(result.log, "utf8").trim() || "(setup produced no output)"
+  const why = result.why === undefined ? "" : ` (${result.why})`
+  // 26906: SetupFailed carries lockfile-diagnosis.ts's forensics (which dependency moved, and the
+  // rollback that keeps the retained bay byte-identical), but THIS report rebuilds the failure text
+  // from the ran result and the log alone -- so without this line the one thing that names the
+  // frozen refusal's cause is dropped exactly where a seat needs it.
+  const diagnosis = error.diagnosis === undefined ? "" : `\n${error.diagnosis}`
+  throw new Error(
+    `environment setup ${result.result} in preserved bay ${context.path}: exit ${String(result.exit)}${why}\n` +
+      `command: ${context.setup}\n${output}\nlog ${result.log}${diagnosis}`,
+    { cause: error },
+  )
+}
+
 export async function environmentInventory(
   root: string,
   git: Git,

@@ -173,4 +173,63 @@ describe("frozenLockfileDiagnosis", () => {
     expect(result).toContain("came back identical")
     expect(result).toContain(join(cwd, "bun.lock"))
   })
+
+  /**
+   * @failure 31669: `yrd env open` refused 2026-10-14..2026-10-22 commits whose Bun 1.4.3 lockfile
+   *          re-resolves transitive `@esbuild/*` entries under Bun 1.4.4 with unchanged workspace
+   *          manifests, blocking all 10 frozen benchmark rows.
+   * @level l1 (real files and child process, deterministic lockfile comparison)
+   * @consumer `openEnvironment` distinguishing pure transitive resolver drift from manifest drift
+   */
+  it("reports transitiveDrift only when workspace declarations and local packages stay identical (31669)", async () => {
+    const cwd = dir()
+    const workspaces = { "": { dependencies: { vitepress: "1.6.3" }, name: "root" } }
+    writeFileSync(
+      join(cwd, "bun.lock"),
+      JSON.stringify({
+        lockfileVersion: 1,
+        packages: {
+          "@esbuild/linux-x64": ["@esbuild/linux-x64@0.25.12", {}],
+          "local-pkg": ["local-pkg@file:./local-pkg", { dependencies: { a: "1.0.0" } }],
+        },
+        workspaces,
+      }),
+    )
+    writeFileSync(
+      join(cwd, "after.lock"),
+      JSON.stringify({
+        lockfileVersion: 1,
+        packages: {
+          "@esbuild/linux-x64": ["@esbuild/linux-x64@0.21.5", {}],
+          "local-pkg": ["local-pkg@file:./local-pkg", { dependencies: { a: "1.0.0" } }],
+        },
+        workspaces,
+      }),
+    )
+    const pureDrift = await frozenLockfileDiagnosis({
+      cwd,
+      setupRun: "sh -c 'cp after.lock bun.lock' --frozen-lockfile",
+    })
+    expect(pureDrift).toContain(
+      "transitive-only lockfile drift: 1 package locator(s) moved with unchanged workspace manifests",
+    )
+
+    // When a workspace declaration changes alongside the lockfile entry, it is manifest drift (26906), not transitive drift.
+    writeFileSync(
+      join(cwd, "after.lock"),
+      JSON.stringify({
+        lockfileVersion: 1,
+        packages: {
+          "@esbuild/linux-x64": ["@esbuild/linux-x64@0.21.5", {}],
+          "local-pkg": ["local-pkg@file:./local-pkg", { dependencies: { a: "1.0.0" } }],
+        },
+        workspaces: { "": { dependencies: { vitepress: "1.6.4" }, name: "root" } },
+      }),
+    )
+    const manifestDrift = await frozenLockfileDiagnosis({
+      cwd,
+      setupRun: "sh -c 'cp after.lock bun.lock' --frozen-lockfile",
+    })
+    expect(manifestDrift).not.toContain("transitive-only lockfile drift:")
+  })
 })

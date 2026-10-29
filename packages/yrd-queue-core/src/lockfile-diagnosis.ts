@@ -97,7 +97,7 @@ async function diagnose(options: FrozenLockfileDiagnosis): Promise<string> {
   } catch (error) {
     return (
       `frozen-lockfile diagnosis: re-running \`${rerun}\` without ${FROZEN_FLAG} in the same disposable worktree ` +
-      `(to see the lockfile it would have produced) itself threw: ${error instanceof Error ? error.message : String(error)}${restoreStartingLockfile(lockfilePath, before)}; ${where}`
+      `(to see the lockfile it would have produced) itself threw: ${error instanceof Error ? error.message : String(error)}${restoreStartingLockfile(lockfilePath, before).note}; ${where}`
     )
   }
   if (result.timedOut || result.signal !== null || result.exitCode !== 0) {
@@ -109,7 +109,7 @@ async function diagnose(options: FrozenLockfileDiagnosis): Promise<string> {
     const stderr = result.stderr.trim()
     return (
       `frozen-lockfile diagnosis: re-running \`${rerun}\` without ${FROZEN_FLAG} to compare lockfiles ${why}` +
-      `${stderr === "" ? "" : `: ${stderr}`}${restoreStartingLockfile(lockfilePath, before)}; ${where}`
+      `${stderr === "" ? "" : `: ${stderr}`}${restoreStartingLockfile(lockfilePath, before).note}; ${where}`
     )
   }
 
@@ -117,7 +117,7 @@ async function diagnose(options: FrozenLockfileDiagnosis): Promise<string> {
   try {
     after = readFileSync(lockfilePath, "utf8")
   } catch (error) {
-    return `frozen-lockfile diagnosis: the re-resolve exited 0 but ${lockfilePath} could not be read afterwards: ${error instanceof Error ? error.message : String(error)}${restoreStartingLockfile(lockfilePath, before)}; ${where}`
+    return `frozen-lockfile diagnosis: the re-resolve exited 0 but ${lockfilePath} could not be read afterwards: ${error instanceof Error ? error.message : String(error)}${restoreStartingLockfile(lockfilePath, before).note}; ${where}`
   }
   // 26906: put the starting bytes back before anything else runs. Reading the
   // re-resolve's own output stays possible (it is already in memory); leaving
@@ -130,7 +130,7 @@ async function diagnose(options: FrozenLockfileDiagnosis): Promise<string> {
   try {
     comparison = { after: parseLockfile(after), before: parseLockfile(before) }
   } catch (error) {
-    return `frozen-lockfile diagnosis: re-resolved successfully but could not parse ${lockfilePath} to compare entries: ${error instanceof Error ? error.message : String(error)}${rollback}; ${where}`
+    return `frozen-lockfile diagnosis: re-resolved successfully but could not parse ${lockfilePath} to compare entries: ${error instanceof Error ? error.message : String(error)}${rollback.note}; ${where}`
   }
 
   const manifestKeys = comparison.after.manifestKeys.length > 0 ? comparison.after.manifestKeys : [""]
@@ -141,13 +141,22 @@ async function diagnose(options: FrozenLockfileDiagnosis): Promise<string> {
     return (
       `frozen-lockfile diagnosis: re-resolved without ${FROZEN_FLAG}; the lockfile ` +
       `${before === after ? "came back identical" : "changed, but no named package entry's locator differs"} — ` +
-      `inspect ${lockfilePath} directly${rollback}; ${lookedAt}`
+      `inspect ${lockfilePath} directly${rollback.note}; ${lookedAt}`
     )
   }
   const lines = changed.map(({ from, name, to }) => `- ${name}: ${from} -> ${to}`)
+  const transitiveOnly =
+    rollback.ok &&
+    comparison.after.manifestKeys.length > 0 &&
+    canonicalJson(comparison.before.declarations) === canonicalJson(comparison.after.declarations) &&
+    !changed.some(({ from, to }) => isLocalLocator(from) || isLocalLocator(to)) &&
+    localPackagesUnchanged(comparison.before.packages, comparison.after.packages)
+  const driftSummary = transitiveOnly
+    ? `\ntransitive-only lockfile drift: ${String(changed.length)} package locator(s) moved with unchanged workspace manifests`
+    : ""
   return (
     `frozen-lockfile diagnosis: \`${setupRun.trim()}\` refused because the lockfile would change; re-resolving ` +
-    `without ${FROZEN_FLAG} in this same worktree shows what changed:\n${lines.join("\n")}${rollback}\n${lookedAt}`
+    `without ${FROZEN_FLAG} in this same worktree shows what changed:\n${lines.join("\n")}${rollback.note}${driftSummary}\n${lookedAt}`
   )
 }
 
@@ -159,24 +168,34 @@ async function diagnose(options: FrozenLockfileDiagnosis): Promise<string> {
  * swallowed — so a reader always knows whether the tree they are about to
  * inspect is really the tree the setup left behind.
  */
-function restoreStartingLockfile(lockfilePath: string, before: string): string {
+function restoreStartingLockfile(lockfilePath: string, before: string): Readonly<{ ok: boolean; note: string }> {
   let current: string | undefined
   try {
     current = readFileSync(lockfilePath, "utf8")
   } catch {
     current = undefined
   }
-  if (current === before) return ""
+  if (current === before) return { note: "", ok: true }
   try {
     writeFileSync(lockfilePath, before)
-    return `; the re-resolve left ${lockfilePath} changed and this diagnosis restored its starting bytes, so the tree it ran in is unchanged`
+    return {
+      note: `; the re-resolve left ${lockfilePath} changed and this diagnosis restored its starting bytes, so the tree it ran in is unchanged`,
+      ok: true,
+    }
   } catch (error) {
-    return `; the re-resolve left ${lockfilePath} changed and this diagnosis COULD NOT restore its starting bytes (the tree is MODIFIED): ${error instanceof Error ? error.message : String(error)}`
+    return {
+      note: `; the re-resolve left ${lockfilePath} changed and this diagnosis COULD NOT restore its starting bytes (the tree is MODIFIED): ${error instanceof Error ? error.message : String(error)}`,
+      ok: false,
+    }
   }
 }
 
 type LockfileRead = Readonly<{ before: ParsedLockfile; after: ParsedLockfile }>
-type ParsedLockfile = Readonly<{ packages: Readonly<Record<string, unknown>>; manifestKeys: readonly string[] }>
+type ParsedLockfile = Readonly<{
+  declarations: Readonly<Record<string, unknown>>
+  packages: Readonly<Record<string, unknown>>
+  manifestKeys: readonly string[]
+}>
 
 /**
  * `bun.lock`'s own format: JSON plus trailing commas before `}`/`]`. No
@@ -188,9 +207,41 @@ function parseLockfile(text: string): ParsedLockfile {
   const parsed: unknown = JSON.parse(text.replace(/,(\s*[}\]])/gu, "$1"))
   if (typeof parsed !== "object" || parsed === null) throw new Error("lockfile root is not an object")
   const root = parsed as Record<string, unknown>
-  const packages = isRecord(root.packages) ? root.packages : {}
+  const { packages: rawPackages, ...declarations } = root
+  const packages = isRecord(rawPackages) ? rawPackages : {}
   const workspaces = isRecord(root.workspaces) ? root.workspaces : {}
-  return { manifestKeys: Object.keys(workspaces), packages }
+  return { declarations, manifestKeys: Object.keys(workspaces), packages }
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`
+  if (isRecord(value)) {
+    const entries = Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
+    return `{${entries.map(([key, val]) => `${JSON.stringify(key)}:${canonicalJson(val)}`).join(",")}}`
+  }
+  return JSON.stringify(value)
+}
+
+function isLocalLocator(locator: string): boolean {
+  return /@(?:file|workspace|link|portal):/u.test(locator)
+}
+
+function localPackagesUnchanged(
+  before: Readonly<Record<string, unknown>>,
+  after: Readonly<Record<string, unknown>>,
+): boolean {
+  const names = new Set([...Object.keys(before), ...Object.keys(after)])
+  for (const name of names) {
+    const beforeLocator = locatorOf(before[name])
+    const afterLocator = locatorOf(after[name])
+    if (
+      (beforeLocator !== undefined && isLocalLocator(beforeLocator)) ||
+      (afterLocator !== undefined && isLocalLocator(afterLocator))
+    ) {
+      if (canonicalJson(before[name]) !== canonicalJson(after[name])) return false
+    }
+  }
+  return true
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
