@@ -34,9 +34,10 @@ import { afterAll, expect, it, vi } from "vitest"
 import * as removely from "removely"
 import type { QueueConfig } from "@yrd/queue-core"
 import { remoteUrl } from "@yrd/queue-core"
+import { createLocalGitWorktreeStore } from "git-super/worktree"
 import { createEnvironmentCleanup } from "../src/env-cleanup.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
-import { writeCloseRequest } from "../src/env-close-requests.ts"
+import { stageCloseRequest, writeCloseRequest } from "../src/env-close-requests.ts"
 import { writeEnvOpenRecord } from "../src/env-open-record.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 
@@ -470,3 +471,288 @@ it.each(["unknown", "blocked", "native-exit", "malformed", "unproven"] as const)
     }
   },
 )
+
+/**
+ * Add a real submodule `packages/alpha` to `w.repo` and `w.env` so `inspectComponentCustodyFreshness`
+ * runs against a real component tree and real primary witness store.
+ */
+async function attachAlphaSubmodule(
+  w: Awaited<ReturnType<typeof world>>,
+): Promise<Readonly<{ alphaPrimary: string; alphaEnv: string; head: string }>> {
+  const subRoot = realpathSync(mkdtempSync(join(tmpdir(), "yrd-cleanup-sub-")))
+  roots.push(subRoot)
+  const seed = gitIn(subRoot)
+  const alphaBare = join(subRoot, "alpha.git")
+  const alphaSeed = join(subRoot, "alpha-seed")
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", alphaBare])
+  await seed(["clone", "--quiet", alphaBare, alphaSeed])
+  const alphaGit = gitIn(alphaSeed)
+  await alphaGit(["config", "user.email", "cleanup@yrd.test"])
+  await alphaGit(["config", "user.name", "yrd"])
+  await alphaGit(["checkout", "--quiet", "-b", "main"])
+  writeFileSync(join(alphaSeed, "alpha.ts"), "export const alpha = 1\n")
+  await alphaGit(["add", "alpha.ts"])
+  await alphaGit(["commit", "--quiet", "-m", "seed alpha"])
+  await alphaGit(["push", "--quiet", "origin", "main"])
+
+  await w.git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", alphaBare, "packages/alpha"])
+  await w.git(["commit", "--quiet", "-m", "add packages/alpha"])
+  await w.git(["push", "--quiet", "origin", "main"])
+  const head = (await w.git(["rev-parse", "HEAD"])).trim()
+  await w.git(["-C", w.env, "reset", "--hard", head])
+  await w.git(["-C", w.env, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"])
+  return {
+    alphaPrimary: join(w.repo, "packages/alpha"),
+    alphaEnv: join(w.env, "packages/alpha"),
+    head,
+  }
+}
+
+it("suppresses startup refiling of an unchanged blocked component-custody refusal across service starts while ignoring unrelated primary noise, and recovers on witness publication, component change, HEAD change, pending request, or fresh terminal work", async () => {
+  const openedAt = new Date().toISOString()
+  const w0 = await world(openedAt)
+  const sub = await attachAlphaSubmodule(w0)
+  const w = { ...w0, head: sub.head }
+
+  const store = createLocalGitWorktreeStore({ repo: w.repo })
+  const initialFreshness = await store.inspectComponentCustodyFreshness(w.env, {
+    primaryRoot: w.repo,
+    targetBranch: "main",
+  })
+  expect(initialFreshness).toMatchObject({
+    status: "ok",
+    fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/u),
+  })
+  if (initialFreshness.status !== "ok") throw new Error("expected initial freshness ok")
+
+  const closeMock = vi.mocked(closeEnvironment)
+  const baseCalls = closeMock.mock.calls.length
+  const blockedOutput = (fingerprint?: string, oid = w.head): string =>
+    JSON.stringify({
+      kept: w.env,
+      reason: "component-custody",
+      custody: {
+        component: "packages/alpha",
+        source: "surviving primary Git graph",
+        status: "blocked",
+        detail: "component commit has no surviving witness",
+        oid,
+        ...(fingerprint === undefined ? {} : { fingerprint }),
+      },
+    })
+
+  // Start 1: terminal merged branch files a close request, consumeCloseRequests runs closeEnvironment (call #1),
+  // consumes the request file, and records the blocked custody refusal with its freshness fingerprint.
+  closeMock.mockImplementationOnce(async (_path, _options, io) => {
+    io.stdout(blockedOutput(initialFreshness.fingerprint))
+    return 0
+  })
+  const start1 = await runRound(w, createEnvironmentCleanup(), "custody-start-1", [w.branch])
+  expect(closeMock.mock.calls.length - baseCalls, "Start 1 runs closeEnvironment once").toBe(1)
+  expect(start1.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
+  expect(start1.some((row) => row.result === "retired" && row.path === w.env)).toBe(true)
+
+  const stateFile = join(w.workdir, "state", "yrd", "environment-cleanup.json")
+  const state1 = JSON.parse(readFileSync(stateFile, "utf8")) as {
+    custodyRefusals?: Record<string, { fingerprint: string; recordedAt: string; why: string }>
+  }
+  expect(state1.custodyRefusals?.[w.env]).toMatchObject({
+    fingerprint: initialFreshness.fingerprint,
+    why: expect.stringContaining("cure: land or push packages/alpha, then re-request"),
+  })
+  const recordedAt1 = state1.custodyRefusals?.[w.env]?.recordedAt
+  expect(typeof recordedAt1).toBe("string")
+
+  // Noise case (Test a): unrelated commit and unrelated ref updates in primaryRoot and primary submodule.
+  const rootTree = (await w.git(["rev-parse", "HEAD^{tree}"])).trim()
+  const rootNoise = (await w.git(["commit-tree", rootTree, "-p", w.head, "-m", "unrelated primary root commit"])).trim()
+  await w.git(["update-ref", "refs/heads/unrelated-noise", rootNoise])
+  await w.git(["update-ref", "refs/tags/unrelated-tag", rootNoise])
+  const alphaPrimaryHead = (await w.git(["-C", sub.alphaPrimary, "rev-parse", "HEAD"])).trim()
+  const alphaPrimaryTree = (await w.git(["-C", sub.alphaPrimary, "rev-parse", "HEAD^{tree}"])).trim()
+  const alphaNoise = (
+    await w.git(["-C", sub.alphaPrimary, "commit-tree", alphaPrimaryTree, "-p", alphaPrimaryHead, "-m", "noise"])
+  ).trim()
+  await w.git(["-C", sub.alphaPrimary, "update-ref", "refs/heads/unrelated-alpha", alphaNoise])
+
+  // Start 2: same terminal head, unchanged custody freshness despite unrelated noise in primaryRoot.
+  // No close request is refiled, closeEnvironment is NOT called again (count stays 1), and the replayed
+  // kept row names itself: "unchanged since <recordedAt>: <why>".
+  const start2 = await runRound(w, createEnvironmentCleanup(), "custody-start-2", [w.branch])
+  expect(
+    closeMock.mock.calls.length - baseCalls,
+    "Start 2 suppresses refiling and does not call closeEnvironment",
+  ).toBe(1)
+  expect(start2.filter((row) => row.result === "filed" && row.path === w.env)).toEqual([])
+  const kept2 = start2.filter((row) => row.result === "kept" && row.path === w.env)
+  expect(kept2, JSON.stringify(start2)).toHaveLength(1)
+  expect(String(kept2[0]?.why)).toBe(`unchanged since ${recordedAt1}: ${state1.custodyRefusals?.[w.env]?.why}`)
+
+  // Start 2b: another unchanged restart does not reprint the unchanged kept row either (#29679 deduplication).
+  const start2b = await runRound(w, createEnvironmentCleanup(), "custody-start-2b", [w.branch])
+  expect(closeMock.mock.calls.length - baseCalls).toBe(1)
+  expect(start2b.filter((row) => row.result === "kept" && row.path === w.env)).toEqual([])
+  expect(start2b.find((row) => row.run === "custody-start-2b" && "kept" in row)?.kept).toBe(1)
+
+  // AC3 recovery arm 1 — Fresh terminal work in a second environment files and closes even while w.env is suppressed.
+  const env2 = await addEnvironment(w, "env-second", openedAt)
+  const env2Head = (await w.git(["-C", env2, "rev-parse", "HEAD"])).trim()
+  readBranchHistory.mockImplementation(async (_store: unknown, _queue: unknown, branch: string) => ({
+    ref: `refs/yrd/changes/${branch}`,
+    history: {
+      state: { status: "merged", commit: branch === "task/env-second" ? env2Head : w.head, tip: "b".repeat(40) },
+      events: [],
+    },
+  }))
+  closeMock.mockImplementationOnce(async (path, _options, io) => {
+    await w.git(["worktree", "remove", "--force", path])
+    io.stdout(JSON.stringify({ closed: path }))
+    return 0
+  })
+  const startFreshPeer = await createEnvironmentCleanup()({
+    repo: w.repo,
+    git: w.git,
+    config: configFor(w.head),
+    workdir: w.workdir,
+    io: { cwd: w.repo, localBranchProtections: null, stdout: () => {}, stderr: () => {} },
+    selection: w.git.selection,
+    outcome: {
+      run: "custody-fresh-peer",
+      log: join(w.workdir, "journal.jsonl"),
+      merged: [w.branch, "task/env-second"],
+      target: w.head,
+    } as never,
+  })
+  expect(startFreshPeer).toEqual([])
+  expect(closeMock.mock.calls.length - baseCalls, "fresh terminal peer called closeEnvironment").toBe(2)
+  expect(closeMock.mock.calls.at(-1)?.[0]).toBe(env2)
+
+  // AC3 recovery arm 2 — Meaningful witness/publication change (publishing a yrd pin in the primary witness store)
+  // changes the freshness fingerprint, invalidates the stored refusal, refiles, and calls closeEnvironment.
+  await w.git(["-C", sub.alphaPrimary, "update-ref", `refs/yrd/pins/${alphaNoise}`, alphaNoise])
+  const afterWitnessFreshness = await store.inspectComponentCustodyFreshness(w.env, {
+    primaryRoot: w.repo,
+    targetBranch: "main",
+  })
+  expect(afterWitnessFreshness.status).toBe("ok")
+  if (afterWitnessFreshness.status !== "ok") throw new Error("expected witness freshness ok")
+  expect(afterWitnessFreshness.fingerprint).not.toBe(initialFreshness.fingerprint)
+  closeMock.mockImplementationOnce(async (_path, _options, io) => {
+    io.stdout(blockedOutput(afterWitnessFreshness.fingerprint))
+    return 0
+  })
+  const start3 = await runRound(w, createEnvironmentCleanup(), "custody-start-3-witness", [w.branch])
+  expect(closeMock.mock.calls.length - baseCalls, "witness publication change refiles and calls closeEnvironment").toBe(
+    3,
+  )
+  expect(start3.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
+
+  // AC3 recovery arm 3 — Candidate component change (new ref in w.env's packages/alpha) invalidates and refiles.
+  await w.git(["-C", sub.alphaEnv, "update-ref", "refs/heads/local-wip", alphaPrimaryHead])
+  const afterComponentFreshness = await store.inspectComponentCustodyFreshness(w.env, {
+    primaryRoot: w.repo,
+    targetBranch: "main",
+  })
+  expect(afterComponentFreshness.status).toBe("ok")
+  if (afterComponentFreshness.status !== "ok") throw new Error("expected component freshness ok")
+  closeMock.mockImplementationOnce(async (_path, _options, io) => {
+    io.stdout(blockedOutput(afterComponentFreshness.fingerprint))
+    return 0
+  })
+  const start4 = await runRound(w, createEnvironmentCleanup(), "custody-start-4-component", [w.branch])
+  expect(closeMock.mock.calls.length - baseCalls, "component ref change refiles and calls closeEnvironment").toBe(4)
+  expect(start4.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
+
+  // Test (c) — Schema version bump invalidates stored fingerprint and refiles.
+  const currentState = JSON.parse(readFileSync(stateFile, "utf8")) as {
+    custodyRefusals: Record<string, { fingerprint: string }>
+  }
+  currentState.custodyRefusals[w.env]!.fingerprint = "f".repeat(64)
+  writeFileSync(stateFile, JSON.stringify(currentState) + "\n")
+  closeMock.mockImplementationOnce(async (_path, _options, io) => {
+    io.stdout(blockedOutput(afterComponentFreshness.fingerprint))
+    return 0
+  })
+  const start5 = await runRound(w, createEnvironmentCleanup(), "custody-start-5-schema-bump", [w.branch])
+  expect(closeMock.mock.calls.length - baseCalls, "schema bump invalidates stored fingerprint and refiles").toBe(5)
+  expect(start5.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
+
+  // AC3 recovery arm 4 — Interrupted pending request (in .processing/) drains on next start even when fingerprint matches.
+  const uid = process.getuid?.() ?? -1
+  const pendingFile = writeCloseRequest(w.workdir, {
+    name: "env-fresh",
+    path: w.env,
+    requester: "yrd",
+    uid,
+    at: new Date().toISOString(),
+    intent: "close",
+    predicate: "direct-admission",
+    options: { noRehome: true },
+    head: w.head,
+  }).file
+  stageCloseRequest(pendingFile)
+  closeMock.mockImplementationOnce(async (_path, _options, io) => {
+    io.stdout(blockedOutput(afterComponentFreshness.fingerprint))
+    return 0
+  })
+  const start6 = await runRound(w, createEnvironmentCleanup(), "custody-start-6-interrupted", [w.branch])
+  expect(closeMock.mock.calls.length - baseCalls, "interrupted staged request drains on Start 6").toBe(6)
+  expect(start6.some((row) => row.result === "interrupted" && row.path === w.env)).toBe(true)
+
+  // Test (d) — Pre/post mismatch at refusal time yields status: "blocked" without fingerprint -> not cached, next start refiles.
+  const stateBeforeMismatch = JSON.parse(readFileSync(stateFile, "utf8")) as {
+    custodyRefusals: Record<string, unknown>
+  }
+  delete stateBeforeMismatch.custodyRefusals[w.env]
+  writeFileSync(stateFile, JSON.stringify(stateBeforeMismatch) + "\n")
+  closeMock.mockImplementationOnce(async (_path, _options, io) => {
+    io.stdout(blockedOutput(undefined))
+    return 0
+  })
+  await runRound(w, createEnvironmentCleanup(), "custody-start-7a-prepost-mismatch", [w.branch])
+  expect(closeMock.mock.calls.length - baseCalls).toBe(7)
+  const stateAfterMismatch = JSON.parse(readFileSync(stateFile, "utf8")) as {
+    custodyRefusals?: Record<string, unknown>
+  }
+  expect(stateAfterMismatch.custodyRefusals?.[w.env]).toBeUndefined()
+  closeMock.mockImplementationOnce(async (_path, _options, io) => {
+    io.stdout(blockedOutput(afterComponentFreshness.fingerprint))
+    return 0
+  })
+  await runRound(w, createEnvironmentCleanup(), "custody-start-7b-refiles", [w.branch])
+  expect(closeMock.mock.calls.length - baseCalls, "blocked without fingerprint refiles on the next start").toBe(8)
+
+  // AC4 + Adjustment 1 — When inspectComponentCustodyFreshness returns status: "unknown" at startup,
+  // startup keeps with "UNKNOWN: ...; left to the ordinary sweep's full proof" and leaves it to the ordinary sweep.
+  const alphaGitDir = (await w.git(["-C", sub.alphaEnv, "rev-parse", "--absolute-git-dir"])).trim()
+  const headLogPath = join(alphaGitDir, "logs", "HEAD")
+  const savedHeadLog = readFileSync(headLogPath, "utf8")
+  try {
+    writeFileSync(headLogPath, "corrupt-reflog-line\n")
+    const start8 = await runRound(w, createEnvironmentCleanup(), "custody-start-8-unknown-freshness", [w.branch])
+    expect(closeMock.mock.calls.length - baseCalls, "startup does not refile on unknown freshness").toBe(8)
+    expect(start8.filter((row) => row.result === "filed" && row.path === w.env)).toEqual([])
+    const keptUnknown = start8.find(
+      (row) => row.result === "kept" && row.path === w.env && String(row.why).startsWith("UNKNOWN:"),
+    )
+    expect(keptUnknown, JSON.stringify(start8)).toBeDefined()
+    expect(String(keptUnknown?.why)).toContain("component custody freshness unknown (")
+    expect(String(keptUnknown?.why)).toContain("left to the ordinary sweep's full proof")
+  } finally {
+    writeFileSync(headLogPath, savedHeadLog)
+  }
+
+  // AC3 recovery arm 5 — Changed HEAD in the environment invalidates the stored refusal and refiles.
+  writeFileSync(join(w.env, "root.txt"), "advanced\n")
+  await w.git(["-C", w.env, "add", "root.txt"])
+  await w.git(["-C", w.env, "commit", "--quiet", "-m", "advance env head"])
+  const newHead = (await w.git(["-C", w.env, "rev-parse", "HEAD"])).trim()
+  const wAdvanced = { ...w, head: newHead }
+  closeMock.mockImplementationOnce(async (_path, _options, io) => {
+    io.stdout(JSON.stringify({ closed: w.env }))
+    return 0
+  })
+  const start9 = await runRound(wAdvanced, createEnvironmentCleanup(), "custody-start-9-head-moved", [w.branch])
+  expect(closeMock.mock.calls.length - baseCalls, "changed HEAD invalidates stored refusal and refiles").toBe(9)
+  expect(start9.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
+})
