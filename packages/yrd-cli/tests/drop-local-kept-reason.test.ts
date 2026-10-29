@@ -122,7 +122,11 @@ it("retires the merged branch and refuses the unmerged one with a named rule and
 it("names --submitter and --reason in the --discard help", async () => {
   const help = capture(process.cwd())
   await runYrdProcess(["bun", "yrd", "drop", "--help"], help.io).catch(() => undefined)
-  const discardHelp = help.stdout().replace(/\s+/gu, " ").match(/--discard (.*?) --release-checkout/u)?.[1] ?? ""
+  const discardHelp =
+    help
+      .stdout()
+      .replace(/\s+/gu, " ")
+      .match(/--discard (.*?) --release-checkout/u)?.[1] ?? ""
   expect(discardHelp, help.stdout()).toContain("--reason")
   expect(discardHelp).toContain("--submitter")
 })
