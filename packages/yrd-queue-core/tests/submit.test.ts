@@ -171,6 +171,41 @@ describe("event submit", () => {
     ])
   })
 
+  /** @failure 31306: a lone witnessed binding was returned without ever checking a reused live path.
+   * @level l2 @consumer issueOf in submit and env open
+   * The decoder rows classify records but do not consume their identity through issueOf.
+   */
+  it("issueOf checks even its first byte-equal witness and returns the identity-supplying key (31306)", async () => {
+    const w = await world(false)
+    const branch = "task/first-witness"
+    await branchWithCommit(w, branch, "change.txt")
+    await w.git(["checkout", "--quiet", branch])
+    const raw = "old-path"
+    const key = "opaque-key"
+    await w.git([
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      `bind\n\nRefs: ${raw}\nIssue-Binding: ${JSON.stringify({ raw, key })}`,
+    ])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const refusing = vi.fn<SameIssue>(async () => ({
+      same: false,
+      resolved: true,
+      why: "old-path live other-key conflicts with opaque-key",
+    }))
+    await expect(issueOf(w.git, branch, head, w.target, raw, refusing)).rejects.toThrow("other-key")
+    expect(refusing).toHaveBeenCalledWith({ kind: "witnessed", raw, key }, { kind: "witnessed", raw, key })
+    const accepting: SameIssue = async () => ({ same: true, key })
+    expect(await issueOf(w.git, branch, head, w.target, raw, accepting)).toEqual({
+      issue: raw,
+      key,
+      source: "binding",
+      commit: head,
+    })
+  })
+
   /** @failure 28187: submit creates a registered candidate inside the inherited habitat scratch root.
    * @level l2 @consumer Yrd submit verification
    * Existing submit tests verify composition but never observe the live worktree's location.
@@ -1044,7 +1079,14 @@ describe("event submit", () => {
     for await (const field of closingReferencesOf(w.git, [`${w.target}..${head6}`], "task/prose-refs")) {
       closing.push(field)
     }
-    expect(closing).toEqual([{ value: "-opaque one, two", commit: head6, trailer: "Closes" }])
+    expect(closing).toEqual([
+      {
+        value: "-opaque one, two",
+        binding: { kind: "raw-only", raw: "-opaque one, two" },
+        commit: head6,
+        trailer: "Closes",
+      },
+    ])
   })
 
   /** @failure An absolute vault path and a vault-relative bead reference refuse as conflicting bindings (25719).
@@ -1148,8 +1190,10 @@ describe("event submit", () => {
     const head = (await w.git(["rev-parse", "HEAD"])).trim()
     const asked: (readonly [string, string])[] = []
     const sameIssue: SameIssue = async (a, b) => {
-      asked.push([a, b])
-      return [a, b].every((raw) => raw === "26585" || raw === path) ? { same: true } : { same: false, resolved: true }
+      asked.push([a.raw, b.raw])
+      return [a.raw, b.raw].every((raw) => raw === "26585" || raw === path)
+        ? { same: true }
+        : { same: false, resolved: true }
     }
     expect(await issueOf(w.git, "task/one-issue-two-spellings", head, w.target, undefined, sameIssue)).toEqual({
       issue: "26585",

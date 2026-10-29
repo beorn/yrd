@@ -7123,7 +7123,7 @@ describe("drop --local --release-checkout", () => {
       log: { write: vi.fn() },
       queue: "main",
       remote: "origin",
-      sameIssue: async (a, b) => (a === b ? { same: true } : { same: false, resolved: true }),
+      sameIssue: async (a, b) => (a.raw === b.raw ? { same: true } : { same: false, resolved: true }),
       request: { branch: fixture.branch, tip: fixture.tip, issue: "29600", reason: "retain checkout", by: "fixture" },
     })
     expect(report.failed).toHaveLength(1)
@@ -7166,7 +7166,7 @@ describe("drop --local --release-checkout", () => {
         log: { write: vi.fn() },
         queue: "main",
         remote: "origin",
-        sameIssue: async (a, b) => (a === b ? { same: true } : { same: false, resolved: true }),
+        sameIssue: async (a, b) => (a.raw === b.raw ? { same: true } : { same: false, resolved: true }),
         request: { branch: fixture.branch, tip: fixture.tip, issue: "29600", reason: "retain checkout", by: "fixture" },
       })
       expect(report.removed).toHaveLength(0)
@@ -7318,7 +7318,7 @@ describe("drop --local --release-checkout", () => {
         queue: "main",
         remote: "origin",
         workdir,
-        sameIssue: async (a, b) => (a === b ? { same: true } : { same: false, resolved: true }),
+        sameIssue: async (a, b) => (a.raw === b.raw ? { same: true } : { same: false, resolved: true }),
         request: {
           branch: fixture.branch,
           tip: fixture.tip,
@@ -7400,7 +7400,7 @@ describe("drop --local --release-checkout", () => {
         queue: "main",
         remote: "origin",
         workdir,
-        sameIssue: async (a, b) => (a === b ? { same: true } : { same: false, resolved: true }),
+        sameIssue: async (a, b) => (a.raw === b.raw ? { same: true } : { same: false, resolved: true }),
         request: {
           branch: fixture.branch,
           tip: fixture.tip,
@@ -7454,7 +7454,7 @@ describe("drop --local --release-checkout", () => {
         log: { write: vi.fn() },
         queue: "main",
         remote: "origin",
-        sameIssue: async (a, b) => (a === b ? { same: true } : { same: false, resolved: true }),
+        sameIssue: async (a, b) => (a.raw === b.raw ? { same: true } : { same: false, resolved: true }),
         request: { branch: fixture.branch, tip: fixture.tip, issue: "29600", reason: "retain checkout", by: "fixture" },
       })
       expect(report.failed).toHaveLength(1)

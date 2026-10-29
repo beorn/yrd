@@ -92,6 +92,16 @@ function isolateHome(work: string): string {
   return home
 }
 
+const PROVIDER = join(import.meta.dirname, "support", "fake-issues-provider.ts")
+
+/** Commit the existing provider declaration on the world's main and publish it. */
+async function declareIssues(w: World, yaml: string): Promise<void> {
+  writeFileSync(join(w.work, "issues.yml"), yaml)
+  await w.git(["add", "issues.yml"])
+  await w.git(["commit", "--quiet", "-m", "declare the issues interface"])
+  await w.git(["push", "--quiet", "origin", "main"])
+}
+
 async function world(setup: string, options: Readonly<{ declareSetup?: boolean }> = {}): Promise<World> {
   // Diagnostic assertions must distinguish reuse messages from a pathname containing "reus".
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-env-open-reus-"))
@@ -241,7 +251,7 @@ describe("yrd env open prepares the retained environment", () => {
    * @consumer anyone opening an issue branch and then committing against it
    * @testonly none
    */
-  it("announces the key its bind commit records, and that later commits must match it (29738)", async () => {
+  it("announces an unwitnessed binding and the provider-key rule without requiring identical spelling (29738,31306)", async () => {
     const w = await world(":")
     const run = capture(w.work)
 
@@ -249,10 +259,13 @@ describe("yrd env open prepares the retained environment", () => {
 
     expect(run.stderr()).toContain("task/29738-leaf-slug is bound to 29738-leaf-slug")
     expect(run.stderr()).toContain("carries the --issue value exactly as given")
-    expect(run.stderr()).toMatch(/every later Refs trailer on this branch must spell it exactly that way/iu)
+    expect(run.stderr()).toContain("same provider key")
+    expect(run.stderr()).toContain("no provider-key witness was recorded")
+    expect(run.stderr()).not.toContain("spell it exactly that way")
     // The bind commit carries exactly what the caller passed - the asymmetry this line warns about.
     const bound = (await w.git(["log", "-1", "--format=%B", "task/29738-leaf-slug"])).trim()
     expect(bound).toContain("Refs: 29738-leaf-slug")
+    expect(bound).not.toContain("Issue-Binding:")
     // The counter-row: a path that writes no key announces nothing, so the line cannot be read as
     // boilerplate. `--bay` never binds, so this bay carries the 28113 line instead.
     const plain = capture(w.work)
@@ -730,6 +743,10 @@ describe("yrd env open prepares the retained environment", () => {
 
   it("binds a fresh issue before setup and reports the exact binding head", async () => {
     const w = await world("printf '%s\\n' \"$YRD_CANDIDATE_SHA\" > setup-head.txt")
+    // Accepted #31306: the actual bind commit couples raw and opaque key before setup. Existing raw-only rows
+    // could pass even if the provider's key were discarded or inferred from the raw spelling.
+    const key = "opaque-provider-key"
+    await declareIssues(w, `resolve: ${JSON.stringify([process.execPath, PROVIDER, "resolve", key])}\n`)
     const before = (await w.git(["rev-parse", "HEAD"])).trim()
     const tree = (await w.git(["rev-parse", "HEAD^{tree}"])).trim()
     const run = capture(w.work)
@@ -747,6 +764,12 @@ describe("yrd env open prepares the retained environment", () => {
     expect((await opened(["rev-parse", "HEAD^"])).trim()).toBe(before)
     expect((await opened(["rev-parse", "HEAD^{tree}"])).trim()).toBe(tree)
     expect((await opened(["log", "-1", "--format=%(trailers:key=Refs,valueonly)"])).trim()).toBe(issue)
+    const witness = (await opened(["log", "-1", "--format=%(trailers:key=Issue-Binding,valueonly)"])).trim()
+    expect(witness).not.toBe("")
+    expect(JSON.parse(witness)).toEqual({ raw: issue, key })
+    expect(run.stderr()).toContain(`provider key ${key}`)
+    expect(run.stderr()).toContain("same provider key")
+    expect(run.stderr()).not.toContain("spell it exactly that way")
     expect(JSON.parse(run.stdout())).toEqual({
       base: before,
       baseSource: "origin",
@@ -1419,16 +1442,6 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
 })
 
 describe("yrd env open --issue asks the project's issues interface before it writes anything (30516)", () => {
-  const PROVIDER = join(import.meta.dirname, "support", "fake-issues-provider.ts")
-
-  /** Commit `issues.yml` on the world's main and publish it, the way a real project declares its store. */
-  async function declareIssues(w: World, yaml: string): Promise<void> {
-    writeFileSync(join(w.work, "issues.yml"), yaml)
-    await w.git(["add", "issues.yml"])
-    await w.git(["commit", "--quiet", "-m", "declare the issues interface"])
-    await w.git(["push", "--quiet", "origin", "main"])
-  }
-
   /**
    * @failure A landed CLI still runs a linked checkout's older provider; its failure names no working retry.
    * @level l2 (real linked checkout, provider subprocess and primary-checkout retry)

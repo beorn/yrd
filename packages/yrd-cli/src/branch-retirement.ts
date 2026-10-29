@@ -46,6 +46,7 @@ import {
   type QueueLocation,
   type QueueConfig,
   type SameIssue,
+  type IssueBinding,
 } from "@yrd/queue-core"
 import { samenessDetail } from "./issue-sameness.ts"
 import type { LocalBranchProtectionResult, YrdCliIO } from "./types.ts"
@@ -304,7 +305,7 @@ export async function retireIssueBranches(
   // request, or when its name carries the request and the comparer names its recorded spelling the same issue.
   const judgeSpelling = (branch: string, bound: string | undefined, recordedIssue: string | undefined) =>
     bound !== undefined && bound !== issue && recordedIssue !== undefined && branchIssue(branch) === issue
-      ? sameIssue(bound, issue)
+      ? sameIssue({ kind: "raw-only", raw: bound }, { kind: "raw-only", raw: issue })
       : undefined
   const isIssueBranch = async (branch: string, recordedIssue: string | undefined) => {
     const bound = branchIssue(branch, recordedIssue)
@@ -988,22 +989,35 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
     }
     let discardProblem: string | undefined
     let canonicalIssue: string | undefined
+    let canonicalReference: IssueBinding | undefined
     let uniqueCommits = 0
     if (request.discard === true && !merged) {
       try {
         const bindings = new Set<string>()
+        const references: IssueBinding[] = []
         for await (const binding of issueBindingsOf(git, [`${request.tip}^!`], request.branch)) {
           bindings.add(binding.issue)
+          references.push(binding.binding)
         }
         if (bindings.size > 1) discardProblem = `conflicting exact-tip issue bindings: ${[...bindings].join(", ")}`
         canonicalIssue = bindings.values().next().value
+        canonicalReference = references[0]
+        if (discardProblem === undefined && canonicalReference !== undefined) {
+          for (const reference of references.slice(1)) {
+            const judged = await input.sameIssue(canonicalReference, reference)
+            if (!judged.same) {
+              discardProblem = `conflicting exact-tip issue bindings${samenessDetail(canonicalReference.raw, reference.raw, judged)}`
+              break
+            }
+          }
+        }
         if (discardProblem === undefined) {
           let differs: string | undefined
-          if (canonicalIssue === undefined || request.issue === undefined) {
-            if (canonicalIssue !== request.issue) differs = ""
+          if (canonicalReference === undefined || request.issue === undefined) {
+            if (canonicalReference?.raw !== request.issue) differs = ""
           } else {
-            const judged = await input.sameIssue(canonicalIssue, request.issue)
-            if (!judged.same) differs = samenessDetail(canonicalIssue, request.issue, judged)
+            const judged = await input.sameIssue(canonicalReference, { kind: "raw-only", raw: request.issue })
+            if (!judged.same) differs = samenessDetail(canonicalReference.raw, request.issue, judged)
           }
           if (differs !== undefined) {
             discardProblem = `exact-tip issue binding ${canonicalIssue ?? "absent"} differs from supplied ${request.issue ?? "absent"}${differs}`
@@ -1366,7 +1380,10 @@ export async function releaseRetainedCheckouts(
     const rootKept = bound.history?.events.some((event) => event.links.includes(request.tip)) === true
     const recordedIssue = bound.history?.state.issue
     if (recordedIssue !== undefined) {
-      const judged = await input.sameIssue(recordedIssue, request.issue)
+      const judged = await input.sameIssue(
+        { kind: "raw-only", raw: recordedIssue },
+        { kind: "raw-only", raw: request.issue },
+      )
       if (!judged.same) {
         throw new Error(
           `recorded issue ${recordedIssue} differs from requested ${request.issue}${samenessDetail(recordedIssue, request.issue, judged)}`,
@@ -1402,11 +1419,14 @@ export async function releaseRetainedCheckouts(
         `yrd: release inspection ${repository}@${commit}: attached ${attached?.branch ?? "none"} at ${attached?.head ?? "unreadable"}\n`,
       )
       let recordedIssue: string | undefined
+      let recordedReference: IssueBinding | undefined
       if (branch === undefined) {
         const bindings = new Set<string>()
+        const references: IssueBinding[] = []
         try {
           for await (const binding of issueBindingsOf(git, [`${commit}^!`], attached?.branch ?? request.branch)) {
             bindings.add(binding.issue)
+            references.push(binding.binding)
           }
         } catch (cause) {
           throw new Error(`${repository}@${commit}: cannot read exact-tip issue binding: ${String(cause)}`, { cause })
@@ -1415,12 +1435,27 @@ export async function releaseRetainedCheckouts(
           throw new Error(`${repository}@${commit}: conflicting exact-tip issue bindings: ${[...bindings].join(", ")}`)
         }
         recordedIssue = bindings.values().next().value
+        recordedReference = references[0]
+        if (recordedReference !== undefined) {
+          for (const reference of references.slice(1)) {
+            const judged = await input.sameIssue(recordedReference, reference)
+            if (!judged.same)
+              throw new Error(
+                `${repository}@${commit}: conflicting exact-tip issue bindings${samenessDetail(recordedReference.raw, reference.raw, judged)}`,
+              )
+          }
+        }
       }
       const bindingDetail = `${repository}@${commit}: exact-tip issue binding ${recordedIssue ?? "absent"}`
       const matchesIssue = async (name: string): Promise<boolean> => {
         // Explicit opaque identity wins even if an embedding host ignores recordedIssue and returns a numeric name.
-        const key = recordedIssue ?? io.branchIssue?.({ branch: name, recordedIssue })
-        return key !== undefined && (await input.sameIssue(key, request.issue)).same
+        if (recordedReference !== undefined)
+          return (await input.sameIssue(recordedReference, { kind: "raw-only", raw: request.issue })).same
+        const key = io.branchIssue?.({ branch: name, recordedIssue })
+        return (
+          key !== undefined &&
+          (await input.sameIssue({ kind: "raw-only", raw: key }, { kind: "raw-only", raw: request.issue })).same
+        )
       }
       let resumed: string | undefined
       const detachedBranches: string[] = []

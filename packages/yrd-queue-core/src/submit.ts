@@ -309,6 +309,8 @@ export type SameIssue = (a: IssueBinding, b: IssueBinding) => Promise<IssueSamen
 
 export type IssueResolution = Readonly<{
   issue: string
+  /** Opaque identity supplied by the host's live resolution or exact witnessed fallback. */
+  key?: string
   source: "binding" | "declared"
   /** The first explicit binding's carrying commit, when source is binding. */
   commit?: string
@@ -1512,7 +1514,13 @@ async function submitEvent(
  * branch rename loses the binding. Conflicting explicit/declared issues refuse.
  * An unbound branch may use an explicit declaration; branch names never decode issue keys.
  */
-export type IssueCandidate = Readonly<{ issue: string; source: "binding"; commit: string; trailer?: string }>
+export type IssueCandidate = Readonly<{
+  issue: string
+  binding: IssueBinding
+  source: "binding"
+  commit: string
+  trailer?: string
+}>
 
 /**
  * Read a branch's unresolved binding candidates in Git's history order.
@@ -1540,6 +1548,7 @@ export async function issueCandidatesOf(
   for await (const candidate of issueBindingsOf(git, [`${base}..${head}`, `^${targetHead}`], branch)) {
     candidates.push({
       issue: candidate.issue,
+      binding: candidate.binding,
       source: "binding",
       commit: candidate.commit,
       ...(candidate.trailer === undefined ? {} : { trailer: candidate.trailer }),
@@ -1565,21 +1574,35 @@ export async function issueOf(
     )
   }
   const candidates = await issueCandidatesOf(git, branch, head, targetHead)
-  let binding: IssueResolution | undefined
+  let bound: { resolution: IssueResolution; reference: IssueBinding } | undefined
   for (const candidate of candidates) {
     if (candidate.source !== "binding") continue
     const issue = candidate.issue
     const commit = candidate.commit
-    if (binding === undefined) binding = { issue, source: "binding", commit }
-    else if (binding.issue !== issue) {
-      const judged = sameIssue === undefined ? undefined : await sameIssue(binding.issue, issue)
+    if (bound === undefined) bound = { resolution: { issue, source: "binding", commit }, reference: candidate.binding }
+    const binding = bound.resolution
+    // Equal legacy values have no witness to check. Every witnessed record, including the first, asks live identity.
+    if (
+      bound.reference.kind === "raw-only" &&
+      candidate.binding.kind === "raw-only" &&
+      bound.reference.raw === candidate.binding.raw
+    )
+      continue
+    {
+      const judged = sameIssue === undefined ? undefined : await sameIssue(bound.reference, candidate.binding)
       // The first spelling stays the binding: a second spelling of one issue is no conflict (31060).
-      if (judged?.same === true) continue
+      if (judged?.same === true) {
+        if (judged.key !== undefined) bound.resolution = { ...binding, key: judged.key }
+        // Retain an actual witness encountered later, so a subsequent contradictory fact cannot erase it.
+        if (bound.reference.kind === "raw-only" && candidate.binding.kind === "witnessed")
+          bound.reference = candidate.binding
+        continue
+      }
       const trailer = candidate.trailer ?? "Refs/Resolves"
       throw new Error(
         `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${issue} at ${commit}; ` +
           (judged?.resolved === true
-            ? `${binding.issue} and ${issue} resolve to different issues; `
+            ? `${judged.why ?? `${binding.issue} and ${issue} resolve to different issues`}; `
             : `Yrd compares issue keys exactly, so it cannot tell whether two keys name one issue; ` +
               (judged === undefined ? "" : `${judged.why}; `)) +
           `the second binding is a ${trailer} trailer, and a Refs or Resolves trailer always binds; ` +
@@ -1592,14 +1615,16 @@ export async function issueOf(
       )
     }
   }
-  if (binding !== undefined) {
-    if (declared !== undefined && declared !== binding.issue) {
-      const judged = sameIssue === undefined ? undefined : await sameIssue(declared, binding.issue)
-      if (judged?.same === true) return binding
+  if (bound !== undefined) {
+    const binding = bound.resolution
+    if (declared !== undefined && (declared !== binding.issue || bound.reference.kind === "witnessed")) {
+      const judged =
+        sameIssue === undefined ? undefined : await sameIssue({ kind: "raw-only", raw: declared }, bound.reference)
+      if (judged?.same === true) return judged.key === undefined ? binding : { ...binding, key: judged.key }
       throw new Error(
         `declared issue ${declared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}; ` +
           (judged?.resolved === true
-            ? `${declared} and ${binding.issue} resolve to different issues; ` +
+            ? `${judged.why ?? `${declared} and ${binding.issue} resolve to different issues`}; ` +
               `omit --issue to use the binding, or fix trailer at ${binding.commit}`
             : `Yrd compares issue keys exactly, so the declared value must equal the binding; ` +
               (judged === undefined ? "" : `${judged.why}; `) +
@@ -1618,7 +1643,7 @@ export async function* issueBindingsOf(
   git: Git,
   revisions: readonly string[],
   branch: string,
-): AsyncGenerator<Readonly<{ issue: string; commit: string; trailer?: string }>, void> {
+): AsyncGenerator<Readonly<{ issue: string; binding: IssueBinding; commit: string; trailer?: string }>, void> {
   yield* issueFieldsOf(git, revisions, branch, ["Closes", "Fixes", "Resolves", "Refs"], true)
 }
 
@@ -1627,12 +1652,12 @@ export async function* closingReferencesOf(
   git: Git,
   revisions: readonly string[],
   branch: string,
-): AsyncGenerator<Readonly<{ value: string; commit: string; trailer: string }>, void> {
+): AsyncGenerator<Readonly<{ value: string; binding: IssueBinding; commit: string; trailer: string }>, void> {
   for await (const field of issueFieldsOf(git, revisions, branch, ["Closes", "Fixes", "Resolves"], false)) {
     if (field.trailer === undefined) {
       throw new Error(`cannot identify the closing trailer in ${branch} at ${field.commit}`)
     }
-    yield { value: field.issue, commit: field.commit, trailer: field.trailer }
+    yield { value: field.issue, binding: field.binding, commit: field.commit, trailer: field.trailer }
   }
 }
 
@@ -1643,10 +1668,11 @@ async function* issueFieldsOf(
   branch: string,
   keywords: readonly string[],
   bindingFallback: boolean,
-): AsyncGenerator<Readonly<{ issue: string; commit: string; trailer?: string }>, void> {
+): AsyncGenerator<Readonly<{ issue: string; binding: IssueBinding; commit: string; trailer?: string }>, void> {
   // NUL separates each commit, Git trailer values, body and keyed trailers.
   // The body fallback accepts colonless Refs/Resolves while excluding subjects.
   const keys = keywords.map((keyword) => `key=${keyword}`).join(",")
+  const allReferenceKeys = ["Closes", "Fixes", "Resolves", "Refs"].map((keyword) => `key=${keyword}`).join(",")
   let history: string
   try {
     history = await git([
@@ -1654,7 +1680,7 @@ async function* issueFieldsOf(
       "--reverse",
       "--topo-order",
       "-z",
-      `--format=%H%x00%(trailers:${keys},valueonly,separator=%x1e)%x00%B%x00%(trailers:${keys},separator=%x1e)`,
+      `--format=%H%x00%(trailers:${keys},valueonly,separator=%x1e)%x00%B%x00%(trailers:${keys},separator=%x1e)%x00%(trailers:key=Issue-Binding,separator=%x1e)%x00%(trailers:${allReferenceKeys},valueonly,separator=%x1e)`,
       ...revisions,
       "--",
     ])
@@ -1665,13 +1691,60 @@ async function* issueFieldsOf(
   if (records.pop() !== "") {
     throw new Error(`incomplete issue binding history for ${branch} in ${revisions.join(" ")}`)
   }
-  for (let index = 0; index < records.length; index += 4) {
+  for (let index = 0; index < records.length; index += 6) {
     const commit = records[index]
     const values = records[index + 1]
     const body = records[index + 2]
     const keyed = records[index + 3]
-    if (commit === undefined || values === undefined || body === undefined || keyed === undefined) {
+    const metadata = records[index + 4]
+    const allReferences = records[index + 5]
+    if (
+      commit === undefined ||
+      values === undefined ||
+      body === undefined ||
+      keyed === undefined ||
+      metadata === undefined ||
+      allReferences === undefined
+    ) {
       throw new Error(`incomplete issue binding history for ${branch} in ${revisions.join(" ")}`)
+    }
+    // Check against every reference trailer in this commit, including Refs when this caller reads only closes.
+    // Witnesses are facts, not a map keyed by raw: contradictory facts must survive to the comparer.
+    const references = allReferences
+      .split("\u001e")
+      .map((value) => value.trim())
+      .filter((value) => value !== "")
+    const witnesses: Extract<IssueBinding, { kind: "witnessed" }>[] = []
+    for (const entry of metadata.split("\u001e").filter((value) => value.trim() !== "")) {
+      const field = /^[ \t]*Issue-Binding[ \t]*:[ \t]*([\s\S]*)$/iu.exec(entry)
+      if (field === null)
+        throw new TypeError(`invalid Issue-Binding in ${branch} at ${commit}: ${JSON.stringify(entry)}`)
+      let value: unknown
+      try {
+        value = JSON.parse(field[1]!)
+      } catch (cause) {
+        throw new TypeError(`invalid Issue-Binding JSON in ${branch} at ${commit}: ${field[1]}`, { cause })
+      }
+      if (value === null || typeof value !== "object" || Array.isArray(value)) {
+        throw new TypeError(`invalid Issue-Binding in ${branch} at ${commit}: expected an object with raw and key`)
+      }
+      const witness = value as Record<string, unknown>
+      if (
+        typeof witness.raw !== "string" ||
+        typeof witness.key !== "string" ||
+        witness.key === "" ||
+        Object.keys(witness).some((key) => key !== "raw" && key !== "key")
+      ) {
+        throw new TypeError(
+          `invalid Issue-Binding in ${branch} at ${commit}: expected string raw and nonempty opaque key`,
+        )
+      }
+      if (!references.includes(witness.raw)) {
+        throw new TypeError(
+          `invalid Issue-Binding in ${branch} at ${commit}: raw ${JSON.stringify(witness.raw)} matches no reference trailer (${references.map((raw) => JSON.stringify(raw)).join(", ")})`,
+        )
+      }
+      witnesses.push({ kind: "witnessed", raw: witness.raw, key: witness.key })
     }
     // The second trailer block keeps each key beside its value, so a refusal can
     // name the trailer that bound the second issue instead of guessing (27300).
@@ -1713,10 +1786,15 @@ async function* issueFieldsOf(
           `invalid issue binding in ${branch} at ${commit}: expected a single-line value without control characters`,
         )
       }
-      yield {
-        issue: issue,
-        commit,
-        ...(candidate.trailer === undefined ? {} : { trailer: candidate.trailer }),
+      const matched = witnesses.filter((witness) => witness.raw === issue)
+      const bindings: readonly IssueBinding[] = matched.length === 0 ? [{ kind: "raw-only", raw: issue }] : matched
+      for (const binding of bindings) {
+        yield {
+          issue,
+          binding,
+          commit,
+          ...(candidate.trailer === undefined ? {} : { trailer: candidate.trailer }),
+        }
       }
     }
   }

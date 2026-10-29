@@ -1,9 +1,9 @@
 import type { SameIssue } from "@yrd/queue-core"
 import { ISSUE_DISPLAY_TIMEOUT_MS } from "./issue-resolver.ts"
-import { ISSUES_CODES } from "./issues/declaration.ts"
+import { ISSUES_CODES, type IssuesCode } from "./issues/declaration.ts"
 import { runIssuesVerb } from "./issues/run.ts"
 
-type Resolution = Readonly<{ key: string } | { why: string; ambiguous: boolean }>
+type Resolution = Readonly<{ key: string } | { why: string; ambiguous: boolean; code: IssuesCode | null }>
 
 export type IssueComparerInput = Readonly<{
   /** The project whose `issues.yml` declares `resolve`. */
@@ -106,6 +106,7 @@ export async function resolveRaw(input: IssueComparerInput, raw: string): Promis
     if (outcome.code === ISSUES_CODES.declarationMissing || outcome.code === ISSUES_CODES.unsupported) {
       return {
         ambiguous: false,
+        code: outcome.code,
         why: `${raw} was not checked against an issues store, because ${input.projectRoot} declares none for it: ${outcome.message}`,
       }
     }
@@ -116,6 +117,7 @@ export async function resolveRaw(input: IssueComparerInput, raw: string): Promis
       .at(-1)
     return {
       ambiguous: false,
+      code: outcome.code,
       why: `resolve ${raw}: ${outcome.message}${line === undefined ? "" : `; the provider said: ${line}`}`,
     }
   }
@@ -124,6 +126,7 @@ export async function resolveRaw(input: IssueComparerInput, raw: string): Promis
   if (keys.length !== 1 || key === undefined) {
     return {
       ambiguous: keys.length > 1,
+      code: null,
       why: `resolve ${raw} returned ${keys.length} keys (${keys.join(", ")}), not one issue`,
     }
   }

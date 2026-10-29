@@ -43,6 +43,7 @@ import {
   worktreeWithoutSubmodules,
   type Git,
   type GitRunner,
+  type IssueBinding,
 } from "@yrd/queue-core"
 import { createProcess, type Process } from "@yrd/process"
 // 29073: `env close --preserve` reaches the ONE worktree preserve (bearly's preserveSlotState, the
@@ -59,10 +60,8 @@ import {
   type PrivateStoreRefusal,
 } from "git-super/worktree"
 import { unaddressedRepository as findRepository } from "./declaration.ts"
-import { ISSUE_DISPLAY_TIMEOUT_MS } from "./issue-resolver.ts"
-import { issueComparer } from "./issue-sameness.ts"
+import { issueComparer, resolveRaw } from "./issue-sameness.ts"
 import { ISSUES_CODES } from "./issues/declaration.ts"
-import { runIssuesVerb } from "./issues/run.ts"
 import { originHead } from "./queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
@@ -485,21 +484,23 @@ export function environmentStampUnreadable(name: string): boolean {
  * none declaring `resolve`, has no store to ask: that is said on stderr and the open proceeds as before. Yrd
  * still learns nothing of hh's bead model; it runs the verb the project declared, within the display read's bound.
  */
-async function requireResolvableIssue(root: string, issue: string, io: YrdCliIO, git: Git): Promise<void> {
-  const outcome = await runIssuesVerb({
-    verb: "resolve",
-    args: [issue],
-    projectRoot: root,
-    cwd: root,
-    timeoutMs: ISSUE_DISPLAY_TIMEOUT_MS,
-    stderr: (text) => io.stderr(text),
-  })
-  if (outcome.ok) return
+async function requireResolvableIssue(root: string, issue: string, io: YrdCliIO, git: Git): Promise<IssueBinding> {
+  const outcome = await resolveRaw(
+    {
+      projectRoot: root,
+      cwd: root,
+      stderr: (text) => io.stderr(text),
+    },
+    issue,
+  )
+  if ("key" in outcome) return { kind: "witnessed", raw: issue, key: outcome.key }
   if (outcome.code === ISSUES_CODES.declarationMissing || outcome.code === ISSUES_CODES.unsupported) {
-    io.stderr(
-      `yrd env open: --issue ${issue} was not checked against an issues store, because ${root} declares none for it: ${outcome.message}\n`,
-    )
-    return
+    io.stderr(`yrd env open: --issue ${outcome.why}\n`)
+    return { kind: "raw-only", raw: issue }
+  }
+  if (outcome.ambiguous) {
+    io.stderr(`yrd env open: --issue ${issue} has no provider-key witness: ${outcome.why}\n`)
+    return { kind: "raw-only", raw: issue }
   }
   let recovery = ""
   try {
@@ -514,7 +515,7 @@ async function requireResolvableIssue(root: string, issue: string, io: YrdCliIO,
   }
   throw new Error(
     `yrd env open: --issue ${issue} does not resolve to an issue through the issues interface declared by ${root}, ` +
-      `so no environment, branch or Refs commit was created: ${outcome.message}${recovery}`,
+      `so no environment, branch or Refs commit was created: ${outcome.why}${recovery}`,
   )
 }
 
@@ -569,9 +570,10 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   ).trim()
   if (name === "") throw new Error("yrd: --bay needs a name")
   const branch = commit === undefined ? `task/${name}` : undefined
-  if (options.issue !== undefined) {
-    await requireResolvableIssue(root, options.issue, io, gitIn(root, undefined, selection))
-  }
+  const requestedBinding =
+    options.issue === undefined
+      ? undefined
+      : await requireResolvableIssue(root, options.issue, io, gitIn(root, undefined, selection))
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process, selection)
   const resolvedBase =
@@ -691,7 +693,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     }
   }
   let headSha = provisioned.headSha
-  if (options.issue !== undefined && branch !== undefined) {
+  if (requestedBinding !== undefined && branch !== undefined) {
     try {
       const environmentGit = gitIn(path, process, selection)
       headSha = (await environmentGit(["rev-parse", "HEAD"])).trim()
@@ -700,10 +702,10 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
         branch,
         headSha,
         base,
-        options.issue,
+        requestedBinding.raw,
         issueComparer({ projectRoot: root, cwd: root, stderr: (text) => io.stderr(text) }),
       )
-      if (binding === undefined) throw new Error(`no issue resolved for requested binding ${options.issue}`)
+      if (binding === undefined) throw new Error(`no issue resolved for requested binding ${requestedBinding.raw}`)
       if (binding.source !== "binding") {
         const tree = (await environmentGit(["rev-parse", `${headSha}^{tree}`])).trim()
         const bound = (
@@ -713,7 +715,10 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
             "-p",
             headSha,
             "-m",
-            `Bind work to ${binding.issue}\n\nRefs: ${binding.issue}`,
+            `Bind work to ${requestedBinding.raw}\n\nRefs: ${requestedBinding.raw}` +
+              (requestedBinding.kind === "witnessed"
+                ? `\nIssue-Binding: ${JSON.stringify({ raw: requestedBinding.raw, key: requestedBinding.key })}`
+                : ""),
           ])
         ).trim()
         // A self-describing reflog message: git writes it verbatim into HEAD's
@@ -728,14 +733,12 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
           headSha,
         ])
         headSha = bound
-        // 29738: the bind commit carries the --issue value exactly as given, so a later Refs trailer that
-        // spells the issue the other way refuses at submit - after a review GO. ANNOUNCE the key here,
-        // where the split is created, in the 28113 shape: stderr only, never a refusal, naming yrd's OWN
-        // flag and key so yrd still learns nothing of hh's bead model. `--json` stdout and the exit code
-        // are unchanged. @cto 08:31:50Z fixed this wording: the line names the exact key it wrote and the
-        // rule that every later Refs trailer must spell it exactly that way.
+        // Announce the actual raw/key record and the comparer's rule, without demanding byte-identical spelling.
         io.stderr(
-          `${branch} is bound to ${binding.issue} by a yrd env open Refs commit, which carries the --issue value exactly as given; every later Refs trailer on this branch must spell it exactly that way, or submit refuses with conflicting issue bindings\n`,
+          `${branch} is bound to ${requestedBinding.raw} by a yrd env open Refs commit, which carries the --issue value exactly as given; ` +
+            (requestedBinding.kind === "witnessed"
+              ? `provider key ${requestedBinding.key} is witnessed; references resolving to the same provider key name the same issue\n`
+              : `no provider-key witness was recorded; differing references must resolve to the same provider key\n`),
         )
       }
       const currentHead = (await environmentGit(["rev-parse", "HEAD"])).trim()

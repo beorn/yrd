@@ -2126,7 +2126,7 @@ export async function coreQueueCommand(
           }
           const bound = change?.issue ?? issue
           if (issue !== undefined && bound !== undefined) {
-            const judged = await sameIssue(bound, issue)
+            const judged = await sameIssue({ kind: "raw-only", raw: bound }, { kind: "raw-only", raw: issue })
             if (!judged.same) {
               kept.push({
                 ...row,
