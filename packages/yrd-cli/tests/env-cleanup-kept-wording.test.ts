@@ -26,6 +26,8 @@ import {
   realpathSync,
   readdirSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -722,24 +724,39 @@ it("suppresses startup refiling of an unchanged blocked component-custody refusa
   await runRound(w, createEnvironmentCleanup(), "custody-start-7b-refiles", [w.branch])
   expect(closeMock.mock.calls.length - baseCalls, "blocked without fingerprint refiles on the next start").toBe(8)
 
-  // AC4 + Adjustment 1 — When inspectComponentCustodyFreshness returns status: "unknown" at startup,
-  // startup keeps with "UNKNOWN: ...; left to the ordinary sweep's full proof" and leaves it to the ordinary sweep.
+  // AC4 + @cto 0c9b2fcd A — When inspectComponentCustodyFreshness returns status: "unknown" at startup
+  // (env component's objects/info/alternates is a symlink), fileTerminalCloseRequests falls through to
+  // writeCloseRequest and consumeCloseRequests consumes it via the full proof.
   const alphaGitDir = (await w.git(["-C", sub.alphaEnv, "rev-parse", "--absolute-git-dir"])).trim()
-  const headLogPath = join(alphaGitDir, "logs", "HEAD")
-  const savedHeadLog = readFileSync(headLogPath, "utf8")
+  const alternatesDir = join(alphaGitDir, "objects", "info")
+  const alternatesTarget = join(alternatesDir, "alternates-target")
+  const alternatesPath = join(alternatesDir, "alternates")
+  mkdirSync(alternatesDir, { recursive: true })
+  writeFileSync(alternatesTarget, "")
+  symlinkSync(alternatesTarget, alternatesPath)
   try {
-    writeFileSync(headLogPath, "corrupt-reflog-line\n")
+    const unknownFreshness = await store.inspectComponentCustodyFreshness(w.env, {
+      primaryRoot: w.repo,
+      targetBranch: "main",
+    })
+    expect(unknownFreshness).toMatchObject({
+      status: "unknown",
+      detail: expect.stringContaining("alternate declaration"),
+    })
+    closeMock.mockImplementationOnce(async (_path, _options, io) => {
+      io.stdout(blockedOutput(afterComponentFreshness.fingerprint))
+      return 0
+    })
     const start8 = await runRound(w, createEnvironmentCleanup(), "custody-start-8-unknown-freshness", [w.branch])
-    expect(closeMock.mock.calls.length - baseCalls, "startup does not refile on unknown freshness").toBe(8)
-    expect(start8.filter((row) => row.result === "filed" && row.path === w.env)).toEqual([])
-    const keptUnknown = start8.find(
-      (row) => row.result === "kept" && row.path === w.env && String(row.why).startsWith("UNKNOWN:"),
-    )
-    expect(keptUnknown, JSON.stringify(start8)).toBeDefined()
-    expect(String(keptUnknown?.why)).toContain("component custody freshness unknown (")
-    expect(String(keptUnknown?.why)).toContain("left to the ordinary sweep's full proof")
+    expect(
+      closeMock.mock.calls.length - baseCalls,
+      "unknown freshness falls through to writeCloseRequest and runs the full proof",
+    ).toBe(9)
+    expect(start8.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
+    expect(start8.some((row) => row.result === "retired" && row.path === w.env)).toBe(true)
   } finally {
-    writeFileSync(headLogPath, savedHeadLog)
+    unlinkSync(alternatesPath)
+    unlinkSync(alternatesTarget)
   }
 
   // AC3 recovery arm 5 — Changed HEAD in the environment invalidates the stored refusal and refiles.
@@ -753,6 +770,87 @@ it("suppresses startup refiling of an unchanged blocked component-custody refusa
     return 0
   })
   const start9 = await runRound(wAdvanced, createEnvironmentCleanup(), "custody-start-9-head-moved", [w.branch])
-  expect(closeMock.mock.calls.length - baseCalls, "changed HEAD invalidates stored refusal and refiles").toBe(9)
+  expect(closeMock.mock.calls.length - baseCalls, "changed HEAD invalidates stored refusal and refiles").toBe(10)
   expect(start9.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
+})
+
+it("files a close request and consumes it through the full proof when startup component custody freshness is unknown", async () => {
+  const openedAt = new Date().toISOString()
+  const w0 = await world(openedAt)
+  const sub = await attachAlphaSubmodule(w0)
+  const w = { ...w0, head: sub.head }
+
+  const store = createLocalGitWorktreeStore({ repo: w.repo })
+  const initialFreshness = await store.inspectComponentCustodyFreshness(w.env, {
+    primaryRoot: w.repo,
+    targetBranch: "main",
+  })
+  if (initialFreshness.status !== "ok") throw new Error("expected initial freshness ok")
+
+  const closeMock = vi.mocked(closeEnvironment)
+  const baseCalls = closeMock.mock.calls.length
+  closeMock.mockImplementationOnce(async (_path, _options, io) => {
+    io.stdout(
+      JSON.stringify({
+        kept: w.env,
+        reason: "component-custody",
+        custody: {
+          component: "packages/alpha",
+          source: "surviving primary Git graph",
+          status: "blocked",
+          detail: "component commit has no surviving witness",
+          oid: w.head,
+          fingerprint: initialFreshness.fingerprint,
+        },
+      }),
+    )
+    return 0
+  })
+  await runRound(w, createEnvironmentCleanup(), "unknown-fallthrough-start-1", [w.branch])
+  expect(closeMock.mock.calls.length - baseCalls).toBe(1)
+
+  const alphaGitDir = (await w.git(["-C", sub.alphaEnv, "rev-parse", "--absolute-git-dir"])).trim()
+  const alternatesDir = join(alphaGitDir, "objects", "info")
+  const alternatesTarget = join(alternatesDir, "alternates-target")
+  const alternatesPath = join(alternatesDir, "alternates")
+  mkdirSync(alternatesDir, { recursive: true })
+  writeFileSync(alternatesTarget, "")
+  symlinkSync(alternatesTarget, alternatesPath)
+  try {
+    const freshness = await store.inspectComponentCustodyFreshness(w.env, {
+      primaryRoot: w.repo,
+      targetBranch: "main",
+    })
+    expect(freshness).toMatchObject({
+      status: "unknown",
+      detail: expect.stringContaining("alternate declaration"),
+    })
+    closeMock.mockImplementationOnce(async (_path, _options, io) => {
+      io.stdout(
+        JSON.stringify({
+          kept: w.env,
+          reason: "component-custody",
+          custody: {
+            component: "packages/alpha",
+            source: "recursive component census",
+            status: "unknown",
+            detail: `alternate declaration ${alternatesPath} is redirected or not a file`,
+          },
+        }),
+      )
+      return 0
+    })
+    const start2 = await runRound(w, createEnvironmentCleanup(), "unknown-fallthrough-start-2", [w.branch])
+    expect(
+      closeMock.mock.calls.length - baseCalls,
+      "unknown freshness files a close request and consumeCloseRequests runs the full proof",
+    ).toBe(2)
+    expect(start2.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
+    const retired = start2.find((row) => row.result === "retired" && row.path === w.env)
+    expect(retired, JSON.stringify(start2)).toBeDefined()
+    expect(String(retired?.why)).toContain("GitSuper custody proof budget or input could not be verified")
+  } finally {
+    unlinkSync(alternatesPath)
+    unlinkSync(alternatesTarget)
+  }
 })

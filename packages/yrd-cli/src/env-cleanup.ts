@@ -992,13 +992,6 @@ async function fileTerminalCloseRequests(
           }
           if (freshness.status === "ok") {
             input.custodyRefusals.delete(row.path)
-          } else {
-            input.record(
-              row.path,
-              "kept",
-              `UNKNOWN: component custody freshness unknown (${freshness.detail}); left to the ordinary sweep's full proof`,
-            )
-            continue
           }
         }
       }
