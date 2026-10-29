@@ -1510,7 +1510,11 @@ export async function closeEnvironment(
       "detail" in removed.custody &&
       typeof removed.custody.detail === "string" &&
       removed.custody.detail.trim() !== "" &&
-      (!("oid" in removed.custody) || (typeof removed.custody.oid === "string" && removed.custody.oid.trim() !== ""))
+      (!("oid" in removed.custody) || (typeof removed.custody.oid === "string" && removed.custody.oid.trim() !== "")) &&
+      (!("fingerprint" in removed.custody) ||
+        (removed.custody.status === "blocked" &&
+          typeof removed.custody.fingerprint === "string" &&
+          /^[0-9a-f]{64}$/u.test(removed.custody.fingerprint)))
     ) {
       const custody = removed.custody
       const status = removed.custody.status

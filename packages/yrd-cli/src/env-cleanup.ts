@@ -18,7 +18,12 @@ import {
   type QueueRunOutcome,
 } from "@yrd/queue-core"
 import { createLocalGitProcess } from "git-super/process"
-import { assertNoPrivateStore, createLocalGitWorktreeStore, PrivateStoreRefusalError } from "git-super/worktree"
+import {
+  assertNoPrivateStore,
+  createLocalGitWorktreeStore,
+  PrivateStoreRefusalError,
+  type ComponentCustodyFreshness,
+} from "git-super/worktree"
 import { inspectProcessCwds, resolveContainedPath, type ProcessCwdProjection } from "removely"
 import { environmentCwdHolder, processCwdCoverage, validateLiveEnvironmentUses } from "./env-close-holders.ts"
 import {
@@ -32,6 +37,7 @@ import {
   CloseRequestAlreadyStandsError,
   ENV_CLOSE_PREDICATE,
   MAX_COVERAGE_ATTEMPTS,
+  closeRequestFile,
   dropCloseRequest,
   envRequestFile,
   listCloseRequests,
@@ -115,6 +121,16 @@ const FRESH_ENVIRONMENT_GRACE_MS = 24 * 60 * 60 * 1000
  * restarts the service and restarts the sweep, so under landing churn the tail
  * of the registry — the backlog this change exists to retire — starves.
  */
+export type PersistedCustodyRefusal = Readonly<{
+  head: string
+  branch?: string
+  targetBranch: string
+  endingEvent?: string
+  fingerprint: string
+  why: string
+  recordedAt: string
+}>
+
 type CleanupProgress = {
   cursor: number
   hint: string | undefined
@@ -128,6 +144,12 @@ type CleanupProgress = {
    * either. It is bounded to the registry the round walked, so a retired environment leaves no entry behind.
    */
   reported: Map<string, string>
+  /**
+   * Completed `status: "blocked"` component-custody refusals keyed by environment path (#31206, @cto 83464c62).
+   * Suppression-only: a matching freshness fingerprint avoids redundant startup refiling; any mismatch, missing
+   * proof, or `status: "unknown"` falls through to the full removal proof. Bounded to live `inventory.rows`.
+   */
+  custodyRefusals: Map<string, PersistedCustodyRefusal>
 }
 
 /** Where the hint lives: the run's existing state dir, not a new config key. */
@@ -158,6 +180,45 @@ function reportedFromState(parsed: unknown): Map<string, string> {
   return reported
 }
 
+function custodyRefusalsFromState(parsed: unknown): Map<string, PersistedCustodyRefusal> {
+  const field = (parsed as { custodyRefusals?: unknown }).custodyRefusals
+  if (field === undefined) return new Map()
+  if (typeof field !== "object" || field === null || Array.isArray(field)) {
+    throw new Error("custodyRefusals state is not a map of environment path to refusal record")
+  }
+  const refusals = new Map<string, PersistedCustodyRefusal>()
+  for (const [path, value] of Object.entries(field)) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new Error(`custodyRefusals state for ${JSON.stringify(path)} is not an object`)
+    }
+    const record = value as Record<string, unknown>
+    if (
+      typeof record.head !== "string" ||
+      !/^[0-9a-f]{40}$/u.test(record.head) ||
+      (record.branch !== undefined && typeof record.branch !== "string") ||
+      typeof record.targetBranch !== "string" ||
+      record.targetBranch.trim() === "" ||
+      (record.endingEvent !== undefined && typeof record.endingEvent !== "string") ||
+      typeof record.fingerprint !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(record.fingerprint) ||
+      typeof record.why !== "string" ||
+      typeof record.recordedAt !== "string"
+    ) {
+      throw new Error(`custodyRefusals state for ${JSON.stringify(path)} has an invalid shape`)
+    }
+    refusals.set(path, {
+      head: record.head,
+      ...(record.branch === undefined ? {} : { branch: record.branch }),
+      targetBranch: record.targetBranch,
+      ...(record.endingEvent === undefined ? {} : { endingEvent: record.endingEvent }),
+      fingerprint: record.fingerprint,
+      why: record.why,
+      recordedAt: record.recordedAt,
+    })
+  }
+  return refusals
+}
+
 /**
  * Consume the durable close requests a caller filed because its own same-UID CWD
  * census could not certify the close (22894). This round IS the capable context:
@@ -179,6 +240,8 @@ async function consumeCloseRequests(
     workdir: string
     registry: string
     primaryRoot: string
+    targetBranch: string
+    custodyRefusals: Map<string, PersistedCustodyRefusal>
     worktrees: Git
     io: YrdCliIO
     outcome: Pick<QueueRunOutcome, "run" | "log">
@@ -438,6 +501,7 @@ async function consumeCloseRequests(
     // After admission fills, use the captured inventory; refreshing it would spawn Git for a deferred row.
     handled.add(request.path)
     if (!existsSync(request.path)) {
+      input.custodyRefusals.delete(request.path)
       journal(file, request, request.path, "already-removed", `${request.path} is gone; the request is satisfied`)
       dropCloseRequest(file)
       continue
@@ -448,6 +512,7 @@ async function consumeCloseRequests(
     }
     const current = inventory.rows.find((row) => row.path === request.path)
     if (current === undefined) {
+      input.custodyRefusals.delete(request.path)
       journal(file, request, request.path, "stale", `${request.path} is no longer a registered environment`)
       dropCloseRequest(file)
       continue
@@ -456,6 +521,7 @@ async function consumeCloseRequests(
       `${current.name} ${current.branch ?? "(detached)"} ${current.head ?? "(no head)"} ` +
       `hold=${current.hold === null ? "no" : JSON.stringify(current.hold)}`
     if (current.hold !== null) {
+      input.custodyRefusals.delete(request.path)
       journal(
         file,
         request,
@@ -468,6 +534,7 @@ async function consumeCloseRequests(
       continue
     }
     if (current.head !== request.head) {
+      input.custodyRefusals.delete(request.path)
       journal(
         file,
         request,
@@ -638,6 +705,7 @@ async function consumeCloseRequests(
       continue
     }
     if (typeof parsed === "object" && parsed !== null && "closed" in parsed && parsed.closed === request.path) {
+      input.custodyRefusals.delete(request.path)
       journal(
         file,
         request,
@@ -686,17 +754,33 @@ async function consumeCloseRequests(
           (custody.status === "blocked"
             ? `cure: land or push ${String(custody.component)}, then re-request`
             : "GitSuper custody proof budget or input could not be verified; inspect the reported proof failure before re-requesting")
-    journal(
-      file,
-      request,
-      request.path,
-      "retired",
+    const retiredWhy =
       typeof parsed === "object" && parsed !== null && "kept" in parsed
         ? (custodyReason ?? keptReason)
-        : `unproven close result ${output.trim()}`,
-      fingerprint,
-      timing,
-    )
+        : `unproven close result ${output.trim()}`
+    if (
+      custody !== undefined &&
+      custody.status === "blocked" &&
+      typeof custody.fingerprint === "string" &&
+      /^[0-9a-f]{64}$/u.test(custody.fingerprint)
+    ) {
+      input.custodyRefusals.set(request.path, {
+        head: request.head,
+        ...(ending?.branch === undefined
+          ? current.branch === undefined
+            ? {}
+            : { branch: current.branch }
+          : { branch: ending.branch }),
+        targetBranch: ending?.queue ?? input.targetBranch,
+        ...(ending?.event === undefined ? {} : { endingEvent: ending.event }),
+        fingerprint: custody.fingerprint,
+        why: `close not performed: ${retiredWhy}`,
+        recordedAt: new Date().toISOString(),
+      })
+    } else {
+      input.custodyRefusals.delete(request.path)
+    }
+    journal(file, request, request.path, "retired", retiredWhy, fingerprint, timing)
     dropCloseRequest(staged)
   }
   return { attempted, closed, handled, proofs }
@@ -814,7 +898,11 @@ async function fileTerminalCloseRequests(
     branchRoots: readonly string[]
     selection: GitSelection
     env?: NodeJS.ProcessEnv
+    custodyRefusals: Map<string, PersistedCustodyRefusal>
+    suppressed: Set<string>
+    inspectCustodyFreshness: (path: string, targetBranch: string) => Promise<ComponentCustodyFreshness>
     record: (path: string, result: string, why: string) => void
+    preserve: (path: string, why: string) => void
     automaticKeep: (path: string, opening: EnvOpenRecordRead, terminal?: boolean) => string | undefined
     terminalHead: (
       branch: string,
@@ -836,6 +924,7 @@ async function fileTerminalCloseRequests(
     try {
       const { head, ending } = await input.terminalHead(row.branch)
       if (row.head !== head) {
+        input.custodyRefusals.delete(row.path)
         input.record(row.path, "kept", `terminal ${row.branch}@${head}; environment advanced to ${row.head}`)
         continue
       }
@@ -878,6 +967,33 @@ async function fileTerminalCloseRequests(
       if (provenance.branches.length !== 1 || provenance.branches[0] !== row.branch) {
         input.record(row.path, "kept", `terminal ${row.branch}; environment spans ${provenance.branches.join(", ")}`)
         continue
+      }
+      const prior = input.custodyRefusals.get(row.path)
+      const requestSlot = closeRequestFile(input.workdir, row.path)
+      const stagedSlot = join(dirname(requestSlot), ".processing", basename(requestSlot))
+      if (prior !== undefined && existsSync(stagedSlot)) {
+        // Leave the slot free so consumeCloseRequests unstages the interrupted .processing/ request and drains it.
+        continue
+      }
+      if (prior !== undefined && !existsSync(requestSlot)) {
+        if (
+          prior.head !== row.head ||
+          prior.branch !== row.branch ||
+          prior.targetBranch !== ending.queue ||
+          (prior.endingEvent !== undefined && prior.endingEvent !== ending.event)
+        ) {
+          input.custodyRefusals.delete(row.path)
+        } else {
+          const freshness = await input.inspectCustodyFreshness(row.path, ending.queue)
+          if (freshness.status === "ok" && freshness.fingerprint === prior.fingerprint) {
+            input.suppressed.add(row.path)
+            input.preserve(row.path, `unchanged since ${prior.recordedAt}: ${prior.why}`)
+            continue
+          }
+          if (freshness.status === "ok") {
+            input.custodyRefusals.delete(row.path)
+          }
+        }
       }
       const { file, alreadyStood } = writeCloseRequest(input.workdir, {
         name: basename(row.path),
@@ -931,7 +1047,13 @@ async function fileTerminalCloseRequests(
  */
 export function createEnvironmentCleanup() {
   const cache = new Map<string, CachedEnvironment>()
-  const progress: CleanupProgress = { cursor: 0, hint: undefined, loaded: false, reported: new Map() }
+  const progress: CleanupProgress = {
+    cursor: 0,
+    hint: undefined,
+    loaded: false,
+    reported: new Map(),
+    custodyRefusals: new Map(),
+  }
   return (input: Parameters<typeof cleanupEnvironments>[0]) => cleanupEnvironments(input, cache, progress)
 }
 
@@ -1214,6 +1336,7 @@ async function cleanupEnvironments(
       // file, one read. A malformed map throws with the cursor, so the whole
       // document is named and the sweep reprints once, never silently forgets.
       progress.reported = reportedFromState(parsed)
+      progress.custodyRefusals = custodyRefusalsFromState(parsed)
       const index = inventory.rows.findIndex((row) => row.name === hint)
       if (index < 0) {
         record(
@@ -1226,6 +1349,8 @@ async function cleanupEnvironments(
     } catch (cause) {
       const missing = (cause as NodeJS.ErrnoException).code === "ENOENT"
       progress.cursor = 0
+      progress.reported = new Map()
+      progress.custodyRefusals = new Map()
       const reason = missing
         ? "absent (first run), starting at index 0"
         : "unreadable (" + String(cause) + "), starting at index 0"
@@ -1240,6 +1365,7 @@ async function cleanupEnvironments(
   const persistState = (): void => {
     const live = new Set(inventory.rows.map((row) => row.path))
     progress.reported = new Map([...progress.reported].filter(([path]) => live.has(path)))
+    progress.custodyRefusals = new Map([...progress.custodyRefusals].filter(([path]) => live.has(path)))
     // The retained cursor outlives the registry that set it: a round stops its batch at the registry's
     // last row and closes an environment, so the NEXT, smaller registry has no row at that index. The
     // batch re-normalizes the cursor only at its END, and the early verdicts — the withdrawal return and
@@ -1266,6 +1392,7 @@ async function cleanupEnvironments(
           runId: outcome.run,
           at: new Date().toISOString(),
           reported: Object.fromEntries(progress.reported),
+          custodyRefusals: Object.fromEntries(progress.custodyRefusals),
         }) + "\n",
       )
     } catch (cause) {
@@ -1274,6 +1401,8 @@ async function cleanupEnvironments(
     }
   }
   // for the next consume.
+  const startupSuppressed = new Set<string>()
+  let resolvedPrimaryRoot: string | undefined
   await fileTerminalCloseRequests({
     workdir,
     rows: inventory.rows,
@@ -1282,7 +1411,27 @@ async function cleanupEnvironments(
     branchRoots: inventory.roots.slice(0, 2),
     selection: input.selection,
     env: input.env,
+    custodyRefusals: progress.custodyRefusals,
+    suppressed: startupSuppressed,
+    inspectCustodyFreshness: async (path, targetBranch) => {
+      if (resolvedPrimaryRoot === undefined) {
+        const primary = (await registeredWorktrees(registryGit))[0]
+        if (primary === undefined) {
+          return {
+            status: "unknown",
+            source: "persistent primary root",
+            detail: `${registry}: native worktree registry has no primary checkout for component custody`,
+          }
+        }
+        resolvedPrimaryRoot = primary.path
+      }
+      return createLocalGitWorktreeStore({ repo: registry, env: input.env }).inspectComponentCustodyFreshness(path, {
+        primaryRoot: resolvedPrimaryRoot,
+        targetBranch,
+      })
+    },
     record,
+    preserve,
     automaticKeep,
     terminalHead: async (branch) => {
       const { history } = await historyOf(branch)
@@ -1339,6 +1488,8 @@ async function cleanupEnvironments(
     workdir,
     registry,
     primaryRoot,
+    targetBranch: config.target.branch,
+    custodyRefusals: progress.custodyRefusals,
     worktrees: registryGit,
     io,
     outcome,
@@ -1361,9 +1512,9 @@ async function cleanupEnvironments(
   for (const [index, row] of ordered.entries()) {
     let closeTiming: Readonly<{ started_at: string; elapsed_ms: number }> | undefined
     try {
-      if (requests.handled.has(row.path)) {
+      if (requests.handled.has(row.path) || startupSuppressed.has(row.path)) {
         // This round already ran the direct close lifecycle for this path under a
-        // filed request; evaluating it again here only repeats the census.
+        // filed request or suppressed an unchanged terminal custody refusal; evaluating it again here only repeats the census.
         continue
       }
       let entry = cache.get(row.path)
@@ -1518,6 +1669,7 @@ async function cleanupEnvironments(
       if ("closed" in result && result.closed === row.path) {
         closed++
         cache.delete(row.path)
+        progress.custodyRefusals.delete(row.path)
         record(
           row.path,
           "closed",
@@ -1537,8 +1689,34 @@ async function cleanupEnvironments(
         } catch (cause) {
           record(row.path, "tell-failed", `closed, but telling about it failed: ${reasonText(cause)}`)
         }
-      } else if ("kept" in result && result.kept === row.path) preserve(row.path, output.trim(), timing)
-      else throw new Error(`unproven close result ${output}`)
+      } else if ("kept" in result && result.kept === row.path) {
+        const custody =
+          "reason" in result &&
+          result.reason === "component-custody" &&
+          "custody" in result &&
+          typeof result.custody === "object" &&
+          result.custody !== null
+            ? (result.custody as Readonly<Record<string, unknown>>)
+            : undefined
+        if (
+          custody !== undefined &&
+          custody.status === "blocked" &&
+          typeof custody.fingerprint === "string" &&
+          /^[0-9a-f]{64}$/u.test(custody.fingerprint)
+        ) {
+          progress.custodyRefusals.set(row.path, {
+            head,
+            ...(row.branch === undefined ? {} : { branch: row.branch }),
+            targetBranch: config.target.branch,
+            fingerprint: custody.fingerprint,
+            why: output.trim(),
+            recordedAt: new Date().toISOString(),
+          })
+        } else if (custody !== undefined) {
+          progress.custodyRefusals.delete(row.path)
+        }
+        preserve(row.path, output.trim(), timing)
+      } else throw new Error(`unproven close result ${output}`)
     } catch (cause) {
       preserve(row.path, namedPrivateStoreRefusal(cause, row.path) ?? reasonText(cause), closeTiming)
     }
