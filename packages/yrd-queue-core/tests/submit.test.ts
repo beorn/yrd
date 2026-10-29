@@ -175,7 +175,7 @@ describe("event submit", () => {
    * @level l2 @consumer issueOf in submit and env open
    * The decoder rows classify records but do not consume their identity through issueOf.
    */
-  it("issueOf checks even its first byte-equal witness and returns the identity-supplying key (31306)", async () => {
+  it("issueOf checks even its first byte-equal witness before accepting the binding (31306)", async () => {
     const w = await world(false)
     const branch = "task/first-witness"
     await branchWithCommit(w, branch, "change.txt")
@@ -200,7 +200,6 @@ describe("event submit", () => {
     const accepting: SameIssue = async () => ({ same: true, key })
     expect(await issueOf(w.git, branch, head, w.target, raw, accepting)).toEqual({
       issue: raw,
-      key,
       source: "binding",
       commit: head,
     })
@@ -1099,7 +1098,7 @@ describe("event submit", () => {
     await w.git(["commit", "--quiet", "--allow-empty", "-m", "first\n\nRefs: @ag/hab/25488-first"])
     await w.git(["commit", "--quiet", "--allow-empty", "-m", "second\n\nRefs: @ag/hab/25489-second"])
     const head = (await w.git(["rev-parse", "HEAD"])).trim()
-    await expect(issueOf(w.git, "task/conflict", head, w.target)).rejects.toThrow(`fix trailer at ${head}`)
+    await expect(issueOf(w.git, "task/conflict", head, w.target)).rejects.toThrow(`resubmit task/conflict`)
     // Automatic environment closure must inspect both bindings while submit still refuses the conflict.
     const bindings = []
     for await (const binding of issueBindingsOf(w.git, [`${w.target}..${head}`], "task/conflict")) {
@@ -1133,8 +1132,9 @@ describe("event submit", () => {
     expect(message).toContain(path)
     // The refusal says what Yrd's comparison is, and it never claims sameness it cannot know.
     expect(message).toContain("compares issue keys exactly")
-    // It gives the way out: rewrite one trailer to the other key when they name one issue.
-    expect(message).toMatch(/rewrite .*trailer/u)
+    // Store identity is repaired without replacing already-authored Git commits.
+    expect(message).not.toMatch(/rewrite .*trailer/u)
+    expect(message).toContain("preserve Git history")
   })
 
   /**
@@ -1228,7 +1228,8 @@ describe("event submit", () => {
     const unresolved = await refusal(async () => ({ same: false, resolved: false, why }))
     expect(unresolved).toContain("compares issue keys exactly")
     expect(unresolved).toContain(why)
-    expect(unresolved).toMatch(/rewrite .*trailer/u)
+    expect(unresolved).not.toMatch(/rewrite .*trailer/u)
+    expect(unresolved).toContain("preserve Git history")
     const declaredUnresolved = await refusal(
       async (a, b) => ((await sameIssue(a, b)).same ? { same: true } : { same: false, resolved: false, why }),
       other,
@@ -1309,7 +1310,7 @@ describe("event submit", () => {
         () => new Error("issueOf resolved despite conflicting issue bindings"),
         (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause))),
       )
-      expect(error.message).toContain(`fix trailer at ${head}`)
+      expect(error.message).toContain(`resubmit task/conflict`)
       expect(error.message).toContain(`${key} trailer`)
       expect(error.message).toContain("Follow-up: @ag/hab/25489-follow-up")
     },
@@ -1369,7 +1370,7 @@ describe("event submit", () => {
           expect(message).toContain("Yrd compares issue keys exactly")
           expect(message).toContain("omit --issue to use the binding")
           expect(message).toContain("pass it exactly as bound: first-issue")
-          expect(message).toContain(`fix trailer at ${first}`)
+          expect(message).toContain(`resubmit task/bound`)
         }
       }
       // This is the publication boundary: neither composition nor any root/pin push may start.

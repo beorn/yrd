@@ -10,6 +10,7 @@
 import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { shellQuote } from "git-super/shell-command"
 import { safeRemoveSync } from "removely"
 import { afterAll, describe, expect, it } from "vitest"
 import { issueComparer } from "../src/issue-sameness.ts"
@@ -48,7 +49,7 @@ function project(verbs?: (root: string) => Readonly<Record<string, readonly stri
 }
 
 /** A `resolve` provider that logs each raw it is asked (untracked, beside the declaration), then runs `body`. */
-const resolving = (body: string): string =>
+const resolving = (body: string, alias?: (root: string) => readonly string[]): string =>
   project((root) => ({
     resolve: [
       "sh",
@@ -57,6 +58,7 @@ const resolving = (body: string): string =>
       "resolve",
       "<raw>",
     ],
+    ...(alias === undefined ? {} : { alias: alias(root) }),
   }))
 
 const calls = (root: string): string[] =>
@@ -163,9 +165,13 @@ describe("witnessed issue identity after rename (31306)", () => {
 
   it("an outage permits exact-raw witness fallback while retaining its failure reason", async () => {
     const root = resolving("printf 'provider offline\\n' >&2; exit 1")
-    const judged = await comparer(root)(bound, legacyOld)
+    const notices: string[] = []
+    const same = issueComparer({ projectRoot: root, cwd: root, stderr: (text) => notices.push(text) })
+    const judged = await same(bound, legacyOld)
     expect(judged).toMatchObject({ same: true, key: "k-bound" })
     expect("why" in judged ? judged.why : "").toContain("provider offline")
+    await same(bound, legacyOld)
+    expect(notices.filter((text) => text.includes("using witnessed key k-bound"))).toHaveLength(1)
     expect(calls(root)).toEqual(["old-path"])
   })
 
@@ -191,9 +197,71 @@ describe("witnessed issue identity after rename (31306)", () => {
 
   it("contradictory witnesses on one exact raw cannot authorize identity", async () => {
     const root = resolving("printf 'provider offline\\n' >&2; exit 1")
-    const judged = await comparer(root)(bound, { kind: "witnessed", raw: "old-path", key: "k-other-witness" })
+    const same = comparer(root)
+    const judged = await same(bound, { kind: "witnessed", raw: "old-path", key: "k-other-witness" })
     expect(judged).toMatchObject({ same: false, resolved: true })
     const why = "why" in judged ? judged.why : ""
     for (const fact of ["old-path", "k-bound", "k-other-witness"]) expect(why).toContain(fact)
+    const otherRaw = await same(bound, { kind: "witnessed", raw: "another-old-path", key: "k-other-witness" })
+    expect(otherRaw).toMatchObject({ same: false, resolved: true })
+    const otherWhy = "why" in otherRaw ? otherRaw.why : ""
+    for (const fact of ["old-path", "another-old-path", "k-bound", "k-other-witness", "provider offline"])
+      expect(otherWhy).toContain(fact)
+  })
+})
+
+// Accepted #31306: a legacy unresolved spelling gets one project-declared, correctly quoted cure, never an
+// invented command. Its live key's pinned declaration supplies the template; printing cannot execute it.
+describe("declared alias repair (31306)", () => {
+  it("says the exact missing declaration key instead of inventing a repair", async () => {
+    const root = resolving(
+      `case "$1" in current) printf '{"keys":["opaque"]}\\n';; *) printf 'not found\\n' >&2; exit 1;; esac`,
+    )
+    const judged = await comparer(root)(rawOnly("old"), rawOnly("current"))
+    expect(judged).toMatchObject({ same: false, resolved: false })
+    const why = "why" in judged ? judged.why : ""
+    expect(why).toContain('this project declares no "alias" repair template in issues.yml')
+    expect(why).not.toContain("Alias repair:")
+  })
+
+  it("prints but never executes the live key's pinned template, preserving each opaque argv value", async () => {
+    const key = "-opaque key's\nidentity"
+    const raw = "old ' reference"
+    const body = `case "$1" in current|current-alias) printf '%s\\n' ${shellQuote(JSON.stringify({ keys: [key] }))};; *) printf 'not found\\n' >&2; exit 1;; esac`
+    const root = resolving(body, (root) => [
+      process.execPath,
+      join(import.meta.dirname, "support/fake-issues-provider.ts"),
+      "trace",
+      "<key>",
+      "<raw>",
+      join(root, "old-repair-calls.jsonl"),
+    ])
+    const same = comparer(root)
+    expect(await same(rawOnly("current"), rawOnly("current-alias"))).toMatchObject({ same: true, key })
+    // Main advances after the key was read. The repair must still use the declaration that supplied that key.
+    const declaration = JSON.parse(readFileSync(join(root, "issues.yml"), "utf8")) as {
+      resolve: string[]
+      alias: string[]
+    }
+    declaration.alias[declaration.alias.length - 1] = join(root, "new-repair-calls.jsonl")
+    writeFileSync(join(root, "issues.yml"), JSON.stringify(declaration))
+    git(root, "add", "issues.yml")
+    git(root, "commit", "--quiet", "-m", "advance the repair template")
+    writeFileSync(join(root, raw), "exact raw argument\n")
+    const judged = await same(rawOnly(raw), rawOnly("current"))
+    expect(judged).toMatchObject({ same: false, resolved: false })
+    const why = !judged.same && !judged.resolved ? judged.why : ""
+    const marker = "\nAlias repair:\n"
+    expect(why).toContain(marker)
+    expect(why).toContain(join(root, "old-repair-calls.jsonl"))
+    expect(why).not.toContain(join(root, "new-repair-calls.jsonl"))
+    expect(existsSync(join(root, "old-repair-calls.jsonl"))).toBe(false)
+    expect(existsSync(join(root, "new-repair-calls.jsonl"))).toBe(false)
+    const command = why.slice(why.indexOf(marker) + marker.length).trimEnd()
+    const executed = Bun.spawnSync(["sh", "-c", command], { cwd: root, stdout: "pipe", stderr: "pipe" })
+    expect(executed.exitCode, executed.stderr.toString()).toBe(0)
+    const recorded = JSON.parse(readFileSync(join(root, "old-repair-calls.jsonl"), "utf8")) as unknown
+    expect(recorded).toEqual({ key, queueOutputEmitted: true })
+    expect(existsSync(join(root, "new-repair-calls.jsonl"))).toBe(false)
   })
 })

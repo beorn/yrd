@@ -17,8 +17,10 @@ import {
   type EventQueue,
   type GitRunner,
   type QueueLocation,
+  type IssueSameness,
 } from "@yrd/queue-core"
 import { runIssuesVerb } from "./issues/run.ts"
+import { issueComparer, resolveRaw } from "./issue-sameness.ts"
 
 // Real public Km CLI trial (2026-10-16, km-cli-trial.json): 1.246s for one
 // closing action across two introduced commits, 0.739s unchanged catch-up.
@@ -260,22 +262,30 @@ async function closeMergedIssues(
             if (observed && mergeSha !== segment.head) yield* closingReferencesOf(input.git, ["-1", mergeSha], branch)
           }
           const refs = references()
+          const resolver = {
+            projectRoot: input.projectRoot,
+            declarationCommit: mergeSha,
+            cwd: input.cwd,
+            ...(input.env === undefined ? {} : { env: input.env }),
+            timeoutMs: UPDATE_TIMEOUT_MS,
+            ...(input.stop === undefined ? {} : { signal: input.stop }),
+            noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
+            stderr: (text: string) => input.report(text.trimEnd()),
+          }
+          const sameIssue = issueComparer(resolver)
           for await (const reference of refs) {
             if (input.stop?.aborted) return { outcomes, queue: completed }
-            const resolved = await runIssuesVerb({
-              verb: "resolve",
-              args: [reference.value],
-              projectRoot: input.projectRoot,
-              declarationCommit: mergeSha,
-              cwd: input.cwd,
-              env: input.env,
-              timeoutMs: UPDATE_TIMEOUT_MS,
-              signal: input.stop,
-              noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
-            })
-            if (!resolved.ok) {
+            let identity: IssueSameness
+            if (reference.binding.kind === "witnessed") {
+              identity = await sameIssue(reference.binding, reference.binding)
+            } else {
+              // A legacy equal-raw comparison deliberately skips resolution. Writes still need one live key.
+              const live = await resolveRaw(resolver, reference.value)
+              identity = "key" in live ? { same: true, key: live.key } : { same: false, resolved: false, why: live.why }
+            }
+            if (!identity.same || identity.key === undefined) {
               const providerId = issueProviderId(mergeSha, "resolve", undefined, reference.value)
-              const diagnostic = resolved.message
+              const diagnostic = identity.why ?? `${reference.value} supplied no unique provider key for closing intent`
               outcomes.push({
                 branch,
                 mergedEvent: mergedEvent.id,
@@ -288,7 +298,6 @@ async function closeMergedIssues(
               input.report(`issuesProvider.resolve failed for ${branch}@${mergeSha}: ${diagnostic}`)
               continue
             }
-            const keys = (resolved.envelope.result as { keys: string[] }).keys
             // Resolving this same raw reference again clears its earlier derived failure,
             // independently of the opaque keys it now names. No applied effect is granted.
             outcomes.push({
@@ -299,7 +308,7 @@ async function closeMergedIssues(
               raw: reference.value,
               status: "fulfilled",
             })
-            for (const key of keys) {
+            for (const key of [identity.key]) {
               const providerId = issueProviderId(mergeSha, "close", "completed", key)
               if (seen.has(providerId)) continue
               seen.add(providerId)

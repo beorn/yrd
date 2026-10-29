@@ -309,8 +309,6 @@ export type SameIssue = (a: IssueBinding, b: IssueBinding) => Promise<IssueSamen
 
 export type IssueResolution = Readonly<{
   issue: string
-  /** Opaque identity supplied by the host's live resolution or exact witnessed fallback. */
-  key?: string
   source: "binding" | "declared"
   /** The first explicit binding's carrying commit, when source is binding. */
   commit?: string
@@ -1592,7 +1590,6 @@ export async function issueOf(
       const judged = sameIssue === undefined ? undefined : await sameIssue(bound.reference, candidate.binding)
       // The first spelling stays the binding: a second spelling of one issue is no conflict (31060).
       if (judged?.same === true) {
-        if (judged.key !== undefined) bound.resolution = { ...binding, key: judged.key }
         // Retain an actual witness encountered later, so a subsequent contradictory fact cannot erase it.
         if (bound.reference.kind === "raw-only" && candidate.binding.kind === "witnessed")
           bound.reference = candidate.binding
@@ -1609,9 +1606,9 @@ export async function issueOf(
           `keep a follow-up link without binding it with a "Follow-up: ${issue}" line` +
           (judged?.resolved === true
             ? "; "
-            : `, or, if both keys name one issue, rewrite one trailer to the other key; ` +
+            : `, or, if both keys name one issue, preserve Git history and repair their issue-store alias; ` +
               `a bind commit made by yrd env open carries the --issue value exactly as given, so a split between two spellings can start there; `) +
-          `then fix trailer at ${commit}`,
+          `preserve Git history; then resubmit ${branch}`,
       )
     }
   }
@@ -1620,16 +1617,16 @@ export async function issueOf(
     if (declared !== undefined && (declared !== binding.issue || bound.reference.kind === "witnessed")) {
       const judged =
         sameIssue === undefined ? undefined : await sameIssue({ kind: "raw-only", raw: declared }, bound.reference)
-      if (judged?.same === true) return judged.key === undefined ? binding : { ...binding, key: judged.key }
+      if (judged?.same === true) return binding
       throw new Error(
         `declared issue ${declared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}; ` +
           (judged?.resolved === true
             ? `${judged.why ?? `${declared} and ${binding.issue} resolve to different issues`}; ` +
-              `omit --issue to use the binding, or fix trailer at ${binding.commit}`
+              `omit --issue to use the binding; preserve Git history; then resubmit ${branch}`
             : `Yrd compares issue keys exactly, so the declared value must equal the binding; ` +
               (judged === undefined ? "" : `${judged.why}; `) +
               `omit --issue to use the binding, or pass it exactly as bound: ${binding.issue}; ` +
-              `or fix trailer at ${binding.commit}`),
+              `preserve Git history; then resubmit ${branch}`),
       )
     }
     return binding

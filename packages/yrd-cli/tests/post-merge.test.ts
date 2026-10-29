@@ -56,6 +56,97 @@ const context = {
   target: "merge-oid",
   merged: ["task/one"],
 }
+/** @failure Renamed or reused closing references address the wrong issue, or ambiguity closes several issues.
+ * @level l2 @consumer Post-merge provider writes from decoded Git closing intent
+ */
+it.each([
+  "legacy-live",
+  "legacy-ambiguous",
+  "witness-live",
+  "witness-outage",
+  "witness-disagreement",
+  "witness-ambiguous",
+] as const)("addresses only a proved opaque key after merge: %s", async (mode) => {
+  const root = world(),
+    remote = join(root, "remote.git"),
+    repo = join(root, "author")
+  const seed = gitIn(root)
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["clone", "--quiet", remote, repo])
+  const git = gitIn(repo)
+  await git(["config", "user.email", "provider@yrd.test"])
+  await git(["config", "user.name", "fixture"])
+  const key = "-opaque key's\nidentity",
+    raw = "old issue spelling",
+    calls = join(root, "calls.jsonl")
+  const fake = join(import.meta.dirname, "support", "fake-issues-provider.ts")
+  const keys = mode.endsWith("ambiguous") ? [key, "other-key"] : [mode === "witness-disagreement" ? "reused-key" : key]
+  writeFileSync(join(repo, ".yrd.yml"), "{}\n")
+  writeFileSync(
+    join(repo, "issues.yml"),
+    JSON.stringify({
+      resolve:
+        mode === "witness-outage"
+          ? [process.execPath, fake, "exit3"]
+          : [process.execPath, fake, "reply", JSON.stringify({ keys })],
+      close: [process.execPath, fake, "trace", "<key>", join(root, "unused-marker"), calls, "<reason>", "<id>"],
+    }),
+  )
+  await git(["add", "."])
+  await git(["commit", "--quiet", "-m", "queue declaration"])
+  await git(["push", "--quiet", "origin", "main"])
+  const base = (await git(["rev-parse", "HEAD"])).trim()
+  const config = await readConfig(git, base, { remote: "origin", branch: "main" })
+  if (config === undefined) throw new Error("fixture queue declaration missing")
+  const store = createEventStore(repo, "origin", git.selection)
+  const queueTip = await createEventQueue(store, "main", base, config, new Date())
+  await git([
+    "commit",
+    "--quiet",
+    "--allow-empty",
+    "-m",
+    `delivered closing intent\n\nCloses: ${raw}${mode.startsWith("legacy") ? "" : `\nIssue-Binding: ${JSON.stringify({ raw, key })}`}`,
+  ])
+  const head = (await git(["rev-parse", "HEAD"])).trim()
+  await git(["push", "--quiet", "origin", "main"])
+  await (
+    await openEvents({ ...store, ref: changesRef("main", "task/one") })
+  ).append(
+    [
+      changeInput("opened", { queueTip, at: new Date(), commit: head, base, by: "historical fixture" }),
+      changeInput("merged", { queueTip, at: new Date(), commit: head, base, reason: `observed on target at ${head}` }),
+    ],
+    { expect: null },
+  )
+  const reports: string[] = []
+  await using runner = createPostMerge({
+    workdir: join(root, "workdir"),
+    cwd: repo,
+    git,
+    store,
+    cleanup: async () => {},
+    report: (message) => reports.push(message),
+  })
+  runner.nudge({ ...context, target: head, projectRoot: repo, queueBranch: "main" })
+  await runner[Symbol.asyncDispose]()
+  const shouldClose = mode === "legacy-live" || mode === "witness-live" || mode === "witness-outage"
+  const actual = existsSync(calls)
+    ? readFileSync(calls, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { key: string })
+    : []
+  expect(
+    actual.map((call) => call.key),
+    reports.join("; "),
+  ).toEqual(shouldClose ? [key] : [])
+  expect(
+    Object.values((await readEventQueue(store, "main")).issueEffects).map(({ effect }) => effect.issueKey),
+  ).toEqual(shouldClose ? [key] : [])
+  if (mode === "witness-outage") expect(reports.join("; ")).toContain("using witnessed key")
+  if (mode === "witness-disagreement") expect(reports.join("; ")).toContain("reused-key")
+  if (mode.endsWith("ambiguous")) expect(reports.join("; ")).toContain("returned 2 keys")
+})
 /** @failure Checkout cleanup starves a merged issue update until reload drops it. @level l2 @consumer Post-merge tracker updates and cleanup handoff @testonly none */
 it.each(["drain", "stop"] as const)(
   "updates a merged issue while earlier cleanup is held, then %s owns cleanup disposal",

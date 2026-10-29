@@ -1,9 +1,14 @@
 import type { SameIssue } from "@yrd/queue-core"
+import { shellQuote } from "git-super/shell-command"
 import { ISSUE_DISPLAY_TIMEOUT_MS } from "./issue-resolver.ts"
-import { ISSUES_CODES, type IssuesCode } from "./issues/declaration.ts"
-import { runIssuesVerb } from "./issues/run.ts"
+import { ISSUES_CODES, substituteArgv, type IssuesCode } from "./issues/declaration.ts"
+import { readIssuesDeclaration, runIssuesVerb, type IssuesEnvelope } from "./issues/run.ts"
 
-type Resolution = Readonly<{ key: string } | { why: string; ambiguous: boolean; code: IssuesCode | null }>
+type Resolution = Readonly<
+  | { key: string; declaration: IssuesEnvelope["declaration"] }
+  | { why: string; ambiguous: boolean; code: IssuesCode | null }
+>
+type Identity = Readonly<{ key: string } | { why: string }>
 
 export type IssueComparerInput = Readonly<{
   /** The project whose `issues.yml` declares `resolve`. */
@@ -11,9 +16,13 @@ export type IssueComparerInput = Readonly<{
   /** Where the provider runs. */
   cwd: string
   env?: NodeJS.ProcessEnv
-  /** Where the provider's stderr passes through. */
+  /** Where provider stderr and witnessed-fallback provenance pass through. */
   stderr?: (text: string) => void
   timeoutMs?: number
+  /** Automatic effects keep the declaration from their delivered merge. */
+  declarationCommit?: string
+  signal?: AbortSignal
+  noProgressTimeoutMs?: number
 }>
 
 /**
@@ -23,6 +32,7 @@ export type IssueComparerInput = Readonly<{
  */
 export function issueComparer(input: IssueComparerInput): SameIssue {
   const resolutions = new Map<string, Promise<Resolution>>()
+  const reportedFallbacks = new Set<string>()
   const resolveOnce = (raw: string): Promise<Resolution> => {
     let reading = resolutions.get(raw)
     if (reading === undefined) {
@@ -33,7 +43,8 @@ export function issueComparer(input: IssueComparerInput): SameIssue {
   }
   return async (a, b) => {
     if (a.kind === "raw-only" && b.kind === "raw-only" && a.raw === b.raw) return { same: true }
-    const resolved: [Resolution, Resolution] = await Promise.all([resolveOnce(a.raw), resolveOnce(b.raw)])
+    const readings: [Resolution, Resolution] = await Promise.all([resolveOnce(a.raw), resolveOnce(b.raw)])
+    const resolved: [Identity, Identity] = [readings[0], readings[1]]
     if (a.raw === b.raw && a.kind === "witnessed" && b.kind === "witnessed" && a.key !== b.key) {
       return {
         same: false,
@@ -46,7 +57,7 @@ export function issueComparer(input: IssueComparerInput): SameIssue {
     for (const index of [0, 1] as const) {
       const binding = bindings[index]
       const peer = bindings[index === 0 ? 1 : 0]
-      const live = resolved[index]
+      const live = readings[index]
       const witness =
         binding.kind === "witnessed"
           ? binding.key
@@ -68,16 +79,49 @@ export function issueComparer(input: IssueComparerInput): SameIssue {
     }
     const [left, right] = resolved
     if ("key" in left && "key" in right) {
-      return left.key === right.key
-        ? {
-            same: true,
-            key: left.key,
-            ...(provenance.length === 0 ? {} : { why: [...new Set(provenance)].join("; ") }),
-          }
-        : { same: false, resolved: true }
+      const details = [...new Set(provenance)]
+      if (left.key !== right.key) {
+        return {
+          same: false,
+          resolved: true,
+          ...(details.length === 0
+            ? {}
+            : { why: `${a.raw} identifies ${left.key}; ${b.raw} identifies ${right.key}; ${details.join("; ")}` }),
+        }
+      }
+      for (const detail of details) {
+        if (!reportedFallbacks.has(detail)) {
+          input.stderr?.(`yrd: ${detail}\n`)
+          reportedFallbacks.add(detail)
+        }
+      }
+      return { same: true, key: left.key, ...(details.length === 0 ? {} : { why: details.join("; ") }) }
     }
     const why = [...provenance, ...[left, right].flatMap((resolution) => ("why" in resolution ? [resolution.why] : []))]
-    return { same: false, resolved: false, why: [...new Set(why)].join("; ") }
+    let detail = [...new Set(why)].join("; ")
+    // A repair target must come from one LIVE resolved key, not an unavailable or ambiguous provider answer.
+    const missing =
+      !("key" in readings[0]) && !readings[0].ambiguous && "key" in readings[1]
+        ? { raw: a.raw, target: readings[1] }
+        : !("key" in readings[1]) && !readings[1].ambiguous && "key" in readings[0]
+          ? { raw: b.raw, target: readings[0] }
+          : undefined
+    if (missing !== undefined) {
+      const reading = await readIssuesDeclaration({
+        projectRoot: input.projectRoot,
+        cwd: input.cwd,
+        ...(input.env === undefined ? {} : { env: input.env }),
+        declarationCommit: missing.target.declaration.commit,
+      })
+      if (!reading.ok) detail += `; alias repair declaration could not be read: ${reading.message}`
+      else if (reading.definition.alias === undefined)
+        detail += '; this project declares no "alias" repair template in issues.yml'
+      else {
+        const argv = substituteArgv(reading.definition.alias, { raw: missing.raw, key: missing.target.key })
+        detail += `\nAlias repair:\n${argv.map(shellQuote).join(" ")}\n`
+      }
+    }
+    return { same: false, resolved: false, why: detail }
   }
 }
 
@@ -97,6 +141,9 @@ export async function resolveRaw(input: IssueComparerInput, raw: string): Promis
     cwd: input.cwd,
     ...(input.env === undefined ? {} : { env: input.env }),
     timeoutMs: input.timeoutMs ?? ISSUE_DISPLAY_TIMEOUT_MS,
+    ...(input.declarationCommit === undefined ? {} : { declarationCommit: input.declarationCommit }),
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
+    ...(input.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: input.noProgressTimeoutMs }),
     stderr: (text) => {
       said += text
       input.stderr?.(text)
@@ -118,7 +165,7 @@ export async function resolveRaw(input: IssueComparerInput, raw: string): Promis
     return {
       ambiguous: false,
       code: outcome.code,
-      why: `resolve ${raw}: ${outcome.message}${line === undefined ? "" : `; the provider said: ${line}`}`,
+      why: `resolve ${raw}: ${outcome.message}${line === undefined ? "" : `; the provider said: ${line}`} (project ${input.projectRoot})`,
     }
   }
   const keys = (outcome.envelope.result as { keys: readonly string[] }).keys
@@ -127,8 +174,8 @@ export async function resolveRaw(input: IssueComparerInput, raw: string): Promis
     return {
       ambiguous: keys.length > 1,
       code: null,
-      why: `resolve ${raw} returned ${keys.length} keys (${keys.join(", ")}), not one issue`,
+      why: `resolve ${raw} returned ${keys.length} keys (${keys.join(", ")}), not one issue (project ${input.projectRoot})`,
     }
   }
-  return { key }
+  return { key, declaration: outcome.envelope.declaration }
 }

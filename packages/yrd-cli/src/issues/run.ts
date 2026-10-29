@@ -25,6 +25,7 @@ import {
   parseIssuesDeclaration,
   substituteArgv,
   type IssuesCode,
+  type IssuesDeclaration,
   type IssuesVerb,
 } from "./declaration.ts"
 
@@ -196,13 +197,19 @@ async function repositoryToRead(root: string, env: NodeJS.ProcessEnv): Promise<I
   return local
 }
 
-/** Run one verb end to end and return the envelope or a named failure. Never throws for a provider's fault. */
-export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<IssuesOutcome> {
-  const request = checkRequest(options)
-  if (!request.ok) return request
-  const verb = options.verb as IssuesVerb
+export type IssuesDeclarationRead =
+  | Readonly<{
+      ok: true
+      declaration: IssuesEnvelope["declaration"]
+      definition: IssuesDeclaration
+    }>
+  | IssuesFailure
+
+/** The one committed declaration reader, shared by verb execution and display-only repair. */
+export async function readIssuesDeclaration(
+  options: Pick<RunIssuesVerbOptions, "projectRoot" | "declarationCommit" | "cwd" | "env">,
+): Promise<IssuesDeclarationRead> {
   const env = options.env ?? process.env
-  const writeStderr = options.stderr ?? ((text: string) => void process.stderr.write(text))
 
   let root = options.projectRoot
   if (root === undefined) {
@@ -251,16 +258,33 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
   const where = `${repository}@${commit}:${ISSUES_DECLARATION_PATH}`
   if (text === undefined) return fail(1, ISSUES_CODES.declarationMissing, where, "absent")
 
-  let declared: readonly string[] | undefined
   try {
-    declared = parseIssuesDeclaration(text, where)[verb]
+    return {
+      ok: true,
+      declaration: { repository, commit, path: ISSUES_DECLARATION_PATH },
+      definition: parseIssuesDeclaration(text, where),
+    }
   } catch (error) {
     if (error instanceof IssuesDeclarationError) {
       return { ok: false, exitCode: 1, code: error.code, message: error.message }
     }
     throw error
   }
+}
+
+/** Run one verb end to end and return the envelope or a named failure. Never throws for a provider's fault. */
+export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<IssuesOutcome> {
+  const request = checkRequest(options)
+  if (!request.ok) return request
+  const verb = options.verb as IssuesVerb
+  const env = options.env ?? process.env
+  const writeStderr = options.stderr ?? ((text: string) => void process.stderr.write(text))
+  const reading = await readIssuesDeclaration(options)
+  if (!reading.ok) return reading
+  const declared = reading.definition[verb]
+  const { repository, commit, path } = reading.declaration
   if (declared === undefined) {
+    const where = `${repository}@${commit}:${path}`
     return fail(1, ISSUES_CODES.unsupported, verb, `${verb} is not declared in ${where} (unsupported)`)
   }
 
@@ -342,6 +366,6 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
   }
   return {
     ok: true,
-    envelope: { declaration: { repository, commit, path: ISSUES_DECLARATION_PATH }, verb, result: parsed },
+    envelope: { declaration: reading.declaration, verb, result: parsed },
   }
 }

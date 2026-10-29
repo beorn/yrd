@@ -116,7 +116,7 @@ describe("yrd issues", () => {
     expect(existsSync(starts)).toBe(false)
     const notVerb = await yrd(root, "issues", "alias", "opaque-key", "old-path")
     expect(notVerb.exitCode).toBe(2)
-    expect(notVerb.stderr).toContain("not a verb")
+    expect(notVerb.stderr).toContain("unknown command 'alias'")
     expect(existsSync(starts)).toBe(false)
   })
 

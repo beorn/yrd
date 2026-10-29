@@ -1,6 +1,6 @@
 /**
  * The issues declaration: `issues.yml` at a project's root, whose top-level keys ARE the verbs and whose values
- * are argv lists (design `issues-interface` rev 6 § 4, @cto ruling 0e9e794e). This module only reads the text
+ * are argv lists, plus the display-only `alias` repair template. This module only reads the text
  * into a validated table; it never runs anything and never decides from issue state.
  */
 
@@ -65,7 +65,7 @@ export function allowedPlaceholders(verb: IssuesVerb): readonly string[] {
   return ISSUES_WRITE_VERBS.has(verb) ? [...ISSUES_VERBS[verb], "id"] : ISSUES_VERBS[verb]
 }
 
-export type IssuesDeclaration = Readonly<Partial<Record<IssuesVerb, readonly string[]>>>
+export type IssuesDeclaration = Readonly<Partial<Record<IssuesVerb, readonly string[]>> & { alias?: readonly string[] }>
 
 /** A declaration that cannot be used, with the message naming what is wrong. */
 export class IssuesDeclarationError extends Error {
@@ -92,16 +92,16 @@ export function parseIssuesDeclaration(text: string, where: string): IssuesDecla
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw refuse("the top level must be a mapping whose keys are verbs")
   }
-  const declaration: Partial<Record<IssuesVerb, readonly string[]>> = {}
+  const declaration: Partial<Record<IssuesVerb | "alias", readonly string[]>> = {}
   for (const [key, value] of Object.entries(raw)) {
-    if (!isIssuesVerb(key)) {
+    if (!isIssuesVerb(key) && key !== "alias") {
       throw refuse(`key ${JSON.stringify(key)} is not a verb; the verbs are ${ISSUES_VERB_NAMES.join(", ")}`)
     }
     if (!Array.isArray(value) || value.length === 0 || !value.every((word) => typeof word === "string")) {
       throw refuse(`${key} must be a non-empty list of strings (an argv)`)
     }
     const argv = value as string[]
-    const allowed = allowedPlaceholders(key)
+    const allowed: readonly string[] = key === "alias" ? ["raw", "key"] : allowedPlaceholders(key)
     for (const word of argv) {
       const whole = WHOLE_PLACEHOLDER.exec(word)
       if (whole !== null) {
@@ -122,7 +122,12 @@ export function parseIssuesDeclaration(text: string, where: string): IssuesDecla
         )
       }
     }
-    if (ISSUES_WRITE_VERBS.has(key) && !argv.includes("<id>")) {
+    if (key === "alias") {
+      for (const name of ["raw", "key"]) {
+        if (!argv.includes(`<${name}>`))
+          throw refuse(`alias lacks <${name}>; include both <raw> and <key> as whole argv elements`)
+      }
+    } else if (ISSUES_WRITE_VERBS.has(key) && !argv.includes("<id>")) {
       throw refuse(`write verb ${key} lacks <id>; add <id> where the provider takes its replay key`)
     }
     declaration[key] = argv
