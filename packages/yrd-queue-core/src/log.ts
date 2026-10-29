@@ -186,6 +186,8 @@ export const LOG_KINDS = [
   "branch-kept",
   // Local custody-first retirement, including protected/refused attempts, with actor and issue.
   "local-branch-retirement",
+  // Origin component retirement and explicit discard decision/result records (29770, @cto ce3f2550).
+  "origin-branch-retirement",
   // One closed or dropped issue's branch judged by the service's closed-issue sweep (29450): the issue's
   // status as the declared resolver returned it, the retirement outcome, the archive ref and, for a
   // removed unmerged tip, the exact recovery command. A `scope: "summary"` row closes each sweep.

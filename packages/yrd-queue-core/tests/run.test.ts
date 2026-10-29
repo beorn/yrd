@@ -467,6 +467,23 @@ it("local retirement keeps protected tips and preserves custody before removing 
     expect.objectContaining({ outcome: "removed", head }),
   ])
   expect(await archives()).toBe("")
+  // 29770: the origin side of the same explicit component-discard clause logs kind: "origin-branch-retirement" with intent: "origin-discard".
+  const originDiscardRow = log.write({
+    kind: "origin-branch-retirement",
+    intent: "origin-discard",
+    outcome: "decision",
+    repo: w.work,
+    remote: "origin",
+    branch: "task/component-origin-discard-count",
+    head,
+    actor: input.actor,
+    reason: "owner value call: origin discard",
+    target: w.target,
+    targetRef: "refs/heads/main",
+    uniqueCommits: 1,
+  })
+  expect(originDiscardRow.kind).toBe("origin-branch-retirement")
+  expect(originDiscardRow.intent).toBe("origin-discard")
   const mergedBranch = "task/closed-but-merged"
   await w.git(["branch", mergedBranch, w.target])
   const queueStore = createEventStore(w.work, "origin", gitIn(w.work).selection)

@@ -268,14 +268,14 @@ function buildProgram(
     if (
       options.discard &&
       (command !== "drop" ||
-        !options.local ||
+        (!options.local && !options.retire) ||
+        (options.local && options.retire) ||
         branch === undefined ||
         options.tip === undefined ||
-        options.retire ||
         options.releaseCheckout)
     ) {
       throw new Error(
-        "--discard requires drop <branch> --local --tip <full-commit>; it cannot combine with --retire or --release-checkout",
+        "--discard requires drop <branch> (--local | --retire) --tip <full-commit>; it cannot combine with --release-checkout",
       )
     }
     if (
@@ -288,7 +288,11 @@ function buildProgram(
     if (command === "drop" && options.reason?.trim() === "<why>" && (options.retire || options.releaseCheckout)) {
       throw new Error("replace --reason <why> with the reason for this retirement")
     }
-    if (options.local !== true && (branch === undefined) === (options.issue === undefined)) {
+    if (
+      options.local !== true &&
+      !(options.retire && options.discard && branch !== undefined) &&
+      (branch === undefined) === (options.issue === undefined)
+    ) {
       throw new Error("drop needs exactly one branch or --issue <id>")
     }
     if (options.local === true && (branch === undefined || options.tip === undefined)) {
@@ -298,10 +302,10 @@ function buildProgram(
       options.retire &&
       (command !== "drop" ||
         options.local ||
-        options.issue !== undefined ||
+        (options.issue !== undefined && !options.discard) ||
         branch === undefined ||
         options.tip === undefined ||
-        !options.reason?.trim())
+        (!options.discard && !options.reason?.trim()))
     ) {
       throw new Error(
         "drop --retire needs a branch, --tip <full-commit> and --reason <why>; choose origin retirement or local cleanup",
@@ -368,7 +372,11 @@ function buildProgram(
       )
     }
     let subject:
-      | { command: "withdraw" | "drop"; branch: string; retire?: Readonly<{ tip: string }> }
+      | {
+          command: "withdraw" | "drop"
+          branch: string
+          retire?: Readonly<{ tip: string; discard?: boolean; issue?: string }>
+        }
       | { command: "drop-issue"; issue: string; submodules?: boolean; apply?: boolean; dryRun?: boolean }
       | {
           command: "drop-local"
@@ -397,7 +405,15 @@ function buildProgram(
       subject = {
         command,
         branch,
-        ...(options.retire && options.tip !== undefined ? { retire: { tip: options.tip } } : {}),
+        ...(options.retire && options.tip !== undefined
+          ? {
+              retire: {
+                tip: options.tip,
+                ...(options.discard === undefined ? {} : { discard: options.discard }),
+                ...(options.issue === undefined ? {} : { issue: options.issue }),
+              },
+            }
+          : {}),
       }
     } else if (command === "drop" && options.issue !== undefined) {
       subject = {
@@ -1499,7 +1515,7 @@ function buildProgram(
       .option("--local", "keep the exact tip in an event or on main, then retire its local branch; requires --tip")
       .option(
         "--discard",
-        "with --local, intentionally lose unmerged component content after its decision is logged and read back",
+        "with --local or --retire, intentionally lose unmerged component content after its decision is logged and read back",
       )
       .option(
         "--release-checkout",
@@ -1512,7 +1528,7 @@ function buildProgram(
       .option("--tip <commit>", "expected full current commit for --local or --retire")
       .option(
         "--issue <id>",
-        "retire issue-bound refs in the author store and the components that issue names; with --local, carry the reviewed issue identity",
+        "retire issue-bound refs in the author store and the components that issue names; with --local or --retire --discard, carry the reviewed issue identity",
       )
       .option(
         "--submodules",

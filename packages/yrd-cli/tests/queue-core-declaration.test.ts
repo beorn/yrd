@@ -3215,7 +3215,7 @@ describe("a queue is the selected origin branch carrying config", () => {
    */
   it.each([
     ["task/30704", "--discard"],
-    ["task/30704", "--discard", "--retire", "--tip", "a".repeat(40), "--reason", "reviewed"],
+    ["task/30704", "--retire", "--discard"],
     ["--issue", "@i/10-yrd/30704-component-branch-owner-delete", "--discard"],
     ["task/30704", "--local", "--discard", "--retire", "--tip", "a".repeat(40), "--reason", "reviewed"],
     [
@@ -3234,7 +3234,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const out = capture(outsideRepositoryRoot())
     expect(await runYrdProcess(["bun", "yrd", "drop", ...args, "--json"], out.io)).toBe(2)
     expect(out.stderr()).toContain(
-      "--discard requires drop <branch> --local --tip <full-commit>; it cannot combine with --retire or --release-checkout",
+      "--discard requires drop <branch> (--local | --retire) --tip <full-commit>; it cannot combine with --release-checkout",
     )
     expect(out.stdout()).toBe("")
   })
@@ -3242,26 +3242,29 @@ describe("a queue is the selected origin branch carrying config", () => {
   /** @failure A declared queue silently converts explicit component-loss intent into event-retaining root cleanup.
    * @level l2 @consumer A caller using --discard in a queue-owning repository
    */
-  it("rejects discard in a declared queue without ordinary root cleanup", async () => {
-    const repo = await world("checks: []\n")
-    const git = gitIn(repo)
-    const tip = (await git(["rev-parse", "HEAD"])).trim()
-    await createQueue(repo, "main", tip, new Date())
-    const branch = "task/discard-root"
-    await git(["branch", branch, tip])
-    const out = capture(repo)
-    expect(
-      await runYrdProcess(
-        ["bun", "yrd", "drop", branch, "--local", "--discard", "--tip", tip, "--reason", "reviewed", "--json"],
-        out.io,
-      ),
-    ).toBe(2)
-    expect(out.stderr()).toContain(
-      "--discard requires a component author checkout without its own queue declaration; ordinary queue cleanup does not apply discard intent",
-    )
-    expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tip)
-    expect(out.stdout()).toBe("")
-  })
+  it.each(["--local", "--retire"] as const)(
+    "rejects %s discard in a declared queue without ordinary root cleanup",
+    async (flag) => {
+      const repo = await world("checks: []\n")
+      const git = gitIn(repo)
+      const tip = (await git(["rev-parse", "HEAD"])).trim()
+      await createQueue(repo, "main", tip, new Date())
+      const branch = "task/discard-root"
+      await git(["branch", branch, tip])
+      const out = capture(repo)
+      expect(
+        await runYrdProcess(
+          ["bun", "yrd", "drop", branch, flag, "--discard", "--tip", tip, "--reason", "reviewed", "--json"],
+          out.io,
+        ),
+      ).toBe(2)
+      expect(out.stderr()).toContain(
+        "--discard requires a component author checkout without its own queue declaration; ordinary queue cleanup does not apply discard intent",
+      )
+      expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tip)
+      expect(out.stdout()).toBe("")
+    },
+  )
 
   /** @failure The discard no-preview message promises Git object custody that deliberate local loss does not provide.
    * @level l1 @consumer A caller copying the explicit discard apply command
@@ -5991,7 +5994,21 @@ describe("component-local retirement without a component queue", () => {
     "discard-different",
     "discard-unreadable",
     "discard-contained",
+    "origin-discard-sync-failure",
+    "origin-discard-no-reason",
+    "origin-discard-unbound",
+    "origin-discard-bound",
+    "origin-discard-with-queue",
+    "origin-discard-mismatch",
+    "origin-discard-conflict",
+    "origin-discard-held",
+    "origin-discard-moved",
+    "origin-discard-missing",
+    "origin-discard-different",
+    "origin-discard-unreadable",
+    "origin-discard-contained",
     "origin-merged",
+    "origin-merged-with-queue",
     "origin-only",
     "origin-equivalent",
     "origin-unmerged",
@@ -6000,6 +6017,7 @@ describe("component-local retirement without a component queue", () => {
     "origin-stale-local-main",
     "origin-stale-default-ref",
     "merged",
+    "local-merged-with-queue",
     "unmerged",
     "unmerged-held",
     "held",
@@ -6017,9 +6035,12 @@ describe("component-local retirement without a component queue", () => {
   ] as const)("retires exact %s component work through the declared root's existing log", async (mode) => {
     // The local-only fixture missed origin retirement and an absent local twin.
     // Fresh published-main custody suffices, but host holds and exact-tip races still keep the name.
-    const discard = mode.startsWith("discard-")
+    const originDiscard = mode.startsWith("origin-discard-")
+    const discard = mode.startsWith("discard-") || originDiscard
     const issue = "@i/10-yrd/30704-component-branch-owner-delete"
     const origin = mode.startsWith("origin-")
+    const withQueue =
+      mode === "origin-merged-with-queue" || mode === "local-merged-with-queue" || mode === "origin-discard-with-queue"
     const contentIntegrated = mode === "origin-equivalent" || mode === "origin-held"
     const root = await world("{}\n")
     const rootGit = gitIn(root)
@@ -6049,7 +6070,7 @@ describe("component-local retirement without a component queue", () => {
     const branch = "task/28824-component"
     const baseTip = (await git(["rev-parse", "HEAD"])).trim()
     if (
-      (discard && mode !== "discard-contained") ||
+      (discard && mode !== "discard-contained" && mode !== "origin-discard-contained") ||
       mode === "unmerged" ||
       mode === "unmerged-held" ||
       mode === "advanced" ||
@@ -6072,8 +6093,8 @@ describe("component-local retirement without a component queue", () => {
         "-m",
         [
           "unmerged component work",
-          ...(discard && mode !== "discard-unbound" ? ["", `Refs: ${issue}`] : []),
-          ...(mode === "discard-conflict" ? ["Refs: @i/10-yrd/other"] : []),
+          ...(discard && mode !== "discard-unbound" && mode !== "origin-discard-unbound" ? ["", `Refs: ${issue}`] : []),
+          ...(mode === "discard-conflict" || mode === "origin-discard-conflict" ? ["Refs: @i/10-yrd/other"] : []),
         ].join("\n"),
       ])
       await git(["checkout", "--quiet", "main"])
@@ -6081,7 +6102,10 @@ describe("component-local retirement without a component queue", () => {
       await git(["branch", branch])
     }
     const actualTip = (await git(["rev-parse", "refs/heads/" + branch])).trim()
-    const tip = mode === "advanced" || mode === "origin-advanced" || mode === "discard-moved" ? baseTip : actualTip
+    const tip =
+      mode === "advanced" || mode === "origin-advanced" || mode === "discard-moved" || mode === "origin-discard-moved"
+        ? baseTip
+        : actualTip
     // Explicit retirement must distinguish integrated content from ancestry (30396).
     // Existing origin-only rows use ancestors, and queue-backed draft rows have an ending event.
     // Independently delivered content plus later main work also defeats direct tree equality.
@@ -6116,7 +6140,7 @@ describe("component-local retirement without a component queue", () => {
     if (discard) await git(["push", "--quiet", "origin", `refs/heads/${branch}:refs/heads/${branch}`])
     if (origin) {
       await git(["push", "--quiet", "origin", `refs/heads/${branch}:refs/heads/${branch}`])
-      if (mode === "origin-only" || mode === "origin-equivalent" || mode === "origin-unmerged") {
+      if (mode === "origin-only" || mode === "origin-equivalent" || mode === "origin-unmerged" || originDiscard) {
         await git(["update-ref", "-d", `refs/heads/${branch}`, actualTip])
       }
       // The local main stays stale: a local-only authority reader must miss this accepted head.
@@ -6145,23 +6169,34 @@ describe("component-local retirement without a component queue", () => {
     const selectedOther = ownSelectedOther ? await world() : undefined
     if (ownSelectedOther) unlinkSync(join(child, ".yrd.yml"))
     let protectionReads = 0
+    const discardIntent = originDiscard ? "origin-discard" : "local-discard"
     run.io.localBranchProtections = async () => {
-      if (++protectionReads === 3 && ["discard-missing", "discard-different", "discard-unreadable"].includes(mode)) {
+      if (
+        ++protectionReads === 3 &&
+        [
+          "discard-missing",
+          "discard-different",
+          "discard-unreadable",
+          "origin-discard-missing",
+          "origin-discard-different",
+          "origin-discard-unreadable",
+        ].includes(mode)
+      ) {
         const logs = join(await workdirOf(rootGit), "logs")
         const path = readdirSync(logs)
           .filter((name) => name.endsWith(".jsonl"))
           .map((name) => join(logs, name))
-          .find((path) => readFileSync(path, "utf8").includes("local-discard"))!
+          .find((path) => readFileSync(path, "utf8").includes(discardIntent))!
         const text = readFileSync(path, "utf8")
         writeFileSync(
           path,
-          mode === "discard-unreadable"
+          mode === "discard-unreadable" || mode === "origin-discard-unreadable"
             ? "not json\n"
-            : mode === "discard-different"
+            : mode === "discard-different" || mode === "origin-discard-different"
               ? text.replace("explicit reviewed component drop", "different call")
               : text
                   .split("\n")
-                  .filter((line) => !line.includes("local-discard"))
+                  .filter((line) => !line.includes(discardIntent))
                   .join("\n"),
         )
       }
@@ -6170,7 +6205,11 @@ describe("component-local retirement without a component queue", () => {
       if (mode === "stale-host-array") return [] as unknown as LocalBranchProtectionResult
       return {
         protections:
-          mode === "held" || mode === "unmerged-held" || mode === "origin-held" || mode === "discard-held"
+          mode === "held" ||
+          mode === "unmerged-held" ||
+          mode === "origin-held" ||
+          mode === "discard-held" ||
+          mode === "origin-discard-held"
             ? ["fixture owner hold"]
             : [],
         evidence: [],
@@ -6203,25 +6242,41 @@ describe("component-local retirement without a component queue", () => {
       origin ? "--retire" : "--local",
       "--tip",
       tip,
-      ...(origin || mode === "discard-unbound"
+      ...((origin && !originDiscard) ||
+      mode === "discard-unbound" ||
+      mode === "origin-discard-unbound" ||
+      mode === "origin-discard-contained"
         ? []
-        : ["--issue", discard ? (mode === "discard-mismatch" ? "@i/10-yrd/other" : issue) : "28824"]),
+        : [
+            "--issue",
+            discard
+              ? mode === "discard-mismatch" || mode === "origin-discard-mismatch"
+                ? "@i/10-yrd/other"
+                : issue
+              : "28824",
+          ]),
       ...(discard ? ["--discard"] : []),
       "--reason",
-      mode === "discard-no-reason" ? "" : "explicit reviewed component drop",
+      mode === "discard-no-reason" || mode === "origin-discard-no-reason" ? "" : "explicit reviewed component drop",
       "--submitter",
       "fixture",
       "--json",
-      ...(selectedOther === undefined ? [] : ["--queue", `${join(dirname(selectedOther), "remote.git")}#main`]),
+      ...(selectedOther !== undefined
+        ? ["--queue", `${join(dirname(selectedOther), "remote.git")}#main`]
+        : withQueue
+          ? ["--queue", `${join(dirname(root), "remote.git")}#main`]
+          : []),
     ]
     let syncedDecision = false
     const nativeFsync = fs.fsyncSync
     const sync = discard
       ? vi.spyOn(fs, "fsyncSync").mockImplementation((fd) => {
           const text = readFileSync(fd, "utf8")
-          if (text.includes('"intent":"local-discard"')) {
+          if (text.includes(`"intent":"${discardIntent}"`)) {
             syncedDecision = true
-            if (mode === "discard-sync-failure") throw new Error("injected log fsync failure")
+            if (mode === "discard-sync-failure" || mode === "origin-discard-sync-failure") {
+              throw new Error("injected log fsync failure")
+            }
           }
           nativeFsync(fd)
         })
@@ -6231,38 +6286,60 @@ describe("component-local retirement without a component queue", () => {
       sync?.mockRestore()
     })
     if (discard) {
-      const removed = ["discard-unbound", "discard-bound", "discard-contained"].includes(mode)
+      const removed = [
+        "discard-unbound",
+        "discard-bound",
+        "discard-contained",
+        "origin-discard-unbound",
+        "origin-discard-bound",
+        "origin-discard-with-queue",
+        "origin-discard-contained",
+      ].includes(mode)
       expect(exit, run.stdout() + run.stderr()).toBe(removed ? 0 : 1)
       const report = JSON.parse(run.stdout()) as { removed: unknown[]; kept: { detail?: string }[]; failed: unknown[] }
       expect(report.failed).toEqual([])
       expect(report.removed).toHaveLength(removed ? 1 : 0)
       expect(report.kept).toHaveLength(removed ? 0 : 1)
       expect((await git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe(
-        removed ? "" : actualTip,
+        originDiscard || removed ? "" : actualTip,
       )
       expect((await git(["symbolic-ref", "HEAD"])).trim()).toBe(
         mode === "discard-checked-out" ? `refs/heads/${branch}` : "refs/heads/main",
       )
       expect(await git(["for-each-ref", "refs/archive/", "refs/yrd/"])).toBe("")
-      expect((await git(["ls-remote", "origin", `refs/heads/${branch}`, "refs/archive/*", "refs/yrd/*"])).trim()).toBe(
-        `${actualTip}\trefs/heads/${branch}`,
+      expect((await git(["ls-remote", "origin", "refs/archive/*", "refs/yrd/*"])).trim()).toBe("")
+      expect((await git(["ls-remote", "origin", `refs/heads/${branch}`])).trim()).toBe(
+        originDiscard && removed ? "" : `${actualTip}\trefs/heads/${branch}`,
       )
       const logs = join(await workdirOf(rootGit), "logs")
-      if (!["discard-unreadable"].includes(mode)) {
+      if (!["discard-unreadable", "origin-discard-unreadable"].includes(mode)) {
         const rows = readdirSync(logs)
           .filter((name) => name.endsWith(".jsonl"))
           .flatMap((name) => readRunLog(logs, name.slice(0, -6)))
-        const decisions = rows.filter((row) => row.intent === "local-discard")
-        if (["discard-unbound", "discard-bound"].includes(mode)) {
+        const decisions = originDiscard
+          ? rows.filter((row) => row.intent === "origin-discard" && row.outcome === "decision")
+          : rows.filter((row) => row.intent === "local-discard")
+        if (
+          [
+            "discard-unbound",
+            "discard-bound",
+            "origin-discard-unbound",
+            "origin-discard-bound",
+            "origin-discard-with-queue",
+          ].includes(mode)
+        ) {
           // The procedural value call must be visible in the actual cleanup report, not only its log.
           expect(report.removed).toEqual([
-            expect.objectContaining({ intent: "local-discard", actor: "fixture", uniqueCommits: 1 }),
+            expect.objectContaining({ intent: discardIntent, actor: "fixture", uniqueCommits: 1 }),
           ])
-          expect((report.removed[0] as { issue?: string }).issue).toBe(mode === "discard-bound" ? issue : undefined)
+          const expectedIssue = mode === "discard-unbound" || mode === "origin-discard-unbound" ? undefined : issue
+          expect((report.removed[0] as { issue?: string }).issue).toBe(expectedIssue)
           expect(syncedDecision).toBe(true)
           expect(decisions).toEqual([
             expect.objectContaining({
-              kind: "local-branch-retirement",
+              kind: originDiscard ? "origin-branch-retirement" : "local-branch-retirement",
+              intent: discardIntent,
+              ...(originDiscard ? { outcome: "decision" } : {}),
               repo: child,
               branch,
               head: tip,
@@ -6272,9 +6349,23 @@ describe("component-local retirement without a component queue", () => {
               uniqueCommits: 1,
             }),
           ])
-          expect(decisions[0]?.issue).toBe(mode === "discard-bound" ? issue : undefined)
-          const result = rows.findIndex((row) => row.kind === "local-branch-retirement" && row.outcome === "removed")
+          expect(decisions[0]?.issue).toBe(expectedIssue)
+          const result = rows.findIndex(
+            (row) =>
+              row.kind === (originDiscard ? "origin-branch-retirement" : "local-branch-retirement") &&
+              row.outcome === "removed",
+          )
           expect(rows.indexOf(decisions[0]!)).toBeLessThan(result)
+        }
+        if (mode === "origin-discard-contained") {
+          expect(report.removed).toEqual([
+            expect.objectContaining({
+              branch,
+              head: tip,
+              custody: { kind: "published-main", ref: "refs/heads/main", tip: baseTip },
+            }),
+          ])
+          expect((report.removed[0] as { intent?: string }).intent).toBeUndefined()
         }
         if (
           [
@@ -6285,12 +6376,29 @@ describe("component-local retirement without a component queue", () => {
             "discard-mismatch",
             "discard-conflict",
             "discard-no-reason",
+            "origin-discard-contained",
+            "origin-discard-held",
+            "origin-discard-moved",
+            "origin-discard-mismatch",
+            "origin-discard-conflict",
+            "origin-discard-no-reason",
           ].includes(mode)
         ) {
           expect(decisions).toEqual([])
         }
       }
-      if (["discard-missing", "discard-different", "discard-unreadable", "discard-sync-failure"].includes(mode)) {
+      if (
+        [
+          "discard-missing",
+          "discard-different",
+          "discard-unreadable",
+          "discard-sync-failure",
+          "origin-discard-missing",
+          "origin-discard-different",
+          "origin-discard-unreadable",
+          "origin-discard-sync-failure",
+        ].includes(mode)
+      ) {
         expect(report.kept[0]?.detail).toContain(logs)
       }
       return
@@ -7970,6 +8078,113 @@ describe("drop --local --release-checkout", () => {
                 : `${fixture.child}@${childTip}: exact-tip issue binding absent; no current attached branch mapping to the requested issue`,
           },
         ])
+      } finally {
+        spy.mockRestore()
+      }
+    },
+    30_000,
+  )
+
+  /**
+   * @failure A standalone linked worktree of a component store refuses drop --local --release-checkout or attempts to write a component event chain (29770).
+   * @level l2 @consumer Seats releasing retained standalone component worktrees after merge, or previewing/refusing unmerged component worktrees
+   */
+  it.each([false, true] as const)(
+    "releases a merged standalone linked component worktree without a component event (withQueue=%s) and keeps unmerged work unreached",
+    async (withQueue) => {
+      const root = await world("{}\n")
+      const rootGit = gitIn(root)
+      const seed = await world()
+      await rootGit([
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        join(dirname(seed), "remote.git"),
+        "modules/child",
+      ])
+      const child = join(root, "modules/child")
+      const childGit = gitIn(child)
+      await rootGit(["commit", "--quiet", "-am", "record component"])
+      await rootGit(["push", "--quiet", "origin", "main"])
+      const rootTip = (await rootGit(["rev-parse", "HEAD"])).trim()
+      await createQueue(root, "main", rootTip, new Date())
+      const linked = mkdtempSync(join(tmpdir(), "yrd-component-linked-wt-"))
+      rmSync(linked, { recursive: true, force: true })
+      const branch = "task/30753-preview-copy"
+      const issue = "30753"
+      await childGit(["worktree", "add", "--quiet", "-b", branch, linked, "main"])
+      const linkedGit = gitIn(linked)
+      writeFileSync(join(linked, "preview.txt"), "component linked worktree commit\n")
+      await linkedGit(["add", "preview.txt"])
+      await linkedGit([
+        "-c",
+        "user.name=fixture",
+        "-c",
+        "user.email=fixture@test.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        `preview copy\n\nRefs: ${issue}`,
+      ])
+      const tip = (await linkedGit(["rev-parse", "HEAD"])).trim()
+      writeFileSync(join(linked, "dirty.txt"), "retained untracked bytes\n")
+      const { spy } = await permitCensus()
+      try {
+        const baseArgv = [
+          "bun",
+          "yrd",
+          "drop",
+          branch,
+          "--local",
+          "--tip",
+          tip,
+          "--issue",
+          issue,
+          "--reason",
+          "retain standalone component checkout",
+          "--release-checkout",
+          "--submitter",
+          "fixture",
+          "--json",
+          "--apply",
+          ...(withQueue ? ["--queue", `${join(dirname(root), "remote.git")}#main`] : []),
+        ]
+        // Unmerged on component origin/main: kept as unreached, never a component event.
+        const unmergedOut = releaseCapture(linked)
+        expect(await runYrdProcess(baseArgv, unmergedOut.io), unmergedOut.stderr()).toBe(1)
+        const unmergedReport = JSON.parse(unmergedOut.stdout()) as ReleaseReport
+        expect(unmergedReport.removed).toEqual([])
+        expect(unmergedReport.kept).toEqual([expect.objectContaining({ branch, head: tip, reason: "unreached" })])
+        expect((await linkedGit(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${branch}`)
+        expect((await childGit(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tip)
+        expect(await childGit(["for-each-ref", "refs/archive/", "refs/yrd/"])).toBe("")
+        expect((await childGit(["ls-remote", "origin", "refs/archive/*", "refs/yrd/*"])).trim()).toBe("")
+
+        // Once the component's published origin/main contains the tip, release detaches and removes the local branch.
+        await linkedGit(["push", "--quiet", "origin", `${tip}:refs/heads/main`])
+        const mergedOut = releaseCapture(linked)
+        expect(await runYrdProcess(baseArgv, mergedOut.io), mergedOut.stderr()).toBe(0)
+        const mergedReport = JSON.parse(mergedOut.stdout()) as ReleaseReport
+        expect(mergedReport.kept).toEqual([])
+        expect(mergedReport.failed).toEqual([])
+        expect(mergedReport.removed).toEqual([expect.objectContaining({ branch, head: tip })])
+        expect(await linkedGit(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")).toBe("")
+        expect((await linkedGit(["rev-parse", "HEAD"])).trim()).toBe(tip)
+        expect(await childGit(["for-each-ref", `refs/heads/${branch}`])).toBe("")
+        expect(readFileSync(join(linked, "dirty.txt"), "utf8")).toBe("retained untracked bytes\n")
+        expect(await childGit(["for-each-ref", "refs/archive/", "refs/yrd/"])).toBe("")
+        expect((await childGit(["ls-remote", "origin", "refs/archive/*", "refs/yrd/*"])).trim()).toBe("")
+
+        // If the component's main worktree cannot be resolved by git-common-dir, refuse loudly.
+        if (!withQueue) {
+          const commonDir = (await linkedGit(["rev-parse", "--git-common-dir"])).trim()
+          await gitIn(commonDir)(["config", "core.worktree", join(root, "modules/vanished-child")])
+          const brokenOut = releaseCapture(linked)
+          expect(await runYrdProcess(baseArgv, brokenOut.io)).not.toBe(0)
+          expect(brokenOut.stderr() + brokenOut.stdout()).toMatch(/primary worktree|common git directory|ENOENT/iu)
+        }
       } finally {
         spy.mockRestore()
       }

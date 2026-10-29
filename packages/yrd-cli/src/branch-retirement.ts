@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs"
+import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { readCommitSubmodules } from "git-super/commit-graph"
 import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
@@ -21,6 +21,7 @@ import {
   keptLinkAdmits,
   listRefs,
   openLog,
+  readRunLog,
   readBranchHistory,
   readEventQueueWithChanges,
   initial,
@@ -42,6 +43,7 @@ import {
   type GitSelection,
   type LocalBranchRetirement,
   type LocalBranchRetirementResult,
+  type LogRecord,
   type EventChange,
   type QueueLocation,
   type QueueConfig,
@@ -855,19 +857,65 @@ type ComponentRetirementInput = Readonly<{
   io: YrdCliIO
   destination: "local" | "origin"
   sameIssue: SameIssue
+  targetDeclared?: boolean
   request: Readonly<{ branch: string; tip: string; by: string; issue?: string; reason?: string; discard?: boolean }>
 }>
 
 /** Find the declared parent from freshly published default refs, never cached origin/HEAD. */
-async function componentRetirementOwner(input: ComponentRetirementInput) {
-  const { repo, git, selection, env } = input
+export async function componentRetirementOwner(
+  input: Readonly<{
+    repo: string
+    git: Git
+    selection: GitSelection
+    env?: NodeJS.ProcessEnv
+    targetDeclared?: boolean
+  }>,
+) {
+  const { repo, git, selection, env, targetDeclared } = input
   try {
     lstatSync(join(repo, ".yrd.yml"))
+    if (targetDeclared === true) return undefined
     throw new Error(`${repo}: local .yrd.yml exists but the selected target has no declaration`)
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause
   }
   let owner = (await git(["rev-parse", "--show-superproject-working-tree"])).trim()
+  if (owner === "" && retainedComponentStoreHere(repo) === undefined) {
+    const metadata = await inspectCheckoutGitMetadata(repo)
+    if (metadata.gitDirectory !== metadata.commonDirectory) {
+      let primaryCheckout: string | undefined
+      for (const row of await registeredWorktrees(git)) {
+        if (resolve(row.path) === metadata.commonDirectory) {
+          const storeGit = gitIn(metadata.commonDirectory, undefined, selection, { env })
+          primaryCheckout = realpathSync((await storeGit(["rev-parse", "--show-toplevel"])).trim())
+          break
+        }
+        if (pathMissing(row.path)) continue
+        const rowMeta = await inspectCheckoutGitMetadata(row.path)
+        if (rowMeta.commonDirectory === metadata.commonDirectory && rowMeta.gitDirectory === metadata.commonDirectory) {
+          primaryCheckout = realpathSync(row.path)
+          break
+        }
+      }
+      if (primaryCheckout === undefined) {
+        throw new Error(
+          `${repo}: linked worktree has no primary worktree registered for common store ${metadata.commonDirectory}`,
+        )
+      }
+      const primaryMeta = await inspectCheckoutGitMetadata(primaryCheckout)
+      if (
+        primaryMeta.commonDirectory !== metadata.commonDirectory ||
+        primaryMeta.gitDirectory !== metadata.commonDirectory
+      ) {
+        throw new Error(
+          `${repo}: resolved primary worktree ${primaryCheckout} does not own common store ${metadata.commonDirectory}`,
+        )
+      }
+      owner = (
+        await gitIn(primaryCheckout, undefined, selection, { env })(["rev-parse", "--show-superproject-working-tree"])
+      ).trim()
+    }
+  }
   while (owner !== "") {
     const ownerGit = gitIn(owner, undefined, selection, { env })
     const queue = await remoteHead(ownerGit, "origin")
@@ -910,6 +958,7 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
     throw new Error(`${repo}: drop retirement requires a non-target branch and a full expected commit oid`)
   }
   const remote = await remoteUrl(git, "origin")
+  const publicRemote = remote.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s]*@/giu, "$1")
   const target = await readRemoteCommit(git, remote, `refs/heads/${targetBranch}`)
   if (target === undefined) throw new Error(`${repo}: target origin/${targetBranch} is absent`)
   if ((await readConfig(git, target, { remote, branch: targetBranch })) !== undefined) {
@@ -952,44 +1001,10 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
       throw new Error(`${repo}: refs/heads/${request.branch} is absent; nothing was removed`)
     }
     const merged = await isAncestor(git, request.tip, target)
-    if (destination === "origin") {
-      const row = { repo, branch: request.branch, head: observedTip ?? request.tip }
-      const custody = { kind: "published-main" as const, ref: `refs/heads/${targetBranch}`, tip: target }
-      const protections = async () =>
-        (await readBranchProtections(io, { repo, branch: request.branch, tip: request.tip, issue: request.issue }))
-          .protections
-      // A component store has no chain and no ending event: its branch goes only when its published main
-      // contains the exact head, so content equality alone keeps and reports it (work.md:110, 30683).
-      const retire = createLandedBranchRetirement({ repo, git, selection, remote, target, targetRef: custody.ref })
-      const result = await retire({
-        path: "",
-        landings: [],
-        branch: request.branch,
-        tip: request.tip,
-        actor: request.by,
-        issue: request.issue,
-        reason: request.reason,
-        log,
-        local: false,
-        origin: true,
-        protections,
-      })
-      const output = {
-        ...row,
-        reason: result.reason,
-        detail: result.detail,
-        ...(result.custody === "main" ? { custody } : {}),
-      }
-      return {
-        removed: result.outcome === "removed" ? [output] : [],
-        kept: result.outcome === "kept" ? [output] : [],
-        failed: result.outcome === "failed" ? [output] : [],
-      }
-    }
     let discardProblem: string | undefined
     let canonicalIssue: string | undefined
     let uniqueCommits = 0
-    if (request.discard === true && !merged) {
+    if (request.discard === true && !merged && observedTip === request.tip) {
       try {
         const bindings = new Set<string>()
         for await (const binding of issueBindingsOf(git, [`${request.tip}^!`], request.branch)) {
@@ -1023,6 +1038,176 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
         await readBranchProtections(io, { repo, branch: request.branch, tip: request.tip, issue: request.issue })
       ).protections
       return discardProblem === undefined ? held : [...held, discardProblem]
+    }
+    if (destination === "origin") {
+      const row = { repo, branch: request.branch, head: observedTip ?? request.tip }
+      const targetRef = `refs/heads/${targetBranch}`
+      const custody = { kind: "published-main" as const, ref: targetRef, tip: target }
+      if (request.discard === true && !merged) {
+        class OriginDiscardKept extends Error {
+          constructor(
+            readonly reason: "held" | "moved",
+            readonly detail: string,
+          ) {
+            super(detail)
+          }
+        }
+        const keepOrigin = (reason: "held" | "moved", detail: string) => {
+          log.write({
+            kind: "origin-branch-retirement",
+            repo,
+            remote: publicRemote,
+            branch: request.branch,
+            head: observedTip ?? request.tip,
+            actor: request.by,
+            ...(request.issue === undefined ? {} : { issue: request.issue }),
+            reason,
+            detail,
+            outcome: "kept",
+          })
+          return {
+            removed: [],
+            kept: [{ ...row, reason, detail }],
+            failed: [],
+          }
+        }
+        const initialReasons = await protections()
+        const discardReason = request.reason ?? ""
+        const missingActorOrReason = request.by.trim() === "" || discardReason.trim() === ""
+        if (observedTip !== request.tip) {
+          return keepOrigin("moved", `origin branch moved: expected ${request.tip}, found ${observedTip ?? "absent"}`)
+        }
+        if (initialReasons.length > 0 || missingActorOrReason) {
+          return keepOrigin(
+            "held",
+            [...initialReasons, ...(missingActorOrReason ? ["discard requires an actor and reason"] : [])].join("; "),
+          )
+        }
+        let decision: LogRecord
+        try {
+          decision = log.write({
+            kind: "origin-branch-retirement",
+            intent: "origin-discard",
+            outcome: "decision",
+            repo,
+            remote: publicRemote,
+            branch: request.branch,
+            head: request.tip,
+            actor: request.by,
+            ...(request.issue === undefined ? {} : { issue: request.issue }),
+            reason: discardReason,
+            target,
+            targetRef,
+            uniqueCommits,
+            pid: process.pid,
+          })
+          const fd = openSync(log.path, "r")
+          try {
+            fsyncSync(fd)
+          } finally {
+            closeSync(fd)
+          }
+        } catch (cause) {
+          return keepOrigin("held", `discard decision could not be synced in ${log.path}: ${String(cause)}`)
+        }
+        const eventStore = createEventStore(repo, remote, selection)
+        try {
+          await retireOriginBranch(eventStore, {
+            branch: request.branch,
+            head: request.tip,
+            authority: {
+              kind: "discarded",
+              ref: targetRef,
+              tip: target,
+              beforeRemove: () => {
+                try {
+                  const rows = readRunLog(dirname(log.path), log.id)
+                  if (
+                    !rows.some(
+                      (entry) =>
+                        entry.run === log.id &&
+                        entry.branch === request.branch &&
+                        entry.head === request.tip &&
+                        entry.actor === request.by &&
+                        JSON.stringify(entry) === JSON.stringify(decision),
+                    )
+                  ) {
+                    throw new Error("exact decision row is missing or differs")
+                  }
+                } catch (cause) {
+                  throw new OriginDiscardKept("held", `discard decision readback in ${log.path}: ${String(cause)}`)
+                }
+              },
+            },
+            trackingRepo: repo,
+            protections: async () => {
+              const held = await protections()
+              if (held.length > 0) throw new OriginDiscardKept("held", held.join("; "))
+              return held
+            },
+          })
+        } catch (cause) {
+          if (cause instanceof OriginDiscardKept) {
+            return keepOrigin(cause.reason, cause.detail)
+          }
+          throw cause
+        }
+        log.write({
+          kind: "origin-branch-retirement",
+          intent: "origin-discard",
+          repo,
+          remote: publicRemote,
+          branch: request.branch,
+          head: request.tip,
+          actor: request.by,
+          ...(request.issue === undefined ? {} : { issue: request.issue }),
+          reason: discardReason,
+          target,
+          targetRef,
+          uniqueCommits,
+          outcome: "removed",
+        })
+        const output = {
+          ...row,
+          reason: discardReason,
+          intent: "origin-discard" as const,
+          actor: request.by,
+          ...(request.issue === undefined ? {} : { issue: request.issue }),
+          uniqueCommits,
+        }
+        return {
+          removed: [output],
+          kept: [],
+          failed: [],
+        }
+      }
+      // A component store has no chain and no ending event: its branch goes only when its published main
+      // contains the exact head, so content equality alone keeps and reports it (work.md:110, 30683).
+      const retire = createLandedBranchRetirement({ repo, git, selection, remote, target, targetRef: custody.ref })
+      const result = await retire({
+        path: "",
+        landings: [],
+        branch: request.branch,
+        tip: request.tip,
+        actor: request.by,
+        issue: request.issue,
+        reason: request.reason,
+        log,
+        local: false,
+        origin: true,
+        protections,
+      })
+      const output = {
+        ...row,
+        reason: result.reason,
+        detail: result.detail,
+        ...(result.custody === "main" ? { custody } : {}),
+      }
+      return {
+        removed: result.outcome === "removed" ? [output] : [],
+        kept: result.outcome === "kept" ? [output] : [],
+        failed: result.outcome === "failed" ? [output] : [],
+      }
     }
     const retirement: Omit<LocalBranchRetirement, "protections"> = {
       repo,
@@ -1156,6 +1341,8 @@ export async function releaseRetainedCheckouts(
      * own round passes none: it IS the context the request waits for, so its hold stays a hold.
      */
     workdir?: string
+    /** A component store has no queue event chain: its checkout releases only when its fresh published main contains the exact tip (29770). */
+    componentStore?: boolean
     request: Readonly<{
       branch: string
       tip: string
@@ -1359,12 +1546,32 @@ export async function releaseRetainedCheckouts(
       })
       return report
     }
-    const bound = await readBranchHistory(rootStore, input.queue, request.branch)
-    if (bound.history?.state.diagnostic !== undefined) throw new Error(bound.history.state.diagnostic)
-    const rootMain = await readRemoteCommit(input.git, rootStore.remote, `refs/heads/${input.queue}`)
-    if (rootMain === undefined) throw new Error(`published ${input.queue} is absent at ${rootStore.remote}`)
-    const rootKept = bound.history?.events.some((event) => event.links.includes(request.tip)) === true
-    const recordedIssue = bound.history?.state.issue
+    const bound =
+      input.componentStore === true ? undefined : await readBranchHistory(rootStore, input.queue, request.branch)
+    if (bound?.history?.state.diagnostic !== undefined) throw new Error(bound.history.state.diagnostic)
+    const rootQueueBranch = input.componentStore === true ? await remoteHead(input.git, input.remote) : input.queue
+    const rootMain = await readRemoteCommit(input.git, rootStore.remote, `refs/heads/${rootQueueBranch}`)
+    if (rootMain === undefined) throw new Error(`published ${rootQueueBranch} is absent at ${rootStore.remote}`)
+    if (
+      input.componentStore === true &&
+      (await readConfig(input.git, rootMain, { remote: rootStore.remote, branch: rootQueueBranch })) !== undefined
+    ) {
+      throw new Error(`${input.repo}: own origin target declares .yrd.yml; run retirement against that queue`)
+    }
+    const rootKept = bound?.history?.events.some((event) => event.links.includes(request.tip)) === true
+    let recordedIssue = bound?.history?.state.issue
+    if (input.componentStore === true) {
+      const bindings = new Set<string>()
+      for await (const binding of issueBindingsOf(input.git, [`${request.tip}^!`], request.branch)) {
+        bindings.add(binding.issue)
+      }
+      if (bindings.size > 1) {
+        throw new Error(
+          `${input.repo}@${request.tip}: conflicting exact-tip issue bindings: ${[...bindings].join(", ")}`,
+        )
+      }
+      recordedIssue = bindings.values().next().value
+    }
     if (recordedIssue !== undefined) {
       const judged = await input.sameIssue(recordedIssue, request.issue)
       if (!judged.same) {
@@ -1488,7 +1695,7 @@ export async function releaseRetainedCheckouts(
             reason: "moved",
             detail: `attached checkout does not match exact recorded pin ${commit}; branch kept`,
           })
-        } else if (path !== "" && !onMain) {
+        } else if ((path !== "" || input.componentStore === true) && !onMain) {
           kept.push({
             ...row,
             reason: "unreached",
@@ -1498,7 +1705,7 @@ export async function releaseRetainedCheckouts(
           candidates.push({
             row,
             disposition:
-              path === ""
+              path === "" && input.componentStore !== true
                 ? { kind: "closed", target: main, store: rootStore, queue: input.queue }
                 : { kind: "merged", base: main, target: main },
             remote,
@@ -1613,8 +1820,11 @@ export async function releaseRetainedCheckouts(
         .sort((a, b) => a.row.path.localeCompare(b.row.path))
         .map(({ row }) => `repository ${row.repo}; path ${row.path || "."}; old tip ${row.head}; remote ${row.remote}`),
     ].join("\n")
-    const endingId = bound.history?.state.ending?.id
-    if (endingId !== undefined && candidates.every((candidate) => candidate.retired)) {
+    const endingId = bound?.history?.state.ending?.id
+    if (
+      (endingId !== undefined || input.componentStore === true) &&
+      candidates.every((candidate) => candidate.retired)
+    ) {
       alreadyRetired.push(...candidates.map((candidate) => candidate.row))
       return report
     }
@@ -1657,7 +1867,7 @@ export async function releaseRetainedCheckouts(
           break
         }
         const uniqueCommits = await dropCommitCount(candidate.git, row.head, candidate.disposition.target)
-        if (row.path === "" && endingId === undefined) {
+        if (row.path === "" && endingId === undefined && input.componentStore !== true) {
           // Descendants are gone by now; the dropped event keeps the root tip and carries the receipt
           // before the root name goes (30683).
           await drop(rootStore, {

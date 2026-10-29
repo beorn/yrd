@@ -2903,6 +2903,31 @@ describe("the queue-format boundary", () => {
     expect(recovered.status, recovered.stderr).toBe(0)
     expect((await git(["rev-parse", originOnlyRef])).trim()).toBe(originOnlyHead)
     expect(await git(["ls-remote", "origin"])).toBe(beforeRecovery)
+
+    // 29770: the counting/custody rule has one explicit origin-discard clause for component stores.
+    // Its beforeRemove readback verifies the decision row before the leased delete runs, and writes no archive or event ref.
+    const discardOriginBranch = "task/origin-discard-count"
+    const discardOriginRef = `refs/heads/${discardOriginBranch}`
+    await git(["update-ref", discardOriginRef, advanced])
+    await git(["push", "--quiet", "origin", discardOriginRef])
+    await git(["update-ref", "-d", discardOriginRef, advanced])
+    let decisionReadback = false
+    await retireOriginBranch(location, {
+      branch: discardOriginBranch,
+      head: advanced,
+      authority: {
+        kind: "discarded",
+        ref: "refs/heads/lab",
+        tip: kept,
+        beforeRemove: () => {
+          decisionReadback = true
+        },
+      },
+    })
+    expect(decisionReadback).toBe(true)
+    expect((await git(["ls-remote", "origin", discardOriginRef])).trim()).toBe("")
+    expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim()).toBe("")
+    expect((await git(["ls-remote", "origin", changesRef("lab", discardOriginBranch)])).trim()).toBe("")
   })
 
   /** @failure Removing the branch name leaves a divergent merged head without event custody once GC runs (30432, 30683).
@@ -3365,7 +3390,7 @@ describe("the queue-format boundary", () => {
     const old = evolve(opened, oldRecord)
     expect(old.diagnostic).toBe(`admission could not judge ${A.slice(0, 12)}: ${legacyReason}`)
     expect(JSON.stringify(oldRecord)).toBe(before)
-    for (const encoded of ["{", "null", '\"\"']) {
+    for (const encoded of ["{", "null", '"\"']) {
       expect(() =>
         evolve(
           opened,

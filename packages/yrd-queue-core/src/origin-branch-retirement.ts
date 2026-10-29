@@ -6,6 +6,7 @@ import { configMatches, gitIn, listRefs, refAt, type Git } from "./git.ts"
 export type OriginRetirementAuthority =
   | Readonly<{ kind: "event"; ref: string; tip: string }>
   | Readonly<{ kind: "published-main"; ref: string; tip: string }>
+  | Readonly<{ kind: "discarded"; ref: string; tip: string; beforeRemove?(): Promise<void> | void }>
 
 /**
  * Delete one checkout's remote-tracking ref for a branch whose origin retirement completed, at exactly the retired
@@ -77,7 +78,7 @@ export async function retireOriginBranch(
     if (reasons !== undefined && reasons.length > 0) throw new Error(`${subject}: kept: ${reasons.join("; ")}`)
   }
   await protect()
-  if (authority.kind === "published-main") {
+  if (authority.kind === "published-main" || authority.kind === "discarded") {
     const fetch = store.backend.fetchRefs
     const contains = store.backend.isAncestor
     if (fetch === undefined) throw new Error(`${subject}: backend cannot read fresh published-main ancestry`)
@@ -88,11 +89,18 @@ export async function retireOriginBranch(
       )
     }
     if (contains === undefined) throw new Error(`${subject}: backend cannot read fresh published-main ancestry`)
-    if (!(await contains(store.repo, head, authority.tip))) {
+    const contained = await contains(store.repo, head, authority.tip)
+    if (authority.kind === "published-main" && !contained) {
       throw new Error(`${subject}: tip is not an ancestor of published ${authority.ref}@${authority.tip}`)
+    }
+    if (authority.kind === "discarded" && contained) {
+      throw new Error(
+        `${subject}: tip ${head} is contained in ${authority.ref}@${authority.tip}; use merged retirement`,
+      )
     }
   }
   await protect()
+  if (authority.kind === "discarded") await authority.beforeRemove?.()
   await publish(
     store.repo,
     [
@@ -114,12 +122,16 @@ export async function retireOriginBranch(
         ? `local branch ${branch} still points to ${localHead}; inspect it: ${git} show-ref --verify ${shellQuote(branchRef)}`
         : authority.kind === "event"
           ? `restore branch ${branch} from the event that keeps it: ${git} fetch ${shellQuote(store.remote)} ${shellQuote(authority.ref)} && ${git} branch ${shellQuote(branch)} ${shellQuote(head)}`
-          : `restore branch ${branch} from the published main fetched before retirement: ${git} branch ${shellQuote(branch)} ${shellQuote(head)}`
+          : authority.kind === "published-main"
+            ? `restore branch ${branch} from the published main fetched before retirement: ${git} branch ${shellQuote(branch)} ${shellQuote(head)}`
+            : `discard log records authorization only and promises no recovery; inspect local object if still present: ${git} branch ${shellQuote(branch)} ${shellQuote(head)}`
     throw new Error(
       `${subject}: ${authority.kind === "event" ? "change" : "published main"} moved during retirement; ${authority.ref} expected ${authority.tip}, found ${authorities.get(authority.ref) ?? "absent"}; ` +
         (authority.kind === "event"
           ? `event ${authority.tip} keeps ${head}; `
-          : "caller established published-main custody; ") +
+          : authority.kind === "published-main"
+            ? "caller established published-main custody; "
+            : "caller recorded origin-discard decision; ") +
         recovery,
     )
   }

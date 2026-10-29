@@ -42,6 +42,7 @@ import { createEnvironmentCleanup, type ClosedEnvironment } from "./env-cleanup.
 import { ENV_CLOSE_QUEUED_EXIT, environmentInventory } from "./env-commands.ts"
 import {
   captureMergedComponentAuthors,
+  componentRetirementOwner,
   retireMergedComponentAuthors,
   retireMergedRootAuthor,
   releaseRetainedCheckouts,
@@ -121,6 +122,7 @@ import {
   readJournals,
   readRunLog,
   readStatus,
+  remoteHead,
   remoteUrl,
   subjects,
   targetName,
@@ -480,7 +482,7 @@ export type CoreQueueCommand =
       by: string
       reason?: string
       recipient?: string
-      retire?: Readonly<{ tip: string }>
+      retire?: Readonly<{ tip: string; discard?: boolean; issue?: string }>
     }>
   | Readonly<{
       command: "drop-issue"
@@ -974,13 +976,12 @@ export async function coreQueueCommand(
     return { config: declared, oid, ...(fetched === undefined ? {} : { fetched }) }
   }
   const captured = await withRemoteSeam("declaration", declaration)
-  if (captured === undefined) {
-    if (
-      (request.command === "drop-local" && !request.releaseCheckout) ||
-      (request.command === "drop" && request.retire !== undefined)
-    ) {
-      const tip = request.command === "drop-local" ? request.tip : request.retire?.tip
-      if (tip === undefined) return await noQueueOnTarget(targetLabel)
+  if (
+    (request.command === "drop-local" && !request.releaseCheckout) ||
+    (request.command === "drop" && request.retire !== undefined)
+  ) {
+    const tip = request.command === "drop-local" ? request.tip : request.retire?.tip
+    if (tip !== undefined) {
       const authorRepo = retainedComponentStoreHere(io.cwd) ?? repositoryHere(io.cwd)
       if (authorRepo === undefined) throw new Error("drop --local requires the authoring repository as cwd")
       const report = await retireComponentBranch({
@@ -990,6 +991,7 @@ export async function coreQueueCommand(
         env,
         io,
         destination: request.command === "drop-local" ? "local" : "origin",
+        targetDeclared: captured !== undefined,
         sameIssue: issueComparer({
           projectRoot: authorRepo,
           cwd: authorRepo,
@@ -1004,6 +1006,8 @@ export async function coreQueueCommand(
                 tip,
                 by: request.by,
                 reason: request.reason,
+                ...(request.retire?.discard ? { discard: true } : {}),
+                ...(request.retire?.issue === undefined ? {} : { issue: request.retire.issue }),
               },
       }).catch((cause: unknown) => {
         throw new Error(
@@ -1034,9 +1038,101 @@ export async function coreQueueCommand(
         return report.failed.length === 0 && (report.kept.length === 0 || report.removed.length > 0) ? 0 : 1
       }
     }
+  }
+  if (request.command === "drop-local" && request.releaseCheckout && retainedComponentStoreHere(io.cwd) === undefined) {
+    const authorRepo = repositoryHere(io.cwd)
+    if (authorRepo !== undefined) {
+      const authorGit = gitIn(authorRepo, undefined, selection, { env })
+      const inTreeOwner =
+        captured === undefined
+          ? await authorGit(["rev-parse", "--show-superproject-working-tree"]).then(
+              (out) => out.trim(),
+              () => undefined,
+            )
+          : ""
+      const componentParent =
+        inTreeOwner === ""
+          ? await componentRetirementOwner({
+              repo: authorRepo,
+              git: authorGit,
+              selection,
+              env,
+              targetDeclared: captured !== undefined,
+            })
+          : undefined
+      if (componentParent !== undefined) {
+        const targetBranch = await remoteHead(authorGit, "origin")
+        if (
+          !request.issue?.trim() ||
+          !request.reason?.trim() ||
+          !request.by.trim() ||
+          request.branch === targetBranch ||
+          !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(request.tip)
+        ) {
+          throw new Error(
+            "drop --release-checkout requires a non-target branch, exact full tip, actor, issue and reason",
+          )
+        }
+        if (request.apply && request.dryRun) throw new Error("choose --dry-run or --apply")
+        const ownerWorkdir =
+          options.workdir ?? (await workdirOf(componentParent.ownerGit, { cwd: componentParent.owner, env }))
+        const log = openLog(componentParent.logDirectory ?? join(ownerWorkdir, "logs"))
+        log.write({
+          kind: "run",
+          command: "drop --local --release-checkout",
+          target: `origin/${componentParent.queue}`,
+          ...(componentParent.config === undefined ? {} : { config: componentParent.config.blob }),
+        })
+        log.write({ kind: "queue", queue: `origin/${componentParent.queue}` })
+        try {
+          const report = await releaseRetainedCheckouts({
+            repo: authorRepo,
+            git: authorGit,
+            selection,
+            env,
+            io,
+            log,
+            queue: targetBranch,
+            remote: "origin",
+            sameIssue: issueComparer({
+              projectRoot: authorRepo,
+              cwd: authorRepo,
+              ...(env === undefined ? {} : { env }),
+              stderr: (text) => io.stderr(text),
+            }),
+            workdir: ownerWorkdir,
+            componentStore: true,
+            request: { ...request, issue: request.issue, reason: request.reason },
+          })
+          emit(
+            io,
+            options.json,
+            report,
+            `checkout release in ${authorRepo}: eligible ${report.eligible.length}, retired ${report.removed.length}, already retired ${report.alreadyRetired.length}, kept ${report.kept.length}, queued ${report.delegated.length}, failed ${report.failed.length}; ${report.apply ? "applied" : "preview; use --apply"}\n` +
+              [...report.eligible, ...report.removed, ...report.kept, ...report.delegated, ...report.failed]
+                .map(
+                  (row) =>
+                    `${row.repo} ${row.branch}: ${row.reason}${row.detail === undefined ? "" : ` (${row.detail})`}`,
+                )
+                .join("\n"),
+          )
+          if (report.failed.length > 0) return 1
+          if (report.delegated.length > 0) return ENV_CLOSE_QUEUED_EXIT
+          if (report.needsDelegation.length > 0) return 1
+          return report.apply && report.kept.length > 0 ? 1 : 0
+        } finally {
+          log.finish()
+        }
+      }
+    }
+  }
+  if (captured === undefined) {
     return await noQueueOnTarget(targetLabel)
   }
-  if (request.command === "drop-local" && request.discard) {
+  if (
+    (request.command === "drop-local" && request.discard) ||
+    (request.command === "drop" && request.retire?.discard)
+  ) {
     throw new Error(
       "--discard requires a component author checkout without its own queue declaration; ordinary queue cleanup does not apply discard intent",
     )
@@ -1240,24 +1336,34 @@ export async function coreQueueCommand(
         selection,
         onEnvironmentClosed: teller,
         // 29772: the round reruns a delegated release itself, --apply, under the same admission.
-        releaseCheckout: (filed) =>
-          releaseRetainedCheckouts({
+        releaseCheckout: async (filed) => {
+          const filedGit = gitIn(filed.path, undefined, selection, { env })
+          const componentParent = await componentRetirementOwner({
             repo: filed.path,
-            git: gitIn(filed.path, undefined, selection, { env }),
+            git: filedGit,
+            selection,
+            env,
+            targetDeclared: true,
+          })
+          return releaseRetainedCheckouts({
+            repo: filed.path,
+            git: filedGit,
             selection,
             env,
             io,
             log: retirementLog,
-            queue: config.target.branch,
-            remote: config.target.remote,
+            queue: componentParent !== undefined ? await remoteHead(filedGit, "origin") : config.target.branch,
+            remote: componentParent !== undefined ? "origin" : config.target.remote,
             sameIssue: issueComparer({
               projectRoot: filed.path,
               cwd: filed.path,
               ...(env === undefined ? {} : { env }),
               stderr: (text) => io.stderr(text),
             }),
+            componentStore: componentParent !== undefined,
             request: { ...filed.release, apply: true },
-          }),
+          })
+        },
       }).finally(() => teller.flush())
       await retireMergedComponentAuthors({
         authors: componentAuthors,

@@ -39,6 +39,7 @@ describe("the journal record-kind vocabulary", () => {
       "branch-deleted",
       "branch-kept",
       "local-branch-retirement",
+      "origin-branch-retirement",
       "closed-issue-retirement",
       "notice-unrecorded",
       "remote-calls",
