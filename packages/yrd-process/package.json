@@ -8,7 +8,7 @@
     "./testing/scripted-process": "./src/testing/scripted-process.ts"
   },
   "dependencies": {
-    "@silvery/scope": "^0.25.0",
+    "@silvery/scope": "0.27.0",
     "git-super": "0.9.0",
     "loggily": "0.13.0",
     "zod": "4.6.5"

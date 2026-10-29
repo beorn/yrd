@@ -72,7 +72,7 @@ describe("25556: seven rows on yrd watch", () => {
   // 25630's rulings (operator screenshot 2026-09-24, "timers headers") moved the filter toggles to the plain second
   // line beside STATS and dropped the queue toggles from the inverted top line. With separate top lines per runner
   // (operator 2026-09-30), the top bar renders one line per queue (here 2 queues, lines 0 and 1), so rows 1, 2 and 4 read line 2.
-  it("row 1: the filter group takes muted ($fg-muted) when selected and extra-muted ($border-default) when not, with no bold and no yellow (25716 row 31)", async () => {
+  it("row 1: the filter group takes foreground ($fg) when selected and extra-muted ($border-default) when not, with no bold and no yellow (25716 row 31)", async () => {
     const app = render(<WatchPane snapshot={baseSnapshot()} live={false} />, { cols: 140, rows: 30 })
     await settle(app)
     app.press("f") // toggle failed off
@@ -80,7 +80,7 @@ describe("25556: seven rows on yrd watch", () => {
 
     expect(fgAt(app, 2, "[f]ailed")).toBe(fgOf("$border-default"))
     expect(boldAt(app, 2, "[f]ailed")).toBe(false)
-    expect(fgAt(app, 2, "[o]pen")).toBe(fgOf("$fg-muted"))
+    expect(fgAt(app, 2, "[o]pen")).toBe(fgOf("$fg"))
     expect(boldAt(app, 2, "[o]pen")).toBe(false)
 
     app.unmount()

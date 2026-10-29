@@ -440,7 +440,7 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     ).toBe(true)
     const openCellBefore = app.cell(openX, pillsY)
     expect(openCellBefore.bold).toBe(false)
-    expect(JSON.stringify(openCellBefore.fg)).toEqual(fgOf("$fg-muted"))
+    expect(JSON.stringify(openCellBefore.fg)).toEqual(fgOf("$fg"))
     app.press("o")
     await settle(app)
     dump("o")
@@ -451,11 +451,11 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     await settle(app)
     dump("a")
     const openCellAfter = app.cell(openX, pillsY)
-    expect(JSON.stringify(openCellAfter.fg)).toEqual(fgOf("$fg-muted"))
+    expect(JSON.stringify(openCellAfter.fg)).toEqual(fgOf("$fg"))
     app.unmount()
   })
 
-  it("paints the active status pill with muted tint and no bold after o (25716 row 31)", async () => {
+  it("paints the active status pill with foreground tint and no bold after o (25716 row 31)", async () => {
     const app = render(<WatchPane snapshot={snapshot()} live={false} />, { cols: 160, rows: 24 })
     await settle(app)
     app.press("o")
@@ -466,10 +466,10 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     expect(x).toBeGreaterThanOrEqual(0)
     expect(app.cell(x, y).bold).toBe(false)
     expect(JSON.stringify(app.cell(x, y).fg)).toEqual(fgOf("$border-default"))
-    // And an active pill ([r]unning) stays active with muted tint and no bold
+    // And an active pill ([r]unning) stays active with foreground tint and no bold
     const rx = (app.lines[y] ?? "").indexOf("[r]unning")
     expect(app.cell(rx, y).bold).toBe(false)
-    expect(JSON.stringify(app.cell(rx, y).fg)).toEqual(fgOf("$fg-muted"))
+    expect(JSON.stringify(app.cell(rx, y).fg)).toEqual(fgOf("$fg"))
     app.unmount()
   })
 
@@ -536,7 +536,7 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     expect(JSON.stringify(app.cell(openX, pillsY).fg)).toEqual(fgOf("$border-default"))
     app.press("a")
     await settle(app)
-    expect(JSON.stringify(app.cell(openX, pillsY).fg)).toEqual(fgOf("$fg-muted"))
+    expect(JSON.stringify(app.cell(openX, pillsY).fg)).toEqual(fgOf("$fg"))
     const afterA = app.lines.join("\n")
     expect(afterA, afterA).not.toMatch(/aRUNNER/)
     expect(
@@ -4030,7 +4030,7 @@ describe("the top line (25416)", () => {
       unselectedFilter: pair("[f]ailed"),
     }
     app.unmount()
-    const chip = [fgOf("$fg-muted"), "null"]
+    const chip = [fgOf("$fg"), "null"]
     const muted = [fgOf("$border-default"), "null"]
     expect(seen).toEqual({ selectedFilter: chip, unselectedFilter: muted })
   })
@@ -4845,14 +4845,14 @@ describe("watch header styling, runner markers, and timer (25716 row 31)", () =>
     app.unmount()
   })
 
-  it("filter options render in muted and extra-muted only, with no bold and no yellow", async () => {
+  it("filter options render in foreground and extra-muted only, with no bold and no yellow", async () => {
     const app = render(<WatchPane snapshot={snapshot()} live={false} />, { cols: 140, rows: 30 })
     await settle(app)
     app.press("f") // toggle failed off
     await settle(app)
 
-    // Active filter [o]pen is $fg-muted, not bold, not yellow
-    expect(fgAt(app, 1, "[o]pen")).toBe(fgOf("$fg-muted"))
+    // Active filter [o]pen is $fg, not bold, not yellow
+    expect(fgAt(app, 1, "[o]pen")).toBe(fgOf("$fg"))
     expect(boldAt(app, 1, "[o]pen")).toBe(false)
     expect(fgAt(app, 1, "[o]pen")).not.toBe(fgOf("$fg-warning"))
 
