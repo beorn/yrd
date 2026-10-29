@@ -9,7 +9,7 @@
  * @testonly none
  * @consumer Yrd's issue reads (slice Y1, in-process) · Tent, staffing and tools through the CLI
  */
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -100,6 +100,40 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
 const ALL_READS = { view: provider("json", "<key>"), list: provider("json") }
 
 describe("yrd issues", () => {
+  // Accepted #31306: alias is validated, committed display-only data, never an executable issues verb.
+  // Existing verb validation cannot prove that resolve coexists with this non-verb or that alias stays unexecuted.
+  it("reads a committed alias repair template without executing or exposing it as a verb (31306)", async () => {
+    const starts = join(scratch(), "alias-starts.jsonl")
+    const verbs = {
+      resolve: provider("resolve", "<raw>"),
+      alias: provider("trace", "<key>", "<raw>", starts),
+    }
+    const root = project({ "issues.yml": declare(verbs) })
+    writeFileSync(join(root, "issues.yml"), declare({ ...verbs, alias: ["uncommitted-invalid-template"] }))
+    const ran = await yrd(root, "issues", "resolve", "old-path")
+    expect(ran.exitCode, ran.stderr).toBe(0)
+    expect(envelopeOf(ran).result).toEqual({ keys: ["old-path"] })
+    expect(existsSync(starts)).toBe(false)
+    const notVerb = await yrd(root, "issues", "alias", "opaque-key", "old-path")
+    expect(notVerb.exitCode).toBe(2)
+    expect(notVerb.stderr).toContain("not a verb")
+    expect(existsSync(starts)).toBe(false)
+  })
+
+  it.each([
+    { argv: [], reason: "alias must be a non-empty list of strings" },
+    { argv: ["repair", "<key>"], reason: "alias lacks <raw>" },
+    { argv: ["repair", "<raw>"], reason: "alias lacks <key>" },
+    { argv: ["repair", "prefix<raw>", "<key>"], reason: "a placeholder must be a whole argv element" },
+    { argv: ["repair", "<raw>", "<key>", "<id>"], reason: "alias carries placeholder <id>" },
+  ])("validates alias argv at the shared declaration reader: $reason (31306)", async ({ argv, reason }) => {
+    const root = project({ "issues.yml": declare({ resolve: provider("resolve", "<raw>"), alias: argv }) })
+    const ran = await yrd(root, "issues", "resolve", "old-path")
+    expect(ran.exitCode).not.toBe(0)
+    expect(ran.stderr).toContain("yrd-issues-declaration-invalid")
+    expect(ran.stderr).toContain(reason)
+  })
+
   // CTO 6ef56c77: the provider owns key grammar; both input and returned identities stay opaque here.
   it("resolve preserves the raw operand and opaque provider keys without a replay id", async () => {
     const raw = " -one.md, two / 三\nnext "
