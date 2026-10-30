@@ -27,13 +27,11 @@ export type IssueComparerInput = Readonly<{
  */
 export function issueComparer(input: IssueComparerInput): SameIssue {
   const resolutions = new Map<string, Promise<Resolution>>()
-  let resolveOnce: (raw: string) => Promise<Resolution>
-  resolveOnce = (raw) => {
-    let reading = resolutions.get(raw)
-    if (reading === undefined) {
-      reading = resolveRaw(input, raw, resolveOnce)
-      resolutions.set(raw, reading)
-    }
+  function resolveOnce(raw: string): Promise<Resolution> {
+    const existing = resolutions.get(raw)
+    if (existing !== undefined) return existing
+    const reading = resolveRaw(input, raw, resolveOnce)
+    resolutions.set(raw, reading)
     return reading
   }
   return async (a, b) => {
