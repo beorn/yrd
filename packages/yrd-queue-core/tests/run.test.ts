@@ -72,6 +72,7 @@ import { eventNoticeOwed } from "../src/event-run.ts"
 import { settledBaseCommit } from "../src/settled-base.ts"
 import { prepareWorktree, SetupFailed } from "../src/worktree.ts"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
+import { runYrdProcess } from "../../yrd-cli/src/cli.ts"
 import { transientPushRetry } from "../src/transient-push.ts"
 import { roundHealthDocument } from "../src/service-health.ts"
 
@@ -4774,22 +4775,52 @@ it("refuses to move main from a first parent the remote main has left (30645)", 
   expect((await readStatus(store, "main", "task/left-parent")).status).not.toBe("merged")
 })
 
-/** @failure A submitted head merged around the queue stayed open and its direct merge was reported forever.
- * @level l3 @consumer queue operator and submitter
+/** @failure A submitted head stays open after landing, or an unsubmitted sibling is attributed that delivery.
+ * @level l3 @consumer queue operator and submitter reading the CLI and merged notice
  */
-it("observes a submitted head on the target, then uses its merged event as the direct boundary", async () => {
+it("observes a submitted head on the target without attributing its unsubmitted sibling", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   const head = await submitCommit(w, "task/observed-by-run", "observed.txt")
+  // #31910: a real advertised sibling has no submission; landing its source cannot create one.
+  const sibling = "task/unsubmitted-sibling"
+  await w.git(["branch", sibling, head])
+  await w.git(["push", "--quiet", "origin", sibling])
+  const cliChanges = async () => {
+    let stdout = ""
+    let stderr = ""
+    const exit = await runYrdProcess(["bun", "yrd", "queue", "list", "--json", "--all", "--drafts", "--fresh"], {
+      cwd: w.work,
+      color: false,
+      localBranchProtections: null,
+      stdout: (text) => void (stdout += text),
+      stderr: (text) => void (stderr += text),
+    })
+    expect(exit, stderr).toBe(0)
+    return (JSON.parse(stdout) as { changes: { branch: string; head: string; state: string }[] }).changes
+  }
+  expect((await cliChanges()).find((row) => row.branch === sibling)).toMatchObject({ head, state: "draft" })
   await w.git(["checkout", "--quiet", "main"])
   await w.git(["merge", "--ff-only", "task/observed-by-run"])
   await w.git(["push", "--quiet", "origin", "main"])
-  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined }
+  const options = {
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "recorder", on: ["merged"] as const, run: w.notifier }],
+  }
 
   const observed = await queueRun(options)
 
   expect(observed).toMatchObject({ directMerges: [head], merged: ["task/observed-by-run"] })
+  const listed = await cliChanges()
+  expect(listed.find((row) => row.branch === "task/observed-by-run")).toMatchObject({ head, state: "merged" })
+  expect(listed.filter((row) => row.branch === sibling)).toEqual([])
+  expect(
+    messages(w)
+      .filter((message) => message.record === "merged")
+      .map((message) => message.change),
+  ).toEqual([changeName({ branch: "task/observed-by-run", head })])
   expect(await readStatus(store, "main", "task/observed-by-run")).toMatchObject({
     status: "merged",
     commit: head,
