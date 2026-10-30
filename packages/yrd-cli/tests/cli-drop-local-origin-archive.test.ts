@@ -124,6 +124,7 @@ it("30683: a never-submitted branch's dropped event starts its chain at origin a
   // The recovery command reads the tip back from that chain.
   expect(report.removed[0]?.recovery).toContain("refs/yrd/main/changes/task/never-submitted")
   expect(report.removed[0]?.recovery).toContain(tip)
+  expect(report.removed[0]?.recovery).not.toContain("--discard")
   // An absent origin branch with completed-drop history is a successful retry, not unpublished work.
   const repeated = capture(repo)
   expect(
