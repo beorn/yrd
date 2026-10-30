@@ -74,7 +74,11 @@ async function resolveRaw(input: IssueComparerInput, raw: string): Promise<Resol
       .map((text) => text.trim())
       .filter((text) => text !== "")
       .at(-1)
-    if (line !== undefined && line.includes("issue not found in saved state")) {
+    if (
+      outcome.code === ISSUES_CODES.providerFailed &&
+      line !== undefined &&
+      line.includes("issue not found in saved state")
+    ) {
       return { why: `${raw} no longer resolves; the provider said: ${line}` }
     }
     return { why: `resolve ${raw}: ${outcome.message}${line === undefined ? "" : `; the provider said: ${line}`}` }

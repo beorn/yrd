@@ -119,6 +119,15 @@ describe("issueComparer (31060)", () => {
     expect("why" in judged ? judged.why : "").toMatch(/resolve 26585: .*killed after 200 ms/u)
   })
 
+  it("a missing-issue line followed by a timeout stays a timeout", async () => {
+    const root = resolving(`printf '"%s": issue not found in saved state\\n' "$1" >&2; sleep 5`)
+    const judged = await comparer(root, 300)("26585", "nope")
+    expect(judged).toMatchObject({ same: false, resolved: false })
+    const why = "why" in judged ? judged.why : ""
+    expect(why).toMatch(/killed after 300 ms/u)
+    expect(why).not.toContain("no longer resolves")
+  })
+
   it.each([
     { name: "no issues.yml", verbs: undefined },
     { name: "an issues.yml without resolve", verbs: { view: ["sh", "-c", "printf '{}'"] } },
