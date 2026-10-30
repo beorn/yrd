@@ -129,7 +129,49 @@ describe("issueComparer (31060)", () => {
     expect(why).toContain("@pm/infra/old/31262-name no longer resolves")
     expect(why).toContain("the current issue is @pm/infra/31262-name")
     const ambiguous = await comparer(root)("@pm/infra/old/shared", "other")
-    expect("why" in ambiguous ? ambiguous.why : "").not.toContain("the current issue is")
+    const ambiguousWhy = "why" in ambiguous ? ambiguous.why : ""
+    expect(ambiguousWhy).not.toContain("the current issue is")
+    expect(ambiguousWhy).toContain("resolve shared returned 2 keys (k-a, k-b), not one issue")
+  })
+
+  it("a missing path keeps a timed-out leaf lookup in the why", async () => {
+    const root = resolving(
+      `case "$1" in old/path) printf '"%s": issue not found in saved state\\n' "$1" >&2; exit 1;; path) sleep 5;; *) printf '{"keys":["k-other"]}\\n';; esac`,
+    )
+    const judged = await comparer(root, 300)("old/path", "other")
+    expect(judged).toMatchObject({ same: false, resolved: false })
+    const why = "why" in judged ? judged.why : ""
+    expect(why).toContain("old/path no longer resolves")
+    expect(why).toMatch(/resolve path: .*killed after 300 ms/u)
+    expect(why).not.toContain("the current issue is")
+    expect(calls(root).filter((raw) => raw === "path")).toHaveLength(1)
+  })
+
+  it("a missing path keeps a failed leaf lookup in the why", async () => {
+    const root = resolving(
+      `case "$1" in old/path) printf '"%s": issue not found in saved state\\n' "$1" >&2; exit 1;; path) printf 'leaf failed for real\\n' >&2; exit 9;; *) printf '{"keys":["k-other"]}\\n';; esac`,
+    )
+    const judged = await comparer(root)("old/path", "other")
+    expect(judged).toMatchObject({ same: false, resolved: false })
+    const why = "why" in judged ? judged.why : ""
+    expect(why).toContain("old/path no longer resolves")
+    expect(why).toContain("provider ended with exit 9")
+    expect(why).not.toContain("the current issue is")
+  })
+
+  it("two missing paths ask their shared leaf once", async () => {
+    const root = resolving(
+      `case "$1" in old/path|legacy/path) printf '"%s": issue not found in saved state\\n' "$1" >&2; exit 1;; path) printf '{"keys":["@pm/infra/path"]}\\n';; *) printf '{"keys":["k-other"]}\\n';; esac`,
+    )
+    const judged = await comparer(root)("old/path", "legacy/path")
+    expect(judged).toMatchObject({ same: false, resolved: false })
+    const why = "why" in judged ? judged.why : ""
+    expect(why).toContain("old/path no longer resolves")
+    expect(why).toContain("legacy/path no longer resolves")
+    expect(why).toContain("the current issue is @pm/infra/path")
+    expect(calls(root).filter((raw) => raw === "path")).toHaveLength(1)
+    expect(calls(root).filter((raw) => raw === "old/path")).toHaveLength(1)
+    expect(calls(root).filter((raw) => raw === "legacy/path")).toHaveLength(1)
   })
 
   it("a missing-issue line followed by a timeout stays a timeout", async () => {

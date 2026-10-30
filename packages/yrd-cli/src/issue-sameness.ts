@@ -20,14 +20,18 @@ export type IssueComparerInput = Readonly<{
  * One command's issue comparer (31060). Byte-equal keys are one issue with no provider call. Differing keys ask
  * the project's declared `resolve` verb once per distinct raw key, memoized for this invocation only. Two keys
  * are one issue only when each resolves to exactly one key and those keys are equal. Any other outcome is no
- * answer: the caller compares exactly and names what resolve returned. Keys stay opaque; Yrd parses no issue syntax.
+ * answer: the caller compares exactly and names what resolve returned. A raw key stays opaque: `/` is not issue
+ * structure. When the provider says that raw is missing from saved state, the comparer asks once more for the
+ * text after the last `/`, as its own opaque raw key, through this same memo. It names that one key, or the
+ * lookup's own failure. That ask never makes the two spellings one issue.
  */
 export function issueComparer(input: IssueComparerInput): SameIssue {
   const resolutions = new Map<string, Promise<Resolution>>()
-  const resolveOnce = (raw: string): Promise<Resolution> => {
+  let resolveOnce: (raw: string) => Promise<Resolution>
+  resolveOnce = (raw) => {
     let reading = resolutions.get(raw)
     if (reading === undefined) {
-      reading = resolveRaw(input, raw)
+      reading = resolveRaw(input, raw, resolveOnce)
       resolutions.set(raw, reading)
     }
     return reading
@@ -49,7 +53,11 @@ export function samenessDetail(a: string, b: string, judged: Awaited<ReturnType<
   return judged.resolved ? `; ${a} and ${b} resolve to different issues` : `; ${judged.why}`
 }
 
-async function resolveRaw(input: IssueComparerInput, raw: string): Promise<Resolution> {
+async function resolveRaw(
+  input: IssueComparerInput,
+  raw: string,
+  resolveOnce: (raw: string) => Promise<Resolution>,
+): Promise<Resolution> {
   let said = ""
   const outcome = await runIssuesVerb({
     verb: "resolve",
@@ -83,9 +91,9 @@ async function resolveRaw(input: IssueComparerInput, raw: string): Promise<Resol
         .split("/")
         .filter((part) => part !== "")
         .at(-1)
-      const found = leaf !== undefined && leaf !== raw ? await resolveRaw(input, leaf) : undefined
-      const current = found !== undefined && "key" in found ? `; the current issue is ${found.key}` : ""
-      return { why: `${raw} no longer resolves${current}; the provider said: ${line}` }
+      const found = leaf !== undefined && leaf !== raw ? await resolveOnce(leaf) : undefined
+      const hint = found === undefined ? "" : "key" in found ? `; the current issue is ${found.key}` : `; ${found.why}`
+      return { why: `${raw} no longer resolves${hint}; the provider said: ${line}` }
     }
     return { why: `resolve ${raw}: ${outcome.message}${line === undefined ? "" : `; the provider said: ${line}`}` }
   }
