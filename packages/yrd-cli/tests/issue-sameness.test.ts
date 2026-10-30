@@ -90,7 +90,7 @@ describe("issueComparer (31060)", () => {
     {
       name: "a failing provider, naming its own stderr line",
       body: `printf '"%s": issue not found in saved state\\n' "$1" >&2; exit 1`,
-      says: ['"nope": issue not found in saved state', "provider ended with exit 1"],
+      says: ["nope no longer resolves", '"nope": issue not found in saved state'],
     },
     {
       name: "zero keys",
