@@ -119,6 +119,19 @@ describe("issueComparer (31060)", () => {
     expect("why" in judged ? judged.why : "").toMatch(/resolve 26585: .*killed after 200 ms/u)
   })
 
+  it("a missing path names the one issue its leaf resolves to now", async () => {
+    const root = resolving(
+      `case "$1" in @pm/infra/old/31262-name) printf '"%s": issue not found in saved state\\n' "$1" >&2; exit 1;; 31262-name) printf '{"keys":["@pm/infra/31262-name"]}\\n';; @pm/infra/old/shared) printf '"%s": issue not found in saved state\\n' "$1" >&2; exit 1;; shared) printf '{"keys":["k-a","k-b"]}\\n';; *) printf '{"keys":["k-other"]}\\n';; esac`,
+    )
+    const named = await comparer(root)("@pm/infra/old/31262-name", "31262")
+    expect(named).toMatchObject({ same: false, resolved: false })
+    const why = "why" in named ? named.why : ""
+    expect(why).toContain("@pm/infra/old/31262-name no longer resolves")
+    expect(why).toContain("the current issue is @pm/infra/31262-name")
+    const ambiguous = await comparer(root)("@pm/infra/old/shared", "other")
+    expect("why" in ambiguous ? ambiguous.why : "").not.toContain("the current issue is")
+  })
+
   it("a missing-issue line followed by a timeout stays a timeout", async () => {
     const root = resolving(`printf '"%s": issue not found in saved state\\n' "$1" >&2; sleep 5`)
     const judged = await comparer(root, 300)("26585", "nope")
