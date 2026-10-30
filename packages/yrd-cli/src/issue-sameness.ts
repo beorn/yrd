@@ -79,7 +79,10 @@ async function resolveRaw(input: IssueComparerInput, raw: string): Promise<Resol
       line !== undefined &&
       line.includes("issue not found in saved state")
     ) {
-      const leaf = raw.split("/").filter((part) => part !== "").at(-1)
+      const leaf = raw
+        .split("/")
+        .filter((part) => part !== "")
+        .at(-1)
       const found = leaf !== undefined && leaf !== raw ? await resolveRaw(input, leaf) : undefined
       const current = found !== undefined && "key" in found ? `; the current issue is ${found.key}` : ""
       return { why: `${raw} no longer resolves${current}; the provider said: ${line}` }
