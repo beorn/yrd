@@ -24,6 +24,7 @@ import {
   enumerateChangeSegments,
   expireQueueOverrides,
   EVENT_TRAILERS,
+  isOpen,
   listChangeHistories,
   readChangeEvents,
   queueResumedAfter,
@@ -1300,7 +1301,7 @@ export async function eventQueueRun(
   const observedMerged: string[] = []
   const observable = [...changes].filter(
     (entry): entry is [string, EventChange & { commit: string; tip: string }] =>
-      entry[1].status !== "merged" && entry[1].commit !== undefined && entry[1].tip !== undefined,
+      isOpen(entry[1].status) && entry[1].commit !== undefined && entry[1].tip !== undefined,
   )
   const offTarget = await offTheTarget(git, [...new Set(observable.map(([, change]) => change.commit))], target)
   const onTarget = observable.filter(([, change]) => !offTarget.has(change.commit))

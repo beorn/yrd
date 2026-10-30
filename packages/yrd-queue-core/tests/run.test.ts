@@ -1329,14 +1329,14 @@ it("ends a deleted event branch with its last commit kept, then continues the li
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/heads/task/deleted-event"])).toBe("")
 })
 
-/** @failure An explicit drop was mistaken for a queue-authored cancellation notice.
+/** @failure A dropped or withdrawn change is relabelled and notified as merged when another branch lands its commit.
  * @level l3 @consumer submitter
  */
-it("keeps an explicit event drop silent even when a cancelled notifier is declared", async () => {
+it("keeps explicit cancellations terminal and silent when another branch lands the same commit", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
-  await submitCommit(w, "task/dropped-event", "dropped.txt")
+  const head = await submitCommit(w, "task/dropped-event", "dropped.txt")
   await drop(store, { queue: "main", branch: "task/dropped-event", by: "operator" })
 
   await queueRun({
@@ -1349,6 +1349,99 @@ it("keeps an explicit event drop silent even when a cancelled notifier is declar
     reason: "dropped",
   })
   expect(existsSync(w.notifyLog)).toBe(false)
+
+  // #31910: local-only retirement must retain its opened+cancelled custody, even when the
+  // same source later lands through a different change. No submit is made for this peer branch.
+  const peer = "peer/local-drop"
+  await w.git(["branch", peer, head])
+  const log = openLog(join(w.workdir, "local-drop"))
+  try {
+    const retired = await retireLocalBranch({
+      repo: w.work,
+      git: w.git,
+      branch: peer,
+      tip: head,
+      actor: "@dropper",
+      reason: "scratch copy no longer needed",
+      log,
+      protections: async () => [],
+      disposition: { kind: "closed", store, queue: "main", target: w.target },
+    })
+    expect(retired, JSON.stringify(retired)).toMatchObject({ outcome: "removed" })
+  } finally {
+    log.finish()
+  }
+  expect(await refAt(w.git, `refs/heads/${peer}`)).toBeUndefined()
+  expect(await refAt(gitIn(w.remote), `refs/heads/${peer}`)).toBeUndefined()
+  expect(await readStatus(store, "main", peer)).toMatchObject({
+    status: "cancelled",
+    reason: "dropped",
+    submitter: "@dropper",
+    commit: head,
+  })
+
+  const withdrawn = "task/withdrawn-event"
+  await w.git(["branch", withdrawn, head])
+  await submit(w.git, "origin", {
+    branch: withdrawn,
+    submitter: "@withdrawer",
+    target: { branch: "main", remote: "origin" },
+  })
+  await withdraw(w.git, "origin", {
+    branch: withdrawn,
+    by: "@withdrawer",
+    target: { branch: "main", remote: "origin" },
+  })
+  const cancelled = ["task/dropped-event", peer, withdrawn]
+  const endings = new Map(
+    await Promise.all(
+      cancelled.map(async (branch) => {
+        const state = await readStatus(store, "main", branch)
+        expect(state.status).toBe("cancelled")
+        expect(state.ending?.id).toEqual(expect.any(String))
+        return [branch, state.ending!.id] as const
+      }),
+    ),
+  )
+
+  // Deliver the exact same source through a legitimately submitted change, then observe the
+  // new target in another round. Containment cannot turn an earlier cancellation into delivery.
+  const delivery = "task/actual-delivery"
+  await w.git(["branch", delivery, head])
+  await submit(w.git, "origin", {
+    branch: delivery,
+    submitter: "@dev/2",
+    target: { branch: "main", remote: "origin" },
+  })
+  const options = { ...(await w.options({ exit: 0 })), checks: [] }
+  expect((await queueRun(options)).merged).toEqual([delivery])
+  const observed = await queueRun({ ...options, targetSha: await remoteTarget(w) })
+  expect.soft(observed).toMatchObject({ exitCode: 0, merged: [] })
+  for (const branch of cancelled) {
+    const state = await readStatus(store, "main", branch)
+    expect.soft(state, branch).toMatchObject({
+      status: "cancelled",
+      reason: branch === withdrawn ? "withdrawn" : "dropped",
+      commit: head,
+      ending: { id: endings.get(branch) },
+    })
+    const events = await (await openEvents({ ...store, ref: changesRef("main", branch) })).events()
+    expect
+      .soft(
+        events.filter((event) => event.type === "merged"),
+        branch,
+      )
+      .toEqual([])
+  }
+  const cancelledNames = cancelled.map((branch) => changeName({ branch, head }))
+  expect
+    .soft(messages(w).filter((message) => message.record === "merged" && cancelledNames.includes(message.change!)))
+    .toEqual([])
+  expect(
+    messages(w).filter(
+      (message) => message.record === "merged" && message.change === changeName({ branch: delivery, head }),
+    ),
+  ).toEqual([expect.objectContaining({ submitter: "@dev/2" })])
 })
 
 /** @failure A just-opened branch could be absent from remote reads during propagation.
