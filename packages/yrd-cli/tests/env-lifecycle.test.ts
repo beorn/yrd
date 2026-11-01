@@ -2032,6 +2032,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     await w.git(["config", "-f", ".gitmodules", "submodule.vendor/dependency.private", "true"])
     await w.git(["add", ".gitmodules"])
     await w.git(["commit", "--quiet", "-m", "declare private dependency"])
+    await w.git(["push", "--quiet", "origin", "main"])
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
     const { path } = await openEnvironment(w.work, selected)
     const gitfile = join(path, "vendor/dependency/.git")
@@ -2066,6 +2067,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     await w.git(["config", "-f", ".gitmodules", "submodule.vendor/dependency.private", "true"])
     await w.git(["add", ".gitmodules"])
     await w.git(["commit", "--quiet", "-m", "declare private dependency"])
+    await w.git(["push", "--quiet", "origin", "main"])
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
     const { path } = await openEnvironment(w.work, selected)
     const checkout = join(path, "vendor/dependency")
@@ -2095,6 +2097,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     await w.git(["config", "-f", ".gitmodules", "submodule.vendor/dependency.private", "true"])
     await w.git(["add", ".gitmodules"])
     await w.git(["commit", "--quiet", "-m", "declare private dependency"])
+    await w.git(["push", "--quiet", "origin", "main"])
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
     const { path } = await openEnvironment(w.work, selected)
     const checkout = join(path, "vendor/dependency")
@@ -2329,8 +2332,132 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     const closed = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io)).toBe(2)
     expect(closed.stderr()).toContain("dirty")
+    expect(closed.stderr()).toContain("git switch -c task/<issue>, then --preserve")
+    expect(closed.stderr()).not.toContain("re-run with --preserve")
     expect(readFileSync(userWork, "utf8")).toBe("user edits\n")
     expect(existsSync(join(dirname(path), "teardown-ran.txt"))).toBe(false)
+  })
+
+  /**
+   * @failure 32124 (@cto ruling 3cb041cd): `yrd env close` treated a clean submodule gitlink whose HEAD
+   *          was on its remote-tracking main as dirty, prescribed `--preserve` alone for a detached HEAD,
+   *          and failed to close a detached HEAD whose only commit ahead of origin/main was an empty bind
+   *          commit, while a detached HEAD with content ahead or an off-remote/dirty submodule must refuse
+   *          naming `git switch -c task/<issue>, then --preserve`.
+   * @level   l2 (real bare remote, real materialized submodule, real worktree close)
+   * @consumer every seat or operator retiring a detached/pinned environment through `yrd env close`
+   */
+  it("admits the 31822 empty-bind + on-remote-gitlink shape and refuses detached content-ahead, off-remote gitlinks, and dirty submodules with B3 guidance (32124)", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+
+    // Advance vendor/dependency on its remote main so an environment opened at `selected` can hold an
+    // unstaged gitlink move whose submodule checkout is clean and an ancestor of its origin/main.
+    const primarySub = gitIn(join(w.work, "vendor/dependency"))
+    writeFileSync(join(w.work, "vendor/dependency/READY"), "on remote main\n")
+    await primarySub(["add", "READY"])
+    await primarySub(["commit", "--quiet", "-m", "advance dependency on remote main"])
+    await primarySub(["push", "--quiet", "origin", "main"])
+    const remoteSubTip = (await primarySub(["rev-parse", "HEAD"])).trim()
+
+    // (a) 31822 shape: detached HEAD 1 empty bind commit ahead of origin/main + clean submodule at remoteSubTip.
+    for (const preserve of [false, true]) {
+      const { path } = await openEnvironment(w.work, selected)
+      const envGit = gitIn(path)
+      const subGit = gitIn(join(path, "vendor/dependency"))
+      await subGit(["fetch", "--quiet", "origin", "main"])
+      await subGit(["checkout", "--quiet", "--detach", remoteSubTip])
+      await envGit([
+        "-c",
+        "user.email=env-open@yrd.test",
+        "-c",
+        "user.name=yrd",
+        "commit",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        "Bind work to 31822",
+      ])
+      const bindSha = (await envGit(["rev-parse", "HEAD"])).trim()
+
+      const closed = capture(w.work)
+      expect(
+        await runYrdProcess(
+          ["bun", "yrd", "env", "close", path, ...(preserve ? ["--preserve"] : []), "--json"],
+          closed.io,
+        ),
+        closed.stderr(),
+      ).toBe(0)
+      expect(existsSync(path)).toBe(false)
+      expect(JSON.parse(closed.stdout())).toEqual({
+        closed: path,
+        discarded: [{ sha: bindSha, subject: "Bind work to 31822" }],
+      })
+      expect(closed.stdout()).toContain(bindSha.slice(0, 8))
+    }
+
+    // (b) Detached HEAD with one content commit ahead refuses with the B3 text.
+    {
+      const { path } = await openEnvironment(w.work, selected)
+      const envGit = gitIn(path)
+      writeFileSync(join(path, "ahead.txt"), "content ahead on detached HEAD\n")
+      await envGit(["add", "ahead.txt"])
+      await envGit([
+        "-c",
+        "user.email=env-open@yrd.test",
+        "-c",
+        "user.name=yrd",
+        "commit",
+        "--quiet",
+        "-m",
+        "content ahead commit",
+      ])
+
+      const refused = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
+      expect(refused.stderr()).toContain("git switch -c task/<issue>, then --preserve")
+      expect(refused.stderr()).not.toContain("re-run with --preserve")
+      expect(existsSync(path)).toBe(true)
+    }
+
+    // (c) A gitlink whose submodule HEAD is not on its remote refuses.
+    {
+      const { path } = await openEnvironment(w.work, selected)
+      const subGit = gitIn(join(path, "vendor/dependency"))
+      writeFileSync(join(path, "vendor/dependency/READY"), "unpushed submodule work\n")
+      await subGit(["add", "READY"])
+      await subGit([
+        "-c",
+        "user.email=env-open@yrd.test",
+        "-c",
+        "user.name=yrd",
+        "commit",
+        "--quiet",
+        "-m",
+        "unpushed submodule commit",
+      ])
+
+      const refused = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
+      expect(refused.stderr()).toContain("vendor/dependency")
+      expect(refused.stderr()).toContain("git switch -c task/<issue>, then --preserve")
+      expect(refused.stderr()).not.toContain("re-run with --preserve")
+      expect(existsSync(path)).toBe(true)
+    }
+
+    // (d) A dirty submodule refuses.
+    {
+      const { path } = await openEnvironment(w.work, selected)
+      writeFileSync(join(path, "vendor/dependency/READY"), "uncommitted submodule dirt\n")
+
+      const refused = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
+      expect(refused.stderr()).toContain("vendor/dependency")
+      expect(refused.stderr()).toContain("git switch -c task/<issue>, then --preserve")
+      expect(refused.stderr()).not.toContain("re-run with --preserve")
+      expect(existsSync(path)).toBe(true)
+    }
   })
 
   it.each([false, true])("closes a registered clean environment with declared teardown=%s", async (teardown) => {
@@ -2386,6 +2513,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       "-m",
       "declare a key this Yrd does not know",
     ])
+    await gitIn(path)(["push", "--quiet", "origin", "HEAD:main"])
     const closed = capture(w.work)
 
     expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
@@ -2531,6 +2659,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
 
     await command(lender, ["git", "add", "vendor/dependency"])
     await command(lender, ["git", "commit", "-m", "update dependency pin"])
+    await command(lender, ["git", "push", "--quiet", "origin", "HEAD:main"])
 
     const lenderGitDir = (
       await command(lenderSub, ["git", "rev-parse", "--path-format=absolute", "--git-dir"])
@@ -2561,6 +2690,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
 
     await command(borrower, ["git", "add", "vendor/dependency"])
     await command(borrower, ["git", "commit", "-m", "update dependency pin in borrower"])
+    await command(borrower, ["git", "push", "--quiet", "-f", "origin", "HEAD:main"])
 
     const closeBorrower = capture(w.work)
     expect(

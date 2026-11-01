@@ -18,6 +18,7 @@
  */
 
 import { shellQuote } from "git-super/shell-command"
+import { superStatus } from "git-super/status"
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { createGitWorkspace, worktreeHomeRoot, type ProvisionedBay } from "@yrd/bay"
@@ -888,18 +889,169 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
   return 0
 }
 
-/** One status read shared by the cleanliness check and the read-only preserve preview. */
+interface DiscardedCommit {
+  readonly sha: string
+  readonly subject: string
+}
+
+interface AdmissibleGitlink {
+  readonly path: string
+  readonly root: string
+  readonly headPin: string
+  readonly previousHead: string
+  readonly previousBranch?: string
+}
+
+interface EnvironmentCloseState {
+  readonly dirty: readonly string[]
+  readonly discarded: readonly DiscardedCommit[]
+  readonly admissibleGitlinks: readonly AdmissibleGitlink[]
+}
+
+/**
+ * 32124 (@cto ruling 3cb041cd): decide dirtiness from per-repo needsPreserve, not raw `git status`,
+ * so plain `env close` and `env close --preserve` share one answer.
+ * - B1: a gitlink-only difference whose submodule is clean and whose HEAD is an ancestor of the
+ *   submodule's remote-tracking main is admissible.
+ * - B2: for a detached root, "ahead" means content ahead: if `git diff --quiet $(git merge-base HEAD origin/main) HEAD`
+ *   holds, the commits ahead carry no tree change and close may discard them, recording each sha and subject.
+ * - B3: otherwise (detached HEAD with content ahead, dirty or unreachable submodule, or unbound store),
+ *   close refuses and names `git switch -c task/<issue>, then --preserve` for a detached HEAD.
+ */
+async function inspectEnvironmentCloseState(
+  path: string,
+  treeGit: Git,
+  process: Process,
+  selection: Awaited<ReturnType<typeof resolveGitSelection>>,
+  detached: boolean,
+): Promise<EnvironmentCloseState> {
+  const status = superStatus({ repo: path })
+  const dirty: string[] = []
+  for (const problem of status.submoduleProblems) {
+    dirty.push(`${problem.path}: ${problem.reason}`)
+  }
+  const cleanByPath = new Map<string, boolean>()
+  for (const repo of status.consultedRepositories) {
+    const repoGit = repo.path === "." ? treeGit : gitIn(repo.root, process, selection)
+    const ownStatus = (
+      await repoGit(["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=all"])
+    ).trim()
+    const ownLines = ownStatus === "" ? [] : ownStatus.split("\n")
+    for (const line of ownLines) {
+      dirty.push(repo.path === "." ? line : `${line.slice(0, 3)}${repo.path}/${line.slice(3)}`)
+    }
+    const staged = (
+      await repoGit(["--no-optional-locks", "diff", "--cached", "--name-status", "--ignore-submodules=dirty"])
+    ).trim()
+    const stagedLines = staged === "" ? [] : staged.split("\n")
+    for (const line of stagedLines) {
+      const [code, ...rest] = line.split("\t")
+      const relPath = rest.join("\t")
+      if (code === undefined || relPath === "") continue
+      const fullPath = repo.path === "." ? relPath : `${repo.path}/${relPath}`
+      if (!dirty.some((entry) => entry.slice(3) === fullPath)) {
+        dirty.push(`${code.padEnd(2, " ")} ${fullPath}`)
+      }
+    }
+    cleanByPath.set(repo.path, ownLines.length === 0 && stagedLines.length === 0)
+  }
+  const admissibleGitlinks: AdmissibleGitlink[] = []
+  for (const repo of status.consultedRepositories) {
+    if (repo.path === ".") continue
+    const parent =
+      status.consultedRepositories.findLast(
+        (candidate) =>
+          candidate.path !== "." && candidate.path !== repo.path && repo.path.startsWith(`${candidate.path}/`),
+      ) ?? status.consultedRepositories.find((candidate) => candidate.path === ".")
+    const parentGit = parent === undefined || parent.path === "." ? treeGit : gitIn(parent.root, process, selection)
+    const relInParent =
+      parent === undefined || parent.path === "." ? repo.path : repo.path.slice(parent.path.length + 1)
+    let headPin: string | undefined
+    try {
+      const parsed = (await parentGit(["rev-parse", "--verify", "--quiet", `HEAD:${relInParent}`])).trim()
+      if (parsed !== "") headPin = parsed
+    } catch {
+      headPin = undefined
+    }
+    if (headPin === undefined) continue
+    const subGit = gitIn(repo.root, process, selection)
+    const subHead = (await subGit(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
+    if (subHead === headPin) continue
+    const submoduleClean =
+      cleanByPath.get(repo.path) === true &&
+      ![...cleanByPath.entries()].some(([childPath, isClean]) => childPath.startsWith(`${repo.path}/`) && !isClean) &&
+      !dirty.some((entry) => entry.slice(3) === repo.path)
+    if (!submoduleClean) continue
+    const remoteMain = await refAt(subGit, "refs/remotes/origin/main")
+    const onRemoteMain = remoteMain !== undefined && (await isAncestor(subGit, subHead, remoteMain))
+    if (onRemoteMain) {
+      const currentBranch = (await subGit(["branch", "--show-current"])).trim()
+      admissibleGitlinks.push({
+        path: repo.path,
+        root: repo.root,
+        headPin,
+        previousHead: subHead,
+        ...(currentBranch === "" ? {} : { previousBranch: currentBranch }),
+      })
+    } else {
+      dirty.push(
+        ` M ${repo.path} (submodule HEAD ${subHead.slice(0, 12)} is not an ancestor of refs/remotes/origin/main)`,
+      )
+    }
+  }
+  const discarded: DiscardedCommit[] = []
+  if (detached) {
+    const originMain = await refAt(treeGit, "refs/remotes/origin/main")
+    if (originMain !== undefined) {
+      const aheadLog = (await treeGit(["log", "--format=%H\t%s", `${originMain}..HEAD`])).trim()
+      if (aheadLog !== "") {
+        const aheadCommits = aheadLog.split("\n").map((line) => {
+          const tab = line.indexOf("\t")
+          return tab < 0
+            ? { sha: line.trim(), subject: "" }
+            : { sha: line.slice(0, tab).trim(), subject: line.slice(tab + 1) }
+        })
+        const mergeBase = (await treeGit(["merge-base", "HEAD", originMain])).trim()
+        const treeDiff = (await treeGit(["diff", "--name-status", mergeBase, "HEAD"])).trim()
+        if (treeDiff === "") {
+          discarded.push(...aheadCommits)
+        } else {
+          for (const entry of aheadCommits) {
+            dirty.push(
+              `detached HEAD is ahead of origin/main with content changes at ${entry.sha.slice(0, 12)} (${entry.subject})`,
+            )
+          }
+        }
+      }
+    }
+  }
+  return { dirty, discarded, admissibleGitlinks }
+}
+
+/** One status read shared by `env open`'s existing-bay cleanliness check. */
 async function environmentDirt(git: Git): Promise<readonly string[]> {
   const dirty = (await git(["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"])).trim()
   return dirty === "" ? [] : dirty.split("\n")
 }
 
-/** Refuse before running user teardown; a dirty tree is work, not garbage. */
+/** Refuse before reusing an existing bay in `env open`; a dirty tree is work, not garbage. */
 async function requireClean(git: Git, path: string, hint = ""): Promise<void> {
   const dirty = await environmentDirt(git)
   if (dirty.length > 0) {
     throw new Error(
       `environment ${path} is dirty; preserve or commit these changes before continuing${hint}:\n${dirty.join("\n")}`,
+    )
+  }
+}
+
+/** Refuse before running user teardown; a dirty tree is work, not garbage. */
+function requireCleanState(state: EnvironmentCloseState, path: string, detached: boolean): void {
+  if (state.dirty.length > 0) {
+    const hint = detached
+      ? " — or attach a branch first (git switch -c task/<issue>, then --preserve) to keep this exact state in a durable ref"
+      : " — or re-run with --preserve to keep this exact state in a durable ref first"
+    throw new Error(
+      `environment ${path} is dirty; preserve or commit these changes before continuing${hint}:\n${state.dirty.join("\n")}`,
     )
   }
 }
@@ -1284,6 +1436,8 @@ export async function closeEnvironment(
     if (onIncompleteCensus === "refuse") throw uncertified(path, admission)
     return queueDelegatedClose(path, options, io, workdir, commit, admission)
   }
+  const detached = registered.branch === undefined
+  let closeState = await inspectEnvironmentCloseState(path, treeGit, process, selection, detached)
   // Both saves use the same worktree preserve operation. Keep custody from the
   // first pass even if the second pass reports no changes.
   const preservedRefs: string[] = []
@@ -1293,6 +1447,14 @@ export async function closeEnvironment(
   // below; undefined when no preserve ran, so the plain close receipt is unchanged.
   let skipped: WorktreePreserveReceipt["skipped"] | undefined
   const preserve = async (phase: "before teardown" | "after teardown"): Promise<void> => {
+    if (
+      detached &&
+      closeState.dirty.length === 0 &&
+      (closeState.discarded.length > 0 || closeState.admissibleGitlinks.length > 0)
+    ) {
+      io.stderr(`yrd: env close --preserve found nothing to preserve in ${path} ${phase}; the close proceeds\n`)
+      return
+    }
     let receipt: WorktreePreserveReceipt
     try {
       receipt = await preserveEnvironmentWorktree(process, root, path)
@@ -1358,7 +1520,7 @@ export async function closeEnvironment(
   if (options.preserve === true) {
     if (options.dryRun !== true) await preserve("before teardown")
   } else {
-    await requireClean(treeGit, path, " — or re-run with --preserve to keep this exact state in a durable ref first")
+    requireCleanState(closeState, path, detached)
   }
   const config = await readConfig(
     treeGit,
@@ -1387,7 +1549,7 @@ export async function closeEnvironment(
       notChecked: ["component-custody", "retention", "remote-reread", "teardown"],
       preserve: {
         requested: options.preserve === true,
-        dirty: options.preserve === true ? await environmentDirt(treeGit) : [],
+        dirty: options.preserve === true ? closeState.dirty : [],
       },
       teardown: config?.teardown ?? null,
       liveEnvironmentUseChecked: io.liveEnvironmentUse !== undefined,
@@ -1420,8 +1582,9 @@ export async function closeEnvironment(
         `environment teardown ${result.result} in preserved environment ${path}; completed custody refs: ${preservedRefs.length === 0 ? "none" : preservedRefs.join(", ")}: exit ${String(result.exit)}${result.why === undefined ? "" : ` (${result.why})`}\ncommand: ${config.teardown}\n${output}\nlog ${result.log}`,
       )
     }
+    closeState = await inspectEnvironmentCloseState(path, treeGit, process, selection, detached)
     if (options.preserve !== true) {
-      await requireClean(treeGit, path, " — or re-run with --preserve to keep this exact state in a durable ref first")
+      requireCleanState(closeState, path, detached)
     } else {
       await preserve("after teardown")
     }
@@ -1490,6 +1653,27 @@ export async function closeEnvironment(
     const retain = options.retain === undefined ? join(workdir, "retained-modules") : resolve(io.cwd, options.retain)
     let removed: unknown
     await assertNoLiveEnvironmentUse(path, io)
+    const alignedGitlinks: AdmissibleGitlink[] = []
+    const restoreAlignedGitlinks = async (): Promise<void> => {
+      for (const entry of [...alignedGitlinks].reverse()) {
+        const subGit = gitIn(entry.root, process, selection)
+        if (entry.previousBranch !== undefined) {
+          await subGit(["checkout", "--quiet", entry.previousBranch])
+        } else {
+          await subGit(["checkout", "--quiet", "--detach", entry.previousHead])
+        }
+      }
+      alignedGitlinks.length = 0
+    }
+    if (preservedRefs.length === 0) {
+      for (const entry of closeState.admissibleGitlinks) {
+        const subGit = gitIn(entry.root, process, selection)
+        if ((await refAt(subGit, entry.headPin)) !== undefined) {
+          await subGit(["checkout", "--quiet", "--detach", entry.headPin])
+          alignedGitlinks.push(entry)
+        }
+      }
+    }
     try {
       removed = JSON.parse(
         await git([
@@ -1508,6 +1692,7 @@ export async function closeEnvironment(
         ]),
       )
     } catch (error) {
+      await restoreAlignedGitlinks()
       throw new Error(
         `environment ${path} could not close through git super worktree remove: ${error instanceof Error ? error.message : String(error)}; inspect its registration and retention directory ${retain} before retrying; no plain-git fallback was attempted`,
         { cause: error },
@@ -1542,6 +1727,7 @@ export async function closeEnvironment(
           typeof removed.custody.fingerprint === "string" &&
           /^[0-9a-f]{64}$/u.test(removed.custody.fingerprint)))
     ) {
+      await restoreAlignedGitlinks()
       const custody = removed.custody
       const status = removed.custody.status
       const component = removed.custody.component
@@ -1571,6 +1757,7 @@ export async function closeEnvironment(
       removed.borrowers.length > 0 &&
       removed.borrowers.every((borrower): borrower is string => typeof borrower === "string" && borrower !== "")
     ) {
+      await restoreAlignedGitlinks()
       const kept = { kept: path, reason: "borrowed", borrowers: removed.borrowers }
       io.stdout(
         options.json === true
@@ -1592,6 +1779,7 @@ export async function closeEnvironment(
       !("manifest" in removed.proof) ||
       typeof removed.proof.manifest !== "string"
     ) {
+      await restoreAlignedGitlinks()
       throw new Error(
         `environment ${path} received malformed git-super removal proof; inspect git worktree list and retention directory ${retain} before retrying`,
       )
@@ -1611,15 +1799,17 @@ export async function closeEnvironment(
   if (removalProof !== undefined) removedProof?.(removalProof)
   const incomplete = retirementOutcome?.retirement === "incomplete"
   const failed = retirementOutcome?.failed ?? []
+  const discarded = closeState.discarded
   io.stdout(
     options.json === true
       ? `${JSON.stringify({
           closed: path,
+          ...(discarded.length === 0 ? {} : { discarded }),
           ...(skipped === undefined ? {} : { skipped }),
           ...(incomplete ? { retirement: "incomplete" } : {}),
           ...(failed.length > 0 ? { failed } : {}),
         })}\n`
-      : `closed environment ${path}${failed.length > 0 ? `; branch retirement failed: ${failed.join("; ")}` : ""}\n`,
+      : `closed environment ${path}${discarded.length === 0 ? "" : `; discarded ${discarded.map((entry) => `${entry.sha.slice(0, 12)} (${entry.subject})`).join(", ")}`}${failed.length > 0 ? `; branch retirement failed: ${failed.join("; ")}` : ""}\n`,
   )
   // The environment is gone either way; a failed retirement left a branch behind, so the close is not a success (30642).
   return failed.length > 0 || (incomplete && removalProof === undefined) ? 1 : 0
