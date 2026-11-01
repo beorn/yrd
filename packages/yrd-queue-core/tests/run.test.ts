@@ -1810,6 +1810,11 @@ it("runs submit and merge checks with setup before each phase and retains both v
     ["Check", expect.stringMatching(/result=pass attempt=1 phase=submit/u)],
     ["Check", expect.stringMatching(/result=pass attempt=1 phase=merge/u)],
   ])
+  // 32043: the merged row names the checks that ran, so a reader of `yrd queue show`
+  // cannot take "merge checks passed" as "the tests passed". The phase-twice check
+  // appears once — the row states the set of checks, not their per-phase replays.
+  const mergingReason = events.find((event) => event.type === "merging")?.props.find(([key]) => key === "Reason")?.[1]
+  expect(mergingReason).toMatch(/^merge checks passed \(verify\);/u)
 })
 
 /** @failure Event setup failures escaped without attributing the candidate against its settled base.

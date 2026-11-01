@@ -3004,12 +3004,17 @@ export async function eventQueueRun(
         deferredChanges.push(branch)
         continue
       }
-      const passedLogs = decisionResults
-        .filter(
-          ({ run }) =>
-            run.result === "pass" && options.checks.some((check) => check.name === run.name && check.run !== "true"),
-        )
-        .map(({ run }) => run.log)
+      const passedRuns = decisionResults.filter(
+        ({ run }) =>
+          run.result === "pass" && options.checks.some((check) => check.name === run.name && check.run !== "true"),
+      )
+      // A check that runs in both the submit and the merge phase passes twice, so the
+      // names are deduped: the row must read as the set of checks that ran, not as a
+      // replay log (32043). "no test step" is deliberately NOT appended — the check set
+      // is declared per repository in `.yrd.yml`, so any claim about tests is an
+      // inference over a name; the names themselves are the fact a reader needs.
+      const passedChecks = [...new Set(passedRuns.map(({ run }) => run.name))]
+      const passedLogs = passedRuns.map(({ run }) => run.log)
       const skippedChecks = options.checks.flatMap((check) => {
         if (options.noCheck === true) return [`${check.name} (no-check mode)`]
         if (check.run === "true") return [`${check.name} (configured off)`]
@@ -3018,7 +3023,9 @@ export async function eventQueueRun(
       })
       const checkReason =
         [
-          ...(passedLogs.length === 0 ? [] : [`merge checks passed; logs: ${passedLogs.join(", ")}`]),
+          ...(passedChecks.length === 0
+            ? []
+            : [`merge checks passed (${passedChecks.join(", ")}); logs: ${passedLogs.join(", ")}`]),
           ...(skippedChecks.length === 0 ? [] : [`skipped checks: ${skippedChecks.join(", ")}`]),
         ].join("; ") || undefined
       tip = await appendOwnedChange("mergingWrite", store, queue, branch, tip, {
