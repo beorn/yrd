@@ -2460,6 +2460,137 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     }
   })
 
+  /**
+   * @failure 32137 (@cto ruling 62f8faa4): `yrd env close` admitted an uncommitted submodule gitlink
+   *          advance whose pin was on component origin/main (B1) and a committed empty root diff (B2),
+   *          but refused a detached HEAD whose committed mergeBase..HEAD diff only advanced a mode 160000
+   *          submodule gitlink to a clean commit on component origin/main (dev5-32013-engine-review shape).
+   * @level   l2 (real bare remote, real materialized submodule, real worktree close)
+   * @consumer every seat or queue consumer retiring a detached environment with a superseded on-main gitlink commit
+   */
+  it("admits detached HEAD commits that only advance a submodule gitlink to a pin on component origin/main, and refuses off-main pins or mixed text changes (32137)", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+
+    const primarySub = gitIn(join(w.work, "vendor/dependency"))
+    writeFileSync(join(w.work, "vendor/dependency/READY"), "on remote main\n")
+    await primarySub(["add", "READY"])
+    await primarySub(["commit", "--quiet", "-m", "advance dependency on remote main"])
+    await primarySub(["push", "--quiet", "origin", "main"])
+    const remoteSubTip = (await primarySub(["rev-parse", "HEAD"])).trim()
+
+    // (a) Exact dev5-32013-engine-review shape: detached HEAD 1 commit ahead of origin/main whose
+    // mergeBase..HEAD diff is solely mode 160000 vendor/dependency at remoteSubTip (on component origin/main).
+    for (const preserve of [false, true]) {
+      const { path } = await openEnvironment(w.work, selected)
+      const envGit = gitIn(path)
+      const subGit = gitIn(join(path, "vendor/dependency"))
+      await subGit(["fetch", "--quiet", "origin", "main"])
+      await subGit(["checkout", "--quiet", "--detach", remoteSubTip])
+      await envGit(["add", "vendor/dependency"])
+      await envGit([
+        "-c",
+        "user.email=env-open@yrd.test",
+        "-c",
+        "user.name=yrd",
+        "commit",
+        "--quiet",
+        "-m",
+        "chore(dependency): measure engine-only intermediate",
+      ])
+      const gitlinkCommitSha = (await envGit(["rev-parse", "HEAD"])).trim()
+
+      const closed = capture(w.work)
+      expect(
+        await runYrdProcess(
+          ["bun", "yrd", "env", "close", path, ...(preserve ? ["--preserve"] : []), "--json"],
+          closed.io,
+        ),
+        closed.stderr(),
+      ).toBe(0)
+      expect(existsSync(path)).toBe(false)
+      expect(JSON.parse(closed.stdout())).toEqual({
+        closed: path,
+        discarded: [
+          {
+            sha: gitlinkCommitSha,
+            subject: "chore(dependency): measure engine-only intermediate",
+            gitlinks: [{ path: "vendor/dependency", pin: remoteSubTip }],
+          },
+        ],
+      })
+    }
+
+    // (b) Committed mode 160000 submodule gitlink pin NOT on component origin/main refuses naming path and pin.
+    {
+      const { path } = await openEnvironment(w.work, selected)
+      const envGit = gitIn(path)
+      const subGit = gitIn(join(path, "vendor/dependency"))
+      writeFileSync(join(path, "vendor/dependency/READY"), "unpushed submodule commit committed in root\n")
+      await subGit(["add", "READY"])
+      await subGit([
+        "-c",
+        "user.email=env-open@yrd.test",
+        "-c",
+        "user.name=yrd",
+        "commit",
+        "--quiet",
+        "-m",
+        "unpushed submodule commit",
+      ])
+      const offMainPin = (await subGit(["rev-parse", "HEAD"])).trim()
+      await envGit(["add", "vendor/dependency"])
+      await envGit([
+        "-c",
+        "user.email=env-open@yrd.test",
+        "-c",
+        "user.name=yrd",
+        "commit",
+        "--quiet",
+        "-m",
+        "chore(dependency): pin unpushed submodule",
+      ])
+
+      const refused = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
+      expect(refused.stderr()).toContain("vendor/dependency")
+      expect(refused.stderr()).toContain(offMainPin.slice(0, 12))
+      expect(refused.stderr()).toContain("is not an ancestor of refs/remotes/origin/main")
+      expect(refused.stderr()).toContain("git switch -c task/<issue>, then --preserve")
+      expect(refused.stderr()).not.toContain("re-run with --preserve")
+      expect(existsSync(path)).toBe(true)
+    }
+
+    // (c) Committed mode 160000 gitlink (on component origin/main) + text file change refuses.
+    {
+      const { path } = await openEnvironment(w.work, selected)
+      const envGit = gitIn(path)
+      const subGit = gitIn(join(path, "vendor/dependency"))
+      await subGit(["fetch", "--quiet", "origin", "main"])
+      await subGit(["checkout", "--quiet", "--detach", remoteSubTip])
+      writeFileSync(join(path, "notes.txt"), "non-gitlink text change\n")
+      await envGit(["add", "vendor/dependency", "notes.txt"])
+      await envGit([
+        "-c",
+        "user.email=env-open@yrd.test",
+        "-c",
+        "user.name=yrd",
+        "commit",
+        "--quiet",
+        "-m",
+        "chore: gitlink plus text change",
+      ])
+
+      const refused = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
+      expect(refused.stderr()).toContain("detached HEAD is ahead of origin/main with content changes")
+      expect(refused.stderr()).toContain("git switch -c task/<issue>, then --preserve")
+      expect(refused.stderr()).not.toContain("re-run with --preserve")
+      expect(existsSync(path)).toBe(true)
+    }
+  })
+
   it.each([false, true])("closes a registered clean environment with declared teardown=%s", async (teardown) => {
     const w = await world(":", teardown ? 'printf "%s\\n" "$YRD_CANDIDATE_SHA" > ../closed.txt' : undefined)
     if (teardown) await addMaterializedDependency(w)

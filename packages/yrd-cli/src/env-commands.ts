@@ -889,9 +889,15 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
   return 0
 }
 
+interface DiscardedGitlink {
+  readonly path: string
+  readonly pin: string
+}
+
 interface DiscardedCommit {
   readonly sha: string
   readonly subject: string
+  readonly gitlinks?: readonly DiscardedGitlink[]
 }
 
 interface AdmissibleGitlink {
@@ -909,12 +915,14 @@ interface EnvironmentCloseState {
 }
 
 /**
- * 32124 (@cto ruling 3cb041cd): decide dirtiness from per-repo needsPreserve, not raw `git status`,
- * so plain `env close` and `env close --preserve` share one answer.
+ * 32124 & 32137 (@cto rulings 3cb041cd, 62f8faa4): decide dirtiness from per-repo needsPreserve,
+ * not raw `git status`, so plain `env close` and `env close --preserve` share one answer.
  * - B1: a gitlink-only difference whose submodule is clean and whose HEAD is an ancestor of the
  *   submodule's remote-tracking main is admissible.
- * - B2: for a detached root, "ahead" means content ahead: if `git diff --quiet $(git merge-base HEAD origin/main) HEAD`
- *   holds, the commits ahead carry no tree change and close may discard them, recording each sha and subject.
+ * - B2: for a detached root, "ahead" means content ahead: if `mergeBase..HEAD` carries no tree change
+ *   or only advances mode-160000 submodule gitlinks whose pins are clean and ancestors of their
+ *   submodule's remote-tracking main (reusing the B1 check), close may discard the commits and record
+ *   each sha, subject, and discarded gitlink path/pin.
  * - B3: otherwise (detached HEAD with content ahead, dirty or unreachable submodule, or unbound store),
  *   close refuses and names `git switch -c task/<issue>, then --preserve` for a detached HEAD.
  */
@@ -931,7 +939,9 @@ async function inspectEnvironmentCloseState(
     dirty.push(`${problem.path}: ${problem.reason}`)
   }
   const cleanByPath = new Map<string, boolean>()
+  const repoByPath = new Map<string, (typeof status.consultedRepositories)[number]>()
   for (const repo of status.consultedRepositories) {
+    repoByPath.set(repo.path, repo)
     const repoGit = repo.path === "." ? treeGit : gitIn(repo.root, process, selection)
     const ownStatus = (
       await repoGit(["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=all"])
@@ -955,6 +965,25 @@ async function inspectEnvironmentCloseState(
     }
     cleanByPath.set(repo.path, ownLines.length === 0 && stagedLines.length === 0)
   }
+  const isSubmoduleClean = (repoPath: string): boolean =>
+    cleanByPath.get(repoPath) === true &&
+    ![...cleanByPath.entries()].some(([childPath, isClean]) => childPath.startsWith(`${repoPath}/`) && !isClean) &&
+    !dirty.some((entry) => entry.slice(3) === repoPath || entry.slice(3).startsWith(`${repoPath} `))
+
+  const checkSubmodulePinOnRemoteMain = async (
+    repoPath: string,
+    pinSha: string,
+  ): Promise<{ clean: false } | { clean: true; onRemoteMain: boolean; subGit: Git; root: string }> => {
+    const repo = repoByPath.get(repoPath)
+    if (repo === undefined || repo.path === "." || !isSubmoduleClean(repoPath)) {
+      return { clean: false }
+    }
+    const subGit = gitIn(repo.root, process, selection)
+    const remoteMain = await refAt(subGit, "refs/remotes/origin/main")
+    const onRemoteMain = remoteMain !== undefined && (await isAncestor(subGit, pinSha, remoteMain))
+    return { clean: true, onRemoteMain, subGit, root: repo.root }
+  }
+
   const admissibleGitlinks: AdmissibleGitlink[] = []
   for (const repo of status.consultedRepositories) {
     if (repo.path === ".") continue
@@ -977,18 +1006,13 @@ async function inspectEnvironmentCloseState(
     const subGit = gitIn(repo.root, process, selection)
     const subHead = (await subGit(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
     if (subHead === headPin) continue
-    const submoduleClean =
-      cleanByPath.get(repo.path) === true &&
-      ![...cleanByPath.entries()].some(([childPath, isClean]) => childPath.startsWith(`${repo.path}/`) && !isClean) &&
-      !dirty.some((entry) => entry.slice(3) === repo.path)
-    if (!submoduleClean) continue
-    const remoteMain = await refAt(subGit, "refs/remotes/origin/main")
-    const onRemoteMain = remoteMain !== undefined && (await isAncestor(subGit, subHead, remoteMain))
-    if (onRemoteMain) {
-      const currentBranch = (await subGit(["branch", "--show-current"])).trim()
+    const check = await checkSubmodulePinOnRemoteMain(repo.path, subHead)
+    if (!check.clean) continue
+    if (check.onRemoteMain) {
+      const currentBranch = (await check.subGit(["branch", "--show-current"])).trim()
       admissibleGitlinks.push({
         path: repo.path,
-        root: repo.root,
+        root: check.root,
         headPin,
         previousHead: subHead,
         ...(currentBranch === "" ? {} : { previousBranch: currentBranch }),
@@ -1012,14 +1036,59 @@ async function inspectEnvironmentCloseState(
             : { sha: line.slice(0, tab).trim(), subject: line.slice(tab + 1) }
         })
         const mergeBase = (await treeGit(["merge-base", "HEAD", originMain])).trim()
-        const treeDiff = (await treeGit(["diff", "--name-status", mergeBase, "HEAD"])).trim()
-        if (treeDiff === "") {
+        const rawDiff = (await treeGit(["diff", "--raw", "--no-abbrev", mergeBase, "HEAD"])).trim()
+        if (rawDiff === "") {
           discarded.push(...aheadCommits)
         } else {
-          for (const entry of aheadCommits) {
-            dirty.push(
-              `detached HEAD is ahead of origin/main with content changes at ${entry.sha.slice(0, 12)} (${entry.subject})`,
-            )
+          const rawLines = rawDiff.split("\n")
+          const discardedGitlinks: DiscardedGitlink[] = []
+          let allAdmissibleGitlinks = true
+          for (const line of rawLines) {
+            const tab = line.indexOf("\t")
+            if (tab < 0) {
+              allAdmissibleGitlinks = false
+              continue
+            }
+            const meta = line.slice(0, tab).trim().split(" ")
+            const gitlinkPath = line.slice(tab + 1).trim()
+            const [oldMode, newMode, , newOid, statusCode] = meta
+            if (
+              oldMode !== ":160000" ||
+              newMode !== "160000" ||
+              statusCode !== "M" ||
+              newOid === undefined ||
+              newOid === "" ||
+              gitlinkPath === "" ||
+              gitlinkPath.includes("\t")
+            ) {
+              allAdmissibleGitlinks = false
+              continue
+            }
+            const check = await checkSubmodulePinOnRemoteMain(gitlinkPath, newOid)
+            if (!check.clean) {
+              allAdmissibleGitlinks = false
+              continue
+            }
+            if (!check.onRemoteMain) {
+              allAdmissibleGitlinks = false
+              const offMainMsg = ` M ${gitlinkPath} (submodule HEAD ${newOid.slice(0, 12)} is not an ancestor of refs/remotes/origin/main)`
+              if (!dirty.includes(offMainMsg)) {
+                dirty.push(offMainMsg)
+              }
+              continue
+            }
+            discardedGitlinks.push({ path: gitlinkPath, pin: newOid })
+          }
+          if (allAdmissibleGitlinks && discardedGitlinks.length > 0) {
+            for (const entry of aheadCommits) {
+              discarded.push({ ...entry, gitlinks: discardedGitlinks })
+            }
+          } else {
+            for (const entry of aheadCommits) {
+              dirty.push(
+                `detached HEAD is ahead of origin/main with content changes at ${entry.sha.slice(0, 12)} (${entry.subject})`,
+              )
+            }
           }
         }
       }
@@ -1809,7 +1878,7 @@ export async function closeEnvironment(
           ...(incomplete ? { retirement: "incomplete" } : {}),
           ...(failed.length > 0 ? { failed } : {}),
         })}\n`
-      : `closed environment ${path}${discarded.length === 0 ? "" : `; discarded ${discarded.map((entry) => `${entry.sha.slice(0, 12)} (${entry.subject})`).join(", ")}`}${failed.length > 0 ? `; branch retirement failed: ${failed.join("; ")}` : ""}\n`,
+      : `closed environment ${path}${discarded.length === 0 ? "" : `; discarded ${discarded.map((entry) => `${entry.sha.slice(0, 12)} (${entry.subject})${entry.gitlinks === undefined || entry.gitlinks.length === 0 ? "" : ` [${entry.gitlinks.map((g) => `${g.path}@${g.pin.slice(0, 12)}`).join(", ")}]`}`).join(", ")}`}${failed.length > 0 ? `; branch retirement failed: ${failed.join("; ")}` : ""}\n`,
   )
   // The environment is gone either way; a failed retirement left a branch behind, so the close is not a success (30642).
   return failed.length > 0 || (incomplete && removalProof === undefined) ? 1 : 0
