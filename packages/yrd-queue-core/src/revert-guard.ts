@@ -663,7 +663,15 @@ export function revertedPathsReason(report: RevertGuardReport): string {
     ...(report.base.state === "single" ? {} : { base: report.base.state }),
     ...(report.base.state === "multiple" ? { bases: report.base.bases } : {}),
   })
-  const named = paths.slice(0, 8).join(", ")
+  const described = [
+    ...report.paths.map(
+      (row) =>
+        `${row.path} (candidate blob ${row.candidate} = the target's pre-advance blob ${row.base}, target blob ${row.target}; a deliberate removal or move of this content reads the same, so check whether it is intended)`,
+    ),
+    ...report.swallowed.map((row) => row.path),
+  ]
+    .slice(0, 8)
+    .join(", ")
   const gapText =
     report.gaps.length === 0
       ? ""
@@ -671,7 +679,7 @@ export function revertedPathsReason(report: RevertGuardReport): string {
           .map((gap) => (gap.path === "" ? gap.reason : `${gap.reason} [${gap.path}@d${String(gap.depth)}]`))
           .join(", ")}`
   const undecidable = report.base.state === "none" || report.gaps.some((gap) => gap.kind === "unjudged")
-  return `${undecidable ? "revert audit undecidable; " : ""}${String(paths.length)} reverted/swallowed path(s)${named === "" ? "" : `: ${named}`}; ${payload}${gapText}`
+  return `${undecidable ? "revert audit undecidable; " : ""}${String(paths.length)} reverted/swallowed path(s)${described === "" ? "" : `: ${described}`}; ${payload}${gapText}`
 }
 
 /**

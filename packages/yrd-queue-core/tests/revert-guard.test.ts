@@ -1228,7 +1228,7 @@ describe("revert guard path cap (28195)", () => {
  * @consumer yrd submit admission warnings and every seat that rechecks a valid tree because of them.
  * @testonly none
  */
-it("30901: a pin-only advance that relocates a declaration is not a reverted path", async () => {
+it("30901: a relocated declaration is reported with the measured blobs and the deliberate-removal clause", async () => {
   const root = mkdtempSync(join(tmpdir(), "yrd-revert-relocate-30901-"))
   roots.push(root)
   const dep = join(root, "dep")
@@ -1260,10 +1260,24 @@ it("30901: a pin-only advance that relocates a declaration is not a reverted pat
     await gitIn(dir, undefined, undefined, { env })(["submodule", "update", "--init", "--recursive", "--quiet"])
     return dir
   }
+  const depGit = gitIn(dep, undefined, undefined, { env })
+  const baseBlob = (await depGit(["rev-parse", `${targetPin}^:manifest-448ce.json`])).trim()
+  const targetBlob = (await depGit(["rev-parse", `${targetPin}:manifest-448ce.json`])).trim()
   const report = await detect({ checkoutAt, target }, candidate, candidate)
+  // The warning is true and stays: the candidate restored the blob the target itself held before its
+  // advance. What the reader was missing is what was compared, so the reason must name the blobs and
+  // say a deliberate move reads the same.
   expect(report.coverage).toBe("complete")
-  expect(report.paths.map((row) => row.path)).toEqual([])
-  expect(revertedPathsFinding(report)).toBeUndefined()
+  expect(report.paths.map((row) => row.path)).toEqual(["vendor/dep/manifest-448ce.json"])
+  expect(report.paths[0]?.candidate).toBe(baseBlob)
+  expect(report.paths[0]?.target).toBe(targetBlob)
+  expect(report.paths[0]?.base).toBe(baseBlob)
+  const reason = revertedPathsReason(report)
+  expect(reason).toContain(`candidate blob ${baseBlob}`)
+  expect(reason).toContain(`target blob ${targetBlob}`)
+  expect(reason).toContain("a deliberate removal or move of this content reads the same")
+  expect(revertedPathsFinding(report)?.coverage).toBe("complete")
+  expect(revertedPathsNotice(reason)?.coverage).toBe("complete")
 })
 
 /**
