@@ -278,6 +278,8 @@ it.each([
     const retain = join(dirname(w.work), "retained-modules")
     const original = capture(w.work)
     const competing = capture(w.work)
+    // The native verifier reports deliberate copy damage through console.warn as well as its result.
+    const warning = proof === "damaged-copy" ? vi.spyOn(console, "warn").mockImplementation(() => {}) : undefined
     let checks = 0
     let manifest: string | undefined
     const closing = closeEnvironment(path, { json: true, retain }, original.io, undefined, "delegate", async () => {
@@ -329,8 +331,16 @@ it.each([
       expect(original.stderr()).toContain(manifest!)
       if (proof === "invalid-json") expect(original.stderr()).toContain("no-manifest:")
       if (proof === "no-modules") expect(original.stderr()).toContain("incomplete-proof: missing retained")
+      if (proof === "damaged-copy") {
+        expect(warning).toHaveBeenCalledExactlyOnceWith(
+          expect.stringContaining(
+            `git-super: retained compaction failed for ${join(dirname(manifest!), "modules")}: gate-2: gate 2 files mismatch`,
+          ),
+        )
+      }
       expect(original.stdout()).toBe("")
     }
+    warning?.mockRestore()
     expect(existsSync(path)).toBe(false)
     expect(await w.git(["worktree", "list", "--porcelain"])).not.toContain(path)
   },
