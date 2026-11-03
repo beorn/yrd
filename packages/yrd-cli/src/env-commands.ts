@@ -1640,8 +1640,9 @@ export async function closeEnvironment(
   const retentionRoot =
     options.retain === undefined ? join(workdir, "retained-modules") : resolve(io.cwd, options.retain)
   const concurrentClose = async (error: unknown): Promise<boolean> => {
-    // Queue callers require the complete typed callback proof; do not synthesize it from a lookup.
-    if (removedProof !== undefined || existsSync(path)) return false
+    // Both queue routes use refuse mode; the request pass can omit the typed callback.
+    // Only the direct manual route may recognize a competing removal from a narrowed lookup.
+    if (onIncompleteCensus !== "delegate" || removedProof !== undefined || existsSync(path)) return false
     const inspected: string[] = []
     const details: string[] = []
     const keep = (): false => {

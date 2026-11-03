@@ -259,6 +259,7 @@ async function world(setup: string, teardown?: string): Promise<World> {
 it.each([
   { checkpoint: 1, proof: "matching" },
   { checkpoint: 2, proof: "matching" },
+  { checkpoint: 1, proof: "automatic" },
   { checkpoint: 1, proof: "missing" },
   { checkpoint: 1, proof: "wrong-head" },
   { checkpoint: 1, proof: "wrong-path" },
@@ -282,50 +283,62 @@ it.each([
     const warning = proof === "damaged-copy" ? vi.spyOn(console, "warn").mockImplementation(() => {}) : undefined
     let checks = 0
     let manifest: string | undefined
-    const closing = closeEnvironment(path, { json: true, retain }, original.io, undefined, "delegate", async () => {
-      if (++checks !== checkpoint) return
-      expect(
-        await closeEnvironment(
-          path,
-          { json: true, retain },
-          competing.io,
-          undefined,
-          "delegate",
-          undefined,
-          (proof) => {
-            manifest = proof.manifest
-          },
-        ),
-        competing.stderr(),
-      ).toBe(0)
-      expect(JSON.parse(competing.stdout())).toMatchObject({ closed: path })
-      expect(existsSync(path)).toBe(false)
-      expect(manifest).toBeTypeOf("string")
-      expect(existsSync(manifest!)).toBe(true)
-      const stored = JSON.parse(readFileSync(manifest!, "utf8")) as {
-        head: string
-        path: string
-        modules: string
-        createdAt: string
-        retained: string
-        notCompared: unknown[]
-      }
-      if (proof === "missing") rmSync(manifest!)
-      else if (proof === "invalid-json") writeFileSync(manifest!, "{")
-      else if (proof === "damaged-copy") {
-        writeFileSync(join(stored.retained, "vendor/dependency/config"), "damaged retained config\n")
-      } else if (proof !== "matching") {
-        if (proof === "wrong-head") stored.head = "0".repeat(40)
-        if (proof === "wrong-path") stored.path = join(dirname(path), "another-environment")
-        if (proof === "wrong-admin") stored.modules = join(dirname(w.work), "another-admin/modules")
-        if (proof === "stale") stored.createdAt = new Date(Date.now() - 3_600_000).toISOString()
-        if (proof === "omitted") stored.notCompared = [{ path: "vendor/dependency", reason: "excluded" }]
-        writeFileSync(manifest!, JSON.stringify(stored))
-      }
-    })
+    // Queue request processing uses refuse without a proof callback; existing single-close rows
+    // did not prove that this automatic caller cannot accept a narrowed competing-removal proof.
+    const closing = closeEnvironment(
+      path,
+      { json: true, retain },
+      original.io,
+      undefined,
+      proof === "automatic" ? "refuse" : "delegate",
+      async () => {
+        if (++checks !== checkpoint) return
+        expect(
+          await closeEnvironment(
+            path,
+            { json: true, retain },
+            competing.io,
+            undefined,
+            "delegate",
+            undefined,
+            (proof) => {
+              manifest = proof.manifest
+            },
+          ),
+          competing.stderr(),
+        ).toBe(0)
+        expect(JSON.parse(competing.stdout())).toMatchObject({ closed: path })
+        expect(existsSync(path)).toBe(false)
+        expect(manifest).toBeTypeOf("string")
+        expect(existsSync(manifest!)).toBe(true)
+        const stored = JSON.parse(readFileSync(manifest!, "utf8")) as {
+          head: string
+          path: string
+          modules: string
+          createdAt: string
+          retained: string
+          notCompared: unknown[]
+        }
+        if (proof === "missing") rmSync(manifest!)
+        else if (proof === "invalid-json") writeFileSync(manifest!, "{")
+        else if (proof === "damaged-copy") {
+          writeFileSync(join(stored.retained, "vendor/dependency/config"), "damaged retained config\n")
+        } else if (proof !== "matching" && proof !== "automatic") {
+          if (proof === "wrong-head") stored.head = "0".repeat(40)
+          if (proof === "wrong-path") stored.path = join(dirname(path), "another-environment")
+          if (proof === "wrong-admin") stored.modules = join(dirname(w.work), "another-admin/modules")
+          if (proof === "stale") stored.createdAt = new Date(Date.now() - 3_600_000).toISOString()
+          if (proof === "omitted") stored.notCompared = [{ path: "vendor/dependency", reason: "excluded" }]
+          writeFileSync(manifest!, JSON.stringify(stored))
+        }
+      },
+    )
     if (proof === "matching") {
       expect(await closing, original.stderr()).toBe(0)
       expect(JSON.parse(original.stdout())).toMatchObject({ closed: path, retirement: "incomplete" })
+    } else if (proof === "automatic") {
+      await expect(closing).rejects.toThrow("ls-tree")
+      expect(original.stdout()).toBe("")
     } else {
       await expect(closing).rejects.toThrow(retain)
       expect(original.stderr()).toContain(manifest!)
