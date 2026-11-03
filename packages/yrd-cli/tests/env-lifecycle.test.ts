@@ -262,13 +262,17 @@ it.each([
   { checkpoint: 1, proof: "missing" },
   { checkpoint: 1, proof: "wrong-head" },
   { checkpoint: 1, proof: "wrong-path" },
+  { checkpoint: 1, proof: "wrong-admin" },
   { checkpoint: 1, proof: "stale" },
   { checkpoint: 1, proof: "damaged-copy" },
+  { checkpoint: 1, proof: "omitted" },
+  { checkpoint: 1, proof: "invalid-json" },
+  { checkpoint: 1, proof: "no-modules" },
 ] as const)(
   "requires $proof concurrent retirement proof at close checkpoint $checkpoint (30783)",
   async ({ checkpoint, proof }) => {
     const w = await world(":")
-    await addMaterializedDependency(w)
+    if (proof !== "no-modules") await addMaterializedDependency(w)
     const head = (await w.git(["rev-parse", "HEAD"])).trim()
     const { path } = await openEnvironment(w.work, head)
     const retain = join(dirname(w.work), "retained-modules")
@@ -299,24 +303,32 @@ it.each([
       const stored = JSON.parse(readFileSync(manifest!, "utf8")) as {
         head: string
         path: string
+        modules: string
         createdAt: string
         retained: string
+        notCompared: unknown[]
       }
       if (proof === "missing") rmSync(manifest!)
+      else if (proof === "invalid-json") writeFileSync(manifest!, "{")
       else if (proof === "damaged-copy") {
         writeFileSync(join(stored.retained, "vendor/dependency/config"), "damaged retained config\n")
       } else if (proof !== "matching") {
         if (proof === "wrong-head") stored.head = "0".repeat(40)
         if (proof === "wrong-path") stored.path = join(dirname(path), "another-environment")
+        if (proof === "wrong-admin") stored.modules = join(dirname(w.work), "another-admin/modules")
         if (proof === "stale") stored.createdAt = new Date(Date.now() - 3_600_000).toISOString()
+        if (proof === "omitted") stored.notCompared = [{ path: "vendor/dependency", reason: "excluded" }]
         writeFileSync(manifest!, JSON.stringify(stored))
       }
     })
     if (proof === "matching") {
       expect(await closing, original.stderr()).toBe(0)
-      expect(JSON.parse(original.stdout())).toMatchObject({ closed: path })
+      expect(JSON.parse(original.stdout())).toMatchObject({ closed: path, retirement: "incomplete" })
     } else {
-      await expect(closing).rejects.toThrow()
+      await expect(closing).rejects.toThrow(retain)
+      expect(original.stderr()).toContain(manifest!)
+      if (proof === "invalid-json") expect(original.stderr()).toContain("no-manifest:")
+      if (proof === "no-modules") expect(original.stderr()).toContain("incomplete-proof: missing retained")
       expect(original.stdout()).toBe("")
     }
     expect(existsSync(path)).toBe(false)

@@ -19,7 +19,8 @@
 
 import { shellQuote } from "git-super/shell-command"
 import { superStatus } from "git-super/status"
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { rebuildRetainedCopyProof, verifyRetainedCopy } from "git-super"
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { createGitWorkspace, worktreeHomeRoot, type ProvisionedBay } from "@yrd/bay"
 import {
@@ -1634,6 +1635,76 @@ export async function closeEnvironment(
     }
     return 0
   }
+  const admittedAt = Date.now()
+  const common = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+  const retentionRoot =
+    options.retain === undefined ? join(workdir, "retained-modules") : resolve(io.cwd, options.retain)
+  const concurrentClose = async (error: unknown): Promise<boolean> => {
+    // Queue callers require the complete typed callback proof; do not synthesize it from a lookup.
+    if (removedProof !== undefined || existsSync(path)) return false
+    const inspected: string[] = []
+    const details: string[] = []
+    const keep = (): false => {
+      const note = `concurrent retirement not proved for ${path}@${commit}; retention root ${retentionRoot}; inspected manifests ${JSON.stringify(inspected)}${details.length === 0 ? "" : `\n${details.join("\n")}`}`
+      io.stderr(`yrd: ${note}\n`)
+      if (error instanceof Error) error.message += `\n${note}`
+      return false
+    }
+    try {
+      if ((await registeredWorktrees(git)).some((entry) => resolve(entry.path) === path)) return keep()
+      if (existsSync(retentionRoot)) {
+        for (const child of readdirSync(retentionRoot, { withFileTypes: true })) {
+          if (!child.isDirectory() || !child.name.startsWith(`${basename(path)}-`)) continue
+          const entry = join(retentionRoot, child.name)
+          const manifest = join(entry, "manifest.json")
+          inspected.push(manifest)
+          const rebuilt = rebuildRetainedCopyProof(entry, retentionRoot)
+          if (typeof rebuilt === "string") {
+            details.push(`${manifest}: ${rebuilt}`)
+            continue
+          }
+          // Native writer: git-super/src/worktree-removal.ts writes WorktreeRemovalProof.head/createdAt
+          // into this same manifest. The GitSuper contract test pins these stored field names (30783).
+          const stored = rebuilt.stored
+          if (
+            rebuilt.path !== path ||
+            rebuilt.modules !== join(adminDir, "modules") ||
+            stored.head !== commit ||
+            typeof stored.createdAt !== "string" ||
+            !(Date.parse(stored.createdAt) > admittedAt) ||
+            !Array.isArray(stored.notCompared) ||
+            stored.notCompared.length !== 0
+          ) {
+            details.push(`${manifest}: identity, admission time or repository coverage does not match`)
+            continue
+          }
+          const verified = verifyRetainedCopy(rebuilt, common)
+          if (verified.status !== "ok") {
+            details.push(`${manifest}: ${JSON.stringify(verified)}`)
+            continue
+          }
+          if (existsSync(path) || (await registeredWorktrees(git)).some((entry) => resolve(entry.path) === path)) {
+            return keep()
+          }
+          if (details.length > 0) io.stderr(`yrd: concurrent close inspection\n${details.join("\n")}\n`)
+          io.stderr(
+            `yrd: concurrent close verified ${path}@${commit} through ${manifest}; branch retirement outcome was not observed\n`,
+          )
+          io.stdout(
+            options.json === true
+              ? `${JSON.stringify({ closed: path, retirement: "incomplete" })}\n`
+              : `closed environment ${path}; concurrent removal verified; branch retirement outcome was not observed\n`,
+          )
+          return true
+        }
+      }
+    } catch (inspectionError) {
+      details.push(
+        `proof inspection failed: ${inspectionError instanceof Error ? inspectionError.message : String(inspectionError)}`,
+      )
+    }
+    return keep()
+  }
   await beforeRemove?.()
   if (config?.teardown !== undefined) {
     const artifacts = join(workdir, "logs", "environments", basename(path), runId())
@@ -1677,7 +1748,13 @@ export async function closeEnvironment(
       subject,
     })
   }
-  const modules = await treeGit(["ls-tree", commit, "--", ".gitmodules"])
+  let modules: string
+  try {
+    modules = await treeGit(["ls-tree", commit, "--", ".gitmodules"])
+  } catch (error) {
+    if (await concurrentClose(error)) return 0
+    throw error
+  }
   const recheck = await admitEnvironmentClose(path, io, censusSource)
   if (recheck.kind === "needs-delegation") {
     // Teardown already ran, so delegating now would run it twice in a context
@@ -1761,6 +1838,7 @@ export async function closeEnvironment(
         ]),
       )
     } catch (error) {
+      if (await concurrentClose(error)) return 0
       await restoreAlignedGitlinks()
       throw new Error(
         `environment ${path} could not close through git super worktree remove: ${error instanceof Error ? error.message : String(error)}; inspect its registration and retention directory ${retain} before retrying; no plain-git fallback was attempted`,
