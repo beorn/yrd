@@ -1,8 +1,9 @@
 /**
- * Narrow GitHub 5xx recognition for yrd publish retries (27995).
+ * Narrow GitHub server-error recognition for yrd publish retries (27995, 32276).
  *
  * Git gives no structured HTTP status. Only the explicit shapes in git's
- * stderr count as transient: `returned error: 50x` and `Internal Server Error`.
+ * stderr count as transient: `returned error: 50x`, `Internal Server Error`,
+ * and the exact `fatal error in commit_refs_rules` server failure.
  * Anything else stays a non-transient refusal (24395 item 4).
  */
 
@@ -11,6 +12,8 @@ import { setTimeout as delay } from "node:timers/promises"
 const MAX_LINE = 300
 const RETURNED_5XX = /returned error:\s*50\d\b/iu
 const INTERNAL_SERVER_ERROR = /Internal Server Error/u
+// 32276 / CTO: read-only GitHub rulesets 403 proved this server failure was not a repository policy refusal.
+const COMMIT_REFS_RULES_ERROR = /fatal error in commit_refs_rules/u
 const REQUEST_ID = /\bRequest ID:\s*([0-9A-Fa-f:]+)/u
 
 export type TransientPush5xx = Readonly<{
@@ -48,7 +51,7 @@ export function matchTransientPush5xx(text: string): TransientPush5xx | undefine
   for (const raw of text.split("\n")) {
     const returned = RETURNED_5XX.exec(raw)
     const internal = INTERNAL_SERVER_ERROR.exec(raw)
-    const match = returned ?? internal
+    const match = returned ?? internal ?? COMMIT_REFS_RULES_ERROR.exec(raw)
     if (match === null || match.index === undefined) continue
     return {
       line: raw.slice(match.index, match.index + MAX_LINE).trim(),

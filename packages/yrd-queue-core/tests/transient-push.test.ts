@@ -29,6 +29,7 @@ describe("transient GitHub 5xx on a git push", () => {
       "fatal: unable to access 'https://github.com/beorn/x/': The requested URL returned error: 502",
     ],
     ["Internal Server Error", "remote: Internal Server Error"],
+    ["retained commit_refs_rules server failure (32276)", "remote: fatal error in commit_refs_rules        "],
     [
       "specimen request id beside Internal Server Error",
       ["remote: Internal Server Error", "remote: Request ID: 8B8E:93E9C:1C9E26:269104:6AC672BE"].join("\n"),
@@ -61,6 +62,7 @@ describe("not a transient 5xx — stay fail-loud, no retry", () => {
     ["4xx 401", "The requested URL returned error: 401"],
     ["4xx 404", "The requested URL returned error: 404"],
     ["unrecognized hook refusal", "remote: pre-receive hook declined"],
+    ["GitHub policy refusal", "remote: error: GH013: Repository rule violations found for refs/heads/main."],
     ["bare HTTP 500 without git's shapes", "error: RPC failed; HTTP 500 curl 22"],
     ["connection reset", "fatal: the remote end hung up unexpectedly: Connection reset by peer"],
     ["empty", ""],
