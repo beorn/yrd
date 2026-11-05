@@ -994,9 +994,7 @@ describe("yrd env open prepares the retained environment", () => {
                 ? "native retained removal proof accepted"
                 : `fresh: opened ${opening.record.at}`
         const evidence = `${mode}, aged=${aged}\n${round.stderr()}\n${journal}`
-        expect(round.stderr(), evidence).toContain(
-          `yrd: environment ${bay}: ${closes ? "closed" : "kept"}: ${why}\n`,
-        )
+        expect(round.stderr(), evidence).toContain(`yrd: environment ${bay}: ${closes ? "closed" : "kept"}: ${why}\n`)
         expect(existsSync(bay), evidence).toBe(!closes)
         const registration = await fixture.git(["worktree", "list", "--porcelain"])
         if (closes) expect(registration, evidence).not.toContain(bay)
