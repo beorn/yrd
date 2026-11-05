@@ -4,6 +4,9 @@
 // superproject's fleet scan and Hab composition both read the row below, so it
 // stays a named export rather than being inlined into the service entry.
 
+// Resolved by the hh-dev workspace, not a declared dependency: this file sits at the repo root,
+// outside yrd's own tsconfig and CI typecheck, so only the dev workspace run checks it (@cto).
+import type { HabModule } from "@hab/config"
 import { yrdQueueRunnerDeclarations } from "./packages/yrd-queue-core/src/runner-declarations.ts"
 // Imported by FILE, never the barrel: hab's plan evaluation loads this module,
 // and the constant is pure, so reading it never drags the queue's module graph
@@ -95,4 +98,4 @@ export default {
       },
     ]),
   ),
-}
+} satisfies HabModule
