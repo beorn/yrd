@@ -52,6 +52,7 @@ import {
 } from "../src/env-close-requests.ts"
 import { workdirOf } from "../src/workdir.ts"
 import { environmentProvenance } from "../src/env-cleanup-provenance.ts"
+import { readEnvOpenRecord, writeEnvOpenRecord } from "../src/env-open-record.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 
@@ -933,28 +934,78 @@ describe("yrd env open prepares the retained environment", () => {
     expect((await w.git(["rev-parse", "refs/heads/task/reopened"])).trim()).toBe(candidate)
   })
 
-  it("keeps a failed environment and reports its command and output", async () => {
+  it("keeps failed setup evidence through fresh, eligible, held and standing cleanup rounds", async () => {
     const command = "printf 'setup exploded\\n' >&2; exit 23"
-    const w = await world(command)
-    const run = capture(w.work)
+    for (const mode of ["plain", "held", "standing"] as const) {
+      const fixture = await world(command)
+      await birthEventQueue(fixture.work, "main")
+      const run = capture(fixture.work)
+      const holdReason = "F5 failed setup evidence"
+      const flags = mode === "held" ? ["--hold", holdReason] : mode === "standing" ? ["--keep"] : []
 
-    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected], run.io)).toBe(2)
+      const selected = (await fixture.git(["rev-parse", "HEAD"])).trim()
+      expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, ...flags], run.io)).toBe(2)
 
-    const listed = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io), listed.stderr()).toBe(0)
-    const rows = JSON.parse(listed.stdout()) as { environments: { path: string }[] }
-    expect(rows.environments).toHaveLength(1)
-    const bay = rows.environments[0]!.path
-    expect(run.stdout()).toBe("")
-    expect(existsSync(bay)).toBe(true)
-    expect(await w.git(["worktree", "list", "--porcelain"])).toContain(bay)
-    expect((await gitIn(bay)(["branch", "--show-current"])).trim()).toBe("")
-    expect(run.stderr()).toContain(command)
-    expect(run.stderr()).toContain("exit 23")
-    expect(run.stderr()).toContain("exit 23 is not a verdict")
-    expect(run.stderr()).toContain("setup exploded")
-    expect(run.stderr()).toContain(bay)
+      const listed = capture(fixture.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io), listed.stderr()).toBe(0)
+      const rows = JSON.parse(listed.stdout()) as { environments: { path: string }[] }
+      expect(rows.environments).toHaveLength(1)
+      const bay = rows.environments[0]!.path
+      expect(run.stdout()).toBe("")
+      expect(existsSync(bay)).toBe(true)
+      expect(await fixture.git(["worktree", "list", "--porcelain"])).toContain(bay)
+      expect((await gitIn(bay)(["branch", "--show-current"])).trim()).toBe("")
+      expect(run.stderr()).toContain(command)
+      expect(run.stderr()).toContain("exit 23")
+      expect(run.stderr()).toContain("exit 23 is not a verdict")
+      expect(run.stderr()).toContain("setup exploded")
+      expect(run.stderr()).toContain(bay)
+
+      const failureText = run.stderr()
+      const logMatch = /^log (.+setup\.log)$/mu.exec(failureText)
+      expect(logMatch, failureText).not.toBeNull()
+      const setupLog = logMatch![1]!
+      expect(relative(bay, setupLog).startsWith(`..${sep}`)).toBe(true)
+      const setupBytes = readFileSync(setupLog)
+      expect(setupBytes.toString("utf8")).toBe("setup exploded\n")
+      const gitDir = (await gitIn(bay)(["rev-parse", "--absolute-git-dir"])).trim()
+      const opening = readEnvOpenRecord(gitDir)
+      if (opening.status !== "recorded") throw new Error(`failed setup opening: ${JSON.stringify(opening)}`)
+
+      for (const aged of mode === "plain" ? [false, true] : [true]) {
+        if (aged) {
+          writeEnvOpenRecord(gitDir, {
+            ...opening.record,
+            at: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+          })
+        }
+        const round = capture(fixture.work)
+        const exit = await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], round.io)
+        expect(exit, round.stderr()).toBe(0)
+        const outcome = JSON.parse(round.stdout()) as { log: string }
+        const journal = readFileSync(outcome.log, "utf8")
+        const closes = mode === "plain" && aged
+        const why =
+          mode === "held"
+            ? `held: ${holdReason}`
+            : mode === "standing"
+              ? "opening lifetime standing"
+              : aged
+                ? "native retained removal proof accepted"
+                : `fresh: opened ${opening.record.at}`
+        const evidence = `${mode}, aged=${aged}\n${round.stderr()}\n${journal}`
+        expect(round.stderr(), evidence).toContain(
+          `yrd: environment ${bay}: ${closes ? "closed" : "kept"}: ${why}\n`,
+        )
+        expect(existsSync(bay), evidence).toBe(!closes)
+        const registration = await fixture.git(["worktree", "list", "--porcelain"])
+        if (closes) expect(registration, evidence).not.toContain(bay)
+        else expect(registration, evidence).toContain(bay)
+        expect(existsSync(setupLog), evidence).toBe(true)
+        expect(readFileSync(setupLog), evidence).toEqual(setupBytes)
+        expect(run.stderr()).toBe(failureText)
+      }
+    }
   })
 
   /**
