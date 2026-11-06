@@ -83,9 +83,9 @@
     },
   },
   "overrides": {
-    "git-super": "github:beorn/git-super#c2992ad7b3d9bb824e4029ae9c71a156d3e82f1b",
-    "gitomic": "github:beorn/gitomic#dadb3fffb3d60217612ec9834ffb73118574f49a",
-    "loggily": "github:beorn/loggily#33b80f632df3005c382698ffe0620d48b1a74554",
+    "git-super": "github:beorn/git-super#3e0aad2952e4d2232a106138e19c81ca17c546d9",
+    "gitomic": "github:beorn/gitomic#abf21f5cbb6599403b25b9e7c9fc46b8ec690570",
+    "loggily": "github:beorn/loggily#b29b733b801ce25f4a87b36df6e2fde6366019f2",
   },
   "packages": {
     "@bearly/cli-process": ["@bearly/cli-process@0.1.0", "", {}, "sha512-rMue1/wZy0eO3mTTOqhiB48E54z1uDggW6qItP/BH9mJvFz//tJ8b1FrPv0TELwbd5oUIHz3QUt3x0AcrudLVA=="],
@@ -380,9 +380,9 @@
 
     "gifenc": ["gifenc@1.0.3", "", {}, "sha512-xdr6AdrfGBcfzncONUOlXMBuc5wJDtOueE3c5rdG0oNgtINLD+f2iFZltrBRZYzACRbKr+mSVU/x98zv2u3jmw=="],
 
-    "git-super": ["git-super@github:beorn/git-super#c2992ad", { "dependencies": { "@bearly/flock": "0.2.3", "@bearly/pacing": "^0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "gitomic": "^0.4.0", "loggily": "^0.10.2", "react": "19.3.1", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-c2992ad", "sha512-3LBRtm6PjYvIbAai2oTL31kXtJ1B1sX3Z3qnGcW9Sbl1BSXPMieje5ZFjz8V6m8EJKC3sWUTUavjfzLKEIhGDQ=="],
+    "git-super": ["git-super@github:beorn/git-super#3e0aad2", { "dependencies": { "@bearly/flock": "0.2.3", "@bearly/pacing": "^0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "gitomic": "^0.4.0", "loggily": "^0.10.2", "react": "19.3.1", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-3e0aad2", "sha512-iED4/zFxz6Di872x840J2VsIFoHwRLIR3PFa5heFxAu0I2ursQgIZQQEhAzoxB1+BI3x1pkRoheIFkyC2gmvHQ=="],
 
-    "gitomic": ["gitomic@github:beorn/gitomic#dadb3ff", { "dependencies": { "@bearly/cli-process": "^0.1.0", "@bearly/flock": "^0.2.2", "@bearly/pacing": "^0.1.0" }, "peerDependencies": { "isomorphic-git": "^1.38.7" }, "optionalPeers": ["isomorphic-git"], "bin": { "gitomic": "./src/bin.ts" } }, "beorn-gitomic-dadb3ff", "sha512-oNRQlknBSPmgSBZZYOOCTk5epvKlnt8dkkJat7KNSttQzHLQGDAkAV7mT0nu9BFHTBn1uPMT8hgbE/+xTyFSgg=="],
+    "gitomic": ["gitomic@github:beorn/gitomic#abf21f5", { "dependencies": { "@bearly/cli-process": "^0.1.0", "@bearly/flock": "^0.2.2", "@bearly/pacing": "^0.1.0" }, "peerDependencies": { "isomorphic-git": "^1.38.7" }, "optionalPeers": ["isomorphic-git"], "bin": { "gitomic": "./src/bin.ts" } }, "beorn-gitomic-abf21f5", "sha512-g/IqRghsSCCFZcPtbx4ydWDTbnWTekX3F917oJ6E+uZi6dUPzzKlwHazVyO7TH86O6np00dP5vp2OhvctsnSDw=="],
 
     "hast-util-to-html": ["hast-util-to-html@9.0.5", "", { "dependencies": { "@types/hast": "^3.0.0", "@types/unist": "^3.0.0", "ccount": "^2.0.0", "comma-separated-tokens": "^2.0.0", "hast-util-whitespace": "^3.0.0", "html-void-elements": "^3.0.0", "mdast-util-to-hast": "^13.0.0", "property-information": "^7.0.0", "space-separated-tokens": "^2.0.0", "stringify-entities": "^4.0.0", "zwitch": "^2.0.4" } }, "sha512-OguPdidb+fbHQSU4Q4ZiLKnzWo8Wwsf5bZfbvu7//a9oTYoqD/fWpe96NuHkoS9h0ccGOTe0C4NGXdtS0iObOw=="],
 
@@ -418,7 +418,7 @@
 
     "lightningcss-win32-x64-msvc": ["lightningcss-win32-x64-msvc@1.32.0", "", { "os": "win32", "cpu": "x64" }, "sha512-Amq9B/SoZYdDi1kFrojnoqPLxYhQ4Wo5XiL8EVJrVsB8ARoC1PWW6VGtT0WKCemjy8aC+louJnjS7U18x3b06Q=="],
 
-    "loggily": ["loggily@github:beorn/loggily#33b80f6", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-33b80f6", "sha512-VQCH6odbYxSaQwyPCtZbpPqcAfIUDPlVafHpTBziR4K2nlD8Qt0qo58h7Kziiqbu7tuq0KETX3dSm/QG/xsroA=="],
+    "loggily": ["loggily@github:beorn/loggily#b29b733", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-b29b733", "sha512-CNglij/ng/eG0PKRPT5n2SQjiSHYTwNbAZ2BurtQGPk63vC5LlCkGfIrkn4h9sBStebwSKYLpvU3yGBnzR23nA=="],
 
     "lru-cache": ["lru-cache@11.5.3", "", {}, "sha512-U4N8FgzmWxc8k1VH8Kr6lQg18U7Fjvby6wXHVRX/ZZ7IwWbRMgrRbP0Wrb5q5NVinryp4SQampHKdvtecItxUg=="],
 
