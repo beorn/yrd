@@ -25,7 +25,12 @@ import {
   type ComponentCustodyFreshness,
 } from "git-super/worktree"
 import { inspectProcessCwds, resolveContainedPath, type ProcessCwdProjection } from "removely"
-import { environmentCwdHolder, processCwdCoverage, validateLiveEnvironmentUses } from "./env-close-holders.ts"
+import {
+  assertNoLiveEnvironmentUse,
+  environmentCwdHolder,
+  processCwdCoverage,
+  validateLiveEnvironmentUses,
+} from "./env-close-holders.ts"
 import {
   IncompleteCensusError,
   PrivateCheckoutRefusalError,
@@ -295,8 +300,6 @@ async function consumeCloseRequests(
     onEnvironmentClosed?: (closed: ClosedEnvironment) => Promise<void>
     releaseCheckout?: ReleaseCheckoutRound
     readTip: (repository: string, branch: string) => Promise<string | undefined>
-    liveUseHolder: (path: string) => string | undefined
-    liveUseFailure: string | undefined
   }>,
 ): Promise<
   Readonly<{ attempted: number; closed: number; handled: ReadonlySet<string>; proofs: readonly WorktreeRemovalProof[] }>
@@ -600,17 +603,18 @@ async function consumeCloseRequests(
       dropCloseRequest(file)
       continue
     }
-    liveUsePrecheckFailure = input.liveUseFailure
-    if (liveUsePrecheckFailure === undefined) {
+    if (attempted < CLOSE_ATTEMPTS_PER_ROUTE) {
       try {
-        const holder = input.liveUseHolder(request.path)
-        if (holder !== undefined) {
+        await assertNoLiveEnvironmentUse(request.path, io)
+      } catch (cause) {
+        // The shared judgement wraps reader failures with an own `cause`, even when the reader throws undefined.
+        // Its holder refusal has no cause; reuse that decision rather than a second matcher or message parser.
+        if (cause instanceof Error && !Object.hasOwn(cause, "cause")) {
           input.custodyRefusals.delete(request.path)
-          journal(file, request, request.path, "retired", `${holder}; no locked close attempted`, fingerprint)
+          journal(file, request, request.path, "retired", `${cause.message}; no locked close attempted`, fingerprint)
           dropCloseRequest(file)
           continue
         }
-      } catch (cause) {
         liveUsePrecheckFailure = String(cause)
       }
     }
@@ -1557,8 +1561,6 @@ async function cleanupEnvironments(
     worktrees: registryGit,
     io,
     outcome,
-    liveUseHolder,
-    liveUseFailure,
     ...(input.onEnvironmentClosed === undefined ? {} : { onEnvironmentClosed: input.onEnvironmentClosed }),
     ...(input.releaseCheckout === undefined ? {} : { releaseCheckout: input.releaseCheckout }),
     readTip: (repository, branch) =>
