@@ -5986,6 +5986,7 @@ describe("component-local retirement without a component queue", () => {
     "origin-discard-no-reason",
     "origin-discard-unbound",
     "origin-discard-bound",
+    "origin-discard-bound-preview",
     "origin-discard-with-queue",
     "origin-discard-mismatch",
     "origin-discard-conflict",
@@ -6255,6 +6256,27 @@ describe("component-local retirement without a component queue", () => {
           ? ["--queue", `${join(dirname(root), "remote.git")}#main`]
           : []),
     ]
+    // 30890: public origin-discard preview must preserve the fixture's real refs and custody journal.
+    // The existing mutation rows never pass --dry-run, so they cannot catch an admitted option being dropped.
+    const preview = mode === "origin-discard-bound-preview"
+    const previewLogs = join(await workdirOf(rootGit), "logs")
+    const previewState = async () => ({
+      localRefs: await git(["for-each-ref", "--format=%(refname) %(objectname)"]),
+      originRefs: await git(["ls-remote", "origin"]),
+      queueRefs: await rootGit(["for-each-ref", "--format=%(refname) %(objectname)"]),
+      queueOriginRefs: await rootGit(["ls-remote", "origin"]),
+      journal: existsSync(previewLogs)
+        ? readdirSync(previewLogs)
+            .filter((name) => name.endsWith(".jsonl"))
+            .sort()
+            .map((name) => ({
+              name,
+              text: readFileSync(join(previewLogs, name), "utf8"),
+            }))
+        : [],
+    })
+    const beforePreview = preview ? await previewState() : undefined
+    if (preview) argv.push("--dry-run")
     let syncedDecision = false
     const nativeFsync = fs.fsyncSync
     const sync = discard
@@ -6273,6 +6295,14 @@ describe("component-local retirement without a component queue", () => {
       unreadable?.mockRestore()
       sync?.mockRestore()
     })
+    if (preview) {
+      expect(exit, run.stdout() + run.stderr()).toBe(0)
+      expect(await previewState(), run.stdout() + run.stderr()).toEqual(beforePreview)
+      const report = JSON.parse(run.stdout()) as { removed: unknown[]; failed: unknown[] }
+      expect(report.removed).toEqual([])
+      expect(report.failed).toEqual([])
+      return
+    }
     if (discard) {
       const removed = [
         "discard-unbound",
