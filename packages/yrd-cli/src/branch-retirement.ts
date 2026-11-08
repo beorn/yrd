@@ -858,7 +858,15 @@ type ComponentRetirementInput = Readonly<{
   destination: "local" | "origin"
   sameIssue: SameIssue
   targetDeclared?: boolean
-  request: Readonly<{ branch: string; tip: string; by: string; issue?: string; reason?: string; discard?: boolean }>
+  request: Readonly<{
+    branch: string
+    tip: string
+    by: string
+    issue?: string
+    reason?: string
+    discard?: boolean
+    dryRun?: true
+  }>
 }>
 
 /** Find the declared parent from freshly published default refs, never cached origin/HEAD. */
@@ -964,14 +972,20 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
   if ((await readConfig(git, target, { remote, branch: targetBranch })) !== undefined) {
     throw new Error(`${repo}: own origin target declares .yrd.yml; run retirement against that queue`)
   }
-  const log = openLog(parent.logDirectory ?? join(await workdirOf(ownerGit, { cwd: owner, env }), "logs"))
-  log.write({
-    kind: "run",
-    command: destination === "local" ? "drop --local" : "drop --retire",
-    pid: process.pid,
-    target: `origin/${queue}`,
-    ...(config === undefined ? {} : { config: config.blob }),
-  })
+  const logDirectory = parent.logDirectory ?? join(await workdirOf(ownerGit, { cwd: owner, env }), "logs")
+  const openRetirementLog = () => {
+    const opened = openLog(logDirectory)
+    opened.write({
+      kind: "run",
+      command: destination === "local" ? "drop --local" : "drop --retire",
+      pid: process.pid,
+      target: `origin/${queue}`,
+      ...(config === undefined ? {} : { config: config.blob }),
+    })
+    return opened
+  }
+  let openedLog = request.dryRun ? undefined : openRetirementLog()
+  const log = () => (openedLog ??= openRetirementLog())
   let headMove: { before: { symbolic: string; tip: string }; after: { detached: string } } | undefined
   /** 30094: a worktree-less retained store keeps its own HEAD; move it in place at the verified tip
    * with the tip as the expected old value, so the branch ref can be removed without losing custody. */
@@ -1053,22 +1067,25 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
           }
         }
         const keepOrigin = (reason: "held" | "moved", detail: string) => {
-          log.write({
-            kind: "origin-branch-retirement",
-            repo,
-            remote: publicRemote,
-            branch: request.branch,
-            head: observedTip ?? request.tip,
-            actor: request.by,
-            ...(request.issue === undefined ? {} : { issue: request.issue }),
-            reason,
-            detail,
-            outcome: "kept",
-          })
+          if (!request.dryRun) {
+            log().write({
+              kind: "origin-branch-retirement",
+              repo,
+              remote: publicRemote,
+              branch: request.branch,
+              head: observedTip ?? request.tip,
+              actor: request.by,
+              ...(request.issue === undefined ? {} : { issue: request.issue }),
+              reason,
+              detail,
+              outcome: "kept",
+            })
+          }
           return {
             removed: [],
             kept: [{ ...row, reason, detail }],
             failed: [],
+            ...(request.dryRun ? { dryRun: true as const, eligible: [] } : {}),
           }
         }
         const initialReasons = await protections()
@@ -1083,9 +1100,18 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
             [...initialReasons, ...(missingActorOrReason ? ["discard requires an actor and reason"] : [])].join("; "),
           )
         }
+        if (request.dryRun) {
+          return {
+            dryRun: true as const,
+            removed: [],
+            kept: [],
+            failed: [],
+            eligible: [{ ...row, reason: discardReason, intent: "origin-discard" as const, uniqueCommits }],
+          }
+        }
         let decision: LogRecord
         try {
-          decision = log.write({
+          decision = log().write({
             kind: "origin-branch-retirement",
             intent: "origin-discard",
             outcome: "decision",
@@ -1101,14 +1127,14 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
             uniqueCommits,
             pid: process.pid,
           })
-          const fd = openSync(log.path, "r")
+          const fd = openSync(log().path, "r")
           try {
             fsyncSync(fd)
           } finally {
             closeSync(fd)
           }
         } catch (cause) {
-          return keepOrigin("held", `discard decision could not be synced in ${log.path}: ${String(cause)}`)
+          return keepOrigin("held", `discard decision could not be synced in ${log().path}: ${String(cause)}`)
         }
         const eventStore = createEventStore(repo, remote, selection)
         try {
@@ -1121,11 +1147,11 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
               tip: target,
               beforeRemove: () => {
                 try {
-                  const rows = readRunLog(dirname(log.path), log.id)
+                  const rows = readRunLog(dirname(log().path), log().id)
                   if (
                     !rows.some(
                       (entry) =>
-                        entry.run === log.id &&
+                        entry.run === log().id &&
                         entry.branch === request.branch &&
                         entry.head === request.tip &&
                         entry.actor === request.by &&
@@ -1135,7 +1161,7 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
                     throw new Error("exact decision row is missing or differs")
                   }
                 } catch (cause) {
-                  throw new OriginDiscardKept("held", `discard decision readback in ${log.path}: ${String(cause)}`)
+                  throw new OriginDiscardKept("held", `discard decision readback in ${log().path}: ${String(cause)}`)
                 }
               },
             },
@@ -1152,7 +1178,7 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
           }
           throw cause
         }
-        log.write({
+        log().write({
           kind: "origin-branch-retirement",
           intent: "origin-discard",
           repo,
@@ -1192,7 +1218,8 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
         actor: request.by,
         issue: request.issue,
         reason: request.reason,
-        log,
+        log: { write: (record) => log().write(record) },
+        ...(request.dryRun ? { dryRun: true } : {}),
         local: false,
         origin: true,
         protections,
@@ -1201,12 +1228,13 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
         ...row,
         reason: result.reason,
         detail: result.detail,
-        ...(result.custody === "main" ? { custody } : {}),
+        ...(!request.dryRun && result.custody === "main" ? { custody } : {}),
       }
       return {
         removed: result.outcome === "removed" ? [output] : [],
         kept: result.outcome === "kept" ? [output] : [],
         failed: result.outcome === "failed" ? [output] : [],
+        ...(request.dryRun ? { dryRun: true as const, eligible: result.outcome === "eligible" ? [output] : [] } : {}),
       }
     }
     const retirement: Omit<LocalBranchRetirement, "protections"> = {
@@ -1220,11 +1248,11 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
         request.discard === true && !merged
           ? (request.reason ?? "")
           : (request.reason ?? "explicit local branch cleanup"),
-      log,
+      log: { write: (record) => log().write(record) },
       // The explicit local-loss call is procedural owner/Chief policy, not provider payload authentication.
       disposition:
         request.discard === true && !merged
-          ? { kind: "discarded", target, targetRef: `refs/heads/${targetBranch}`, uniqueCommits, log }
+          ? { kind: "discarded", target, targetRef: `refs/heads/${targetBranch}`, uniqueCommits, log: log() }
           : { kind: "merged", base: target, target },
     }
     if (merged || request.discard === true) headMove = await detachStoreHeadAtTip()
@@ -1263,18 +1291,20 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
     } catch (restoreCause) {
       reason += `; store HEAD left detached at ${request.tip}: ${restoreCause instanceof Error ? restoreCause.message : String(restoreCause)}`
     }
-    log.write({
-      ...(destination === "local"
-        ? { kind: "local-branch-retirement" as const }
-        : { kind: "observation" as const, scope: "branch-retirement" }),
-      repo,
-      branch: request.branch,
-      head: request.tip,
-      actor: request.by,
-      issue: request.issue,
-      reason,
-      outcome: "failed",
-    })
+    if (!request.dryRun) {
+      log().write({
+        ...(destination === "local"
+          ? { kind: "local-branch-retirement" as const }
+          : { kind: "observation" as const, scope: "branch-retirement" }),
+        repo,
+        branch: request.branch,
+        head: request.tip,
+        actor: request.by,
+        issue: request.issue,
+        reason,
+        outcome: "failed",
+      })
+    }
     return {
       removed: [],
       kept: [],
@@ -1285,9 +1315,10 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
           reason,
         },
       ],
+      ...(request.dryRun ? { dryRun: true as const, eligible: [] } : {}),
     }
   } finally {
-    log.finish()
+    openedLog?.finish()
   }
 }
 

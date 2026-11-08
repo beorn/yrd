@@ -72,6 +72,7 @@ import {
   claimWorktrees,
   directMergeLine,
   drop,
+  previewRetire,
   acceptsMergedLocalRetirement,
   retireLocalBranch,
   pauseLine,
@@ -482,7 +483,7 @@ export type CoreQueueCommand =
       by: string
       reason?: string
       recipient?: string
-      retire?: Readonly<{ tip: string; discard?: boolean; issue?: string }>
+      retire?: Readonly<{ tip: string; discard?: boolean; issue?: string; dryRun?: true }>
     }>
   | Readonly<{
       command: "drop-issue"
@@ -1000,7 +1001,14 @@ export async function coreQueueCommand(
         }),
         request:
           request.command === "drop-local"
-            ? request
+            ? {
+                branch: request.branch,
+                tip: request.tip,
+                by: request.by,
+                issue: request.issue,
+                reason: request.reason,
+                discard: request.discard,
+              }
             : {
                 branch: request.branch,
                 tip,
@@ -1008,6 +1016,7 @@ export async function coreQueueCommand(
                 reason: request.reason,
                 ...(request.retire?.discard ? { discard: true } : {}),
                 ...(request.retire?.issue === undefined ? {} : { issue: request.retire.issue }),
+                ...(request.retire?.dryRun ? { dryRun: true as const } : {}),
               },
       }).catch((cause: unknown) => {
         throw new Error(
@@ -1016,12 +1025,31 @@ export async function coreQueueCommand(
         )
       })
       if (report !== undefined) {
+        let summary: string
+        if (request.command === "drop" && request.retire?.dryRun) {
+          const eligible = report.eligible
+          if (eligible === undefined) {
+            throw new Error("origin retirement preview returned no eligibility judgment")
+          }
+          summary = [
+            `origin retirement preview in ${authorRepo}: eligible ${eligible.length}, kept ${report.kept.length}, failed ${report.failed.length}`,
+            ...eligible.map((row) =>
+              [
+                `${row.branch}: eligible at ${row.head}`,
+                row.reason,
+                ...("uniqueCommits" in row ? [`${row.uniqueCommits} unique commits`] : []),
+              ].join("; "),
+            ),
+          ].join("\n")
+        } else {
+          summary = `${request.command === "drop-local" ? "local" : "origin"} retirement in ${authorRepo}: retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}`
+        }
         emit(
           io,
           options.json,
           report,
           [
-            `${request.command === "drop-local" ? "local" : "origin"} retirement in ${authorRepo}: retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}`,
+            summary,
             ...report.removed.flatMap((row) =>
               !("headMove" in row) || row.headMove === undefined
                 ? []
@@ -1194,7 +1222,7 @@ export async function coreQueueCommand(
     request.command === "pause" ||
     request.command === "resume" ||
     request.command === "withdraw" ||
-    request.command === "drop" ||
+    (request.command === "drop" && request.retire?.dryRun !== true) ||
     (request.command === "drop-issue" && request.dryRun !== true) ||
     (request.command === "drop-local" && (!request.releaseCheckout || request.apply)) ||
     request.command === "ignore" ||
@@ -2396,7 +2424,7 @@ export async function coreQueueCommand(
       // The event store is Yrd's private replica; the caller's checkout holds the tracking ref its readers see (31457).
       const trackingRepo = repositoryHere(io.cwd)
       try {
-        dropped = await drop(eventStore, {
+        const dropRequest: Parameters<typeof drop>[1] = {
           queue: config.target.branch,
           branch: request.branch,
           by: request.by,
@@ -2406,7 +2434,18 @@ export async function coreQueueCommand(
             (await readBranchProtections(io, { repo, branch: request.branch, tip, issue })).protections,
           ...(request.reason === undefined ? {} : { note: request.reason }),
           ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
-        })
+        }
+        if (request.retire?.dryRun) {
+          const preview = await previewRetire(eventStore, { ...dropRequest, retire: request.retire })
+          emit(
+            io,
+            options.json,
+            { ...preview, uniqueCommits: retirementCount },
+            `eligible ${request.branch} at ${preview.head}; ${retirementCount} unique commits relative to ${targetLabel}@${countTarget}`,
+          )
+          return 0
+        }
+        dropped = await drop(eventStore, dropRequest)
       } catch (error) {
         if (error instanceof DropRetireRefused) {
           const queue = formatStoredQueueAddress(queueName(config.target, await remoteUrl(git, config.target.remote)))
@@ -7856,16 +7895,14 @@ export async function readEventListing(
   }))
   const directRows: Row[] = directMerges
     .filter((commit) => options.all === true || listNow.getTime() - commit.at.getTime() <= READ_HORIZON_MS)
-    .map(
-      (commit): Row => ({
-        at: commit.at,
-        head: commit.commit,
-        branch: commit.target,
-        reason: directMergeLine(commit),
-        state: "direct",
-        subject: commit.subject,
-      }),
-    )
+    .map((commit): Row => ({
+      at: commit.at,
+      head: commit.commit,
+      branch: commit.target,
+      reason: directMergeLine(commit),
+      state: "direct",
+      subject: commit.subject,
+    }))
     .sort((left, right) => (right.at?.getTime() ?? 0) - (left.at?.getTime() ?? 0))
   const projected = [...selected.table, ...selected.document, ...directRows]
   const titles = await subjects(

@@ -83,6 +83,7 @@ export {
   decide,
   expireQueueOverrides,
   drop,
+  previewRetire,
   DropRetireRefused,
   evolve,
   enumerateChangeSegments,
@@ -122,6 +123,7 @@ export type {
   QueueReadStore,
   SetBranchIgnoredRequest,
   DropRequest,
+  DropPreview,
   Dropped,
 } from "./events.ts"
 export { eventListRows, eventRows } from "./event-table.ts"

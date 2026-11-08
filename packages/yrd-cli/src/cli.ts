@@ -352,7 +352,7 @@ function buildProgram(
       )
     }
     if (
-      (options.submodules || options.dryRun || options.apply) &&
+      (options.submodules || (options.dryRun && !options.retire) || options.apply) &&
       (command !== "drop" || options.issue === undefined || (options.local && !options.releaseCheckout))
     ) {
       throw new Error(
@@ -375,7 +375,7 @@ function buildProgram(
       | {
           command: "withdraw" | "drop"
           branch: string
-          retire?: Readonly<{ tip: string; discard?: boolean; issue?: string }>
+          retire?: Readonly<{ tip: string; discard?: boolean; issue?: string; dryRun?: true }>
         }
       | { command: "drop-issue"; issue: string; submodules?: boolean; apply?: boolean; dryRun?: boolean }
       | {
@@ -411,6 +411,7 @@ function buildProgram(
                 tip: options.tip,
                 ...(options.discard === undefined ? {} : { discard: options.discard }),
                 ...(options.issue === undefined ? {} : { issue: options.issue }),
+                ...(options.dryRun ? { dryRun: true as const } : {}),
               },
             }
           : {}),
