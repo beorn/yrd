@@ -7,6 +7,8 @@
  *   and request and sweep routes preserve independent progress across invocations.
  * @failure 31447: oldest-first put a seat's own close request behind every older automatic filing for an ended
  *   environment (rank 175 of 177 on 2026-10-28), so a seat waited hours for one attempt per round.
+ * @failure 31450: a live-use hold on an older automatic request consumes the only close attempt and defers an
+ *   eligible request, although the round already knows the hold; a failed reader must retain the loud close recheck.
  * @level l2
  * @consumer the queue round's post-judgment environment cleanup
  * @reach fs-walk <fixture-only: close-request and environment directories the fixture makes under the OS temp root>
@@ -22,6 +24,9 @@ import { createEnvironmentCleanup } from "../src/env-cleanup.ts"
 import { closeRequestFile, listCloseRequests, writeCloseRequest } from "../src/env-close-requests.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
 import * as envCommands from "../src/env-commands.ts"
+import * as closeRequests from "../src/env-close-requests.ts"
+import { assertNoLiveEnvironmentUse } from "../src/env-close-holders.ts"
+import type { YrdCliIO } from "../src/types.ts"
 import type { QueueConfig } from "@yrd/queue-core"
 import { testGitIn } from "../../../tests/support/test-git-in.ts"
 
@@ -77,7 +82,11 @@ async function world(): Promise<
   return { env, git, head, repo, workdir }
 }
 
-async function runRound(w: Awaited<ReturnType<typeof world>>, run: string): Promise<number> {
+async function runRound(
+  w: Awaited<ReturnType<typeof world>>,
+  run: string,
+  liveEnvironmentUse?: YrdCliIO["liveEnvironmentUse"],
+): Promise<number> {
   const census = vi
     .spyOn(removely, "inspectProcessCwds")
     .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
@@ -102,6 +111,7 @@ async function runRound(w: Awaited<ReturnType<typeof world>>, run: string): Prom
         cwd: w.repo,
         stdout: () => {},
         stderr: () => {},
+        ...(liveEnvironmentUse === undefined ? {} : { liveEnvironmentUse }),
       },
       selection: w.git.selection,
       outcome: { run, log: join(w.workdir, "journal.jsonl"), merged: [], target: w.head } as never,
@@ -365,6 +375,77 @@ it("drops gone and stale requests without spending the one consumer close attemp
   ])
   expect(listCloseRequests(w.workdir)).toEqual(valid.slice(1).map((path) => closeRequestFile(w.workdir, path)))
 })
+
+it.each(["held", "reader-failure"] as const)(
+  "preserves the close allowance past an older live-use hold, with %s evidence",
+  async (evidence) => {
+    const w = await world()
+    const uid = process.getuid?.()
+    if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
+    const held = join(w.repo, ".bays", "a-live-held")
+    await w.git(["worktree", "add", "--quiet", "--detach", held, "HEAD"])
+    const files = [held, w.env].map(
+      (path, index) =>
+        writeCloseRequest(w.workdir, {
+          name: path.split("/").at(-1)!,
+          path,
+          requester: "unknown",
+          uid,
+          at: `2026-10-28T09:14:5${index}.000Z`,
+          intent: "close",
+          predicate: "direct-admission",
+          options: { noRehome: true },
+          head: w.head,
+          ending: { remote: "origin", queue: "main", branch: `task/ended-${index}`, event: "e".repeat(40) },
+        }).file,
+    )
+    const reader = vi.fn(async () => {
+      if (evidence === "reader-failure") throw new Error("fixture reader offline")
+      return [{ path: held, reason: "fixture slot lease" }]
+    })
+    const attempted: string[] = []
+    const stage = vi.spyOn(closeRequests, "stageCloseRequest")
+    vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
+      attempted.push(path)
+      // Keep the real direct-close admission check: the fixture does not implement the allowance decision.
+      await assertNoLiveEnvironmentUse(path, callIo)
+      callIo.stdout(JSON.stringify({ closed: path }))
+      return 0
+    })
+    try {
+      await runRound(w, "live-use-allowance", reader)
+      const rows = cleanupRows(w.workdir).filter((row) => row.run === "live-use-allowance")
+      const summary = rows.find((row) => row.consumer !== undefined)
+      const retired = rows.find((row) => row.path === held && row.request !== undefined)
+      expect(existsSync(files[0]!)).toBe(false)
+      if (evidence === "held") {
+        expect(attempted).toEqual([w.env])
+        expect(stage.mock.calls.map(([file]) => file)).toEqual([files[1]])
+        expect(retired).toMatchObject({
+          result: "retired",
+          why: expect.stringContaining("live use: fixture slot lease"),
+        })
+        expect(retired?.why).toContain("no locked close attempted")
+        expect(summary?.consumer).toEqual({ attempted: 1, closed: 1 })
+        expect(listCloseRequests(w.workdir)).toEqual([])
+        expect(reader.mock.calls).toEqual([[], [w.env]])
+      } else {
+        expect(attempted).toEqual([held])
+        expect(stage.mock.calls.map(([file]) => file)).toEqual([files[0]])
+        expect(retired).toMatchObject({ result: "retired", why: expect.stringContaining("reader unavailable") })
+        expect(summary?.consumer).toEqual({ attempted: 1, closed: 0 })
+        expect(listCloseRequests(w.workdir)).toEqual([files[1]])
+        expect(reader.mock.calls).toEqual([[], [held]])
+      }
+    } finally {
+      stage.mockRestore()
+      vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
+        callIo.stdout(JSON.stringify({ closed: path }))
+        return 0
+      })
+    }
+  },
+)
 
 it("lets a kept consumer request leave the independent sweep close available for another environment", async () => {
   const w = await world()

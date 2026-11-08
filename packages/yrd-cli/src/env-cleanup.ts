@@ -295,12 +295,15 @@ async function consumeCloseRequests(
     onEnvironmentClosed?: (closed: ClosedEnvironment) => Promise<void>
     releaseCheckout?: ReleaseCheckoutRound
     readTip: (repository: string, branch: string) => Promise<string | undefined>
+    liveUseHolder: (path: string) => string | undefined
+    liveUseFailure: string | undefined
   }>,
 ): Promise<
   Readonly<{ attempted: number; closed: number; handled: ReadonlySet<string>; proofs: readonly WorktreeRemovalProof[] }>
 > {
   const proofs: WorktreeRemovalProof[] = []
   const { workdir, registry, worktrees, io, outcome } = input
+  let liveUsePrecheckFailure: string | undefined
   const journal = (
     file: string,
     request: StoredEnvRequest | undefined,
@@ -310,6 +313,9 @@ async function consumeCloseRequests(
     fingerprint?: string,
     timing?: Readonly<{ started_at: string; elapsed_ms: number }>,
   ): void => {
+    if (liveUsePrecheckFailure !== undefined) {
+      why += `; live-use precheck unavailable: ${liveUsePrecheckFailure}; direct-close recheck retained`
+    }
     const diagnostic =
       result === "retired"
         ? `${request?.intent === "release-checkout" ? "release" : "close"} not performed: ${why}`
@@ -544,6 +550,7 @@ async function consumeCloseRequests(
   let closed = 0
   const handled = new Set<string>()
   for (const { file, request } of closes) {
+    liveUsePrecheckFailure = undefined
     // Cheap dispositions: missing path, absent registration, held registration, or changed HEAD.
     // After admission fills, use the captured inventory; refreshing it would spawn Git for a deferred row.
     handled.add(request.path)
@@ -592,6 +599,20 @@ async function consumeCloseRequests(
       )
       dropCloseRequest(file)
       continue
+    }
+    liveUsePrecheckFailure = input.liveUseFailure
+    if (liveUsePrecheckFailure === undefined) {
+      try {
+        const holder = input.liveUseHolder(request.path)
+        if (holder !== undefined) {
+          input.custodyRefusals.delete(request.path)
+          journal(file, request, request.path, "retired", `${holder}; no locked close attempted`, fingerprint)
+          dropCloseRequest(file)
+          continue
+        }
+      } catch (cause) {
+        liveUsePrecheckFailure = String(cause)
+      }
     }
     if (attempted >= CLOSE_ATTEMPTS_PER_ROUTE) {
       handled.delete(request.path)
@@ -1320,8 +1341,8 @@ async function cleanupEnvironments(
       liveUseFailure = `live environment-use reader unavailable: ${String(cause)}`
     }
   }
-  const automaticKeep = (path: string, opening: EnvOpenRecordRead, terminal = false): string | undefined => {
-    if (liveUseFailure !== undefined) return liveUseFailure
+  const liveUseHolder = (path: string): string | undefined => {
+    if (liveUseFailure !== undefined) return undefined
     if (liveUses.length > 0) {
       const environment = realpathSync(path)
       const use = liveUses.find((candidate) => {
@@ -1330,6 +1351,12 @@ async function cleanupEnvironments(
       })
       if (use !== undefined) return `live use: ${use.reason} (${use.path})`
     }
+    return undefined
+  }
+  const automaticKeep = (path: string, opening: EnvOpenRecordRead, terminal = false): string | undefined => {
+    if (liveUseFailure !== undefined) return liveUseFailure
+    const holder = liveUseHolder(path)
+    if (holder !== undefined) return holder
     // An exact terminal job can close immediately; an unfinished opening keeps its grace.
     if (!terminal && opening.status === "recorded") {
       const openedAt = Date.parse(opening.record.at)
@@ -1530,6 +1557,8 @@ async function cleanupEnvironments(
     worktrees: registryGit,
     io,
     outcome,
+    liveUseHolder,
+    liveUseFailure,
     ...(input.onEnvironmentClosed === undefined ? {} : { onEnvironmentClosed: input.onEnvironmentClosed }),
     ...(input.releaseCheckout === undefined ? {} : { releaseCheckout: input.releaseCheckout }),
     readTip: (repository, branch) =>
