@@ -7,7 +7,7 @@
  * @consumer yrd drop cleanup of retained/cold component stores.
  * @testonly none
  */
-import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, expect, it } from "vitest"
@@ -151,18 +151,50 @@ async function nestedRetainedWorld(merged = true): Promise<World & { enclosing: 
   return { ...world, store, enclosing }
 }
 
-it("retires a branch in a retained store nested inside a Git root and leaves that root untouched", async () => {
-  const world = await nestedRetainedWorld()
-  const enclosingRefsBefore = (await gitIn(world.enclosing)(["for-each-ref"])).trim()
-  const observed = capture(world.store)
-  const code = await runYrdProcess(
-    ["bun", "yrd", "drop", world.branch, "--local", "--tip", world.tip, "--submitter", "fixture", "--json"],
-    observed.io,
-  )
-  expect(code, observed.stderr() + observed.stdout()).toBe(0)
-  await expect(gitIn(world.store)(["rev-parse", "--verify", `refs/heads/${world.branch}`])).rejects.toThrow()
-  expect((await gitIn(world.enclosing)(["for-each-ref"])).trim()).toBe(enclosingRefsBefore)
-})
+// 30890: the cold-store CLI route must forward preview intent while preserving attached HEAD and origin.
+// The local-application case cannot detect a dropped origin-preview flag.
+it.each(["local", "origin-preview"] as const)(
+  "handles %s in a nested retained store and leaves its root untouched",
+  async (mode) => {
+    const world = await nestedRetainedWorld()
+    const preview = mode === "origin-preview"
+    const storeGit = gitIn(world.store)
+    if (preview) await storeGit(["symbolic-ref", "HEAD", `refs/heads/${world.branch}`])
+    const originBefore = await storeGit(["ls-remote", "origin"])
+    const enclosingRefsBefore = (await gitIn(world.enclosing)(["for-each-ref"])).trim()
+    const observed = capture(world.store)
+    const code = await runYrdProcess(
+      [
+        "bun",
+        "yrd",
+        "drop",
+        world.branch,
+        ...(preview ? ["--retire", "--dry-run", "--reason", "reviewed cold retirement"] : ["--local"]),
+        "--tip",
+        world.tip,
+        "--submitter",
+        "fixture",
+        "--json",
+      ],
+      observed.io,
+    )
+    expect(code, observed.stderr() + observed.stdout()).toBe(0)
+    if (preview) {
+      expect(JSON.parse(observed.stdout())).toMatchObject({
+        dryRun: true,
+        removed: [],
+        eligible: [{ branch: world.branch, head: world.tip }],
+      })
+      expect((await storeGit(["rev-parse", `refs/heads/${world.branch}`])).trim()).toBe(world.tip)
+      expect((await storeGit(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${world.branch}`)
+      expect(existsSync(join(world.store, "logs"))).toBe(false)
+    } else {
+      await expect(storeGit(["rev-parse", "--verify", `refs/heads/${world.branch}`])).rejects.toThrow()
+    }
+    expect(await storeGit(["ls-remote", "origin"])).toBe(originBefore)
+    expect((await gitIn(world.enclosing)(["for-each-ref"])).trim()).toBe(enclosingRefsBefore)
+  },
+)
 
 it("exits 1 when a nested retained store keeps the branch", async () => {
   const world = await nestedRetainedWorld(false)

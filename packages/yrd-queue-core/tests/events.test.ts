@@ -37,6 +37,7 @@ import {
   enumerateChangeSegments,
   expireQueueOverrides,
   drop,
+  previewRetire,
   evolve,
   initial,
   listChangeHistories,
@@ -2312,6 +2313,48 @@ describe("the queue-format boundary", () => {
       expect(ordinaryDrop).toContain("30432")
       expect((await listRefs(branchRef, location)).get(branchRef)).toBe(extra)
       expect((await listRefs(selectedRef, location)).get(selectedRef)).toBe(refTipBefore)
+
+      // 30890: a retirement preview must judge this divergent exact head before the retained append.
+      // Existing retirement rows only apply, so their successful custody write cannot prove nonmutation.
+      const refsBeforePreview = await git(["ls-remote", "origin"])
+      const publishPreview = vi.spyOn(git.backend, "publish")
+      const casPreview = vi.spyOn(git.backend, "compareAndSwapRemote")
+      try {
+        await expect(
+          previewRetire(location, {
+            queue: "lab",
+            branch,
+            by: "@dev/3",
+            note: "retain the exact divergent head",
+            retire: { tip: extra },
+          }),
+        ).resolves.toEqual({ queue: "lab", branch, head: extra, dryRun: true })
+        await expect(
+          previewRetire(location, {
+            queue: "lab",
+            branch,
+            by: "@dev/3",
+            note: "held preview",
+            retire: { tip: extra },
+            protections: async () => ["fixture hold"],
+          }),
+        ).rejects.toThrow("fixture hold")
+        await expect(
+          previewRetire(location, {
+            queue: "lab",
+            branch,
+            by: "@dev/3",
+            note: "moved preview",
+            retire: { tip: base },
+          }),
+        ).rejects.toThrow(`expected ${base}`)
+        expect(publishPreview).not.toHaveBeenCalled()
+        expect(casPreview).not.toHaveBeenCalled()
+        expect(await git(["ls-remote", "origin"])).toBe(refsBeforePreview)
+      } finally {
+        publishPreview.mockRestore()
+        casPreview.mockRestore()
+      }
 
       let racedSelectedTip: string | undefined
       const staleSelectedTip = await drop(location, {

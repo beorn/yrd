@@ -5987,6 +5987,8 @@ describe("component-local retirement without a component queue", () => {
     "origin-discard-unbound",
     "origin-discard-bound",
     "origin-discard-bound-preview",
+    "origin-discard-moved-preview",
+    "origin-discard-conflict-preview",
     "origin-discard-with-queue",
     "origin-discard-mismatch",
     "origin-discard-conflict",
@@ -5997,11 +5999,14 @@ describe("component-local retirement without a component queue", () => {
     "origin-discard-unreadable",
     "origin-discard-contained",
     "origin-merged",
+    "origin-merged-preview",
     "origin-merged-with-queue",
     "origin-only",
     "origin-equivalent",
     "origin-unmerged",
+    "origin-unmerged-preview",
     "origin-held",
+    "origin-held-preview",
     "origin-advanced",
     "origin-stale-local-main",
     "origin-stale-default-ref",
@@ -6021,7 +6026,9 @@ describe("component-local retirement without a component queue", () => {
     "stale-host-array",
     "malformed-declaration",
     "unreadable-declaration",
-  ] as const)("retires exact %s component work through the declared root's existing log", async (mode) => {
+  ] as const)("retires exact %s component work through the declared root's existing log", async (fixtureMode) => {
+    const preview = fixtureMode.endsWith("-preview")
+    const mode = fixtureMode.replace(/-preview$/, "")
     // The local-only fixture missed origin retirement and an absent local twin.
     // Fresh published-main custody suffices, but host holds and exact-tip races still keep the name.
     const originDiscard = mode.startsWith("origin-discard-")
@@ -6258,7 +6265,6 @@ describe("component-local retirement without a component queue", () => {
     ]
     // 30890: public origin-discard preview must preserve the fixture's real refs and custody journal.
     // The existing mutation rows never pass --dry-run, so they cannot catch an admitted option being dropped.
-    const preview = mode === "origin-discard-bound-preview"
     const previewLogs = join(await workdirOf(rootGit), "logs")
     const previewState = async () => ({
       localRefs: await git(["for-each-ref", "--format=%(refname) %(objectname)"]),
@@ -6296,9 +6302,61 @@ describe("component-local retirement without a component queue", () => {
       sync?.mockRestore()
     })
     if (preview) {
-      expect(exit, run.stdout() + run.stderr()).toBe(0)
-      expect(await previewState(), run.stdout() + run.stderr()).toEqual(beforePreview)
-      const report = JSON.parse(run.stdout()) as { removed: unknown[]; failed: unknown[] }
+      const held = ["origin-discard-moved", "origin-discard-conflict", "origin-unmerged", "origin-held"].includes(mode)
+      expect(exit, run.stdout() + run.stderr()).toBe(held ? 1 : 0)
+      const afterPreview = await previewState()
+      expect(afterPreview.originRefs).toBe(beforePreview!.originRefs)
+      expect(afterPreview.queueOriginRefs).toBe(beforePreview!.queueOriginRefs)
+      expect(afterPreview.journal).toEqual(beforePreview!.journal)
+      for (const [localKey, originKey] of [
+        ["localRefs", "originRefs"],
+        ["queueRefs", "queueOriginRefs"],
+      ] as const) {
+        const refs = (text: string) =>
+          new Map(
+            text
+              .trim()
+              .split("\n")
+              .filter(Boolean)
+              .map((line) => {
+                const [ref, oid] = line.split(" ")
+                return [ref!, oid!] as const
+              }),
+          )
+        const before = refs(beforePreview![localKey]),
+          after = refs(afterPreview[localKey])
+        const origin = new Map(
+          afterPreview[originKey]
+            .trim()
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => {
+              const [oid, ref] = line.split("\t")
+              return [ref!, oid!] as const
+            }),
+        )
+        expect([...after.keys()].filter((ref) => ref.startsWith("refs/gitomic/fetch/"))).toEqual([])
+        for (const [ref, oid] of after) {
+          if (before.get(ref) === oid) continue
+          expect(ref.startsWith("refs/gitomic/fetched/"), ref).toBe(true)
+          const originRef = "refs/" + ref.split("/").slice(4).join("/")
+          expect(oid, ref).toBe(origin.get(originRef))
+        }
+        for (const [ref, oid] of before) {
+          if (ref.startsWith("refs/gitomic/fetched/")) expect(after.has(ref), ref).toBe(true)
+          else expect(after.get(ref), ref).toBe(oid)
+        }
+      }
+      const report = JSON.parse(run.stdout()) as {
+        dryRun: boolean
+        eligible: unknown[]
+        removed: unknown[]
+        kept: unknown[]
+        failed: unknown[]
+      }
+      expect(report.dryRun).toBe(true)
+      expect(report.eligible).toHaveLength(held ? 0 : 1)
+      expect(report.kept).toHaveLength(held ? 1 : 0)
       expect(report.removed).toEqual([])
       expect(report.failed).toEqual([])
       return
@@ -6715,17 +6773,29 @@ describe("exact-tip origin retirement of a draft", () => {
 
   // Ended-only cases miss safe never-submitted work and its required ending fold.
   // Use the real origin and Git merge result: matching trees are not ancestry proof.
+  // 30890 preview rows additionally prove the public queue route judges without an ending or ref write.
   it.each([
+    "plain-drop-preview",
+    "withdraw-preview",
     "ancestor",
+    "ancestor-preview",
     "equivalent",
+    "equivalent-preview",
     "equivalent-human",
+    "equivalent-human-preview",
     "unmerged",
+    "unmerged-preview",
     "already-open",
+    "already-open-preview",
     "advanced",
+    "advanced-preview",
     "held",
+    "held-preview",
     "held-later",
     "opened-later",
-  ] as const)("retires a %s draft only under fresh-main custody and its exact tip", async (mode) => {
+  ] as const)("retires a %s draft only under fresh-main custody and its exact tip", async (fixtureMode) => {
+    const preview = fixtureMode.endsWith("-preview")
+    const mode = fixtureMode.replace(/-preview$/, "")
     const repo = await world("{}\n")
     const git = gitIn(repo)
     const base = (await git(["rev-parse", "HEAD"])).trim()
@@ -6775,24 +6845,51 @@ describe("exact-tip origin retirement of a draft", () => {
       }
       return { protections: [], evidence: [] }
     }
+    const previewOrigin = preview ? await git(["ls-remote", "origin"]) : undefined
     const code = await runYrdProcess(
       [
         "bun",
         "yrd",
-        "drop",
+        mode === "withdraw" ? "withdraw" : "drop",
         branch,
-        "--retire",
-        "--tip",
-        mode === "advanced" ? base : head,
+        ...(["plain-drop", "withdraw"].includes(mode) ? [] : ["--retire", "--tip", mode === "advanced" ? base : head]),
         "--reason",
         "retire exact work already accepted by main",
         "--submitter",
         "fixture",
         ...(mode === "equivalent-human" ? [] : ["--json"]),
+        ...(preview ? ["--dry-run"] : []),
       ],
       output.io,
     )
     const store = createEventStore(repo, "origin", git.selection)
+    if (preview) {
+      expect(await git(["ls-remote", "origin"])).toBe(previewOrigin)
+      const unsupported = ["plain-drop", "withdraw"].includes(mode)
+      const held = ["unmerged", "already-open", "advanced", "held"].includes(mode)
+      if (unsupported) {
+        expect(code).toBe(2)
+        expect(output.stderr()).toContain(
+          mode === "withdraw"
+            ? "unknown option '--dry-run'"
+            : "--submodules, --dry-run and --apply require drop --issue <id>",
+        )
+      } else if (held) expect(code, output.stderr()).not.toBe(0)
+      else {
+        expect(code, output.stderr()).toBe(0)
+        if (mode === "equivalent-human") expect(output.stdout()).toContain(`eligible ${branch} at ${head}`)
+        else {
+          expect(JSON.parse(output.stdout())).toEqual({
+            queue: "main",
+            branch,
+            head,
+            dryRun: true,
+            uniqueCommits: mode === "ancestor" ? 0 : 1,
+          })
+        }
+      }
+      return
+    }
     if (
       mode === "unmerged" ||
       mode === "already-open" ||
