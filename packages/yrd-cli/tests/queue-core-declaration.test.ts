@@ -6861,6 +6861,14 @@ describe("exact-tip origin retirement of a draft", () => {
       }
       return { protections: [], evidence: [] }
     }
+    // A real reader warms this cache; preview preserves it, while an applied drop invalidates it.
+    const statusStamp = join(await workdirOf(git), "repo", MIRROR_REFRESHED_AT)
+    if (mode === "ancestor") {
+      await resolveQueueLocation(repo, undefined, process.env)
+      const warmed = capture(repo)
+      expect(await runYrdProcess(["bun", "yrd", "list", "--json"], warmed.io), warmed.stderr()).toBe(0)
+      expect(existsSync(statusStamp), "the real list command created the warm status cache stamp").toBe(true)
+    }
     const previewOrigin = preview ? await git(["ls-remote", "origin"]) : undefined
     const code = await runYrdProcess(
       [
@@ -6879,6 +6887,9 @@ describe("exact-tip origin retirement of a draft", () => {
       output.io,
     )
     const store = createEventStore(repo, "origin", git.selection)
+    if (mode === "ancestor") {
+      expect(existsSync(statusStamp), "only applied retirement invalidates the warm status cache").toBe(preview)
+    }
     if (preview) {
       expect(await git(["ls-remote", "origin"])).toBe(previewOrigin)
       const unsupported = ["plain-drop", "withdraw"].includes(mode)

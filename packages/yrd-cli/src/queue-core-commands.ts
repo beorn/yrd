@@ -1222,7 +1222,7 @@ export async function coreQueueCommand(
     request.command === "pause" ||
     request.command === "resume" ||
     request.command === "withdraw" ||
-    request.command === "drop" ||
+    (request.command === "drop" && request.retire?.dryRun !== true) ||
     (request.command === "drop-issue" && request.dryRun !== true) ||
     (request.command === "drop-local" && (!request.releaseCheckout || request.apply)) ||
     request.command === "ignore" ||
