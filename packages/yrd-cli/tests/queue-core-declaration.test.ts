@@ -6958,6 +6958,75 @@ describe("drop --local --release-checkout", () => {
     ]
     return { repo, git, branch, tip, child, checkoutFiles, argv }
   }
+  // AC2 (31936): a competing branch move after detach must refuse while restoring
+  // symbolic HEAD. Existing advanced-HEAD/lock cases deliberately permit a detached
+  // retry, so they do not prove this stronger nonmutating-refusal requirement.
+  it("31936: restores symbolic HEAD when the component ref moves after detach", async () => {
+    const seed = await world()
+    const repo = join(dirname(seed), "retained")
+    const branch = "task/29600-retained"
+    await gitIn(seed)(["worktree", "add", "--quiet", "-b", branch, repo, "main"])
+    const git = gitIn(repo)
+    const tip = (await git(["rev-parse", "HEAD"])).trim()
+    const tree = (await git(["rev-parse", "HEAD^{tree}"])).trim()
+    const advanced = (await git(["commit-tree", tree, "-p", tip, "-m", "competing branch writer"])).trim()
+    const gitdir = (await git(["rev-parse", "--absolute-git-dir"])).trim()
+    const files = [
+      join(repo, "private.bin"),
+      join(repo, ".agent-lease.json"),
+      join(gitdir, "locked"),
+      join(gitdir, "index"),
+    ]
+    writeFileSync(files[0]!, Buffer.from([0, 255, 12, 8]))
+    writeFileSync(files[1]!, '{"bad":"retained evidence"}\n')
+    writeFileSync(files[2]!, "retained lock\n")
+    const beforeBytes = files.map((path) => readFileSync(path))
+    const beforeStatus = await git(["status", "--porcelain=v2", "--untracked-files=all"])
+    const beforeRemote = await git(["ls-remote", "origin"])
+    const { spy } = await permitCensus()
+    let moved = false
+    try {
+      const output = releaseCapture(repo)
+      output.io.localBranchProtections = async () => {
+        if (!moved && (await git(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")) === "") {
+          await git(["update-ref", `refs/heads/${branch}`, advanced, tip])
+          moved = true
+        }
+        return { protections: [], evidence: [] }
+      }
+      const report = await releaseRetainedCheckouts({
+        repo,
+        git,
+        selection: git.selection,
+        io: output.io,
+        log: { write: vi.fn() },
+        queue: "main",
+        remote: "origin",
+        componentStore: true,
+        sameIssue: async (a, b) => (a === b ? { same: true } : { same: false, resolved: true }),
+        request: {
+          branch,
+          tip,
+          issue: "29600",
+          reason: "retain checkout",
+          by: "fixture",
+          apply: true,
+        },
+      })
+      expect(moved, JSON.stringify(report)).toBe(true)
+      expect(report.removed).toEqual([])
+      const refusals = [...report.failed, ...report.kept]
+      expect(refusals).toHaveLength(1)
+      expect(refusals[0]?.detail).toContain("moved")
+      expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(advanced)
+      expect(await git(["status", "--porcelain=v2", "--untracked-files=all"])).toBe(beforeStatus)
+      expect(await git(["ls-remote", "origin"])).toBe(beforeRemote)
+      expect(files.map((path) => readFileSync(path))).toEqual(beforeBytes)
+      expect((await git(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")).trim()).toBe(`refs/heads/${branch}`)
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
   // Canonical Refs on the exact pinned child tip must survive numeric-name mapping (30704).
   // Existing release cases bind only a numeric issue and cannot expose this lost identity.
   it.each(["attached", "detached", "duplicate"] as const)(
