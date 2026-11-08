@@ -1031,7 +1031,16 @@ export async function coreQueueCommand(
           if (eligible === undefined) {
             throw new Error("origin retirement preview returned no eligibility judgment")
           }
-          summary = `origin retirement preview in ${authorRepo}: eligible ${eligible.length}, kept ${report.kept.length}, failed ${report.failed.length}`
+          summary = [
+            `origin retirement preview in ${authorRepo}: eligible ${eligible.length}, kept ${report.kept.length}, failed ${report.failed.length}`,
+            ...eligible.map((row) =>
+              [
+                `${row.branch}: eligible at ${row.head}`,
+                row.reason,
+                ...("uniqueCommits" in row ? [`${row.uniqueCommits} unique commits`] : []),
+              ].join("; "),
+            ),
+          ].join("\n")
         } else {
           summary = `${request.command === "drop-local" ? "local" : "origin"} retirement in ${authorRepo}: retired ${report.removed.length}, kept ${report.kept.length}, failed ${report.failed.length}`
         }

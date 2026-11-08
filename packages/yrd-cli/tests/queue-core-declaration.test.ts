@@ -6359,6 +6359,22 @@ describe("component-local retirement without a component queue", () => {
       expect(report.kept).toHaveLength(held ? 1 : 0)
       expect(report.removed).toEqual([])
       expect(report.failed).toEqual([])
+      if (mode === "origin-discard-bound") {
+        // The JSON-only preview missed a bare summary that hides the actual reason and unique-commit count.
+        const human = capture(child)
+        human.io.localBranchProtections = io.localBranchProtections
+        expect(
+          await runYrdProcess(
+            argv.filter((arg) => arg !== "--json"),
+            human.io,
+          ),
+          human.stderr(),
+        ).toBe(0)
+        expect(human.stdout()).toContain(`${branch}: eligible at ${tip}`)
+        expect(human.stdout()).toContain("explicit reviewed component drop")
+        expect(human.stdout()).toContain("1 unique commits")
+        expect(await previewState()).toEqual(afterPreview)
+      }
       return
     }
     if (discard) {
