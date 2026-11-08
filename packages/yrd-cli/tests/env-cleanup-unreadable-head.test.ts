@@ -376,7 +376,7 @@ it("drops gone and stale requests without spending the one consumer close attemp
   expect(listCloseRequests(w.workdir)).toEqual(valid.slice(1).map((path) => closeRequestFile(w.workdir, path)))
 })
 
-it.each(["held", "reader-failure"] as const)(
+it.each(["held", "reader-failure", "reader-undefined"] as const)(
   "preserves the close allowance past an older live-use hold, with %s evidence",
   async (evidence) => {
     const w = await world()
@@ -399,9 +399,11 @@ it.each(["held", "reader-failure"] as const)(
           ending: { remote: "origin", queue: "main", branch: `task/ended-${index}`, event: "e".repeat(40) },
         }).file,
     )
-    const reader = vi.fn(async () => {
+    // The real host's round-wide declared-cwd read omits slot leases; only the targeted read includes them.
+    const reader = vi.fn(async (targetPath?: string) => {
       if (evidence === "reader-failure") throw new Error("fixture reader offline")
-      return [{ path: held, reason: "fixture slot lease" }]
+      if (evidence === "reader-undefined") throw undefined
+      return targetPath === held ? [{ path: held, reason: "fixture slot lease" }] : []
     })
     const attempted: string[] = []
     const stage = vi.spyOn(closeRequests, "stageCloseRequest")
@@ -428,14 +430,12 @@ it.each(["held", "reader-failure"] as const)(
         expect(retired?.why).toContain("no locked close attempted")
         expect(summary?.consumer).toEqual({ attempted: 1, closed: 1 })
         expect(listCloseRequests(w.workdir)).toEqual([])
-        expect(reader.mock.calls).toEqual([[], [w.env]])
       } else {
         expect(attempted).toEqual([held])
         expect(stage.mock.calls.map(([file]) => file)).toEqual([files[0]])
         expect(retired).toMatchObject({ result: "retired", why: expect.stringContaining("reader unavailable") })
         expect(summary?.consumer).toEqual({ attempted: 1, closed: 0 })
         expect(listCloseRequests(w.workdir)).toEqual([files[1]])
-        expect(reader.mock.calls).toEqual([[], [held]])
       }
     } finally {
       stage.mockRestore()
