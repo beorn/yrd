@@ -8183,13 +8183,14 @@ describe("drop --local --release-checkout", () => {
    * @level l2 @consumer Seats releasing retained standalone component worktrees after merge, or previewing/refusing unmerged component worktrees
    */
   it.each([
-    [false, false],
-    [true, false],
-    [false, true],
-    [true, true],
+    [false, false, false],
+    [true, false, false],
+    [false, true, false],
+    [true, true, false],
+    [true, true, true],
   ] as const)(
-    "releases a standalone linked component without publication (withQueue=%s, discard=%s)",
-    async (withQueue, discard) => {
+    "releases a retained component without publication (withQueue=%s, discard=%s, primary=%s)",
+    async (withQueue, discard, primary) => {
       const root = await world("{}\n")
       const rootGit = gitIn(root)
       const seed = await world()
@@ -8208,11 +8209,16 @@ describe("drop --local --release-checkout", () => {
       await rootGit(["push", "--quiet", "origin", "main"])
       const rootTip = (await rootGit(["rev-parse", "HEAD"])).trim()
       await createQueue(root, "main", rootTip, new Date())
-      const linked = mkdtempSync(join(tmpdir(), "yrd-component-linked-wt-"))
-      rmSync(linked, { recursive: true, force: true })
+      if (primary) await rootGit(["checkout", "--quiet", "--detach", rootTip])
+      const linked = primary ? child : mkdtempSync(join(tmpdir(), "yrd-component-linked-wt-"))
+      if (!primary) rmSync(linked, { recursive: true, force: true })
       const branch = "task/30753-preview-copy"
       const issue = "30753"
-      await childGit(["worktree", "add", "--quiet", "-b", branch, linked, "main"])
+      await childGit(
+        primary
+          ? ["checkout", "--quiet", "-b", branch, "main"]
+          : ["worktree", "add", "--quiet", "-b", branch, linked, "main"],
+      )
       const linkedGit = gitIn(linked)
       writeFileSync(join(linked, "preview.txt"), "component linked worktree commit\n")
       await linkedGit(["add", "preview.txt"])
@@ -8254,7 +8260,9 @@ describe("drop --local --release-checkout", () => {
         expect(await runYrdProcess(baseArgv, unmergedOut.io), unmergedOut.stderr()).toBe(1)
         const unmergedReport = JSON.parse(unmergedOut.stdout()) as ReleaseReport
         expect(unmergedReport.removed).toEqual([])
-        expect(unmergedReport.kept).toEqual([expect.objectContaining({ branch, head: tip, reason: "unreached" })])
+        expect(unmergedReport.kept, JSON.stringify(unmergedReport)).toEqual([
+          expect.objectContaining({ branch, head: tip, reason: "unreached" }),
+        ])
         expect((await linkedGit(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${branch}`)
         expect((await childGit(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tip)
         expect(await childGit(["for-each-ref", "refs/archive/", "refs/yrd/"])).toBe("")
@@ -8288,6 +8296,10 @@ describe("drop --local --release-checkout", () => {
           expect(decisions).toEqual([
             expect.objectContaining({ repo: linked, branch, head: tip, actor: "fixture", issue }),
           ])
+          if (primary) {
+            expect(await rootGit(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")).toBe("")
+            expect((await rootGit(["rev-parse", "HEAD"])).trim()).toBe(rootTip)
+          }
           return
         }
 
