@@ -1589,7 +1589,19 @@ export async function releaseRetainedCheckouts(
         )
       }
     }
-    const registrations = await registeredWorktrees(input.git)
+    let registrations = await registeredWorktrees(input.git)
+    if (input.componentStore === true) {
+      const metadata = await inspectCheckoutGitMetadata(input.repo)
+      const checkout = realpathSync(input.repo)
+      if (
+        metadata.gitDirectory === metadata.commonDirectory &&
+        realpathSync((await input.git(["rev-parse", "--show-toplevel"])).trim()) === checkout
+      ) {
+        registrations = registrations.map((row) =>
+          row.path === metadata.commonDirectory ? { ...row, path: checkout } : row,
+        )
+      }
+    }
     const attachedRoots = registrations.filter((row) => row.head === request.tip && row.branch === request.branch)
     const roots =
       attachedRoots.length > 0

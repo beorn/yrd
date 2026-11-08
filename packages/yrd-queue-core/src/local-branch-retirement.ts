@@ -1,9 +1,10 @@
-import { closeSync, fsyncSync, openSync } from "node:fs"
+import { closeSync, fsyncSync, openSync, realpathSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 
 import { findArchiveRefFor } from "git-super/archive-ref"
 import { changedCommitGitlinks } from "git-super/commit-graph"
 import { createGitWorktreeStore, worktreeOperationBranch } from "git-super/worktree"
+import { inspectCheckoutGitMetadata } from "git-super"
 import {
   ChainCustodyMismatch,
   drop,
@@ -90,6 +91,8 @@ class RetirementKept extends Error {
 export async function retireLocalBranch(input: LocalBranchRetirement): Promise<LocalBranchRetirementResult> {
   const { repo, git, branch, tip, actor, issue, reason, disposition } = input
   const store = createGitWorktreeStore({ repo, gitProcess: seamProcess(git, repo) })
+  const retainedMetadata =
+    input.retainedCheckout === undefined ? undefined : await inspectCheckoutGitMetadata(input.retainedCheckout)
   let firstProtectionRead = true
   let completedArchive: string | undefined
   // A tip proven in its target needs no custody of its own (30683): reachability() proves it for a merged or
@@ -141,12 +144,14 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     const self = resolve(repo)
     for (const row of await store.list()) {
       if (input.worktreeLess === true && resolve(row.path) === self) continue
-      if (
-        input.retainedCheckout !== undefined &&
-        resolve(row.path) === resolve(input.retainedCheckout) &&
-        row.branch === `refs/heads/${branch}`
-      ) {
-        continue
+      if (retainedMetadata !== undefined && row.branch === `refs/heads/${branch}`) {
+        const registered = realpathSync(row.path)
+        if (
+          registered === retainedMetadata.gitDirectory ||
+          (registered !== retainedMetadata.commonDirectory &&
+            (await inspectCheckoutGitMetadata(row.path)).gitDirectory === retainedMetadata.gitDirectory)
+        )
+          continue
       }
       if (row.branch === `refs/heads/${branch}`) return { code: "held", detail: `branch is checked out at ${row.path}` }
       if (row.branch === undefined) {

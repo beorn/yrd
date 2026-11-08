@@ -7007,7 +7007,7 @@ describe("drop --local --release-checkout", () => {
       expect(report.removed).toEqual([])
       const refusals = [...report.failed, ...report.kept]
       expect(refusals.length).toBeGreaterThan(0)
-      expect(refusals[0]?.detail).toContain(tip)
+      expect(refusals.some((row) => row.detail?.includes(tip))).toBe(true)
       expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(advanced)
       expect(await git(["status", "--porcelain=v2", "--untracked-files=all"])).toBe(beforeStatus)
       expect(await git(["ls-remote", "origin"])).toBe(beforeRemote)
