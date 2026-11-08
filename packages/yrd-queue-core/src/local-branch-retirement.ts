@@ -28,6 +28,8 @@ export type LocalBranchRetirement = Readonly<{
   dryRun?: boolean
   /** A proven worktree-less retained store: its own attached HEAD is not a live checkout (30094). */
   worktreeLess?: boolean
+  /** Exact attached checkout retained by the GitSuper detach/delete/restore operation. */
+  retainedCheckout?: string
   log: Pick<QueueRunLog, "write">
   /** Caller-owned holds, leases and live use, including detached rebase/bisect use.
    * Required: missing or unreadable authority must never mean unprotected.
@@ -139,6 +141,13 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     const self = resolve(repo)
     for (const row of await store.list()) {
       if (input.worktreeLess === true && resolve(row.path) === self) continue
+      if (
+        input.retainedCheckout !== undefined &&
+        resolve(row.path) === resolve(input.retainedCheckout) &&
+        row.branch === `refs/heads/${branch}`
+      ) {
+        continue
+      }
       if (row.branch === `refs/heads/${branch}`) return { code: "held", detail: `branch is checked out at ${row.path}` }
       if (row.branch === undefined) {
         const operation = worktreeOperationBranch(row.path)
@@ -273,6 +282,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       await store.removeBranch({
         branch,
         tip,
+        ...(input.retainedCheckout === undefined ? {} : { retainedCheckout: input.retainedCheckout }),
         beforeRemove: async () => {
           const held = await protection()
           if (held !== undefined) throw new RetirementKept(held)

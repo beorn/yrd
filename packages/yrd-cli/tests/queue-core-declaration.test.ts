@@ -3218,23 +3218,11 @@ describe("a queue is the selected origin branch carrying config", () => {
     ["task/30704", "--retire", "--discard"],
     ["--issue", "@i/10-yrd/30704-component-branch-owner-delete", "--discard"],
     ["task/30704", "--local", "--discard", "--retire", "--tip", "a".repeat(40), "--reason", "reviewed"],
-    [
-      "task/30704",
-      "--local",
-      "--discard",
-      "--release-checkout",
-      "--tip",
-      "a".repeat(40),
-      "--issue",
-      "@i/10-yrd/30704-component-branch-owner-delete",
-      "--reason",
-      "reviewed",
-    ],
   ])("rejects inapplicable discard options %j", async (...args) => {
     const out = capture(outsideRepositoryRoot())
     expect(await runYrdProcess(["bun", "yrd", "drop", ...args, "--json"], out.io)).toBe(2)
     expect(out.stderr()).toContain(
-      "--discard requires drop <branch> (--local | --retire) --tip <full-commit>; it cannot combine with --release-checkout",
+      "--discard requires drop <branch> (--local | --retire) --tip <full-commit>; --release-checkout requires --local",
     )
     expect(out.stdout()).toBe("")
   })
@@ -6980,20 +6968,22 @@ describe("drop --local --release-checkout", () => {
     writeFileSync(files[0]!, Buffer.from([0, 255, 12, 8]))
     writeFileSync(files[1]!, '{"bad":"retained evidence"}\n')
     writeFileSync(files[2]!, "retained lock\n")
+    const hooks = join(gitdir, "race-hooks")
+    mkdirSync(hooks)
+    const marker = join(hooks, "moved")
+    const hook = join(hooks, "reference-transaction")
+    writeFileSync(
+      hook,
+      `#!${process.execPath}\nimport { existsSync, readFileSync, writeFileSync } from "node:fs"\nconst rows = readFileSync(0, "utf8")\nif (process.argv[2] === "committed" && rows.trim().endsWith(" HEAD") && !existsSync(${JSON.stringify(marker)})) {\n  writeFileSync(${JSON.stringify(marker)}, "moved")\n  const result = Bun.spawnSync(["git", "-C", ${JSON.stringify(repo)}, "update-ref", ${JSON.stringify(`refs/heads/${branch}`)}, ${JSON.stringify(advanced)}, ${JSON.stringify(tip)}])\n  if (result.exitCode !== 0) throw Error(result.stderr.toString())\n}\n`,
+    )
+    chmodSync(hook, 0o755)
+    await git(["config", "core.hooksPath", hooks])
     const beforeBytes = files.map((path) => readFileSync(path))
     const beforeStatus = await git(["status", "--porcelain=v2", "--untracked-files=all"])
     const beforeRemote = await git(["ls-remote", "origin"])
     const { spy } = await permitCensus()
-    let moved = false
     try {
       const output = releaseCapture(repo)
-      output.io.localBranchProtections = async () => {
-        if (!moved && (await git(["symbolic-ref", "--quiet", "HEAD"]).catch(() => "")) === "") {
-          await git(["update-ref", `refs/heads/${branch}`, advanced, tip])
-          moved = true
-        }
-        return { protections: [], evidence: [] }
-      }
       const report = await releaseRetainedCheckouts({
         repo,
         git,
@@ -7013,11 +7003,11 @@ describe("drop --local --release-checkout", () => {
           apply: true,
         },
       })
-      expect(moved, JSON.stringify(report)).toBe(true)
+      expect(existsSync(marker), JSON.stringify(report)).toBe(true)
       expect(report.removed).toEqual([])
       const refusals = [...report.failed, ...report.kept]
-      expect(refusals).toHaveLength(1)
-      expect(refusals[0]?.detail).toContain("moved")
+      expect(refusals.length).toBeGreaterThan(0)
+      expect(refusals[0]?.detail).toContain(tip)
       expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(advanced)
       expect(await git(["status", "--porcelain=v2", "--untracked-files=all"])).toBe(beforeStatus)
       expect(await git(["ls-remote", "origin"])).toBe(beforeRemote)
@@ -8192,9 +8182,14 @@ describe("drop --local --release-checkout", () => {
    * @failure A standalone linked worktree of a component store refuses drop --local --release-checkout or attempts to write a component event chain (29770).
    * @level l2 @consumer Seats releasing retained standalone component worktrees after merge, or previewing/refusing unmerged component worktrees
    */
-  it.each([false, true] as const)(
-    "releases a merged standalone linked component worktree without a component event (withQueue=%s) and keeps unmerged work unreached",
-    async (withQueue) => {
+  it.each([
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ] as const)(
+    "releases a standalone linked component without publication (withQueue=%s, discard=%s)",
+    async (withQueue, discard) => {
       const root = await world("{}\n")
       const rootGit = gitIn(root)
       const seed = await world()
@@ -8264,6 +8259,37 @@ describe("drop --local --release-checkout", () => {
         expect((await childGit(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tip)
         expect(await childGit(["for-each-ref", "refs/archive/", "refs/yrd/"])).toBe("")
         expect((await childGit(["ls-remote", "origin", "refs/archive/*", "refs/yrd/*"])).trim()).toBe("")
+
+        // AC1 (31936): only explicit owner discard admits an unmerged retained checkout.
+        // The merged path below and global option-refusal cases never reached this contract.
+        if (discard) {
+          const beforeRemote = await linkedGit(["ls-remote", "origin"])
+          const preview = releaseCapture(linked)
+          expect(
+            await runYrdProcess([...baseArgv.filter((arg) => arg !== "--apply"), "--discard"], preview.io),
+            preview.stderr(),
+          ).toBe(0)
+          expect((JSON.parse(preview.stdout()) as ReleaseReport).eligible).toHaveLength(1)
+          expect((await linkedGit(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${branch}`)
+          const applied = releaseCapture(linked)
+          expect(await runYrdProcess([...baseArgv, "--discard"], applied.io), applied.stderr()).toBe(0)
+          const report = JSON.parse(applied.stdout()) as ReleaseReport
+          expect(report.removed).toHaveLength(1)
+          expect(report.failed).toEqual([])
+          expect((await linkedGit(["rev-parse", "HEAD"])).trim()).toBe(tip)
+          expect(await childGit(["for-each-ref", `refs/heads/${branch}`, "refs/archive/", "refs/yrd/"])).toBe("")
+          expect(await linkedGit(["ls-remote", "origin"])).toBe(beforeRemote)
+          expect(readFileSync(join(linked, "dirty.txt"), "utf8")).toBe("retained untracked bytes\n")
+          const logs = join(await workdirOf(withQueue ? rootGit : linkedGit), "logs")
+          const decisions = readdirSync(logs)
+            .filter((name) => name.endsWith(".jsonl"))
+            .flatMap((name) => readRunLog(logs, name.slice(0, -6)))
+            .filter((row) => row.intent === "local-discard")
+          expect(decisions).toEqual([
+            expect.objectContaining({ repo: linked, branch, head: tip, actor: "fixture", issue }),
+          ])
+          return
+        }
 
         // Once the component's published origin/main contains the tip, release detaches and removes the local branch.
         await linkedGit(["push", "--quiet", "origin", `${tip}:refs/heads/main`])

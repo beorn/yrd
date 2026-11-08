@@ -1575,7 +1575,7 @@ describe("yrd queue up, the service", () => {
 
   describe("delegated release requests (29772)", () => {
     // A confined seat's --apply files the release; the round, whose census reads every same-UID pid, runs it.
-    async function filedRelease(name: string) {
+    async function filedRelease(name: string, discard = false) {
       const w = await world()
       await w.git(["config", "yrd.workdir", w.workdir])
       await redeclare(w, "setup: ':'\n")
@@ -1618,7 +1618,15 @@ describe("yrd queue up, the service", () => {
         uid,
         at: new Date().toISOString(),
         predicate: "direct-admission",
-        release: { branch, tip, issue: "29772", reason: "retain checkout", by: "@dev/luna5", submodules: false },
+        release: {
+          branch,
+          tip,
+          issue: "29772",
+          reason: "retain checkout",
+          by: "@dev/luna5",
+          submodules: false,
+          ...(discard ? { discard: true } : {}),
+        },
       })
       return { w, workdir, environment, branch, tip, file, inEnv, commit }
     }
@@ -1654,6 +1662,19 @@ describe("yrd queue up, the service", () => {
      * @consumer a Landlock-confined seat whose own census cannot read a same-UID pid
      * @testonly none
      */
+    // 31936: if replay drops explicit discard intent, this queue-owned request
+    // silently becomes ordinary root release. The ordinary case cannot catch it.
+    it("preserves discard intent on replay and keeps a queue-owned branch", async () => {
+      const filed = await filedRelease("discard-refused", true)
+      const { exit, run, rows } = await oneRound(filed.w, filed.workdir)
+      expect(exit, run.stderr()).toBe(0)
+      expect(rows).toHaveLength(1)
+      expect(String(rows[0]?.why)).toContain("--discard requires a component author checkout")
+      expect((await filed.w.git(["rev-parse", `refs/heads/${filed.branch}`])).trim()).toBe(filed.tip)
+      expect((await filed.inEnv(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${filed.branch}`)
+      expect(readFileSync(join(filed.environment, "payload.txt"), "utf8")).toBe("private committed work\n")
+    }, 120_000)
+
     it("releases the branch in the round and keeps the checkout bytes", async () => {
       const filed = await filedRelease("released")
       const { exit, run, rows } = await oneRound(filed.w, filed.workdir)

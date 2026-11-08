@@ -1332,7 +1332,7 @@ export async function releaseRetainedCheckouts(
     selection: GitSelection
     env?: NodeJS.ProcessEnv
     io: YrdCliIO
-    log: LocalBranchRetirement["log"]
+    log: LocalBranchRetirement["log"] & Partial<{ id: string; path: string }>
     queue: string
     remote: string
     sameIssue: SameIssue
@@ -1350,11 +1350,20 @@ export async function releaseRetainedCheckouts(
       reason: string
       by: string
       submodules?: boolean
+      discard?: boolean
       apply?: boolean
     }>
   }>,
 ) {
   const { request, io } = input
+  if (request.discard === true && input.componentStore !== true) {
+    throw new Error(
+      "--discard requires a component author checkout without its own queue declaration; ordinary queue cleanup does not apply discard intent",
+    )
+  }
+  if (request.discard === true && request.submodules === true) {
+    throw new Error("retained-checkout discard selects one exact component; omit --submodules")
+  }
   // Transport keeps the configured URL; receipts and diagnostics never retain
   // its userinfo. Match URLs within error text as well as standalone origins.
   const publicText = (value: string) => value.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s]*@/giu, "$1")
@@ -1714,19 +1723,32 @@ export async function releaseRetainedCheckouts(
             reason: "moved",
             detail: `attached checkout does not match exact recorded pin ${commit}; branch kept`,
           })
-        } else if ((path !== "" || input.componentStore === true) && !onMain) {
+        } else if ((path !== "" || input.componentStore === true) && !onMain && request.discard !== true) {
           kept.push({
             ...row,
             reason: "unreached",
             detail: `exact branch head ${commit} is not an ancestor of its published main ${main}; kept for owner review (30683, 30704)`,
           })
         } else {
+          let disposition: LocalBranchRetirement["disposition"] =
+            path === "" && input.componentStore !== true
+              ? { kind: "closed", target: main, store: rootStore, queue: input.queue }
+              : { kind: "merged", base: main, target: main }
+          if (request.discard === true && !onMain) {
+            if (typeof input.log.id !== "string" || typeof input.log.path !== "string") {
+              throw new Error(`${repository}: explicit discard requires the existing durable run log id and path`)
+            }
+            disposition = {
+              kind: "discarded",
+              target: main,
+              targetRef: `refs/heads/${rootQueueBranch}`,
+              uniqueCommits: await dropCommitCount(git, commit, main),
+              log: { id: input.log.id, path: input.log.path },
+            }
+          }
           candidates.push({
             row,
-            disposition:
-              path === "" && input.componentStore !== true
-                ? { kind: "closed", target: main, store: rootStore, queue: input.queue }
-                : { kind: "merged", base: main, target: main },
+            disposition,
             remote,
             checkout: realpathSync(repository),
             git,
@@ -1817,6 +1839,7 @@ export async function releaseRetainedCheckouts(
           reason: request.reason,
           by: request.by,
           submodules: request.submodules === true,
+          ...(request.discard === undefined ? {} : { discard: request.discard }),
         },
       })
       const queued = `${alreadyStood ? "release request already stood" : "queued release request"} ${file} for the queue's own round (exit 4 means queued, not released yet); it journals the outcome under ${join(input.workdir, "logs", "post-merge")}`
@@ -1899,7 +1922,8 @@ export async function releaseRetainedCheckouts(
           })
         }
         const store = createGitWorktreeStore({ repo: row.repo, gitProcess: seamProcess(candidate.git, row.repo) })
-        if (!candidate.detached) {
+        const retainedCheckout = input.componentStore === true && !candidate.detached ? candidate.checkout : undefined
+        if (!candidate.detached && retainedCheckout === undefined) {
           original = await store.detachAt(candidate.checkout, row.head, `refs/heads/${row.branch}`)
         }
         const result = await retireLocalBranch({
@@ -1911,6 +1935,7 @@ export async function releaseRetainedCheckouts(
           issue: request.issue,
           reason: request.reason,
           log: input.log,
+          ...(retainedCheckout === undefined ? {} : { retainedCheckout }),
           protections: async () => {
             const reasons = await protect(candidate)
             await verify(candidate, before)

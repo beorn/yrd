@@ -74,7 +74,15 @@ export type EnvReleaseRequest = Readonly<{
   uid: number
   at: string
   predicate: typeof ENV_CLOSE_PREDICATE
-  release: Readonly<{ branch: string; tip: string; issue: string; reason: string; by: string; submodules: boolean }>
+  release: Readonly<{
+    branch: string
+    tip: string
+    issue: string
+    reason: string
+    by: string
+    submodules: boolean
+    discard?: boolean
+  }>
 }>
 
 export type StoredReleaseRequest = EnvReleaseRequest & Readonly<{ coverageAttempts?: number }>
@@ -211,7 +219,8 @@ export function writeReleaseRequest(
       standing.release.tip !== request.release.tip ||
       standing.release.issue !== request.release.issue ||
       standing.release.reason !== request.release.reason ||
-      standing.release.submodules !== request.release.submodules
+      standing.release.submodules !== request.release.submodules ||
+      (standing.release.discard === true) !== (request.release.discard === true)
     ) {
       throw new CloseRequestAlreadyStandsError(
         file,
@@ -412,6 +421,9 @@ function parseCloseRequest(parsed: unknown, file: string): StoredEnvRequest {
       return value
     }
     if (typeof release.submodules !== "boolean") throw bad("release.submodules must be a boolean")
+    if (release.discard !== undefined && typeof release.discard !== "boolean") {
+      throw bad("release.discard must be a boolean")
+    }
     return {
       intent: "release-checkout",
       name: text("name"),
@@ -427,6 +439,7 @@ function parseCloseRequest(parsed: unknown, file: string): StoredEnvRequest {
         reason: field("reason"),
         by: field("by"),
         submodules: release.submodules,
+        ...(release.discard === undefined ? {} : { discard: release.discard }),
       },
       ...(attempts === undefined ? {} : { coverageAttempts: attempts }),
     }

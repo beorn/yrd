@@ -74,6 +74,27 @@ it("keys a release apart from a close for the same path, and re-filing the same 
   expect(() => writeReleaseRequest(workdir, release("c".repeat(40)))).toThrow(/already stands/u)
 })
 
+// 31936: delegation must preserve explicit loss intent and refuse an intent
+// change at the standing key; existing release tests contain no discard field.
+it("round-trips explicit discard and keeps legacy release intent ordinary", () => {
+  const workdir = store()
+  const ordinary = release("b".repeat(40))
+  const destructive = { ...ordinary, release: { ...ordinary.release, discard: true } }
+  const first = writeReleaseRequest(workdir, ordinary)
+  expect(readCloseRequest(first.file)).toMatchObject({ release: { branch: ordinary.release.branch } })
+  expect(() => writeReleaseRequest(workdir, destructive)).toThrow(/already stands/u)
+  expect(
+    writeReleaseRequest(workdir, { ...ordinary, release: { ...ordinary.release, discard: false } }).alreadyStood,
+  ).toBe(true)
+  const other = store()
+  const written = writeReleaseRequest(other, destructive)
+  expect(readCloseRequest(written.file)).toMatchObject({ release: { discard: true } })
+  expect(writeReleaseRequest(other, destructive).alreadyStood).toBe(true)
+  expect(() => writeReleaseRequest(other, ordinary)).toThrow(/already stands/u)
+  writeFileSync(written.file, JSON.stringify({ ...destructive, release: { ...destructive.release, discard: "true" } }))
+  expect(() => readCloseRequest(written.file)).toThrow(/discard.*boolean/u)
+})
+
 it("reads a close file written before intents existed as a legacy close", () => {
   const workdir = store()
   const file = closeRequestFile(workdir, path)

@@ -272,10 +272,10 @@ function buildProgram(
         (options.local && options.retire) ||
         branch === undefined ||
         options.tip === undefined ||
-        options.releaseCheckout)
+        (options.releaseCheckout && !options.local))
     ) {
       throw new Error(
-        "--discard requires drop <branch> (--local | --retire) --tip <full-commit>; it cannot combine with --release-checkout",
+        "--discard requires drop <branch> (--local | --retire) --tip <full-commit>; --release-checkout requires --local",
       )
     }
     if (
