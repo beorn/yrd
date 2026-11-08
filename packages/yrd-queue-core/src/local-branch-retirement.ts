@@ -150,8 +150,9 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
           registered === retainedMetadata.gitDirectory ||
           (registered !== retainedMetadata.commonDirectory &&
             (await inspectCheckoutGitMetadata(row.path)).gitDirectory === retainedMetadata.gitDirectory)
-        )
+        ) {
           continue
+        }
       }
       if (row.branch === `refs/heads/${branch}`) return { code: "held", detail: `branch is checked out at ${row.path}` }
       if (row.branch === undefined) {
