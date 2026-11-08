@@ -946,6 +946,7 @@ function namedPrivateCheckout(checkout: string, store: string | undefined): stri
 async function fileTerminalCloseRequests(
   input: Readonly<{
     workdir: string
+    io: YrdCliIO
     rows: readonly { path: string; branch?: string; head?: string; hold: string | null }[]
     terminal: readonly string[]
     branchRoots: readonly string[]
@@ -1052,6 +1053,15 @@ async function fileTerminalCloseRequests(
             input.custodyRefusals.delete(row.path)
           }
         }
+      }
+      try {
+        await assertNoLiveEnvironmentUse(row.path, input.io)
+      } catch (cause) {
+        // As in the consumer, an own cause means reader failure, not an observed holder.
+        if (!(cause instanceof Error) || Object.hasOwn(cause, "cause")) throw cause
+        input.suppressed.add(row.path)
+        input.record(row.path, "skipped-held", `${cause.message}; checked again at the next startup catch-up`)
+        continue
       }
       const { file, alreadyStood } = writeCloseRequest(input.workdir, {
         name: basename(row.path),
@@ -1469,6 +1479,7 @@ async function cleanupEnvironments(
   let resolvedPrimaryRoot: string | undefined
   await fileTerminalCloseRequests({
     workdir,
+    io,
     rows: inventory.rows,
     terminal: [...outcome.merged, ...(input.withdrawn ?? [])],
     // The third inventory root holds detached exact-commit environments.

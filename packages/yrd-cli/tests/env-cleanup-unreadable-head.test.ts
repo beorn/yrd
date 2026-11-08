@@ -86,6 +86,7 @@ async function runRound(
   w: Awaited<ReturnType<typeof world>>,
   run: string,
   liveEnvironmentUse?: YrdCliIO["liveEnvironmentUse"],
+  merged: string[] = [],
 ): Promise<number> {
   const census = vi
     .spyOn(removely, "inspectProcessCwds")
@@ -114,7 +115,7 @@ async function runRound(
         ...(liveEnvironmentUse === undefined ? {} : { liveEnvironmentUse }),
       },
       selection: w.git.selection,
-      outcome: { run, log: join(w.workdir, "journal.jsonl"), merged: [], target: w.head } as never,
+      outcome: { run, log: join(w.workdir, "journal.jsonl"), merged, target: w.head } as never,
     })
     return census.mock.calls.length
   } finally {
@@ -138,6 +139,78 @@ function cleanupRows(root: string, depth = 0): readonly Record<string, unknown>[
   }
   return rows
 }
+
+it.each(["held", "unheld", "late-held", "reader-failure", "reader-undefined"] as const)(
+  "files terminal jobs only when unheld, with %s evidence",
+  async (evidence) => {
+    const w = await world()
+    await w.git(["remote", "add", "origin", w.repo])
+    const branch = "task/env-valid"
+    const envGit = testGitIn(w.env)
+    await envGit(["checkout", "--quiet", "-b", branch])
+    const gitDir = (await envGit(["rev-parse", "--absolute-git-dir"])).trim()
+    writeFileSync(
+      join(gitDir, "yrd-open.json"),
+      JSON.stringify({ version: 1, lifetime: "job", at: "2026-10-01T00:00:00.000Z" }),
+    )
+    readBranchHistory.mockResolvedValue({
+      history: { state: { status: "merged", commit: w.head, tip: w.head, event: "e".repeat(40) }, events: [] },
+    } as never)
+    let targetedReads = 0
+    const holder = "slot lease pid 123 seat @dev/12 since 2026-10-01T00:00:00Z"
+    const reader = async (path?: string) => {
+      if (path === undefined) return []
+      targetedReads++
+      if (evidence === "reader-failure") throw new Error("fixture reader offline")
+      if (evidence === "reader-undefined") throw undefined
+      return evidence === "held" || (evidence === "late-held" && targetedReads > 1)
+        ? [{ path: w.env, reason: holder }]
+        : []
+    }
+    try {
+      await runRound(w, `terminal-${evidence}`, reader, [branch])
+      const rows = cleanupRows(w.workdir).filter((row) => row.run === `terminal-${evidence}`)
+      const skipped = rows.filter((row) => row.path === w.env && row.result === "skipped-held")
+      const filed = rows.filter((row) => row.path === w.env && row.result === "filed")
+      expect(listCloseRequests(w.workdir)).toEqual([])
+      if (evidence === "held") {
+        expect(filed).toEqual([])
+        expect(skipped).toHaveLength(1)
+        expect(skipped[0]?.why).toContain(holder)
+        expect(skipped[0]?.why).toContain("checked again at the next startup catch-up")
+        expect(rows.filter((row) => row.request !== undefined)).toEqual([])
+        await runRound(w, "terminal-held-next-round", reader, [branch])
+        const nextRows = cleanupRows(w.workdir).filter((row) => row.run === "terminal-held-next-round")
+        expect(nextRows.filter((row) => row.result === "skipped-held")).toHaveLength(1)
+        expect(listCloseRequests(w.workdir)).toEqual([])
+        await runRound(w, "terminal-released", async () => [], [branch])
+        const released = cleanupRows(w.workdir).filter((row) => row.run === "terminal-released")
+        expect(released.filter((row) => row.result === "filed")).toHaveLength(1)
+        expect(released).toContainEqual(expect.objectContaining({ result: "closed", path: w.env }))
+      } else if (evidence === "reader-failure" || evidence === "reader-undefined") {
+        expect(filed).toEqual([])
+        expect(skipped).toEqual([])
+        expect(rows).toContainEqual(
+          expect.objectContaining({ result: "file-failed", why: expect.stringContaining("reader unavailable") }),
+        )
+      } else {
+        expect(filed).toHaveLength(1)
+        expect(skipped).toEqual([])
+        expect(rows).toContainEqual(
+          expect.objectContaining({ result: evidence === "late-held" ? "retired" : "closed", path: w.env }),
+        )
+        if (evidence === "late-held") {
+          const retired = rows.find((row) => row.result === "retired")
+          expect(retired?.why).toContain(holder)
+          expect(retired?.why).toContain("no locked close attempted")
+          expect(rows.filter((row) => row.result === "closed")).toEqual([])
+        }
+      }
+    } finally {
+      readBranchHistory.mockResolvedValue({ history: undefined })
+    }
+  },
+)
 
 it("reads past unreadable head requests and consumes a valid later request in one pass", async () => {
   const w = await world()

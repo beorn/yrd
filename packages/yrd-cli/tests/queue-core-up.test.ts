@@ -805,151 +805,169 @@ describe("yrd queue up, the service", () => {
     }
   }, 300_000)
 
-  it("startup recovers terminal cleanup for a fresh recorded job merged before interruption", async () => {
-    const w = await world()
-    await w.git(["config", "yrd.workdir", w.workdir])
-    const ready = join(w.workdir, "provider-ready")
-    const release = join(w.workdir, "provider-release")
-    const provider = join(w.workdir, "provider.sh")
-    const script = ['touch "$1"', ...waitingFor('test ! -f "$2"', "restart fixture provider was not released")].join(
-      "\n",
-    )
-    writeFileSync(provider, script)
-    await redeclare(w, JSON.stringify({ setup: ":", issuesProvider: { update: ["sh", provider, ready, release] } }))
-    const branch = "task/restart-job"
-    await w.git(["checkout", "--quiet", "-b", branch, "main"])
-    writeFileSync(join(w.work, "work.txt"), "merged job\n")
-    await w.git(["add", "work.txt"])
-    await w.git(["commit", "--quiet", "-m", "job without issue metadata"])
-    const head = (await w.git(["rev-parse", "HEAD"])).trim()
-    await w.git(["checkout", "--quiet", "main"])
-    const opened = capture(w.work)
-    expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "restart-job", "--json"], opened.io),
-      opened.stderr(),
-    ).toBe(0)
-    const environment = (JSON.parse(opened.stdout()) as { path: string }).path
-    const gitDir = (await gitIn(environment)(["rev-parse", "--absolute-git-dir"])).trim()
-    expect(JSON.parse(readFileSync(join(gitDir, "yrd-open.json"), "utf8"))).toMatchObject({ lifetime: "job" })
-    await gitIn(environment)(["checkout", "--quiet", branch])
-    await submit(w.git, "origin", { branch, submitter: "fixture", target: { remote: "origin", branch: "main" } })
-    const workdir = await workdirOf(w.git, { cwd: w.work })
-    const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue({
-      complete: true,
-      unreadable: [],
-      mechanism: "proc",
-      rows: [],
-    })
-    const startupHistories = vi.spyOn(queueCore, "listChangeHistories")
-    try {
-      const stop = new AbortController()
-      const first = capture(w.work)
-      first.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
-      first.io.liveEnvironmentUse = async () => []
-      expect(
-        await coreQueueCommand(
-          w.work,
-          first.io,
-          {
-            command: "up",
-            intervalSeconds: 0,
-            stop: stop.signal,
-            afterRound: async (outcome) => {
-              await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 30_000 })
-              expect(outcome.merged).toEqual([branch])
-              stop.abort()
-            },
-          },
-          { json: true, workdir },
-        ),
-        first.stderr(),
-      ).toBe(0)
-      const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
-      const merged = await queueCore.readStatus(store, "main", branch)
-      expect(merged.status).toBe("merged")
-      expect(merged.issue).toBeUndefined()
-      expect(existsSync(environment), "merge is durable while its pending cleanup is interrupted").toBe(true)
-      // Another registered terminal branch makes startup's acquisition contract observable (31428).
-      const olderBranch = "task/restart-older"
-      const olderPath = join(workdir, "environments", "restart-older")
-      await w.git(["worktree", "add", "--quiet", "-b", olderBranch, olderPath, head])
-      const queueTip = (await readEventQueue(store, "main")).tip
-      if (queueTip === null) throw new Error("fixture queue has no tip")
-      await (
-        await openEvents({ ...store, ref: `refs/yrd-archive/main/${olderBranch}`, writer: "fixture" })
-      ).append(
-        [
-          changeInput("opened", { queueTip, at: new Date(), commit: head, by: "fixture" }),
-          changeInput("merged", { queueTip, at: new Date(), commit: head }),
-        ],
-        { expect: null },
+  it.each(["held", "unheld"] as const)(
+    "startup recovers terminal cleanup for a %s fresh recorded job merged before interruption",
+    async (use) => {
+      const w = await world()
+      await w.git(["config", "yrd.workdir", w.workdir])
+      const ready = join(w.workdir, "provider-ready")
+      const release = join(w.workdir, "provider-release")
+      const provider = join(w.workdir, "provider.sh")
+      const script = ['touch "$1"', ...waitingFor('test ! -f "$2"', "restart fixture provider was not released")].join(
+        "\n",
       )
-      startupHistories.mockClear()
-      writeFileSync(release, "go")
-      const restarted = capture(w.work)
-      restarted.io.localBranchProtections = async () => ({
-        protections: ["fixture author hold"],
-        evidence: [],
+      writeFileSync(provider, script)
+      await redeclare(w, JSON.stringify({ setup: ":", issuesProvider: { update: ["sh", provider, ready, release] } }))
+      const branch = "task/restart-job"
+      await w.git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(w.work, "work.txt"), "merged job\n")
+      await w.git(["add", "work.txt"])
+      await w.git(["commit", "--quiet", "-m", "job without issue metadata"])
+      const head = (await w.git(["rev-parse", "HEAD"])).trim()
+      await w.git(["checkout", "--quiet", "main"])
+      const opened = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "restart-job", "--json"], opened.io),
+        opened.stderr(),
+      ).toBe(0)
+      const environment = (JSON.parse(opened.stdout()) as { path: string }).path
+      const gitDir = (await gitIn(environment)(["rev-parse", "--absolute-git-dir"])).trim()
+      expect(JSON.parse(readFileSync(join(gitDir, "yrd-open.json"), "utf8"))).toMatchObject({ lifetime: "job" })
+      await gitIn(environment)(["checkout", "--quiet", branch])
+      await submit(w.git, "origin", { branch, submitter: "fixture", target: { remote: "origin", branch: "main" } })
+      const workdir = await workdirOf(w.git, { cwd: w.work })
+      const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue({
+        complete: true,
+        unreadable: [],
+        mechanism: "proc",
+        rows: [],
       })
-      restarted.io.liveEnvironmentUse = async () => []
-      const stopRestart = new AbortController()
-      expect(
-        await coreQueueCommand(
-          w.work,
-          restarted.io,
-          {
-            command: "up",
-            intervalSeconds: 0,
-            stop: stopRestart.signal,
-            afterRound: async (outcome) => {
-              expect(outcome.merged, "restart merges no new change").toEqual([])
-              await waitForEnvironmentCleanup(workdir, outcome.run)
-              stopRestart.abort()
+      const startupHistories = vi.spyOn(queueCore, "listChangeHistories")
+      try {
+        const stop = new AbortController()
+        const first = capture(w.work)
+        first.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
+        first.io.liveEnvironmentUse = async () => []
+        expect(
+          await coreQueueCommand(
+            w.work,
+            first.io,
+            {
+              command: "up",
+              intervalSeconds: 0,
+              stop: stop.signal,
+              afterRound: async (outcome) => {
+                await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 30_000 })
+                expect(outcome.merged).toEqual([branch])
+                stop.abort()
+              },
             },
-          },
-          { json: true, workdir },
-        ),
-        restarted.stderr(),
-      ).toBe(0)
-      await w.git(["fetch", "--quiet", "origin", "main"])
-      expect(await w.git(["merge-base", "--is-ancestor", head, "origin/main"])).toBe("")
-      expect(existsSync(environment), restarted.stderr()).toBe(false)
-      const startupSelections = startupHistories.mock.calls.flatMap((args) =>
-        Array.isArray(args[2]?.branches) ? [args[2].branches] : [],
-      )
-      expect(startupSelections).toHaveLength(1)
-      expect(startupSelections[0]).toEqual(expect.arrayContaining([branch, olderBranch]))
-      const attempts = readdirSync(join(workdir, "post-merge"))
-        .filter((name) => name.endsWith(".json"))
-        .map((name) => JSON.parse(readFileSync(join(workdir, "post-merge", name), "utf8")))
-      expect(attempts).toContainEqual(
-        expect.objectContaining({ merged: expect.arrayContaining([branch, olderBranch]) }),
-      )
-      expect(allCleanupRows(workdir).some((row) => row.path === environment && row.result === "filed")).toBe(true)
-      expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim(), "hold retains the released author ref").toBe(
-        head,
-      )
-      const logs = join(workdir, "logs")
-      const heldRows = [logs, join(logs, "post-merge")].flatMap((dir) =>
-        readdirSync(dir)
-          .filter((name) => name.endsWith(".jsonl"))
-          .flatMap((name) => readRunLog(dir, name.slice(0, -".jsonl".length))),
-      )
-      expect(heldRows).toContainEqual(
-        expect.objectContaining({
-          kind: "local-branch-retirement",
-          branch,
-          head,
-          outcome: "kept",
-          detail: "fixture author hold; branch kept",
-        }),
-      )
-    } finally {
-      writeFileSync(release, "go")
-      startupHistories.mockRestore()
-      census.mockRestore()
-    }
-  }, 120_000)
+            { json: true, workdir },
+          ),
+          first.stderr(),
+        ).toBe(0)
+        const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+        const merged = await queueCore.readStatus(store, "main", branch)
+        expect(merged.status).toBe("merged")
+        expect(merged.issue).toBeUndefined()
+        expect(existsSync(environment), "merge is durable while its pending cleanup is interrupted").toBe(true)
+        // Another registered terminal branch makes startup's acquisition contract observable (31428).
+        const olderBranch = "task/restart-older"
+        const olderPath = join(workdir, "environments", "restart-older")
+        await w.git(["worktree", "add", "--quiet", "-b", olderBranch, olderPath, head])
+        const queueTip = (await readEventQueue(store, "main")).tip
+        if (queueTip === null) throw new Error("fixture queue has no tip")
+        await (
+          await openEvents({ ...store, ref: `refs/yrd-archive/main/${olderBranch}`, writer: "fixture" })
+        ).append(
+          [
+            changeInput("opened", { queueTip, at: new Date(), commit: head, by: "fixture" }),
+            changeInput("merged", { queueTip, at: new Date(), commit: head }),
+          ],
+          { expect: null },
+        )
+        startupHistories.mockClear()
+        writeFileSync(release, "go")
+        const restarted = capture(w.work)
+        restarted.io.localBranchProtections = async () => ({
+          protections: ["fixture author hold"],
+          evidence: [],
+        })
+        const holder = "slot lease pid 123 seat @dev/12 since 2026-10-01T00:00:00Z"
+        restarted.io.liveEnvironmentUse = async (path) =>
+          use === "held" && path === environment ? [{ path: environment, reason: holder }] : []
+        const stopRestart = new AbortController()
+        expect(
+          await coreQueueCommand(
+            w.work,
+            restarted.io,
+            {
+              command: "up",
+              intervalSeconds: 0,
+              stop: stopRestart.signal,
+              afterRound: async (outcome) => {
+                expect(outcome.merged, "restart merges no new change").toEqual([])
+                await waitForEnvironmentCleanup(workdir, outcome.run)
+                stopRestart.abort()
+              },
+            },
+            { json: true, workdir },
+          ),
+          restarted.stderr(),
+        ).toBe(0)
+        await w.git(["fetch", "--quiet", "origin", "main"])
+        expect(await w.git(["merge-base", "--is-ancestor", head, "origin/main"])).toBe("")
+        expect(existsSync(environment), restarted.stderr()).toBe(use === "held")
+        const startupSelections = startupHistories.mock.calls.flatMap((args) =>
+          Array.isArray(args[2]?.branches) ? [args[2].branches] : [],
+        )
+        expect(startupSelections).toHaveLength(1)
+        expect(startupSelections[0]).toEqual(expect.arrayContaining([branch, olderBranch]))
+        const attempts = readdirSync(join(workdir, "post-merge"))
+          .filter((name) => name.endsWith(".json"))
+          .map((name) => JSON.parse(readFileSync(join(workdir, "post-merge", name), "utf8")))
+        expect(attempts).toContainEqual(
+          expect.objectContaining({ merged: expect.arrayContaining([branch, olderBranch]) }),
+        )
+        const environmentRows = allCleanupRows(workdir).filter((row) => row.path === environment)
+        expect(environmentRows.some((row) => row.result === "filed")).toBe(use === "unheld")
+        if (use === "held") {
+          const skipped = environmentRows.filter((row) => row.result === "skipped-held")
+          expect(skipped).toHaveLength(1)
+          expect(skipped[0]?.why).toContain(holder)
+          expect(skipped[0]?.why).toContain("checked again at the next startup catch-up")
+          expect(existsSync(closeRequestFile(workdir, environment))).toBe(false)
+          expect(environmentRows.filter((row) => row.request !== undefined)).toEqual([])
+        }
+        expect(
+          (await w.git(["rev-parse", `refs/heads/${branch}`])).trim(),
+          "hold retains the released author ref",
+        ).toBe(head)
+        const logs = join(workdir, "logs")
+        const heldRows = [logs, join(logs, "post-merge")].flatMap((dir) =>
+          readdirSync(dir)
+            .filter((name) => name.endsWith(".jsonl"))
+            .flatMap((name) => readRunLog(dir, name.slice(0, -".jsonl".length))),
+        )
+        if (use === "unheld") {
+          expect(heldRows).toContainEqual(
+            expect.objectContaining({
+              kind: "local-branch-retirement",
+              branch,
+              head,
+              outcome: "kept",
+              detail: "fixture author hold; branch kept",
+            }),
+          )
+        }
+      } finally {
+        writeFileSync(release, "go")
+        startupHistories.mockRestore()
+        census.mockRestore()
+      }
+    },
+    120_000,
+  )
 
   /**
    * @failure A service start mints one housekeeping journal per merged round, and cleanup appends rows to a round journal whose final row was already written.
