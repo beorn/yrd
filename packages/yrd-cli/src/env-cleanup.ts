@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
@@ -67,17 +67,6 @@ import {
 import { repositoryHere } from "./declaration.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import type { WorktreeRemovalProof } from "./branch-retirement.ts"
-
-type CachedEnvironment = {
-  paths: { path: string; optional: boolean }[]
-  branches: readonly string[]
-  bindingKey?: string
-  expensiveKey?: string
-  verdict?: string
-  retryRemoteProof?: boolean
-  hold?: string | null
-  busy?: string
-}
 
 /**
  * A round charged the spawn-producing evaluation of at most this many
@@ -1114,7 +1103,6 @@ async function fileTerminalCloseRequests(
  * - a declared Hab slot preserves its environment through a round and a changed declaration releases it
  */
 export function createEnvironmentCleanup() {
-  const cache = new Map<string, CachedEnvironment>()
   const progress: CleanupProgress = {
     cursor: 0,
     hint: undefined,
@@ -1122,19 +1110,7 @@ export function createEnvironmentCleanup() {
     reported: new Map(),
     custodyRefusals: new Map(),
   }
-  return (input: Parameters<typeof cleanupEnvironments>[0]) => cleanupEnvironments(input, cache, progress)
-}
-
-/** A missing required index/reflog is uncertainty, never an unchanged identity. */
-function identity(file: Readonly<{ path: string; optional: boolean }>): string {
-  try {
-    const stat = statSync(file.path, { bigint: true })
-    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`
-  } catch (cause) {
-    const code = (cause as NodeJS.ErrnoException).code
-    if (file.optional && (code === "ENOENT" || code === "ENOTDIR")) return "absent optional path"
-    throw new Error(`cannot inspect cleanup input ${file.path}: ${String(cause)}`, { cause })
-  }
+  return (input: Parameters<typeof cleanupEnvironments>[0]) => cleanupEnvironments(input, progress)
 }
 
 /** One completed round applies the same predicate to current and backlog environments. */
@@ -1146,31 +1122,14 @@ async function proveEnvironmentRemovable(input: {
   target: string
   originBranch: string
   treeGit: ReturnType<typeof gitIn>
-  entry: CachedEnvironment
   ancestor: (root: string, head: string, target: string) => Promise<void>
 }): Promise<void> {
-  input.entry.retryRemoteProof = false
   await input.ancestor(input.path, input.head, input.target)
   // A private store is reported by its own class and retire route (#27120 AC2). Removal inspection refuses an empty
   // checkout whose store survives as an unknown submodule state (#30563), so the private-store question goes first.
   const adminDir = (await input.treeGit.at(input.path)(["rev-parse", "--absolute-git-dir"])).trim()
   await assertNoPrivateStore(createLocalGitProcess(), { adminDir, repository: input.path, head: input.head })
   const inspection = await createLocalGitWorktreeStore({ repo: input.repo, env: input.env }).inspectRemoval(input.path)
-  for (const component of inspection.consultedRepositories) {
-    if (component.path === ".") continue
-    for (const resource of ["index", `refs/remotes/origin/${input.originBranch}`, "packed-refs"]) {
-      const path = (await input.treeGit.at(component.root)(["rev-parse", "--git-path", resource])).trim()
-      if (path === "") throw new Error(`component ${component.root}: Git returned no ${resource} path`)
-      const absolute = resolve(component.root, path)
-      if (!input.entry.paths.some((file) => file.path === absolute)) {
-        input.entry.paths.push({ path: absolute, optional: resource !== "index" })
-      }
-    }
-  }
-  for (const component of inspection.uninitializedSubmodules) {
-    const path = join(input.path, component, ".git")
-    if (!input.entry.paths.some((file) => file.path === path)) input.entry.paths.push({ path, optional: true })
-  }
   if (inspection.records.length > 0) throw new Error(`dirty root/components: ${inspection.records.join("; ")}`)
   if (inspection.notCompared.length > 0) {
     throw new Error(`repository coverage unproven: ${JSON.stringify(inspection.notCompared)}`)
@@ -1182,9 +1141,6 @@ async function proveEnvironmentRemovable(input: {
     const componentGit = input.treeGit.at(component.root)
     const localTarget = await refAt(componentGit, `refs/remotes/origin/${input.originBranch}`)
     if (localTarget !== undefined && (await isAncestor(componentGit, component.to, localTarget))) continue
-    // A private tracking ref may lag publication. Remote-dependent keeps must
-    // retry even when neither the root target nor local filesystem changes.
-    input.entry.retryRemoteProof = true
     const remoteRef = `refs/heads/${input.originBranch}`
     try {
       const published = await readRemoteCommit(componentGit, "origin", remoteRef)
@@ -1196,7 +1152,6 @@ async function proveEnvironmentRemovable(input: {
       })
     }
   }
-  input.entry.retryRemoteProof = false
 }
 
 /**
@@ -1228,7 +1183,6 @@ async function cleanupEnvironments(
     /** Runs a delegated `drop --release-checkout` in this round (29772); absent, release requests stay standing. */
     releaseCheckout?: ReleaseCheckoutRound
   }>,
-  cache: Map<string, CachedEnvironment>,
   progress: CleanupProgress,
 ): Promise<readonly WorktreeRemovalProof[]> {
   const proofs: WorktreeRemovalProof[] = []
@@ -1596,15 +1550,7 @@ async function cleanupEnvironments(
         // filed request or suppressed an unchanged terminal custody refusal; evaluating it again here only repeats the census.
         continue
       }
-      let entry = cache.get(row.path)
-      if (entry === undefined) {
-        entry = { paths: [], branches: [] }
-        cache.set(row.path, entry)
-      }
       const holder = busy(row.path, snapshot)
-      if (entry.hold !== row.hold || entry.busy !== holder) entry.expensiveKey = undefined
-      entry.hold = row.hold
-      entry.busy = holder
       if (row.hold !== null) throw new Error(`held${row.hold === "" ? "" : `: ${row.hold}`}`)
       // Opening-record lookup spawns Git too: protected rows consume the batch.
       if (charged >= SWEEP_INSPECTION_BATCH) {
@@ -1621,66 +1567,17 @@ async function cleanupEnvironments(
       const treeGit = gitIn(row.path, undefined, git.selection, { env: input.env })
       const head = row.head
       if (head === undefined) throw new Error(`registered environment ${row.path} has no HEAD`)
-      if (entry.paths.length === 0) {
-        for (const resource of ["index", "logs/HEAD"]) {
-          const path = (await treeGit(["rev-parse", "--git-path", resource])).trim()
-          if (path === "") throw new Error(`environment ${row.path}: Git returned no ${resource} path`)
-          entry.paths.push({ path: resolve(row.path, path), optional: false })
-        }
-      }
-      const ownLog = entry.paths[1]
-      if (ownLog === undefined) throw new Error(`environment ${row.path}: HEAD reflog identity absent`)
-      const bindingKey = async (): Promise<string> =>
-        JSON.stringify([
-          head,
-          row.branch,
-          config.blob,
-          identity(ownLog),
-          await Promise.all(
-            [...new Set([...(row.branch === undefined ? [] : [row.branch]), ...entry.branches])].map(async (branch) => [
-              branch,
-              (await historyOf(branch)).history?.events.at(-1)?.id,
-            ]),
-          ),
-        ])
-      const key = await bindingKey()
-      if (entry.bindingKey !== key) {
-        entry.bindingKey = key
-        entry.expensiveKey = undefined
-      }
       if (holder !== undefined) throw new Error(holder)
-      const expensiveKey = (): string =>
-        JSON.stringify([
-          head,
-          row.branch,
-          config.blob,
-          outcome.target,
-          entry.bindingKey,
-          entry.paths.map((file) => [file.path, identity(file)]),
-        ])
-      if (entry.expensiveKey === expensiveKey()) {
-        if (entry.verdict !== undefined) throw new Error(entry.verdict)
-      } else {
-        try {
-          await proveEnvironmentRemovable({
-            path: row.path,
-            head,
-            repo,
-            env: input.env,
-            target: outcome.target,
-            originBranch: config.target.branch,
-            treeGit,
-            entry,
-            ancestor,
-          })
-          entry.verdict = undefined
-          entry.expensiveKey = expensiveKey()
-        } catch (cause) {
-          entry.verdict = String(cause)
-          entry.expensiveKey = entry.retryRemoteProof ? undefined : expensiveKey()
-          throw cause
-        }
-      }
+      await proveEnvironmentRemovable({
+        path: row.path,
+        head,
+        repo,
+        env: input.env,
+        target: outcome.target,
+        originBranch: config.target.branch,
+        treeGit,
+        ancestor,
+      })
       // A kept or refused close spends this route's allowance too.
       if (sweepAttempted >= CLOSE_ATTEMPTS_PER_ROUTE) {
         preserve(row.path, "eligible; yielding to the next queue round before removal")
@@ -1747,7 +1644,6 @@ async function cleanupEnvironments(
       if (typeof result !== "object" || result === null) throw new Error(`malformed close result ${output}`)
       if ("closed" in result && result.closed === row.path) {
         closed++
-        cache.delete(row.path)
         progress.custodyRefusals.delete(row.path)
         record(
           row.path,

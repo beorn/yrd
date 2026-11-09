@@ -16,7 +16,7 @@
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import * as removely from "removely"
 import { PrivateStoreRefusalError } from "git-super/worktree"
 import { afterAll, expect, it, vi } from "vitest"
@@ -920,4 +920,105 @@ it("keeps an environment whose opening record becomes unreadable or standing bef
   expect(rows.filter((row) => row.result === "closed")).toEqual([])
   const kept = rows.find((row) => row.result === "kept" && row.path === w.env)
   expect(String(kept?.why)).toContain(`opening record unreadable at ${recordPath}: `)
+})
+
+it("re-evaluates sweep custody refusals every round without caching stale borrower verdicts (#32881)", async () => {
+  const w = await world()
+  const subRoot = mkdtempSync(join(tmpdir(), "yrd-cleanup-32881-sub-"))
+  roots.push(subRoot)
+  const subSeed = join(subRoot, "sub-seed")
+  const subBare = join(subRoot, "sub.git")
+  mkdirSync(subSeed, { recursive: true })
+  const seedGit = testGitIn(subSeed)
+  await seedGit(["init", "--quiet", "--initial-branch=main"])
+  await seedGit(["config", "user.email", "cleanup@yrd.test"])
+  await seedGit(["config", "user.name", "yrd"])
+  writeFileSync(join(subSeed, "sub.txt"), "sub\n")
+  await seedGit(["add", "sub.txt"])
+  await seedGit(["commit", "--quiet", "-m", "seed sub"])
+  await seedGit(["clone", "--quiet", "--bare", subSeed, subBare])
+
+  await w.git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", subBare, "packages/sub"])
+  await w.git(["commit", "--quiet", "-m", "add packages/sub"])
+  const head = (await w.git(["rev-parse", "HEAD"])).trim()
+  await w.git(["remote", "add", "origin", w.repo])
+  await w.git(["fetch", "--quiet", "origin", "main"])
+
+  const envGit = testGitIn(w.env)
+  await envGit(["reset", "--hard", head])
+  await envGit(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"])
+  const envSubGit = testGitIn(join(w.env, "packages/sub"))
+  const envSubGitDir = resolve(join(w.env, "packages/sub"), (await envSubGit(["rev-parse", "--git-dir"])).trim())
+
+  const borrower = join(w.repo, ".bays", "z-borrower")
+  await w.git(["worktree", "add", "--quiet", "--detach", borrower, head])
+  const borrowerGit = testGitIn(borrower)
+  await borrowerGit(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"])
+  const borrowerSubGit = testGitIn(join(borrower, "packages/sub"))
+  const borrowerSubGitDir = resolve(
+    join(borrower, "packages/sub"),
+    (await borrowerSubGit(["rev-parse", "--git-dir"])).trim(),
+  )
+  const borrowerAlternates = join(borrowerSubGitDir, "objects", "info", "alternates")
+  mkdirSync(dirname(borrowerAlternates), { recursive: true })
+  writeFileSync(borrowerAlternates, `${join(envSubGitDir, "objects")}\n`)
+  // Keep borrower itself inside the 24h opening grace so only w.env is a sweep candidate.
+  const borrowerGitDir = (await borrowerGit(["rev-parse", "--absolute-git-dir"])).trim()
+  writeFileSync(
+    join(borrowerGitDir, "yrd-open.json"),
+    JSON.stringify({ version: 1, lifetime: "job", at: new Date().toISOString() }),
+  )
+
+  const cleanup = createEnvironmentCleanup()
+  const census = vi
+    .spyOn(removely, "inspectProcessCwds")
+    .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+  const config: QueueConfig = {
+    target: { remote: "origin", branch: "main" },
+    archiveAfter: "never",
+    revertGuard: "observe",
+    ignore: [],
+    checks: [],
+    notify: [],
+    health: { stallAfterMs: 0, declared: false },
+    blob: head,
+  }
+  const invoke = (run: string) =>
+    cleanup({
+      repo: w.repo,
+      git: w.git,
+      config,
+      workdir: w.workdir,
+      io: { localBranchProtections: null, cwd: w.repo, stdout: () => {}, stderr: () => {} },
+      selection: w.git.selection,
+      outcome: { run, log: join(w.workdir, "journal.jsonl"), merged: [], target: head } as never,
+    })
+
+  try {
+    // Round 1 & Round 2 while borrower exists: both rounds end in the same GitSuper borrower refusal
+    // (change-only reporting logs the identical reason on Round 1 and retains it in state on Round 2).
+    await invoke("borrower-round-1")
+    await invoke("borrower-round-2")
+    const r1 = cleanupRows(w.workdir).find((row) => row.run === "borrower-round-1" && row.path === w.env)
+    const r2Summary = cleanupRows(w.workdir).find((row) => row.run === "borrower-round-2" && row.kept !== undefined)
+    const stateAfterR2 = JSON.parse(
+      readFileSync(join(w.workdir, "state", "yrd", "environment-cleanup.json"), "utf8"),
+    ) as { reported: Record<string, string> }
+    expect(r1?.result).toBe("kept")
+    expect(String(r1?.why)).toContain("borrowed by")
+    expect(r2Summary).toMatchObject({ closed: 0, kept: 2 })
+    expect(stateAfterR2.reported[w.env]).toBe(`kept\0${String(r1?.why)}`)
+
+    // Clear the borrower alternate: nothing inside w.env's own index, refs, packed-refs or logs/HEAD changes,
+    // so the old narrow cache stayed stale and kept re-throwing "borrowed by" instead of closing w.env.
+    rmSync(borrowerAlternates)
+    await invoke("borrower-cleared-round-3")
+    const r3 = cleanupRows(w.workdir).filter((row) => row.run === "borrower-cleared-round-3")
+    expect(
+      r3.some((row) => row.result === "closed" && row.path === w.env),
+      JSON.stringify(r3),
+    ).toBe(true)
+  } finally {
+    census.mockRestore()
+  }
 })
