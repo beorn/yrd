@@ -232,7 +232,11 @@ it("labels interrupted evidence and starts a fresh catch-up without consulting o
     runner.nudge({ ...context, update: ["sh", "-c", "true"] })
     await runner[Symbol.asyncDispose]()
   }
-  const path = join(root, "post-merge", readdirSync(join(root, "post-merge")).find((n) => n.endsWith(".json"))!)
+  const path = join(
+    root,
+    "post-merge",
+    readdirSync(join(root, "post-merge")).find((n) => n.endsWith(".json"))!,
+  )
   const old = attemptAt(path)
   writeFileSync(path, JSON.stringify({ ...old, status: "running", endedAt: undefined }))
   await using restarted = createPostMerge({
@@ -697,8 +701,18 @@ it.each([
     if (mode === "observed-legacy") {
       const before = (await readBranchHistory(store, "main", "task/first")).history!
       expect(before.state.status).toBe("merged")
-      expect(trailer(before.events.find((event) => event.type === "opened")!, "Base")).toBeUndefined()
-      expect(trailer(before.events.find((event) => event.type === "merged")!, "Base")).toBeUndefined()
+      expect(
+        trailer(
+          before.events.find((event) => event.type === "opened")!,
+          "Base",
+        ),
+      ).toBeUndefined()
+      expect(
+        trailer(
+          before.events.find((event) => event.type === "merged")!,
+          "Base",
+        ),
+      ).toBeUndefined()
       await using runner = createPostMerge({
         workdir,
         cwd: repo,
@@ -1561,10 +1575,9 @@ it.each(["recorded", "provider-fails"] as const)(
               rounds++
               merged.push(...outcome.merged)
               if (merged.includes("task/with-issue") && merged.includes("task/no-issue")) {
-                await vi.waitFor(
-                  () => expect(new Set(eventActions().map((action) => action.branch)).size).toBe(2),
-                  { timeout: 10000 },
-                )
+                await vi.waitFor(() => expect(new Set(eventActions().map((action) => action.branch)).size).toBe(2), {
+                  timeout: 10000,
+                })
                 stop.abort()
               } else if (rounds > 4) stop.abort()
             },
@@ -1612,7 +1625,11 @@ it.each(["recorded", "provider-fails"] as const)(
     )
     expect(report).toContain(`task/with-issue@${withIssue} (yrd-issues-provider-failed: event sh -c`)
     expect(readPostMergeIssueDiagnostics(workdir)).toContainEqual(
-      expect.objectContaining({ branch: "task/with-issue", mergeSha: withIssue, providerId: `yrd:merged:${withIssue}` }),
+      expect.objectContaining({
+        branch: "task/with-issue",
+        mergeSha: withIssue,
+        providerId: `yrd:merged:${withIssue}`,
+      }),
     )
   },
   60000,

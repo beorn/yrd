@@ -363,7 +363,9 @@ describe("yrd issues", () => {
       expect(refused.exitCode, kind).toBe(2)
       expect(refused.stderr).toContain("kind must be merged, failed, withdrawn")
     }
-    expect((await yrd(root, "issues", "event", "raw", "merged", source, "text")).stderr).toContain("--id <id> is required")
+    expect((await yrd(root, "issues", "event", "raw", "merged", source, "text")).stderr).toContain(
+      "--id <id> is required",
+    )
   })
 
   // #31194: a clone's main can lag the merge Yrd just published by seconds (2-44 s measured on /hh/dev).
