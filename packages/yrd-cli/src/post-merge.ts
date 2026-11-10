@@ -431,9 +431,18 @@ export function mergedEventSource(url: string, mergeSha: string): string {
 }
 
 /**
+ * The operation id a `merged` event is written under, so a retry writes nothing. km keys its replay record by a ref
+ * named after the id, one ref segment with no colon, so the ruled `yrd:<kind>:<sha>` (@cto 721b42d7 condition 2) is
+ * spelled with dashes; #31194 acceptance row 4 holds the test that proves this id against km's rule.
+ */
+export function mergedEventOperationId(mergeSha: string): string {
+  return `yrd-merged-${mergeSha}`
+}
+
+/**
  * One `merged` item event per delivered change, on the issue the change names (@cto 721b42d7, #31194). Yrd passes
  * the change's issue value as it holds it and the provider resolves it; the event's time is the provider's write
- * time. Replay-safe under `yrd:merged:<merge sha>`. A failed call is reported and kept as derived evidence: it
+ * time. Replay-safe under {@link mergedEventOperationId}. A failed call is reported and kept as derived evidence: it
  * never holds or undoes the merge, and nothing here closes an issue (#29630 is the one close writer).
  */
 async function recordMergedEvents(
@@ -461,7 +470,7 @@ async function recordMergedEvents(
     if (why !== undefined) unrecorded.push(`${at} (${why})`)
   }
   // A branch-level outcome keeps its own id, so the close path's branch rows (providerId "") never clear it.
-  const branchLevel = { mergedEvent: "", mergeSha: "", providerId: "yrd:merged", status: "unavailable" } as const
+  const branchLevel = { mergedEvent: "", mergeSha: "", providerId: "yrd-merged", status: "unavailable" } as const
   let url: string
   try {
     url = await remoteUrl(input.git, input.remote)
@@ -493,7 +502,7 @@ async function recordMergedEvents(
         record({ ...branchLevel, branch, diagnostic }, "no merge SHA")
         continue
       }
-      const providerId = `yrd:merged:${mergeSha}`
+      const providerId = mergedEventOperationId(mergeSha)
       const identity = { branch, mergedEvent: mergedEvent.id, mergeSha, providerId }
       const issue = segment.state.issue
       if (issue === undefined || issue === "") {

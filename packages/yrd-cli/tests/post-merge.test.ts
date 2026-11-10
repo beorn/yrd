@@ -1593,14 +1593,14 @@ it.each(["recorded", "provider-fails"] as const)(
     const noIssue = (await readStatus(store, "main", "task/no-issue")).merge!
     // One provider call, for the change that names an issue: its value as held, kind merged, the replay key.
     expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual([
-      [issue, "merged", `${remote}@${withIssue}`, "task/with-issue merged", `yrd:merged:${withIssue}`].join("\t"),
+      [issue, "merged", `${remote}@${withIssue}`, "task/with-issue merged", `yrd-merged-${withIssue}`].join("\t"),
     ])
     const actions = eventActions()
     expect(actions).toContainEqual(
       expect.objectContaining({
         branch: "task/no-issue",
         mergeSha: noIssue,
-        providerId: `yrd:merged:${noIssue}`,
+        providerId: `yrd-merged-${noIssue}`,
         status: "skipped",
         reason: "no-issue",
       }),
@@ -1619,7 +1619,7 @@ it.each(["recorded", "provider-fails"] as const)(
       expect.objectContaining({
         branch: "task/with-issue",
         status: "failed",
-        providerId: `yrd:merged:${withIssue}`,
+        providerId: `yrd-merged-${withIssue}`,
         diagnostic: expect.stringContaining("provider ended with exit 3"),
       }),
     )
@@ -1628,7 +1628,7 @@ it.each(["recorded", "provider-fails"] as const)(
       expect.objectContaining({
         branch: "task/with-issue",
         mergeSha: withIssue,
-        providerId: `yrd:merged:${withIssue}`,
+        providerId: `yrd-merged-${withIssue}`,
       }),
     )
   },

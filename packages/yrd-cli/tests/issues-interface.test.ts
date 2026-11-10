@@ -355,9 +355,9 @@ describe("yrd issues", () => {
       "issues.yml": declare({ event: provider("json", "<raw>", "<kind>", "<source>", "<text>", "<id>") }),
     })
     const source = "github.com/beorn/hh-dev@0123456789abcdef0123456789abcdef01234567"
-    const ran = await yrd(root, "issues", "event", "--id", "yrd:merged:0123", "--", "-31194", "merged", source, "a b")
+    const ran = await yrd(root, "issues", "event", "--id", "yrd-merged-0123", "--", "-31194", "merged", source, "a b")
     expect(ran.exitCode, ran.stderr).toBe(0)
-    expect(envelopeOf(ran).result).toEqual({ argv: ["-31194", "merged", source, "a b", "yrd:merged:0123"] })
+    expect(envelopeOf(ran).result).toEqual({ argv: ["-31194", "merged", source, "a b", "yrd-merged-0123"] })
     for (const kind of ["closed", "opened", ""]) {
       const refused = await yrd(root, "issues", "event", "--id", "i", "raw", kind, source, "text")
       expect(refused.exitCode, kind).toBe(2)
