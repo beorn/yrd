@@ -3284,7 +3284,14 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).toBe(0)
     expect(await git(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).toBe("")
     const report = JSON.parse(out.stdout()) as {
-      removed: { branch: string; head: string; intent?: string; actor?: string; recovery?: string }[]
+      removed: {
+        branch: string
+        head: string
+        reason?: string
+        intent?: string
+        actor?: string
+        recovery?: string
+      }[]
       kept: unknown[]
     }
     expect(report.kept).toEqual([])
@@ -3293,8 +3300,15 @@ describe("a queue is the selected origin branch carrying config", () => {
     ])
     const after = (await readBranchHistory(store, "main", branch)).history
     const dropped = after?.events.at(-1)
-    expect(dropped).toMatchObject({ type: "cancelled", links: expect.arrayContaining([head]), content: reason })
+    expect(dropped).toMatchObject({
+      type: "cancelled",
+      links: expect.arrayContaining([head]),
+      content: expect.stringContaining(reason),
+    })
     expect(after?.state.status).toBe("cancelled")
+    // 33188 follow-up (@cto 2026-11-10): the event itself names the seat outside the change's own actors.
+    expect(String(dropped?.content)).toContain("discarded by @dev/3; the change was recorded for fixture")
+    expect(report.removed[0]?.reason).toContain("discarded by @dev/3; the change was recorded for fixture")
     const row = report.removed[0]
     if (row?.recovery === undefined) throw new Error("discard receipt named no recovery command")
     expect(row.recovery).toContain(changesRef("main", branch))
@@ -3309,6 +3323,64 @@ describe("a queue is the selected origin branch carrying config", () => {
       row.recovery,
     ).toBe(0)
     expect((await git(["rev-parse", `refs/heads/${restored}`])).trim()).toBe(head)
+  }, 60_000)
+
+  /** @failure 33188 follow-up: every discard reads as a foreign decision, so a receipt cannot tell an owner's own
+   *          withdrawal from one another seat made on its branch.
+   * @level l2 @consumer an owner reading the receipt of its own discard
+   */
+  it("does not mark a discard by the change's own submitter as foreign", async () => {
+    const repo = await world("checks: []\n")
+    const git = gitIn(repo)
+    const branch = "task/discard-own"
+    const recorded = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", recorded, new Date())
+    const store = createEventStore(repo, "origin", git.selection)
+    await (
+      await openEvents({ ...store, ref: changesRef("main", branch), writer: "fixture" })
+    ).append(
+      [
+        changeInput("opened", { queueTip, at: new Date(), commit: recorded, by: "fixture" }),
+        changeInput("cancelled", { queueTip, at: new Date(), commit: recorded, reason: "withdrawn", by: "fixture" }),
+      ],
+      { expect: null },
+    )
+    await git(["branch", branch, recorded])
+    // Advance past the recorded tip: an ordinary local drop of a tip the chain already keeps writes no new event,
+    // and this test is about the event a discard writes.
+    await git(["checkout", "--quiet", "-b", `${branch}-work`])
+    await git(["commit", "--quiet", "--allow-empty", "-m", "my own withdrawn follow-up"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    await git(["branch", "-f", branch, head])
+    const reason = "my own withdrawal; the reviewed direction was dropped"
+    const out = capture(repo)
+    expect(
+      await runYrdProcess(
+        [
+          "bun",
+          "yrd",
+          "drop",
+          branch,
+          "--local",
+          "--discard",
+          "--tip",
+          head,
+          "--reason",
+          reason,
+          "--submitter",
+          "fixture",
+          "--json",
+        ],
+        out.io,
+      ),
+      out.stderr(),
+    ).toBe(0)
+    const report = JSON.parse(out.stdout()) as { removed: { reason?: string }[] }
+    expect(report.removed[0]?.reason).toBe(reason)
+    expect(report.removed[0]?.reason).not.toContain("discarded by")
+    const after = (await readBranchHistory(store, "main", branch)).history
+    expect(after?.events.at(-1)?.content).toBe(reason)
   }, 60_000)
 
   /** @failure 33188: --discard without the reason the dropped event is supposed to record retires a branch on a

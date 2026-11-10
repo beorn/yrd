@@ -51,6 +51,7 @@ import {
   readBranchProtections,
   advancedDrop,
   dropCommitCount,
+  discardActorNote,
   type AdvancedRecord,
   componentDropHint,
   componentsHoldingBranch,
@@ -2327,6 +2328,17 @@ export async function coreQueueCommand(
             advanced = unlocked.advanced
           }
           const uniqueCommits = advanced?.uniqueCommits ?? (await dropCommitCount(authorGit, head, target))
+          // 33188 follow-up (@cto 2026-11-10): a discard by a seat outside the change's own actors still passes,
+          // but the dropped event's content and this receipt must say who did it and what the chain recorded.
+          const discardNote =
+            request.discard === true
+              ? discardActorNote({
+                  by: request.by,
+                  queue: config.target.branch,
+                  ...(history === undefined ? {} : { history }),
+                })
+              : undefined
+          const reason = request.reason ?? "explicit local branch cleanup"
           const result = await retireLocalBranch({
             repo: authorRepo,
             git: authorGit,
@@ -2335,7 +2347,7 @@ export async function coreQueueCommand(
             actor: request.by,
             owner: change?.submitter,
             issue: bound,
-            reason: request.reason ?? "explicit local branch cleanup",
+            reason: discardNote === undefined ? reason : `${reason} (${discardNote})`,
             dryRun: false,
             log,
             protections: async () =>

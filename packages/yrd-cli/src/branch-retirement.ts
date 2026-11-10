@@ -2780,6 +2780,52 @@ export function createLandedBranchRetirement(
   }
 }
 
+/** Who may retire a change's tip without an explicit withdrawal call (30683, 30999): its recorded submitter, the
+ * seat that ended it, and the queue's declared runner. */
+export function retirementActors(
+  input: Readonly<{
+    state: Pick<EventChange, "submitter" | "ending">
+    events: readonly Readonly<{ id: string; props: readonly (readonly [string, string])[] }>[]
+    queue: string
+  }>,
+): readonly string[] {
+  const ending = input.events.find((event) => event.id === input.state.ending?.id)
+  return [
+    input.state.submitter,
+    ending?.props.find(([key]) => key === "By")?.[1],
+    ...yrdQueueRunnerDeclarations.filter((row) => row.queue.base === input.queue).map((row) => row.owner),
+  ].filter((actor): actor is string => actor !== undefined && actor.trim() !== "")
+}
+
+/**
+ * In words, who discarded a tip and what the chain recorded for it. A caller outside the change's own actors is not
+ * refused — an explicit discard with a reason is their call — but the dropped event and its receipt both carry this
+ * sentence, so a seat whose branch name vanished can find who and why from the change chain alone (33188 follow-up,
+ * @cto 2026-11-10). Undefined when the caller is one of the change's own actors.
+ */
+export function discardActorNote(
+  input: Readonly<{
+    by: string
+    queue: string
+    history?: Readonly<{
+      state: Pick<EventChange, "submitter" | "ending">
+      events: readonly Readonly<{ id: string; props: readonly (readonly [string, string])[] }>[]
+    }>
+  }>,
+): string | undefined {
+  const state = input.history?.state
+  const recorded = state?.submitter?.trim()
+  if (state === undefined) return `discarded by ${input.by}; this branch has no change record`
+  if (retirementActors({ state, events: input.history?.events ?? [], queue: input.queue }).includes(input.by)) {
+    return undefined
+  }
+  return `discarded by ${input.by}; ${
+    recorded === undefined || recorded === ""
+      ? "the change records no submitter"
+      : `the change was recorded for ${recorded}`
+  }`
+}
+
 /**
  * The next step for a branch drop keeps because it moved past its recorded change tip (29579). When the target already
  * holds the current tip, as after a fast-forward to it while verifying, nothing is lost by moving the branch back to
@@ -2875,12 +2921,7 @@ export async function advancedDrop(
       detail: `; whether ${input.targetLabel} holds ${input.head} is unknown (${error instanceof Error ? error.message : String(error)})`,
     }
   }
-  const ending = events.find((event) => event.id === state.ending?.id)
-  const owners = [
-    state.submitter,
-    ending?.props.find(([key]) => key === "By")?.[1],
-    ...yrdQueueRunnerDeclarations.filter((row) => row.queue.base === input.queue).map((row) => row.owner),
-  ]
+  const owners = retirementActors({ state, events, queue: input.queue })
   if (isOpen(state.status)) return { detail: "; change is still open; withdraw it before dropping its advanced tip" }
   // A merged change's branch that advanced with rejected work drops the same way as a cancelled one's (30999).
   const ended =
