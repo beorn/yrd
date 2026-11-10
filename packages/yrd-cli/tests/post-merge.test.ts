@@ -1495,8 +1495,8 @@ it.each([
   60000,
 )
 
-/** @failure A delivered change's merged item event is lost, keyed off its merge, written as a close, or a failed provider call holds the merge. @level l2 @consumer Yrd post-merge item events (#31194, @cto 721b42d7) @testonly none */
-it.each(["recorded", "provider-fails"] as const)(
+/** @failure A delivered change's merged item event is lost, keyed off its merge, written as a close, or a failed provider call holds the merge; or, with no event declared, a provider is called or the round records a failure. @level l2 @consumer Yrd post-merge item events (#31194, @cto 721b42d7) @testonly none */
+it.each(["recorded", "provider-fails", "undeclared"] as const)(
   "writes one merged item event per delivered change through the issues declaration: %s",
   async (mode) => {
     const root = world(),
@@ -1517,9 +1517,12 @@ it.each(["recorded", "provider-fails"] as const)(
     const reply = mode === "provider-fails" ? "exit 3" : "printf '{\"applied\":true}\\n'"
     writeFileSync(
       join(repo, "issues.yml"),
-      JSON.stringify({
-        event: ["sh", "-c", write + reply, "event", "<raw>", "<kind>", "<source>", "<text>", "<id>", calls],
-      }),
+      JSON.stringify(
+        // Production's shape today: other verbs declared, no `event`. A call of any verb lands in `calls`.
+        mode === "undeclared"
+          ? { comment: ["sh", "-c", write + "exit 9", "comment", "<key>", "<text>", "<id>", "-", "-", calls] }
+          : { event: ["sh", "-c", write + reply, "event", "<raw>", "<kind>", "<source>", "<text>", "<id>", calls] },
+      ),
     )
     await git(["add", ".yrd.yml", "issues.yml"])
     await git(["commit", "--quiet", "-m", "queue"])
@@ -1588,6 +1591,23 @@ it.each(["recorded", "provider-fails"] as const)(
       ).toBe(0)
     } finally {
       stop.abort()
+    }
+    if (mode === "undeclared") {
+      // Nothing is called, each merged branch says why at the round's target, and nothing counts as failed.
+      expect(existsSync(calls)).toBe(false)
+      const actions = eventActions()
+      for (const branch of ["task/with-issue", "task/no-issue"]) {
+        expect(actions).toContainEqual(
+          expect.objectContaining({
+            branch,
+            mergeSha: "",
+            status: "skipped",
+            reason: expect.stringMatching(/^issues\.yml declares no event at target [0-9a-f]{40}$/),
+          }),
+        )
+      }
+      expect(actions.filter(({ status }) => status !== "skipped")).toEqual([])
+      return
     }
     const withIssue = (await readStatus(store, "main", "task/with-issue")).merge!
     const noIssue = (await readStatus(store, "main", "task/no-issue")).merge!

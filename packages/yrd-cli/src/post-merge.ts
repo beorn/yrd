@@ -443,7 +443,8 @@ export function mergedEventOperationId(mergeSha: string): string {
  * One `merged` item event per delivered change, on the issue the change names (@cto 721b42d7, #31194). Yrd passes
  * the change's issue value as it holds it and the provider resolves it; the event's time is the provider's write
  * time. Replay-safe under {@link mergedEventOperationId}. A failed call is reported and kept as derived evidence: it
- * never holds or undoes the merge, and nothing here closes an issue (#29630 is the one close writer).
+ * never holds or undoes the merge, and nothing here closes an issue (#29630 is the one close writer). Nothing is read
+ * while issues.yml at the round's target declares no `event`: no event could be written.
  */
 async function recordMergedEvents(
   input: Readonly<{
@@ -471,6 +472,21 @@ async function recordMergedEvents(
   }
   // A branch-level outcome keeps its own id, so the close path's branch rows (providerId "") never clear it.
   const branchLevel = { mergedEvent: "", mergeSha: "", providerId: "yrd-merged", status: "unavailable" } as const
+  // A change history is read only for a write it can feed. The declaration at each merge still decides that merge.
+  let declared: boolean
+  try {
+    declared = await declaresEvent(input.git, input.target)
+  } catch (error) {
+    const diagnostic = `merged events not recorded: issues.yml at target ${input.target} is unreadable: ${String(error)}`
+    for (const branch of new Set(input.branches)) record({ ...branchLevel, branch, diagnostic })
+    input.report(diagnostic)
+    return outcomes
+  }
+  if (!declared) {
+    const reason = `issues.yml declares no event at target ${input.target}`
+    for (const branch of new Set(input.branches)) record({ ...branchLevel, branch, status: "skipped", reason })
+    return outcomes
+  }
   let url: string
   try {
     url = await remoteUrl(input.git, input.remote)
