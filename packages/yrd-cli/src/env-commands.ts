@@ -68,7 +68,7 @@ import { runIssuesVerb } from "./issues/run.ts"
 import { originHead } from "./queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
-import { censusRetainedStores } from "./retained-census.ts"
+import { censusRetainedStores, retainedCloseLine } from "./retained-census.ts"
 import { formatYrdCommand } from "./command-format.ts"
 import { envOpenRecordFromFlags, writeEnvOpenRecord } from "./env-open-record.ts"
 import {
@@ -1967,6 +1967,7 @@ export async function closeEnvironment(
     }
     removalProof = removed.proof as WorktreeRemovalProof
     io.stderr(`retained environment removal proof ${removalProof.manifest}\n`)
+    io.stderr(`${retainedCloseLine(retain)}\n`)
   } else {
     // No submodules recorded at this commit, so there is no gitlink for
     // git-super to materialize on the way out. The helper re-asks before it

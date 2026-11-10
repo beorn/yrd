@@ -25,6 +25,16 @@ export type RetainedCensus =
       noManifest: readonly string[]
     }>
 
+/**
+ * The one line `env close` prints after retaining (@cto dc77f630): a directory count only, because the full census
+ * parses every manifest (9.7 s on the live 8,560-store root) and close must stay fast. It points at the full census.
+ */
+export function retainedCloseLine(root: string): string {
+  if (!existsSync(root)) return `no retained stores: ${root} does not exist`
+  const stores = readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length
+  return `${stores} retained store(s) under ${root}; yrd env retained counts the expired ones`
+}
+
 export function censusRetainedStores(root: string, now: number): RetainedCensus {
   if (!existsSync(root)) return { root, state: "absent" }
   let live = 0

@@ -2773,6 +2773,8 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       expect(proofLine).toBeTypeOf("string")
       const proof = proofLine!.slice("retained environment removal proof ".length)
       expect(readFileSync(proof, "utf8")).toContain("vendor/dependency/config")
+      // #33010: the close names how many stores the retention root now holds, never the expired count (too slow).
+      expect(closed.stderr()).toMatch(/\n1 retained store\(s\) under .*retained-modules; yrd env retained counts the expired ones\n/)
     }
   })
 

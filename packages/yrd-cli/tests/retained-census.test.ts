@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, expect, test } from "vitest"
-import { censusRetainedStores } from "../src/retained-census.ts"
+import { censusRetainedStores, retainedCloseLine } from "../src/retained-census.ts"
 
 const roots: string[] = []
 afterAll(() => {
@@ -57,6 +57,19 @@ test("counts live, expired, legacy, malformed and manifest-less stores by name, 
     "torn",
   ])
   expect(census.state === "read" && census.noManifest).toEqual(["no-manifest"])
+})
+
+// @cto dc77f630: env close prints the census line only. A full census parses every manifest (9.7 s on the live
+// 8,560-store root), so the close line counts store directories alone and points at the full census.
+test("the env close line counts store directories without reading manifests and names the full census", () => {
+  const root = mkdtempSync(join(tmpdir(), "retained-census-line-"))
+  roots.push(root)
+  store(root, "a", { retainUntil: "2026-11-01T00:00:00.000Z" })
+  store(root, "torn", "{")
+  writeFileSync(join(root, "stray-file"), "not a store\n")
+  expect(retainedCloseLine(root)).toBe(`2 retained store(s) under ${root}; yrd env retained counts the expired ones`)
+  const missing = join(tmpdir(), "retained-census-line-absent-33010")
+  expect(retainedCloseLine(missing)).toBe(`no retained stores: ${missing} does not exist`)
 })
 
 test("an absent retained root is named, never read as an empty store", () => {
