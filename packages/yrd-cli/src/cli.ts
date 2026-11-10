@@ -347,7 +347,7 @@ function buildProgram(
       }
       throw new Error(
         (options.discard
-          ? "drop --local --discard has no preview; it logs and reads back the discard decision, then deliberately loses local component content; it keeps no Git object custody.\n"
+          ? "drop --local --discard has no preview; in a component author checkout it logs and reads back the discard decision, then deliberately loses local component content; it keeps no Git object custody. In a queue-backed root checkout the dropped event keeps the exact tip and only the local name goes.\n"
           : "drop --local has no preview; it writes the event that keeps the tip at origin, then deletes the local branch.\n") +
           `To apply: ${apply}`,
       )
@@ -1517,7 +1517,7 @@ function buildProgram(
       .option("--local", "keep the exact tip in an event or on main, then retire its local branch; requires --tip")
       .option(
         "--discard",
-        "with --local or --retire and --tip, intentionally lose unmerged component content after its decision is logged and read back; requires --reason <why> and --submitter <agent> (or YRD_DEFAULT_SUBMITTER), else the branch is kept",
+        "with --local and --tip, end a withdrawn branch whose content will never be submitted; a component author checkout logs the decision, reads it back and loses that content, while a queue-backed root branch records a dropped event that keeps the exact tip; requires --reason <why> and --submitter <agent> (or YRD_DEFAULT_SUBMITTER), else the branch is kept",
       )
       .option(
         "--release-checkout",
@@ -1545,6 +1545,7 @@ function buildProgram(
         "  yrd drop <branch> --local --tip <full-oid>\n" +
         "Plain --local has no preview: it writes the event that keeps the tip at origin, then deletes the local branch.\n" +
         "For a cancelled change whose local tip advanced, its owner or the queue owner may use --reason <why>; open changes must be withdrawn first. This also applies to local branches selected by --issue.\n" +
+        "For a withdrawn root branch whose content will never be submitted, --discard --reason <why> records the withdrawal in a dropped event that keeps the exact tip, then deletes the local name.\n" +
         "To keep the tip with that event and detach the branch while keeping checkout bytes: yrd drop <branch> --local --release-checkout --tip <full-oid> --issue <id> --reason <why> [--apply]\n" +
         "For a queue-backed draft, --retire writes an ending event that keeps the exact tip as a Git parent; it creates no separate branch archive under refs/archive/. The event chain is retained, including after a manual move to refs/yrd-archive.\n",
     )

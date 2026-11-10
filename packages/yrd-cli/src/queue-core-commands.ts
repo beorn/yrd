@@ -1157,12 +1157,14 @@ export async function coreQueueCommand(
   if (captured === undefined) {
     return await noQueueOnTarget(targetLabel)
   }
-  if (
-    (request.command === "drop-local" && request.discard) ||
-    (request.command === "drop" && request.retire?.discard)
-  ) {
+  // A queue-backed root branch has a route for explicit discard intent: the dropped event keeps the exact tip
+  // before the name goes (33188), so --discard here is a withdrawal decision, never a loss of custody. Only the
+  // origin retirement form stays refused; it writes no local custody at all.
+  if (request.command === "drop" && request.retire?.discard) {
     throw new Error(
-      "--discard requires a component author checkout without its own queue declaration; ordinary queue cleanup does not apply discard intent",
+      "--discard does not apply to origin retirement in a queue-backed checkout: --retire keeps the exact tip as an " +
+        "event parent and discards nothing local; to retire the local name after a withdrawal, run " +
+        "drop <branch> --local --discard --tip <full-commit> --reason <why> --submitter <agent>",
     )
   }
   const config = captured.config
@@ -2146,6 +2148,15 @@ export async function coreQueueCommand(
         return report.failed.length === 0 ? 0 : 1
       }
       const issue = request.issue
+      // 33188: this store declares a queue, so the dropped event below keeps the exact tip and the local name is
+      // all that goes. The explicit decision is still asked for in full, and its reason is what the event records.
+      if (request.command === "drop-local" && request.discard === true) {
+        if ((request.reason ?? "").trim() === "") {
+          throw new Error(
+            "drop --local --discard requires --reason <why>: the dropped event records why the withdrawn tip is worthless",
+          )
+        }
+      }
       if (request.branch === config.target.branch || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(request.tip)) {
         throw new Error("drop --local requires a non-target branch and a full expected commit oid")
       }
@@ -2291,6 +2302,8 @@ export async function coreQueueCommand(
             !(await acceptsMergedLocalRetirement(authorGit, { local: true, head, change }))
           ) {
             // The owner may drop it with a reason; the dropped event then keeps both commits (30683).
+            // 33188: --discard is the same owner call for a withdrawn tip whose content will never be submitted,
+            // and the dropped event still keeps it — the tip is journalled, so this path loses no custody.
             const unlocked = await advancedDrop(authorGit, {
               repo: authorRepo,
               branch,
@@ -2300,6 +2313,7 @@ export async function coreQueueCommand(
               target,
               targetLabel,
               by: request.by,
+              ...(request.discard === true ? { discard: true as const } : {}),
               ...(request.reason === undefined ? {} : { reason: request.reason }),
             })
             if ("detail" in unlocked) {
@@ -2345,6 +2359,10 @@ export async function coreQueueCommand(
                 ? {}
                 : { detail: result.detail }),
             ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
+            // 33188: an explicit withdrawal reads as one on the receipt, and names the event that kept the tip.
+            ...(request.discard === true && result.outcome === "removed"
+              ? { intent: "local-discard" as const, actor: request.by }
+              : {}),
             // The event that keeps the tip lives on the change chain at origin (30683).
             ...(result.outcome === "removed" && result.event !== undefined
               ? {

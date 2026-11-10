@@ -2830,6 +2830,8 @@ export async function dropCommitCount(git: Git, head: string, target: string): P
  * submitter, the seat that ended it, or the seat that owns its queue may drop it, with a nonempty reason, and only
  * when the target provably lacks commits the tip holds. Anything else keeps the advanced refusal and its cure, and
  * an unknown ancestry or count refuses by name.
+ * A queue-backed root branch reached through `--discard` states the same withdrawal as an owner decision, so the
+ * recorded submitter gate does not apply; the dropped event still keeps the exact tip (33188).
  */
 export async function advancedDrop(
   git: Git,
@@ -2846,6 +2848,8 @@ export async function advancedDrop(
     targetLabel: string
     by: string
     reason?: string
+    /** Explicit local withdrawal of a withdrawn change's advanced tip; the tip is still journalled. */
+    discard?: true
   }>,
 ): Promise<Readonly<{ advanced: AdvancedRecord }> | Readonly<{ detail: string }>> {
   const { state, events } = input.history
@@ -2882,7 +2886,7 @@ export async function advancedDrop(
   const ended =
     (state.status === "cancelled" && state.ending?.kind === "cancelled") ||
     (state.status === "merged" && state.ending?.kind === "merged")
-  if (held || !ended || !owners.includes(input.by)) {
+  if (held || !ended || (input.discard !== true && !owners.includes(input.by))) {
     return refusal()
   }
   if (input.reason === undefined || input.reason.trim() === "") {

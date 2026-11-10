@@ -3227,32 +3227,180 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(out.stdout()).toBe("")
   })
 
-  /** @failure A declared queue silently converts explicit component-loss intent into event-retaining root cleanup.
-   * @level l2 @consumer A caller using --discard in a queue-owning repository
+  /** @failure 33188: a withdrawn root branch whose content will never be submitted has no route, so the owner
+   *          either keeps it forever or reaches for a destructive git command the guard refuses.
+   * @level l2 @consumer an owner retiring a withdrawn, unmerged ROOT branch after a DROP GO
    */
-  it.each(["--local", "--retire"] as const)(
-    "rejects %s discard in a declared queue without ordinary root cleanup",
-    async (flag) => {
-      const repo = await world("checks: []\n")
-      const git = gitIn(repo)
-      const tip = (await git(["rev-parse", "HEAD"])).trim()
-      await createQueue(repo, "main", tip, new Date())
-      const branch = "task/discard-root"
-      await git(["branch", branch, tip])
-      const out = capture(repo)
-      expect(
-        await runYrdProcess(
-          ["bun", "yrd", "drop", branch, flag, "--discard", "--tip", tip, "--reason", "reviewed", "--json"],
-          out.io,
-        ),
-      ).toBe(2)
-      expect(out.stderr()).toContain(
-        "--discard requires a component author checkout without its own queue declaration; ordinary queue cleanup does not apply discard intent",
-      )
-      expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tip)
-      expect(out.stdout()).toBe("")
-    },
-  )
+  it("discards a withdrawn advanced root branch into a dropped event that keeps its exact tip", async () => {
+    const repo = await world("checks: []\n")
+    const git = gitIn(repo)
+    const branch = "task/withdrawn-root"
+    const recorded = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", recorded, new Date())
+    const store = createEventStore(repo, "origin", git.selection)
+    await (
+      await openEvents({ ...store, ref: changesRef("main", branch), writer: "fixture" })
+    ).append(
+      [
+        changeInput("opened", {
+          queueTip,
+          at: new Date(),
+          commit: recorded,
+          by: "fixture",
+          issue: "@example/withdrawn-root",
+        }),
+        changeInput("cancelled", { queueTip, at: new Date(), commit: recorded, reason: "withdrawn", by: "chief" }),
+      ],
+      { expect: null },
+    )
+    await git(["checkout", "--quiet", "-b", branch])
+    await git(["commit", "--quiet", "--allow-empty", "-m", "reviewed work the operator withdrew"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    const reason = "withdrawn by the operator; this content will never be submitted"
+    const out = capture(repo)
+    // The submitter is NOT the recorded one: an explicit discard is the owner's withdrawal decision, and the
+    // dropped event keeps the tip, so no submitter gate is needed to make the call safe.
+    expect(
+      await runYrdProcess(
+        [
+          "bun",
+          "yrd",
+          "drop",
+          branch,
+          "--local",
+          "--discard",
+          "--tip",
+          head,
+          "--reason",
+          reason,
+          "--submitter",
+          "@dev/3",
+          "--json",
+        ],
+        out.io,
+      ),
+      out.stderr(),
+    ).toBe(0)
+    expect(await git(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).toBe("")
+    const report = JSON.parse(out.stdout()) as {
+      removed: { branch: string; head: string; intent?: string; actor?: string; recovery?: string }[]
+      kept: unknown[]
+    }
+    expect(report.kept).toEqual([])
+    expect(report.removed).toEqual([
+      expect.objectContaining({ branch, head, intent: "local-discard", actor: "@dev/3" }),
+    ])
+    const after = (await readBranchHistory(store, "main", branch)).history
+    const dropped = after?.events.at(-1)
+    expect(dropped).toMatchObject({ type: "cancelled", links: expect.arrayContaining([head]), content: reason })
+    expect(after?.state.status).toBe("cancelled")
+    const row = report.removed[0]
+    if (row?.recovery === undefined) throw new Error("discard receipt named no recovery command")
+    expect(row.recovery).toContain(changesRef("main", branch))
+    // The receipt's own recovery command restores the exact tip from the event that kept it.
+    const restored = "task/withdrawn-root-restored"
+    expect(
+      spawnSync(
+        "/bin/sh",
+        ["-c", row.recovery.replace(`branch ${shellQuote(branch)}`, `branch ${shellQuote(restored)}`)],
+        { cwd: repo, encoding: "utf8", timeout: 30_000 },
+      ).status,
+      row.recovery,
+    ).toBe(0)
+    expect((await git(["rev-parse", `refs/heads/${restored}`])).trim()).toBe(head)
+  }, 60_000)
+
+  /** @failure 33188: --discard without the reason the dropped event is supposed to record retires a branch on a
+   *          decision nobody can read back.
+   * @level l2 @consumer an owner typing a discard from memory
+   */
+  it("refuses a root discard that carries no reason", async () => {
+    const repo = await world("checks: []\n")
+    const git = gitIn(repo)
+    const tip = (await git(["rev-parse", "HEAD"])).trim()
+    await createQueue(repo, "main", tip, new Date())
+    const branch = "task/discard-no-reason"
+    await git(["branch", branch, tip])
+    const reasonless = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "drop", branch, "--local", "--discard", "--tip", tip, "--submitter", "fixture", "--json"],
+        reasonless.io,
+      ),
+    ).toBe(2)
+    expect(reasonless.stderr()).toContain("--discard requires --reason <why>")
+    expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tip)
+  }, 60_000)
+
+  /** @failure 33188: --discard becomes a way past the withdrawal rule, retiring an advance whose change is still
+   *          open, so a live submission loses its branch before review.
+   * @level l2 @consumer an owner reaching for --discard on an open change
+   */
+  it("keeps a root discard while its change is still open", async () => {
+    const repo = await world("checks: []\n")
+    const git = gitIn(repo)
+    const branch = "task/open-discard"
+    const recorded = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", recorded, new Date())
+    const store = createEventStore(repo, "origin", git.selection)
+    await (
+      await openEvents({ ...store, ref: changesRef("main", branch), writer: "fixture" })
+    ).append([changeInput("opened", { queueTip, at: new Date(), commit: recorded, by: "fixture" })], { expect: null })
+    await git(["checkout", "--quiet", "-b", branch])
+    await git(["commit", "--quiet", "--allow-empty", "-m", "advance while open"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    const out = capture(repo)
+    expect(
+      await runYrdProcess(
+        [
+          "bun",
+          "yrd",
+          "drop",
+          branch,
+          "--local",
+          "--discard",
+          "--tip",
+          head,
+          "--reason",
+          "reviewed",
+          "--submitter",
+          "fixture",
+          "--json",
+        ],
+        out.io,
+      ),
+      out.stderr(),
+    ).toBe(1)
+    expect(out.stdout()).toContain("change is still open; withdraw it before dropping its advanced tip")
+    expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
+  }, 60_000)
+
+  /** @failure 33188: --discard on the origin retirement form discards nothing local, and its old refusal named a
+   *          component checkout without the route that now exists for a root branch.
+   * @level l1 @consumer a caller reaching for --retire --discard
+   */
+  it("names the local root route when --discard is asked of origin retirement", async () => {
+    const repo = await world("checks: []\n")
+    const git = gitIn(repo)
+    const tip = (await git(["rev-parse", "HEAD"])).trim()
+    await createQueue(repo, "main", tip, new Date())
+    const branch = "task/discard-retire"
+    await git(["branch", branch, tip])
+    const out = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "drop", branch, "--retire", "--discard", "--tip", tip, "--reason", "reviewed", "--json"],
+        out.io,
+      ),
+    ).toBe(2)
+    expect(out.stderr()).toContain(
+      "drop <branch> --local --discard --tip <full-commit> --reason <why> --submitter <agent>",
+    )
+    expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tip)
+    expect(out.stdout()).toBe("")
+  }, 60_000)
 
   /** @failure The discard no-preview message promises Git object custody that deliberate local loss does not provide.
    * @level l1 @consumer A caller copying the explicit discard apply command
