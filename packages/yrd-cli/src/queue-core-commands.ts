@@ -1539,6 +1539,7 @@ export async function coreQueueCommand(
             updateDue?: boolean
             projectRoot?: string
             queueBranch: string
+            remote: string
             cleanup: (merged: readonly string[]) => Promise<void>
           }) => context.cleanup(context.merged),
         })
@@ -1909,6 +1910,7 @@ export async function coreQueueCommand(
             updateDue: outcome.merged.length > 0 || startupCatchup,
             ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
             queueBranch: config.target.branch,
+            remote: config.target.remote,
             cleanup,
           })
         }
@@ -4369,6 +4371,7 @@ export async function coreQueueCommand(
                 update: declared.config.issuesProvider?.update,
                 ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
                 queueBranch: declared.config.target.branch,
+                remote: declared.config.target.remote,
                 cleanup: async (merged) => {
                   await cleanupAfterRound(
                     { run: startupLog.id, log: startupLog.path, base: declared.oid, target: declared.oid, merged },
@@ -8020,7 +8023,7 @@ function withPostMergeIssueDiagnostics<Run extends JournalSummary>(
           if (matched.length === 0) return { row, events }
           const added = matched.map(
             (failure) =>
-              `issuesProvider close failed for merged event ${failure.mergedEvent} at ${failure.mergeSha} (${failure.providerId}): ${failure.diagnostic}`,
+              `issuesProvider call failed for merged event ${failure.mergedEvent} at ${failure.mergeSha} (${failure.providerId}): ${failure.diagnostic}`,
           )
           return { row: { ...row, diagnostic: [row.diagnostic, ...added].filter(Boolean).join("; ") }, events }
         }),
@@ -8040,7 +8043,7 @@ function withPostMergeIssueDiagnostics<Run extends JournalSummary>(
       if (matched.length === 0) return row
       const added = matched.map(
         (failure) =>
-          `issuesProvider close failed for historical merged event ${failure.mergedEvent} at ${failure.mergeSha} (${failure.providerId}): ${failure.diagnostic}`,
+          `issuesProvider call failed for historical merged event ${failure.mergedEvent} at ${failure.mergeSha} (${failure.providerId}): ${failure.diagnostic}`,
       )
       return { ...row, diagnostic: [row.diagnostic, ...added].filter(Boolean).join("; ") }
     })

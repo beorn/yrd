@@ -66,6 +66,7 @@ import { legendLines } from "./watch-words.ts"
 import {
   ISSUES_CLOSE_REASONS,
   ISSUES_DECLARATION_PATH,
+  ISSUES_EVENT_KINDS,
   ISSUES_VERBS,
   ISSUES_VERB_NAMES,
   ISSUES_WRITE_VERBS,
@@ -1788,7 +1789,9 @@ function buildProgram(
       .description(
         verb === "close"
           ? `the declared ${verb}; <reason> is ${ISSUES_CLOSE_REASONS.join(" or ")}`
-          : `the declared ${verb}${write ? "" : " (a read)"}`,
+          : verb === "event"
+            ? `the declared ${verb}; <kind> is ${ISSUES_EVENT_KINDS.join(", ")}`
+            : `the declared ${verb}${write ? "" : " (a read)"}`,
       )
       .option("--project-root <path>", "the project root; default the toplevel of the current repository")
       .option("--timeout-ms <n>", "kill the provider after this many milliseconds (yrd-issues-provider-timed-out)", int)

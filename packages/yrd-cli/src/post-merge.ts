@@ -12,12 +12,15 @@ import {
   issueProviderId,
   writeQueueEvent,
   isAncestor,
+  normalizedRemote,
+  remoteUrl,
   trailer,
   type AppliedIssueEffect,
   type EventQueue,
   type GitRunner,
   type QueueLocation,
 } from "@yrd/queue-core"
+import { ISSUES_CODES } from "./issues/declaration.ts"
 import { runIssuesVerb } from "./issues/run.ts"
 
 // Real public Km CLI trial (2026-10-16, km-cli-trial.json): 1.246s for one
@@ -38,6 +41,8 @@ type Context = Readonly<{
   updateDue?: boolean
   projectRoot?: string
   queueBranch?: string
+  /** The target's remote name; the `merged` item event names the repository by its URL. */
+  remote?: string
 }>
 
 type IssueDiagnostic = Readonly<{
@@ -408,6 +413,106 @@ async function closeMergedIssues(
   return { outcomes, queue: completed }
 }
 
+/**
+ * One `merged` item event per delivered change, on the issue the change names (@cto 721b42d7, #31194). Yrd passes
+ * the change's issue value as it holds it and the provider resolves it; the event's time is the provider's write
+ * time. Replay-safe under `yrd:merged:<merge sha>`. A failed call is reported and kept as derived evidence: it
+ * never holds or undoes the merge, and nothing here closes an issue (#29630 is the one close writer).
+ */
+async function recordMergedEvents(
+  input: Readonly<{
+    branches: readonly string[]
+    queue: string
+    store: QueueLocation
+    git: GitRunner
+    remote: string
+    /** The target this round published; every merge it delivered is its ancestor. */
+    target: string
+    projectRoot?: string
+    cwd: string
+    env?: NodeJS.ProcessEnv
+    report: (message: string) => void
+    stop?: AbortSignal
+  }>,
+): Promise<Array<Record<string, unknown>>> {
+  const outcomes: Array<Record<string, unknown>> = []
+  const unrecorded: string[] = []
+  const record = (outcome: Record<string, unknown>, why?: string): void => {
+    outcomes.push({ verb: "event", ...outcome })
+    const at =
+      outcome.mergeSha === "" ? String(outcome.branch) : `${String(outcome.branch)}@${String(outcome.mergeSha)}`
+    if (why !== undefined) unrecorded.push(`${at} (${why})`)
+  }
+  // A branch-level outcome keeps its own id, so the close path's branch rows (providerId "") never clear it.
+  const branchLevel = { mergedEvent: "", mergeSha: "", providerId: "yrd:merged", status: "unavailable" } as const
+  let repository: string
+  try {
+    repository = normalizedRemote(await remoteUrl(input.git, input.remote))
+  } catch (error) {
+    const diagnostic = `merged events not recorded: remote ${input.remote} has no readable URL: ${String(error)}`
+    for (const branch of new Set(input.branches)) record({ ...branchLevel, branch, diagnostic })
+    input.report(diagnostic)
+    return outcomes
+  }
+  let recorded = 0
+  for (const branch of new Set(input.branches)) {
+    if (input.stop?.aborted) break
+    let segments: ReturnType<typeof enumerateChangeSegments>
+    try {
+      const reading = await readBranchHistory(input.store, input.queue, branch)
+      if (reading.history === undefined) throw new Error(`post-merge named branch ${branch} has no event history`)
+      segments = enumerateChangeSegments(reading.history.events, reading.ref, input.store.repo)
+    } catch (error) {
+      record({ ...branchLevel, branch, diagnostic: String(error) }, "history unavailable")
+      continue
+    }
+    for (const segment of segments) {
+      if (input.stop?.aborted) break
+      if (segment.state.status !== "merged" || segment.state.ending?.kind !== "merged") continue
+      const mergedEvent = segment.events.findLast((event) => event.type === "merged")
+      const mergeSha = segment.state.merge
+      if (mergedEvent === undefined || mergeSha === undefined) {
+        const diagnostic = `${branch}: merged segment ${segment.opened} has no actual merged event or merge SHA`
+        record({ ...branchLevel, branch, diagnostic }, "no merge SHA")
+        continue
+      }
+      const providerId = `yrd:merged:${mergeSha}`
+      const identity = { branch, mergedEvent: mergedEvent.id, mergeSha, providerId }
+      const issue = segment.state.issue
+      if (issue === undefined || issue === "") {
+        record({ ...identity, status: "skipped", reason: "no-issue" }, "names no issue")
+        continue
+      }
+      const written = await runIssuesVerb({
+        verb: "event",
+        args: [issue, "merged", `${repository}@${mergeSha}`, `${branch} merged`],
+        id: providerId,
+        ...(input.projectRoot === undefined ? {} : { projectRoot: input.projectRoot }),
+        declarationCommit: mergeSha,
+        targetCommit: input.target,
+        cwd: input.cwd,
+        env: input.env,
+        signal: input.stop,
+        timeoutMs: UPDATE_TIMEOUT_MS,
+        noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
+      })
+      if (written.ok) {
+        recorded++
+        record({ ...identity, status: "fulfilled", issue })
+      } else if (written.code === ISSUES_CODES.unsupported || written.code === ISSUES_CODES.declarationMissing) {
+        // Not yet declared at that merge: no provider was asked, so nothing failed; the evidence says why.
+        record({ ...identity, status: "skipped", reason: written.message, issue })
+      } else {
+        record({ ...identity, status: "failed", issue, diagnostic: written.message }, written.message)
+      }
+    }
+  }
+  if (unrecorded.length > 0) {
+    input.report(`merged events: ${recorded} recorded, ${unrecorded.length} not recorded: ${unrecorded.join("; ")}`)
+  }
+  return outcomes
+}
+
 /** Serial provider writes and serial cleanup have independent lifetimes; attempt evidence is never replay authority. */
 export function createPostMerge<C extends Context>(
   options: Readonly<{
@@ -517,6 +622,43 @@ export function createPostMerge<C extends Context>(
     cleanupPending = coalesce(cleanupPending, context)
     if (cleanupActive === undefined) startCleanup()
   }
+  /** The round's `merged` item events; a failure is reported and returned, never thrown into the update or close. */
+  const mergedEvents = async (
+    context: C,
+  ): Promise<Readonly<{ actions: Array<Record<string, unknown>>; failed: boolean }>> => {
+    if (context.merged.length === 0) return { actions: [], failed: false }
+    const { git, store } = options
+    const { queueBranch, remote } = context
+    if (git === undefined || store === undefined || queueBranch === undefined || remote === undefined) {
+      const missing = [
+        ...(git === undefined ? ["git"] : []),
+        ...(store === undefined ? ["store"] : []),
+        ...(queueBranch === undefined ? ["queueBranch"] : []),
+        ...(remote === undefined ? ["remote"] : []),
+      ]
+      options.report(`merged events not recorded: missing input(s) ${missing.join(", ")}`)
+      return { actions: [], failed: false }
+    }
+    try {
+      const actions = await recordMergedEvents({
+        branches: context.merged,
+        queue: queueBranch,
+        store,
+        git,
+        remote,
+        target: context.target,
+        ...(context.projectRoot === undefined ? {} : { projectRoot: context.projectRoot }),
+        cwd: options.cwd,
+        env: options.env,
+        report: options.report,
+        stop: options.stop,
+      })
+      return { actions, failed: actions.some(({ status }) => status === "failed" || status === "unavailable") }
+    } catch (error) {
+      options.report("merged events not recorded: " + String(error))
+      return { actions: [], failed: true }
+    }
+  }
   const attempt = async (context: C): Promise<void> => {
     const id = new Date().toISOString().replaceAll(":", "-") + "-" + randomUUID()
     const path = join(directory, id + ".json")
@@ -539,7 +681,12 @@ export function createPostMerge<C extends Context>(
       reason:
         context.update === undefined ? "no issuesProvider.update declared" : "no provider update due for idle round",
     }
+    let eventsFailed = false
     try {
+      // Before the update and the close, so an issue reads merged, then closed. Never needs --project-root.
+      const events = await mergedEvents(context)
+      issueActions = events.actions
+      eventsFailed = events.failed
       try {
         if (context.update !== undefined && context.updateDue !== false) {
           const result = await process.run({
@@ -611,7 +758,7 @@ export function createPostMerge<C extends Context>(
           stop: options.stop,
           knownQueue: completedQueue?.branch === context.queueBranch ? completedQueue.value : undefined,
         })
-        issueActions = closed.outcomes
+        issueActions = [...issueActions, ...closed.outcomes]
         if (
           issueActions.some(
             ({ status }) => status === "failed" || status === "unavailable" || status === "record-failed",
@@ -634,6 +781,7 @@ export function createPostMerge<C extends Context>(
         settled = { status: "unavailable", reason }
         options.report(reason)
       }
+      if (eventsFailed) settled = { ...settled, status: "failed" }
     } catch (error) {
       const reason = "post-merge issue close attempt unavailable: " + String(error)
       settled = { status: "unavailable", reason }

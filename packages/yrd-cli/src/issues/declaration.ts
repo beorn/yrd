@@ -35,6 +35,9 @@ export const ISSUES_VERBS = {
   reopen: ["key"],
   assign: ["key", "seat"],
   unassign: ["key", "seat"],
+  // One item event on the issue a change names (@cto 721b42d7, #31194): <raw> is the change's issue value exactly as
+  // Yrd holds it, resolved by the provider; <source> is `<repository>@<sha>`; <text> is the same on every replay.
+  event: ["raw", "kind", "source", "text"],
 } as const satisfies Record<string, readonly string[]>
 
 export type IssuesVerb = keyof typeof ISSUES_VERBS
@@ -49,10 +52,14 @@ export const ISSUES_WRITE_VERBS: ReadonlySet<IssuesVerb> = new Set<IssuesVerb>([
   "reopen",
   "assign",
   "unassign",
+  "event",
 ])
 
 /** GitHub's pair (`gh issue close --reason`). */
 export const ISSUES_CLOSE_REASONS = ["completed", "not-planned"] as const
+
+/** The change transitions an `event` records; never `closed`, whose one writer is the close path (#29630). */
+export const ISSUES_EVENT_KINDS = ["merged", "failed", "withdrawn"] as const
 
 export const ISSUES_DECLARATION_PATH = "issues.yml"
 

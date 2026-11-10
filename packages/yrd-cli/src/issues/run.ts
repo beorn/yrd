@@ -16,6 +16,7 @@ import { createLegacyBackend, gitIn, isAncestor, openReader, resolveGitSelection
 import {
   ISSUES_CLOSE_REASONS,
   ISSUES_CODES,
+  ISSUES_EVENT_KINDS,
   ISSUES_DECLARATION_PATH,
   ISSUES_VERBS,
   ISSUES_VERB_NAMES,
@@ -49,6 +50,11 @@ export type RunIssuesVerbOptions = Readonly<{
   projectRoot?: string
   /** Read this exact ancestor of main; automatic effects use their delivered merge commit. */
   declarationCommit?: string
+  /**
+   * With {@link declarationCommit}: prove its ancestry against this commit instead of the project's main. Yrd's
+   * post-merge passes the target its own round published, which a clone's main can lag by seconds (#31194).
+   */
+  targetCommit?: string
   /** The caller's directory: where discovery starts and where the provider runs. */
   cwd: string
   /** The provider's environment, inherited whole. Defaults to this process's. */
@@ -100,6 +106,17 @@ function checkRequest(
       `close ${JSON.stringify(values.reason)}`,
       `reason must be ${ISSUES_CLOSE_REASONS.join(" or ")}`,
     )
+  }
+  if (verb === "event" && !(ISSUES_EVENT_KINDS as readonly string[]).includes(values.kind as string)) {
+    return fail(
+      2,
+      ISSUES_CODES.badArguments,
+      `event ${JSON.stringify(values.kind)}`,
+      `kind must be ${ISSUES_EVENT_KINDS.join(", ")}`,
+    )
+  }
+  if (options.targetCommit !== undefined && options.declarationCommit === undefined) {
+    return fail(2, ISSUES_CODES.badArguments, verb, "targetCommit is the ancestry tip for declarationCommit; pass both")
   }
   if (ISSUES_WRITE_VERBS.has(verb)) {
     if (options.id === undefined || options.id === "") {
@@ -229,12 +246,18 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       const pinned = (
         await ancestryGit(["rev-parse", "--verify", "--end-of-options", `${options.declarationCommit}^{commit}`])
       ).trim()
-      if (!(await isAncestor(ancestryGit, pinned, commit))) {
+      const tip =
+        options.targetCommit === undefined
+          ? commit
+          : (
+              await ancestryGit(["rev-parse", "--verify", "--end-of-options", `${options.targetCommit}^{commit}`])
+            ).trim()
+      if (!(await isAncestor(ancestryGit, pinned, tip))) {
         return fail(
           1,
           ISSUES_CODES.noMain,
           repository,
-          `declaration commit ${pinned} is not an ancestor of main ${commit}`,
+          `declaration commit ${pinned} is not an ancestor of ${options.targetCommit === undefined ? "main" : "target"} ${tip}`,
         )
       }
       commit = pinned

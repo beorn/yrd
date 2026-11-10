@@ -52,8 +52,8 @@ export function queueName(target: Target, remoteUrl: string): string {
   return formatQueueKey(normalizedRemote(remoteUrl), target.branch)
 }
 
-/** A remote URL as the queue's name spells it; a path is returned as it stands. */
-function normalizedRemote(url: string): string {
+/** A remote URL as the queue's name spells it, e.g. `github.com/beorn/hh-dev`; a path is returned as it stands. */
+export function normalizedRemote(url: string): string {
   const text = url.trim()
   if (text.startsWith("/") || text.startsWith(".") || text.startsWith("~")) return text
   const scheme = /^[a-z][a-z0-9+.-]*:\/\//iu
