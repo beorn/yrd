@@ -1568,6 +1568,9 @@ async function cleanupEnvironments(
       const head = row.head
       if (head === undefined) throw new Error(`registered environment ${row.path} has no HEAD`)
       if (holder !== undefined) throw new Error(holder)
+      // A corrupt change chain still refuses the close. This is a live read, not the
+      // deleted custody-refusal cache: a thrown history keeps the environment.
+      if (row.branch !== undefined && row.branch !== "") await historyOf(row.branch)
       await proveEnvironmentRemovable({
         path: row.path,
         head,

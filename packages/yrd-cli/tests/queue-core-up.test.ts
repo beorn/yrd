@@ -1230,7 +1230,7 @@ describe("yrd queue up, the service", () => {
     }
   }, 120_000)
 
-  it("reuses a dirty environment verdict until its index changes", async () => {
+  it("re-proves a dirty environment every round and still keeps it", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
     await redeclare(w, "setup: ':'\n")
@@ -1262,6 +1262,7 @@ describe("yrd queue up, the service", () => {
     const stop = new AbortController()
     const run = capture(w.work)
     let rounds = 0
+    let seenAtIdle = 0
     try {
       expect(
         await coreQueueCommand(
@@ -1274,7 +1275,8 @@ describe("yrd queue up, the service", () => {
             afterRound: async () => {
               rounds++
               if (rounds === 2) {
-                expect(inspections, "unchanged idle pass repeated the recursive removal inspection").toBe(1)
+                expect(inspections, "an unchanged idle pass re-proves removal").toBeGreaterThan(1)
+                seenAtIdle = inspections
                 await gitIn(environment.path)(["add", "dirty.txt"])
               }
               if (rounds === 3) stop.abort()
@@ -1285,7 +1287,7 @@ describe("yrd queue up, the service", () => {
         run.stderr(),
       ).toBe(0)
       expect(rounds).toBe(3)
-      expect(inspections).toBe(2)
+      expect(inspections).toBeGreaterThan(seenAtIdle)
       expect(existsSync(environment.path)).toBe(true)
     } finally {
       stop.abort()
