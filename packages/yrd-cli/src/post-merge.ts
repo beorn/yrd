@@ -20,7 +20,7 @@ import {
   type GitRunner,
   type QueueLocation,
 } from "@yrd/queue-core"
-import { ISSUES_CODES } from "./issues/declaration.ts"
+import { ISSUES_CODES, ISSUES_DECLARATION_PATH, parseIssuesDeclaration } from "./issues/declaration.ts"
 import { runIssuesVerb } from "./issues/run.ts"
 
 // Real public Km CLI trial (2026-10-16, km-cli-trial.json): 1.246s for one
@@ -413,6 +413,14 @@ async function closeMergedIssues(
   return { outcomes, queue: completed }
 }
 
+/** Whether issues.yml at `commit` declares `event`, read with the interface's own parser. */
+async function declaresEvent(git: GitRunner, commit: string): Promise<boolean> {
+  const blob = (await git(["ls-tree", "--format=%(objectname)", commit, "--", ISSUES_DECLARATION_PATH])).trim()
+  if (blob === "") return false
+  const text = await git(["cat-file", "blob", blob])
+  return parseIssuesDeclaration(text, `${commit}:${ISSUES_DECLARATION_PATH}`).event !== undefined
+}
+
 /**
  * One `merged` item event per delivered change, on the issue the change names (@cto 721b42d7, #31194). Yrd passes
  * the change's issue value as it holds it and the provider resolves it; the event's time is the provider's write
@@ -480,7 +488,16 @@ async function recordMergedEvents(
       const identity = { branch, mergedEvent: mergedEvent.id, mergeSha, providerId }
       const issue = segment.state.issue
       if (issue === undefined || issue === "") {
-        record({ ...identity, status: "skipped", reason: "no-issue" }, "names no issue")
+        // Named only once the event is live at that merge; before then no change is counted.
+        let live: boolean
+        try {
+          live = await declaresEvent(input.git, mergeSha)
+        } catch (error) {
+          record({ ...identity, status: "failed", diagnostic: String(error) }, String(error))
+          continue
+        }
+        if (live) record({ ...identity, status: "skipped", reason: "no-issue" }, "names no issue")
+        else record({ ...identity, status: "skipped", reason: "issues.yml declares no event at the merge" })
         continue
       }
       const written = await runIssuesVerb({

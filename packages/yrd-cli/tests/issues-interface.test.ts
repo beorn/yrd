@@ -349,6 +349,71 @@ describe("yrd issues", () => {
     expect(ran.stderr).toContain("reason must be completed or not-planned")
   })
 
+  // #31194, @cto 721b42d7: Yrd's merged item event. The provider resolves <raw>; `closed` stays the close path's.
+  it("passes event's four operands and <id> whole, and refuses a kind outside merged|failed|withdrawn (rule: event kinds)", async () => {
+    const root = project({
+      "issues.yml": declare({ event: provider("json", "<raw>", "<kind>", "<source>", "<text>", "<id>") }),
+    })
+    const source = "github.com/beorn/hh-dev@0123456789abcdef0123456789abcdef01234567"
+    const ran = await yrd(root, "issues", "event", "--id", "yrd:merged:0123", "--", "-31194", "merged", source, "a b")
+    expect(ran.exitCode, ran.stderr).toBe(0)
+    expect(envelopeOf(ran).result).toEqual({ argv: ["-31194", "merged", source, "a b", "yrd:merged:0123"] })
+    for (const kind of ["closed", "opened", ""]) {
+      const refused = await yrd(root, "issues", "event", "--id", "i", "raw", kind, source, "text")
+      expect(refused.exitCode, kind).toBe(2)
+      expect(refused.stderr).toContain("kind must be merged, failed, withdrawn")
+    }
+    expect((await yrd(root, "issues", "event", "raw", "merged", source, "text")).stderr).toContain("--id <id> is required")
+  })
+
+  // #31194: a clone's main can lag the merge Yrd just published by seconds (2-44 s measured on /hh/dev).
+  it("proves a declaration commit against targetCommit while main lags, and still refuses one outside it (rule: target ancestry)", async () => {
+    const root = project({ "issues.yml": declare({ view: provider("json", "lagging", "<key>") }) })
+    const lagging = git(root, "rev-parse", "HEAD")
+    git(root, "checkout", "--quiet", "-b", "published")
+    writeFileSync(join(root, "issues.yml"), declare({ view: provider("json", "delivered", "<key>") }))
+    git(root, "add", "issues.yml")
+    git(root, "commit", "--quiet", "-m", "the delivered merge")
+    const merge = git(root, "rev-parse", "HEAD")
+    writeFileSync(join(root, "later.txt"), "later")
+    git(root, "add", "later.txt")
+    git(root, "commit", "--quiet", "-m", "the target after the round")
+    const target = git(root, "rev-parse", "HEAD")
+    git(root, "checkout", "--quiet", "-b", "side", lagging)
+    writeFileSync(join(root, "issues.yml"), declare({ view: provider("json", "side", "<key>") }))
+    git(root, "add", "issues.yml")
+    git(root, "commit", "--quiet", "-m", "never delivered")
+    const side = git(root, "rev-parse", "HEAD")
+    git(root, "checkout", "--quiet", "main")
+    expect(git(root, "rev-parse", "main")).toBe(lagging)
+    const read = (declarationCommit?: string, targetCommit?: string, stderr: (text: string) => void = () => {}) =>
+      runIssuesVerb({
+        verb: "view",
+        args: ["key"],
+        cwd: root,
+        ...(declarationCommit === undefined ? {} : { declarationCommit }),
+        ...(targetCommit === undefined ? {} : { targetCommit }),
+        stderr,
+      })
+    expect(await read(merge)).toMatchObject({ ok: false, code: "yrd-issues-no-main" })
+    expect(await read(merge, target)).toMatchObject({
+      ok: true,
+      envelope: { declaration: { commit: merge }, result: { argv: ["delivered", "key"] } },
+    })
+    let providerOutput = ""
+    expect(
+      await read(side, target, (text) => {
+        providerOutput += text
+      }),
+    ).toMatchObject({
+      ok: false,
+      code: "yrd-issues-no-main",
+      message: expect.stringContaining(`is not an ancestor of target ${target}`),
+    })
+    expect(providerOutput).toBe("")
+    expect(await read(undefined, target)).toMatchObject({ ok: false, exitCode: 2, code: "yrd-issues-bad-arguments" })
+  })
+
   it("refuses a write verb without --id with exit 2, naming it (rule: bad arguments)", async () => {
     const root = project({ "issues.yml": declare({ reopen: provider("json", "<key>", "<id>") }) })
     const ran = await yrd(root, "issues", "reopen", "k")

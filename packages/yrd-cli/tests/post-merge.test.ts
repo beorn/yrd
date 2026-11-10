@@ -1480,3 +1480,140 @@ it.each([
   },
   60000,
 )
+
+/** @failure A delivered change's merged item event is lost, keyed off its merge, written as a close, or a failed provider call holds the merge. @level l2 @consumer Yrd post-merge item events (#31194, @cto 721b42d7) @testonly none */
+it.each(["recorded", "provider-fails"] as const)(
+  "writes one merged item event per delivered change through the issues declaration: %s",
+  async (mode) => {
+    const root = world(),
+      remote = join(root, "remote.git"),
+      repo = join(root, "author"),
+      workdir = join(root, "queue"),
+      calls = join(root, "event-calls.tsv")
+    mkdirSync(workdir)
+    const seed = gitIn(root)
+    await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+    await seed(["clone", "--quiet", remote, repo])
+    const git = gitIn(repo)
+    await git(["config", "user.email", "provider@yrd.test"])
+    await git(["config", "user.name", "fixture"])
+    await git(["checkout", "--quiet", "-b", "main"])
+    writeFileSync(join(repo, ".yrd.yml"), JSON.stringify({ issuesProvider: { update: ["sh", "-c", "true"] } }))
+    const write = 'printf "%s\\t%s\\t%s\\t%s\\t%s\\n" "$1" "$2" "$3" "$4" "$5" >> "$6"; '
+    const reply = mode === "provider-fails" ? "exit 3" : "printf '{\"applied\":true}\\n'"
+    writeFileSync(
+      join(repo, "issues.yml"),
+      JSON.stringify({
+        event: ["sh", "-c", write + reply, "event", "<raw>", "<kind>", "<source>", "<text>", "<id>", calls],
+      }),
+    )
+    await git(["add", ".yrd.yml", "issues.yml"])
+    await git(["commit", "--quiet", "-m", "queue"])
+    await git(["push", "--quiet", "origin", "main"])
+    const target = (await git(["rev-parse", "HEAD"])).trim(),
+      config = await readConfig(git, target, { remote: "origin", branch: "main" })
+    if (config === undefined) throw Error("fixture queue lost config")
+    const store = createEventStore(repo, "origin", git.selection)
+    await createEventQueue(store, "main", target, config, new Date())
+    const issue = "@i/16-work-lifecycle/31194-item-events"
+    for (const [branch, named] of [
+      ["task/with-issue", issue],
+      ["task/no-issue", undefined],
+    ] as const) {
+      await git(["checkout", "--quiet", "-b", branch, "origin/main"])
+      writeFileSync(join(repo, branch.replaceAll("/", "-") + ".txt"), branch)
+      await git(["add", "."])
+      await git(["commit", "--quiet", "-m", branch])
+      await submit(git, "origin", {
+        branch,
+        submitter: "fixture",
+        target: { remote: "origin", branch: "main" },
+        ...(named === undefined ? {} : { issue: named }),
+      })
+      await git(["checkout", "--quiet", "main"])
+    }
+    const eventActions = (): Array<Record<string, unknown>> =>
+      readdirSync(join(workdir, "post-merge"))
+        .filter((name) => name.endsWith(".json"))
+        .map((name) => JSON.parse(readFileSync(join(workdir, "post-merge", name), "utf8")) as Record<string, unknown>)
+        .filter((attempt) => attempt.status !== "running")
+        .flatMap((attempt) => (attempt.issueActions ?? []) as Array<Record<string, unknown>>)
+        .filter((action) => action.verb === "event")
+    const stop = new AbortController(),
+      merged: string[] = [],
+      diagnostics: string[] = []
+    let rounds = 0
+    try {
+      expect(
+        await coreQueueCommand(
+          repo,
+          {
+            cwd: repo,
+            stdout: (s) => diagnostics.push(s),
+            stderr: (s) => diagnostics.push(s),
+            localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
+          },
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async (outcome) => {
+              rounds++
+              merged.push(...outcome.merged)
+              if (merged.includes("task/with-issue") && merged.includes("task/no-issue")) {
+                await vi.waitFor(
+                  () => expect(new Set(eventActions().map((action) => action.branch)).size).toBe(2),
+                  { timeout: 10000 },
+                )
+                stop.abort()
+              } else if (rounds > 4) stop.abort()
+            },
+          },
+          { workdir, json: true },
+        ),
+        diagnostics.join(" "),
+      ).toBe(0)
+    } finally {
+      stop.abort()
+    }
+    const withIssue = (await readStatus(store, "main", "task/with-issue")).merge!
+    const noIssue = (await readStatus(store, "main", "task/no-issue")).merge!
+    // One provider call, for the change that names an issue: its value as held, kind merged, the replay key.
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual([
+      [issue, "merged", `${remote}@${withIssue}`, "task/with-issue merged", `yrd:merged:${withIssue}`].join("\t"),
+    ])
+    const actions = eventActions()
+    expect(actions).toContainEqual(
+      expect.objectContaining({
+        branch: "task/no-issue",
+        mergeSha: noIssue,
+        providerId: `yrd:merged:${noIssue}`,
+        status: "skipped",
+        reason: "no-issue",
+      }),
+    )
+    const report = diagnostics.join(" ")
+    expect(report).toContain(`task/no-issue@${noIssue} (names no issue)`)
+    // The merge is published whatever the provider did.
+    await seed(["--git-dir", remote, "merge-base", "--is-ancestor", withIssue, "main"])
+    if (mode === "recorded") {
+      expect(actions).toContainEqual(
+        expect.objectContaining({ branch: "task/with-issue", status: "fulfilled", issue, mergeSha: withIssue }),
+      )
+      return
+    }
+    expect(actions).toContainEqual(
+      expect.objectContaining({
+        branch: "task/with-issue",
+        status: "failed",
+        providerId: `yrd:merged:${withIssue}`,
+        diagnostic: expect.stringContaining("provider ended with exit 3"),
+      }),
+    )
+    expect(report).toContain(`task/with-issue@${withIssue} (yrd-issues-provider-failed: event sh -c`)
+    expect(readPostMergeIssueDiagnostics(workdir)).toContainEqual(
+      expect.objectContaining({ branch: "task/with-issue", mergeSha: withIssue, providerId: `yrd:merged:${withIssue}` }),
+    )
+  },
+  60000,
+)
