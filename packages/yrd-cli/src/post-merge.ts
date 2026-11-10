@@ -422,6 +422,15 @@ async function declaresEvent(git: GitRunner, commit: string): Promise<boolean> {
 }
 
 /**
+ * The `source` a `merged` event carries: the repository as the queue's name spells it, at the merge's 40-hex sha, e.g.
+ * `github.com/beorn/hh-dev@<sha>` (operator ruling absorbed in #31194). km reads it with `parseEventRef`, the one
+ * parser; #31194 acceptance row 6 holds the test that proves this form against it.
+ */
+export function mergedEventSource(url: string, mergeSha: string): string {
+  return `${normalizedRemote(url)}@${mergeSha}`
+}
+
+/**
  * One `merged` item event per delivered change, on the issue the change names (@cto 721b42d7, #31194). Yrd passes
  * the change's issue value as it holds it and the provider resolves it; the event's time is the provider's write
  * time. Replay-safe under `yrd:merged:<merge sha>`. A failed call is reported and kept as derived evidence: it
@@ -453,9 +462,9 @@ async function recordMergedEvents(
   }
   // A branch-level outcome keeps its own id, so the close path's branch rows (providerId "") never clear it.
   const branchLevel = { mergedEvent: "", mergeSha: "", providerId: "yrd:merged", status: "unavailable" } as const
-  let repository: string
+  let url: string
   try {
-    repository = normalizedRemote(await remoteUrl(input.git, input.remote))
+    url = await remoteUrl(input.git, input.remote)
   } catch (error) {
     const diagnostic = `merged events not recorded: remote ${input.remote} has no readable URL: ${String(error)}`
     for (const branch of new Set(input.branches)) record({ ...branchLevel, branch, diagnostic })
@@ -502,7 +511,7 @@ async function recordMergedEvents(
       }
       const written = await runIssuesVerb({
         verb: "event",
-        args: [issue, "merged", `${repository}@${mergeSha}`, `${branch} merged`],
+        args: [issue, "merged", mergedEventSource(url, mergeSha), `${branch} merged`],
         id: providerId,
         ...(input.projectRoot === undefined ? {} : { projectRoot: input.projectRoot }),
         declarationCommit: mergeSha,
