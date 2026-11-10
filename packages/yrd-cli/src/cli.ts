@@ -47,7 +47,7 @@ import {
   yrdQueueRunnerDeclarations,
 } from "@yrd/queue-core"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
-import { closeEnvironment, listEnvironments, openEnvironment } from "./env-commands.ts"
+import { closeEnvironment, listEnvironments, openEnvironment, retainedEnvironments } from "./env-commands.ts"
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { repositoryHere, unaddressedRepository } from "./declaration.ts"
@@ -1717,6 +1717,20 @@ function buildProgram(
     .description("the environments this repository holds")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await listEnvironments(options as Parameters<typeof listEnvironments>[0], io)))
+  env_
+    .command("retained")
+    .description(
+      "count the stores env close retained: live, past their own retainUntil, legacy, malformed and without a " +
+        "manifest, read from manifests only (no size walk); retires nothing",
+    )
+    .option(
+      "--retain <directory>",
+      "durable GitSuper retention directory; defaults to the workdir retained-modules directory",
+    )
+    .option("--json", "emit stable JSON")
+    .action(async (options) =>
+      setExit(await retainedEnvironments(options as Parameters<typeof retainedEnvironments>[0], io)),
+    )
 
   env_
     .command("close <path>")

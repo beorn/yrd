@@ -68,6 +68,7 @@ import { runIssuesVerb } from "./issues/run.ts"
 import { originHead } from "./queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
+import { censusRetainedStores } from "./retained-census.ts"
 import { formatYrdCommand } from "./command-format.ts"
 import { envOpenRecordFromFlags, writeEnvOpenRecord } from "./env-open-record.ts"
 import {
@@ -867,6 +868,38 @@ export async function environmentInventory(
       ...(branch === undefined ? {} : { branch }),
     }))
   return { roots, rows }
+}
+
+export type EnvRetainedOptions = Readonly<{ json?: boolean; retain?: string }>
+
+/**
+ * `yrd env retained` — the census of the stores `env close` retained (#33010): live, past their own retainUntil,
+ * legacy, malformed and manifest-less, read from manifests with no size walk. Read-only; it retires nothing.
+ */
+export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+  const root = requireRepository(io)
+  const selection = await resolveGitSelection(root)
+  await using process = createProcess({ cwd: root })
+  const git = gitIn(root, process, selection)
+  const retentionRoot =
+    options.retain === undefined ? join(await workdirOf(git), "retained-modules") : resolve(io.cwd, options.retain)
+  const census = censusRetainedStores(retentionRoot, Date.now())
+  if (options.json === true) {
+    io.stdout(`${JSON.stringify(census)}\n`)
+    return 0
+  }
+  if (census.state === "absent") {
+    io.stdout(`no retained stores: ${retentionRoot} does not exist (no environment has closed into it)\n`)
+    return 0
+  }
+  io.stdout(
+    `${census.total} retained store(s) under ${retentionRoot}: ${census.live} live, ${census.expired} past retainUntil ` +
+      `(${census.expiredLegacy} with a legacy manifest${census.oldestExpired === null ? "" : `, oldest ${census.oldestExpired}`}), ` +
+      `${census.malformed.length} malformed, ${census.noManifest.length} without a manifest\n`,
+  )
+  for (const entry of census.malformed) io.stdout(`malformed: ${entry.name}: ${entry.reason}\n`)
+  for (const name of census.noManifest) io.stdout(`no manifest: ${name}\n`)
+  return 0
 }
 
 /** `yrd env list` — the environments this repository holds, as git holds them. */
