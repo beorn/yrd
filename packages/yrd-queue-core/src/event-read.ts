@@ -235,6 +235,17 @@ async function readMultiPrefixInventory(
   // atomically moves between them. Fetch only selected event refs, never all advertised branch objects.
   const backend = store.backend
   if (backend?.listRefs === undefined) throw new TypeError("multi-prefix event reading requires a ref-capable backend")
+  const fetch = async (repo: string, refs: readonly string[], remote: string): Promise<ReadonlyMap<string, Oid>> => {
+    if (backend.fetchRefs === undefined) throw new TypeError("remote event reading requires a fetch-capable backend")
+    try {
+      return await backend.fetchRefs(repo, refs, remote, { absent: "omit" })
+    } catch (error) {
+      // Acquisition can itself exhaust its observation window before returning
+      // tips. Only that fetch's named conflict joins the existing inventory retry.
+      if (error instanceof Conflict && error.refs.length > 0) throw new EventRefsMoved(error.refs, error.message)
+      throw error
+    }
+  }
   const exact = prefix.every((part) => !part.endsWith("/"))
   // A detail read already names both possible refs: one named fetch supplies their coherent inventory
   // and objects without advertising every other branch. A listing selects its two prefixes first.
@@ -244,9 +255,7 @@ async function readMultiPrefixInventory(
     throw new TypeError("refs read alongside event chains need an exact remote read of named chain refs")
   }
   if (exact && store.remote !== undefined) {
-    const fetch = backend.fetchRefs
-    if (fetch === undefined) throw new TypeError("remote event reading requires a fetch-capable backend")
-    advertised = await fetch(store.repo, [...prefix, ...(also?.refs ?? [])], store.remote, { absent: "omit" })
+    advertised = await fetch(store.repo, [...prefix, ...(also?.refs ?? [])], store.remote)
     acquiredExact = true
     for (const ref of also?.refs ?? []) also?.seen.set(ref, advertised.get(ref) ?? null)
   } else advertised = listed ?? (await listRefs("refs/", store))
@@ -258,8 +267,7 @@ async function readMultiPrefixInventory(
   if (selected.size === 0) return new Map()
   if (recent !== undefined && !exact) {
     if (store.remote !== undefined && !acquiredExact) {
-      if (backend.fetchRefs === undefined) throw new TypeError("remote event reading requires a fetch-capable backend")
-      const acquired = await backend.fetchRefs(store.repo, [...selected.keys()], store.remote, { absent: "omit" })
+      const acquired = await fetch(store.repo, [...selected.keys()], store.remote)
       const moved = [...selected].filter(([ref, oid]) => acquired.get(ref) !== oid).map(([ref]) => ref)
       if (moved.length > 0) throw new EventRefsMoved(moved)
       acquiredExact = true
@@ -279,8 +287,7 @@ async function readMultiPrefixInventory(
       ),
     fetchRefs: async (repo, _refs, remote) => {
       if (acquiredExact) return selected
-      if (backend.fetchRefs === undefined) throw new TypeError("remote event reading requires a fetch-capable backend")
-      const acquired = await backend.fetchRefs(repo, [...selected.keys()], remote, { absent: "omit" })
+      const acquired = await fetch(repo, [...selected.keys()], remote)
       const moved = [...selected].filter(([ref, oid]) => acquired.get(ref) !== oid).map(([ref]) => ref)
       if (moved.length > 0) throw new EventRefsMoved(moved)
       return selected

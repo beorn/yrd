@@ -7043,6 +7043,9 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     { command: "up", fault: "ref-race", moves: 4, mode: "recover" },
     { command: "run", fault: "ref-race", moves: 4, mode: "recover" },
     { command: "up", fault: "unrelated-error", moves: 4, mode: "refuse" },
+    { command: "up", fault: "fetch-ref-race", moves: 4, mode: "recover" },
+    { command: "up", fault: "fetch-ref-race", moves: Number.POSITIVE_INFINITY, mode: "exhaust-up" },
+    { command: "run", fault: "fetch-ref-race", moves: Number.POSITIVE_INFINITY, mode: "exhaust-run" },
     { command: "up", fault: "ref-race", moves: Number.POSITIVE_INFINITY, mode: "exhaust-up" },
     { command: "run", fault: "ref-race", moves: Number.POSITIVE_INFINITY, mode: "exhaust-run" },
   ] as const)(
@@ -7066,12 +7069,41 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
         await w.git(["--git-dir", remote, "update-ref", ref, queued.tip, after])
         tips.push({ ref, before: queued.tip, after })
       }
+      // 33449: move a real ref AFTER Gitomic's own advertisement, inside its native
+      // fetch operation. The older ref-race rows only move before that operation.
+      const moveCount = join(w.work, "fetch-race-count")
+      const racingGit = join(w.work, "fetch-race-git")
+      const nativeGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim()
+      const tip = tips[0]!
+      writeFileSync(moveCount, "0")
+      writeFileSync(
+        racingGit,
+        `#!/bin/sh
+case " $* " in
+  *" ls-remote "*)
+    ${shellQuote(nativeGit)} "$@" || exit "$?"
+    n=$(cat ${shellQuote(moveCount)})
+    if [ "$n" -lt ${Number.isFinite(moveLimit) ? moveLimit : 1000000} ]; then
+      if [ "$((n % 2))" -eq 0 ]; then next=${shellQuote(tip.after)}; old=${shellQuote(tip.before)}
+      else next=${shellQuote(tip.before)}; old=${shellQuote(tip.after)}; fi
+      ${shellQuote(nativeGit)} --git-dir ${shellQuote(remote)} update-ref ${shellQuote(tip.ref)} "$next" "$old" || exit "$?"
+      echo "$((n + 1))" > ${shellQuote(moveCount)}
+    fi
+    ;;
+  *) exec ${shellQuote(nativeGit)} "$@" ;;
+esac
+`,
+      )
+      chmodSync(racingGit, 0o755)
       const originalBackend = gitomic.createShellBackend
       let moves = 0
       let moving = Promise.resolve()
       using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
         const backend = originalBackend(options)
-        const fetch = backend.fetchRefs
+        const fetch =
+          fault === "fetch-ref-race"
+            ? originalBackend({ ...options, gitExecutable: racingGit }).fetchRefs
+            : backend.fetchRefs
         if (fetch === undefined) throw new Error("fixture needs Gitomic native ref acquisition")
         return {
           ...backend,
@@ -7086,6 +7118,24 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
             })
             await previous
             try {
+              if (fault === "fetch-ref-race") {
+                try {
+                  // Optional absent refs are valid inventory members. More than 256
+                  // names select Gitomic's advertised, batched acquisition path.
+                  if (typeof refs !== "string" && refs.includes(tips[0]!.ref)) {
+                    return await fetch(
+                      args[0],
+                      [...refs, ...Array.from({ length: 257 }, (_, i) => `refs/yrd/main/changes/task/absent-${i}`)],
+                      args[2],
+                      args[3],
+                    )
+                  }
+                  if (backend.fetchRefs === undefined) throw new Error("fixture lost native fetch")
+                  return await backend.fetchRefs(...args)
+                } finally {
+                  moves = Number(readFileSync(moveCount, "utf8"))
+                }
+              }
               if (moves < moveLimit && refs.includes(tips[0]!.ref)) {
                 if (fault === "unrelated-error") throw new Error("unrelated inventory read failure")
                 const tip = tips[moves % tips.length]!
