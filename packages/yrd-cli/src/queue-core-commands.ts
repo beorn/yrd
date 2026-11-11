@@ -3625,6 +3625,8 @@ export async function coreQueueCommand(
         const conflict = publisher.conflict
         if (conflict === undefined) return undefined
         const cause = conflict.message
+        const resolution = `Stop the other live runner named at ${publisher.ref} before restarting this service.`
+        io.stderr(`yrd: runner-conflict: ${cause}. ${resolution}\n`)
         const base = lineDocument(lastStop, 0)
         writeHealth({
           ...base,
@@ -3632,7 +3634,7 @@ export async function coreQueueCommand(
           error: {
             code: "runner-conflict",
             cause,
-            resolution: [`Stop the other live runner named at ${publisher.ref} before restarting this service.`],
+            resolution: [resolution],
           },
           facts: {
             ...base.facts,

@@ -3033,7 +3033,7 @@ describe("yrd queue up, the service", () => {
   })
 
   /**
-   * @failure A second live runner could start rounds despite a fresh claim from another identity.
+   * @failure A second live runner could start rounds despite a fresh claim, or exit without a terminal diagnostic.
    * @level l2 (real queue service, leased remote claim and health document)
    * @consumer Hab, which must keep the conflicting runner down and expose the named owner
    */
@@ -3068,6 +3068,12 @@ describe("yrd queue up, the service", () => {
       error: { code: "runner-conflict" },
       facts: { "runner-conflict": `other-host/7 ${now}` },
     })
+    expect(run.stderr()).toContain(
+      "Stop the other live runner named at refs/yrd/main/runner before restarting this service.",
+    )
+    expect(run.stderr()).toContain(
+      `yrd: runner-conflict: refs/yrd/main/runner: a fresh second runner other-host/7 started ${now} owns this queue`,
+    )
     const logDir = join(w.workdir, "logs")
     expect(existsSync(logDir) ? readdirSync(logDir) : []).toEqual([])
   })
