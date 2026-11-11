@@ -261,7 +261,7 @@ it("reads past unreadable head requests and consumes a valid later request in on
 it.each([
   { scenario: "oldest request beyond eight newer filenames", newerAt: "2026-10-15T00:00:01.000Z", olderFirst: true },
   { scenario: "filename tie-break for equal request times", newerAt: "2026-10-15T00:00:00.000Z", olderFirst: false },
-])("closes the two oldest requests in order using $scenario", async ({ newerAt, olderFirst }) => {
+])("closes only the oldest request in order using $scenario", async ({ newerAt, olderFirst }) => {
   const w = await world()
   const uid = process.getuid?.()
   if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
@@ -288,11 +288,10 @@ it.each([
   // All eight newer names precede the old intent, so sorting only the selected batch cannot pass this case.
   expect(listCloseRequests(w.workdir).at(-1)).toBe(older)
   await runRound(w, "cleanup-request-order")
-  // Two locked closes per round (33559, @cto 2026-11-11): one per round could not outrun the fleet's filings.
-  const expectedClosed = olderFirst ? [w.env, newer[0]!] : [newer[0]!, newer[1]!]
+  const expectedClosed = olderFirst ? [w.env] : [newer[0]!]
   const expectedStanding = olderFirst
-    ? newer.slice(1).map((path) => closeRequestFile(w.workdir, path))
-    : [...newer.slice(2).map((path) => closeRequestFile(w.workdir, path)), older]
+    ? newer.map((path) => closeRequestFile(w.workdir, path))
+    : [...newer.slice(1).map((path) => closeRequestFile(w.workdir, path)), older]
   // The independent sweep may close a different target; this is the request route's order and allowance.
   const closed = cleanupRows(w.workdir).filter((row) => row.result === "closed" && row.request !== undefined)
   expect(closed.map((row) => row.path)).toEqual(expectedClosed)
@@ -301,13 +300,13 @@ it.each([
   }
   expect(listCloseRequests(w.workdir)).toEqual(expectedStanding)
   const deferred = cleanupRows(w.workdir).filter((row) => row.result === "deferred")
-  expect(deferred.map((row) => row.path)).toEqual(olderFirst ? newer.slice(1) : [...newer.slice(2), w.env])
+  expect(deferred.map((row) => row.path)).toEqual(olderFirst ? newer : [...newer.slice(1), w.env])
   expect(deferred.every((row) => row.why === "cap")).toBe(true)
   await runRound(w, "cleanup-next-oldest-request")
   const nextClosed = cleanupRows(w.workdir).filter(
     (row) => row.run === "cleanup-next-oldest-request" && row.result === "closed" && row.request !== undefined,
   )
-  expect(nextClosed.map((row) => row.path)).toEqual(olderFirst ? [newer[1], newer[2]] : [newer[2], newer[3]])
+  expect(nextClosed.map((row) => row.path)).toEqual([olderFirst ? newer[0] : newer[1]])
 })
 
 it("clears fifteen gone tail intents after the cap using no further inventory, census or attempt", async () => {
@@ -383,11 +382,9 @@ it("attempts a seat's own request before older automatic filings, at the measure
   // 09:14:49.891Z; @dev/luna5's env close request was filed at 18:44:58.154Z with 167 automatic requests ahead.
   // Each `at` is that file's real write time (mtime minus at was 0 s for every automatic file), not a stale stamp.
   const automatic: string[] = []
-  const automaticPaths: string[] = []
   for (const [index, at] of ["2026-10-28T09:14:49.891Z", "2026-10-28T09:14:50.465Z"].entries()) {
     const path = join(w.repo, ".bays", `a-ended-${index}`)
     await w.git(["worktree", "add", "--quiet", "--detach", path, "HEAD"])
-    automaticPaths.push(path)
     automatic.push(
       request(path, at, { remote: "origin", queue: "main", branch: `task/ended-${index}`, event: "e".repeat(40) }),
     )
@@ -395,14 +392,13 @@ it("attempts a seat's own request before older automatic filings, at the measure
   const seat = request(w.env, "2026-10-28T18:44:58.154Z")
   await runRound(w, "cleanup-seat-request-first")
   const closed = cleanupRows(w.workdir).filter((row) => row.result === "closed" && row.request !== undefined)
-  // Two locked closes per round (33559): the seat's own request first, then the oldest automatic filing.
-  expect(closed.map((row) => row.path)).toEqual([w.env, automaticPaths[0]!])
+  expect(closed.map((row) => row.path)).toEqual([w.env])
   expect(existsSync(seat)).toBe(false)
-  // Within the automatic class, oldest first still holds: the newer filing stands for a later round.
-  expect(listCloseRequests(w.workdir)).toEqual([automatic[1]!])
+  // Within the automatic class, oldest first still holds: both stand for later rounds.
+  expect(listCloseRequests(w.workdir)).toEqual([...automatic].sort())
 })
 
-it("drops gone and stale requests without spending the consumer close allowance", async () => {
+it("drops gone and stale requests without spending the one consumer close attempt", async () => {
   const w = await world()
   const uid = process.getuid?.()
   if (uid === undefined) throw new Error("this cleanup case needs a real unix uid")
@@ -449,10 +445,8 @@ it("drops gone and stale requests without spending the consumer close allowance"
   expect(rows.filter((row) => row.result === "stale")).toHaveLength(4)
   expect(rows.filter((row) => row.result === "closed" && row.request !== undefined).map((row) => row.path)).toEqual([
     valid[0],
-    valid[1],
   ])
-  // Eight unreadable, gone and stale filings cost nothing: both locked closes go to live requests.
-  expect(listCloseRequests(w.workdir)).toEqual(valid.slice(2).map((path) => closeRequestFile(w.workdir, path)))
+  expect(listCloseRequests(w.workdir)).toEqual(valid.slice(1).map((path) => closeRequestFile(w.workdir, path)))
 })
 
 it.each(["held", "reader-failure", "reader-undefined"] as const)(
@@ -510,13 +504,11 @@ it.each(["held", "reader-failure", "reader-undefined"] as const)(
         expect(summary?.consumer).toEqual({ attempted: 1, closed: 1 })
         expect(listCloseRequests(w.workdir)).toEqual([])
       } else {
-        // Two locked closes per round (33559): the reader failure refuses the first and still leaves the second
-        // attempt, which fails the same way, so neither filing is spent on a close.
-        expect(attempted).toEqual([held, w.env])
-        expect(stage.mock.calls.map(([file]) => file)).toEqual([files[0], files[1]])
+        expect(attempted).toEqual([held])
+        expect(stage.mock.calls.map(([file]) => file)).toEqual([files[0]])
         expect(retired).toMatchObject({ result: "retired", why: expect.stringContaining("reader unavailable") })
-        expect(summary?.consumer).toEqual({ attempted: 2, closed: 0 })
-        expect(listCloseRequests(w.workdir)).toEqual([])
+        expect(summary?.consumer).toEqual({ attempted: 1, closed: 0 })
+        expect(listCloseRequests(w.workdir)).toEqual([files[1]])
       }
     } finally {
       stage.mockRestore()
@@ -580,8 +572,6 @@ it("counts a refused sweep close as its route attempt and resumes at the next el
   await w.git(["fetch", "--quiet", "origin", "main"])
   const second = join(w.repo, ".bays", "z-second-sweep")
   await w.git(["worktree", "add", "--quiet", "-b", "task/second-sweep", second, "HEAD"])
-  const third = join(w.repo, ".bays", "z-third-sweep")
-  await w.git(["worktree", "add", "--quiet", "-b", "task/third-sweep", third, "HEAD"])
   const attempts: string[] = []
   vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
     attempts.push(path)
@@ -595,9 +585,7 @@ it("counts a refused sweep close as its route attempt and resumes at the next el
   })
   try {
     await runRound(w, "sweep-refused-first")
-    // A refusal still counts as one of the route's two attempts (33559), so the route resumes on the next row
-    // in the SAME round instead of yielding the whole round to it.
-    expect(attempts).toEqual([w.env, second])
+    expect(attempts).toEqual([w.env])
     vi.mocked(closeEnvironment).mockImplementation(async (path, _options, callIo) => {
       attempts.push(path)
       callIo.stdout(JSON.stringify({ closed: path }))
@@ -610,14 +598,13 @@ it("counts a refused sweep close as its route attempt and resumes at the next el
       return 0
     })
   }
-  expect(attempts).toEqual([w.env, second, third, w.env])
+  expect(attempts).toEqual([w.env, second])
   const rows = cleanupRows(w.workdir)
   expect(rows.some((row) => row.run === "sweep-refused-first" && row.result === "kept" && row.path === w.env)).toBe(
     true,
   )
-  const firstRoundClosed = rows.filter((row) => row.run === "sweep-refused-first" && row.result === "closed")
-  expect(firstRoundClosed.map((row) => row.path)).toEqual([second])
-  expect(rows.some((row) => row.run === "sweep-next-row" && row.result === "closed" && row.path === third)).toBe(true)
+  expect(rows.some((row) => row.run === "sweep-refused-first" && row.result === "closed")).toBe(false)
+  expect(rows.some((row) => row.run === "sweep-next-row" && row.result === "closed" && row.path === second)).toBe(true)
 })
 
 it("rechecks a pending request next round after its HEAD moves during the first close", async () => {
@@ -758,28 +745,18 @@ it("gives consumer and sweep separate attempts while pending requests and the sw
     cursorEnv: string
     reported: Record<string, string>
   }
-  // Two locked closes per route (33559): the consumer route spends both on the pending requests and the sweep
-  // spends both on the eligible environments, so one round clears both populations and the cursor runs on
-  // to the row the closed pending environment named.
-  expect(stateAfterRound1.cursorEnv).toBe("env-pending")
+  expect(stateAfterRound1.cursorEnv).toBe("z-second-eligible")
   const round1Rows = cleanupRows(w.workdir).filter((row) => row.run === "round-1-closes-request")
-  expect(round1Rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([
-    w.env,
-    pending,
-    eligible,
-    secondEligible,
-  ])
-  expect(listCloseRequests(w.workdir)).toEqual([])
+  expect(round1Rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([w.env, eligible])
+  expect(listCloseRequests(w.workdir)).toEqual([closeRequestFile(w.workdir, pending)])
 
   await runCleanupRound("round-2-closes-eligible-unrecorded")
   const round2Rows = cleanupRows(w.workdir).filter((row) => row.run === "round-2-closes-eligible-unrecorded")
-  // The fixture's close prints a receipt without deleting the path, so the sweep meets the same rows again; what
-  // this round proves is that no request-driven close is left to drain.
-  expect(round2Rows.filter((row) => row.result === "closed" && row.request !== undefined)).toEqual([])
+  expect(round2Rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([pending, secondEligible])
   expect(listCloseRequests(w.workdir)).toEqual([])
 })
 
-it("stops the general sweep cursor on the third eligible row after two sweep removals", async () => {
+it("stops the general sweep cursor on the second eligible row after one sweep removal", async () => {
   const w = await world()
   await w.git(["remote", "add", "origin", w.repo])
   await w.git(["fetch", "--quiet", "origin", "main"])
@@ -790,15 +767,14 @@ it("stops the general sweep cursor on the third eligible row after two sweep rem
 
   await runRound(w, "sweep-stops-on-second-eligible")
   const rows = cleanupRows(w.workdir).filter((row) => row.run === "sweep-stops-on-second-eligible")
-  // Two sweep removals per round (33559), then the route yields on the next eligible row.
-  expect(rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([w.env, second])
+  expect(rows.filter((row) => row.result === "closed").map((row) => row.path)).toEqual([w.env])
   const yielded = rows.filter(
     (row) => row.result === "kept" && row.why === "eligible; yielding to the next queue round before removal",
   )
-  expect(yielded.map((row) => row.path)).toEqual([third])
+  expect(yielded.map((row) => row.path)).toEqual([second])
   const statePath = join(w.workdir, "state", "yrd", "environment-cleanup.json")
   const state = JSON.parse(readFileSync(statePath, "utf8")) as { cursorEnv: string }
-  expect(state.cursorEnv).toBe("z-third-eligible")
+  expect(state.cursorEnv).toBe("z-second-eligible")
 })
 
 it("leaves the general sweep's recorded reason in place when the terminal filing pass sees an unrecorded row", async () => {

@@ -5412,13 +5412,13 @@ describe("yrd queue up, the service", () => {
       const closed = authors.filter(({ path }) => !existsSync(path))
       expect(
         closed.map(({ branch }) => branch),
-        `the round spends both consumer close allowances (33559)\n${successor.stderr()}`,
-      ).toEqual([authors[1]!.branch, authors[2]!.branch])
+        `a started attempt spends one consumer close allowance\n${successor.stderr()}`,
+      ).toEqual([authors[1]!.branch])
       const remaining = authors.filter(({ path }) => existsSync(path))
       expect(
         remaining.map(({ branch }) => branch),
         "prior catch-up and deferred request rows remain available for startup",
-      ).toEqual([authors[0]!.branch])
+      ).toEqual([authors[0]!.branch, authors[2]!.branch])
       const successorInventory = await environmentInventory(w.work, gitIn(w.work), w.workdir)
       for (const author of closed) {
         expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${author.branch}`])).trim()).toBe("")
