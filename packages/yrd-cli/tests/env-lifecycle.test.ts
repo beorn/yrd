@@ -2766,6 +2766,34 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
   })
 
   /**
+   * @failure 33552: on a detached HEAD with content ahead, `env close --preserve --dry-run` admitted the close while
+   *          the real `--preserve` call failed later inside the worktree preserve preflight (`git symbolic-ref -q
+   *          HEAD` exits 1), so the preview and the call disagreed and the refusal named no route. --preserve keeps an
+   *          attached issue branch's state, so both refuse up front with the B3 route and keep the environment.
+   * @level   l2 (real bare remote, real worktree, real close CLI)
+   * @consumer every seat retiring a detached environment through `yrd env close --preserve`
+   */
+  it("refuses --preserve on a detached HEAD with content ahead the same way in preview and in the call, naming B3 (33552)", async () => {
+    const w = await world(":")
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    for (const dryRun of [true, false]) {
+      const { path } = await openEnvironment(w.work, selected)
+      const envGit = gitIn(path)
+      writeFileSync(join(path, "ahead.txt"), "content ahead on detached HEAD\n")
+      await envGit(["add", "ahead.txt"])
+      await envGit(["-c", "user.email=env-open@yrd.test", "-c", "user.name=yrd", "commit", "--quiet", "-m", "content ahead"])
+
+      const refused = capture(w.work)
+      const args = ["bun", "yrd", "env", "close", path, "--preserve", ...(dryRun ? ["--dry-run"] : []), "--json"]
+      expect(await runYrdProcess(args, refused.io), `dryRun=${dryRun}`).toBe(2)
+      expect(refused.stderr()).toContain("git switch -c task/<issue>, then --preserve")
+      expect(refused.stderr()).not.toContain("custody preflight")
+      expect(refused.stdout()).toBe("")
+      expect(existsSync(path)).toBe(true)
+    }
+  })
+
+  /**
    * @failure 32137 (@cto ruling 62f8faa4): `yrd env close` admitted an uncommitted submodule gitlink
    *          advance whose pin was on component origin/main (B1) and a committed empty root diff (B2),
    *          but refused a detached HEAD whose committed mergeBase..HEAD diff only advanced a mode 160000

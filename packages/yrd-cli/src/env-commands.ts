@@ -1052,6 +1052,8 @@ interface EnvironmentCloseState {
   readonly dirty: readonly string[]
   readonly discarded: readonly DiscardedCommit[]
   readonly admissibleGitlinks: readonly AdmissibleGitlink[]
+  /** A detached root carries commits with content ahead of origin/main (B3), which no preserve can keep (33552). */
+  readonly contentAhead: boolean
 }
 
 /**
@@ -1105,6 +1107,7 @@ async function inspectEnvironmentCloseState(
     }
     cleanByPath.set(repo.path, ownLines.length === 0 && stagedLines.length === 0)
   }
+  let contentAhead = false
   const isSubmoduleClean = (repoPath: string): boolean =>
     cleanByPath.get(repoPath) === true &&
     ![...cleanByPath.entries()].some(([childPath, isClean]) => childPath.startsWith(`${repoPath}/`) && !isClean) &&
@@ -1224,6 +1227,7 @@ async function inspectEnvironmentCloseState(
               discarded.push({ ...entry, gitlinks: discardedGitlinks })
             }
           } else {
+            contentAhead = true
             for (const entry of aheadCommits) {
               dirty.push(
                 `detached HEAD is ahead of origin/main with content changes at ${entry.sha.slice(0, 12)} (${entry.subject})`,
@@ -1234,7 +1238,7 @@ async function inspectEnvironmentCloseState(
       }
     }
   }
-  return { dirty, discarded, admissibleGitlinks }
+  return { dirty, discarded, admissibleGitlinks, contentAhead }
 }
 
 /** One status read shared by `env open`'s existing-bay cleanliness check. */
@@ -1263,6 +1267,18 @@ function requireCleanState(state: EnvironmentCloseState, path: string, detached:
       `environment ${path} is dirty; preserve or commit these changes before continuing${hint}:\n${state.dirty.join("\n")}`,
     )
   }
+}
+
+/**
+ * 33552: commits ahead on a detached HEAD (B3) have no branch for --preserve to keep them on: the worktree preserve
+ * preflight refuses at `git symbolic-ref HEAD`. Refuse before any ref moves, in the preview and the call alike, naming
+ * the B3 route. Uncommitted root changes on a detached HEAD stay preservable.
+ */
+function requireBranchForContentAhead(state: EnvironmentCloseState, path: string): void {
+  if (!state.contentAhead) return
+  throw new Error(
+    `environment ${path} has commits ahead of origin/main on a detached HEAD, which --preserve cannot keep without a branch; attach one first (git switch -c task/<issue>, then --preserve) to keep this exact state in a durable ref:\n${state.dirty.join("\n")}`,
+  )
 }
 
 /** Retained environments preserve user work; GitSuper owns populated-submodule removal. */
@@ -1727,6 +1743,7 @@ export async function closeEnvironment(
     )
   }
   if (options.preserve === true) {
+    if (detached) requireBranchForContentAhead(closeState, path)
     if (options.dryRun !== true) await preserve("before teardown")
   } else {
     requireCleanState(closeState, path, detached)
