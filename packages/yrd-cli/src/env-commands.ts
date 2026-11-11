@@ -998,8 +998,9 @@ export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdC
       ? fallback
       : `unpublished preparation: ${name}: ${preparation.reason}; created ${preparation.createdAt}; source ${preparation.sourceGitDir}${preparation.reason === "interrupted publication" ? `; ${fallback.trim()}` : ""}\n`
   }
-  for (const entry of census.malformed)
+  for (const entry of census.malformed) {
     io.stdout(describeUnpublished(entry.name, `malformed: ${entry.name}: ${entry.reason}\n`))
+  }
   for (const name of census.noManifest) io.stdout(describeUnpublished(name, `no manifest: ${name}\n`))
   return 0
 }
