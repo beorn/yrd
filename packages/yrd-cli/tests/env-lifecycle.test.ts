@@ -130,17 +130,62 @@ type World = Readonly<{ git: ReturnType<typeof gitIn>; work: string }>
 // incomplete estate declaration before invoking retirement. Census-only tests cannot exercise its flags.
 it("retained drain uses the production CLI in dry-run mode and requires its namespace", async () => {
   const w = await world(":")
+  // Retirement opens an existing common writer lease; creating one is the writer's job, even in this fixture.
+  mkdirSync(join(w.work, ".git", "yrd-worktree-mutations"), { recursive: true })
+  writeFileSync(join(w.work, ".git", "yrd-worktree-mutations", "writer.lock"), "")
   const retain = join(dirname(w.work), "retained-modules")
   mkdirSync(join(retain, "old"), { recursive: true })
-  writeFileSync(join(retain, "old", "manifest.json"), JSON.stringify({
-    retainUntil: "2020-01-01T00:00:00Z", writerLocks: [], notCompared: [],
-  }))
+  writeFileSync(
+    join(retain, "old", "manifest.json"),
+    JSON.stringify({
+      retainUntil: "2020-01-01T00:00:00Z",
+      writerLocks: [],
+      notCompared: [],
+    }),
+  )
   const missing = capture(w.work)
-  expect(await runYrdProcess(["bun", "yrd", "env", "retained", "--retire-expired", "--retain", retain, "--artifact-dir", join(dirname(w.work), "proof")], missing.io)).toBe(2)
+  expect(
+    await runYrdProcess(
+      [
+        "bun",
+        "yrd",
+        "env",
+        "retained",
+        "--retire-expired",
+        "--retain",
+        retain,
+        "--artifact-dir",
+        join(dirname(w.work), "proof"),
+      ],
+      missing.io,
+    ),
+  ).toBe(2)
   expect(missing.stderr()).toContain("namespace")
   const run = capture(w.work)
-  expect(await runYrdProcess(["bun", "yrd", "env", "retained", "--retire-expired", "--retain", retain, "--namespace", dirname(w.work), "--artifact-dir", join(dirname(w.work), "proof"), "--json"], run.io), run.stderr()).toBe(0)
-  expect(JSON.parse(run.stdout())).toMatchObject({ apply: false, rows: [{ entry: join(retain, "old"), outcome: "kept" }] })
+  expect(
+    await runYrdProcess(
+      [
+        "bun",
+        "yrd",
+        "env",
+        "retained",
+        "--retire-expired",
+        "--retain",
+        retain,
+        "--namespace",
+        dirname(w.work),
+        "--artifact-dir",
+        join(dirname(w.work), "proof"),
+        "--json",
+      ],
+      run.io,
+    ),
+    run.stderr(),
+  ).toBe(0)
+  expect(JSON.parse(run.stdout())).toMatchObject({
+    apply: false,
+    rows: [{ entry: join(retain, "old"), outcome: "kept" }],
+  })
   expect(existsSync(join(retain, "old", "manifest.json"))).toBe(true)
 })
 

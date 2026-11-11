@@ -1335,15 +1335,20 @@ exec ${JSON.stringify(nativeGit)} "$@"
   // without that option keep 300 s. A CLI-only test cannot observe the ProcessRequest timeout.
   it.each([undefined, 1_200_000])("keeps the default or caller root invocation bound (%s)", async (bound) => {
     const root = temporaryRoot("protocol-bound")
-    const executable = protocolExecutable(root, 'frame({version:1, token, ready:true}); closeSync(3); process.exit(0);')
+    const executable = protocolExecutable(root, "frame({version:1, token, ready:true}); closeSync(3); process.exit(0);")
     await using process = createProcess({ cwd: root })
-    const runner = { run: async (request: Parameters<typeof process.run>[0]) => {
-      expect(request.timeoutMs).toBe(bound ?? 300_000)
-      return process.run(request)
-    } }
-    const git = gitIn(root, runner, { executable, contract: "root-v1", scope: "local", origin: "fixture" }, {
-      ...(bound === undefined ? {} : { rootInvocationTimeoutMs: bound }),
-    })
+    const runner = {
+      run: async (request: Parameters<typeof process.run>[0]) => {
+        expect(request.timeoutMs).toBe(bound ?? 300_000)
+        return process.run(request)
+      },
+    }
+    const git = gitIn(
+      root,
+      runner,
+      { executable, contract: "root-v1", scope: "local", origin: "fixture" },
+      bound === undefined ? {} : { rootInvocationTimeoutMs: bound },
+    )
     await expect(git(["status"])).resolves.toBe("")
   })
 

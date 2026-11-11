@@ -1721,13 +1721,33 @@ function buildProgram(
     .command("retained")
     .description(
       "count the stores env close retained: live, past their own retainUntil, legacy, malformed and without a " +
-        "manifest, read from manifests only (no size walk); retires nothing",
+        "manifest, read from manifests only; --retire-expired plans a batch, --apply deletes after re-verification",
     )
     .option(
       "--retain <directory>",
       "durable GitSuper retention directory; defaults to the workdir retained-modules directory",
     )
     .option("--json", "emit stable JSON")
+    .option("--retire-expired", "select expired non-legacy stores for a dry-run batch; no deletion by default")
+    .option("--apply", "apply the granted retirement batch after held re-verification; requires --retire-expired")
+    .option(
+      "--limit <count>",
+      "select at most this many entries (default 20; first live grant must be at most 20)",
+      Number,
+    )
+    .option(
+      "--namespace <path>",
+      "complete managed estate root; repeat for every root",
+      (value: string, previous: string[]) => [...previous, value],
+      [],
+    )
+    .option("--artifact-dir <directory>", "external caller-owned directory for retirement evidence")
+    .option(
+      "--entry <name>",
+      "select the exact direct-child name from a reviewed dry-run list; repeat for that list",
+      (value: string, previous: string[]) => [...previous, value],
+      [],
+    )
     .action(async (options) =>
       setExit(await retainedEnvironments(options as Parameters<typeof retainedEnvironments>[0], io)),
     )

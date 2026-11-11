@@ -870,13 +870,34 @@ export async function environmentInventory(
   return { roots, rows }
 }
 
-export type EnvRetainedOptions = Readonly<{ json?: boolean; retain?: string }>
+export type EnvRetainedOptions = Readonly<{
+  json?: boolean
+  retain?: string
+  retireExpired?: boolean
+  apply?: boolean
+  limit?: number
+  namespace?: readonly string[]
+  artifactDir?: string
+  entry?: readonly string[]
+}>
+
+// The approved batch scan measured 469-665 s; this caller alone needs room beyond gitIn's normal 300 s ceiling.
+const RETAINED_BATCH_TIMEOUT_MS = 1_200_000
 
 /**
  * `yrd env retained` — the census of the stores `env close` retained (#33010): live, past their own retainUntil,
- * legacy, malformed and manifest-less, read from manifests with no size walk. Read-only; it retires nothing.
+ * legacy, malformed and manifest-less, read from manifests with no size walk. --retire-expired selects a batch;
+ * it is a dry run unless --apply is explicit. The existing Git transport owns frozen-binary selection and killing.
  */
 export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+  if (options.apply === true && options.retireExpired !== true) {
+    throw new Error("--apply requires --retire-expired; no retained stores were touched")
+  }
+  if (options.retireExpired === true && (!options.namespace?.length || !options.artifactDir)) {
+    throw new Error(
+      "--retire-expired requires the complete --namespace <managed-root> declaration and --artifact-dir <external-evidence-dir>; no retained stores were touched",
+    )
+  }
   const root = requireRepository(io)
   const selection = await resolveGitSelection(root)
   await using process = createProcess({ cwd: root })
@@ -884,6 +905,66 @@ export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdC
   const retentionRoot =
     options.retain === undefined ? join(await workdirOf(git), "retained-modules") : resolve(io.cwd, options.retain)
   const census = censusRetainedStores(retentionRoot, Date.now())
+  if (options.retireExpired === true) {
+    const limit = options.limit ?? 20
+    if (!Number.isInteger(limit) || limit < 1) throw new Error("--limit must be a positive whole number")
+    const names = options.entry?.length
+      ? [...options.entry]
+      : census.state === "read"
+        ? [...census.expiredEntries].sort()
+        : []
+    for (const name of names) {
+      if (basename(name) !== name || name === "." || name === "..") {
+        throw new Error(`--entry ${name} must name one direct child of ${retentionRoot}`)
+      }
+    }
+    const entries = names.slice(0, limit).map((name) => join(retentionRoot, name))
+    if (entries.length === 0) {
+      const reason = `no selected expired stores with writerLocks and notCompared under ${retentionRoot}; legacy, missing-field, malformed and manifest-less stores excluded`
+      io.stdout(
+        options.json === true
+          ? `${JSON.stringify({ root: retentionRoot, apply: options.apply === true, rows: [], reason, census })}\n`
+          : `${reason}\n`,
+      )
+      return 0
+    }
+    const batch = gitIn(root, process, selection, {
+      timeoutMs: RETAINED_BATCH_TIMEOUT_MS,
+      rootInvocationTimeoutMs: RETAINED_BATCH_TIMEOUT_MS,
+    })
+    const args = [
+      "super",
+      ...(options.json === true ? ["--json"] : []),
+      "worktree",
+      "retention",
+      "retire-batch",
+      "--root",
+      retentionRoot,
+      "--common",
+      (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim(),
+      ...(options.namespace ?? []).flatMap((path) => ["--namespace", resolve(io.cwd, path)]),
+      "--artifact-dir",
+      resolve(io.cwd, options.artifactDir as string),
+      ...(options.apply === true ? ["--apply"] : []),
+      ...entries,
+    ]
+    try {
+      io.stdout(await batch(args))
+      const stderr = batch.lastInvocation?.result?.stderr
+      if (stderr) io.stderr(stderr)
+      return 0
+    } catch (error) {
+      const result = batch.lastInvocation?.result
+      if (result?.stdout) io.stdout(result.stdout)
+      if (result?.stderr) io.stderr(result.stderr)
+      io.stderr(
+        result?.timedOut === true
+          ? `retained batch under ${retentionRoot}: scan exceeded 1200 s; child killed; inspect its evidence before retrying\n`
+          : `retained batch under ${retentionRoot}: ${error instanceof Error ? error.message : String(error)}\n`,
+      )
+      return 2
+    }
+  }
   if (options.json === true) {
     io.stdout(`${JSON.stringify(census)}\n`)
     return 0

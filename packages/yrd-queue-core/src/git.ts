@@ -128,6 +128,8 @@ export type GitInvocationOptions = Readonly<{
   objects?: GitObjectContext
   signal?: AbortSignal
   timeoutMs?: number
+  /** Explicit bound for a long root-v1 operation; omitted preserves the ordinary five-minute ceiling. */
+  rootInvocationTimeoutMs?: number
   openOutput?: (invocation: Pick<GitInvocation, "args" | "cwd" | "selection">) => GitOutputSink
   onInvocation?: (invocation: GitInvocation) => void
   /** A remote read's one retry, observed before dispatch even when it recovers. */
@@ -539,7 +541,10 @@ export async function invokeGit(
   const timeoutMs =
     selection?.contract !== "root-v1"
       ? options.timeoutMs
-      : Math.min(options.timeoutMs ?? GIT_ROOT_INVOCATION_MS, GIT_ROOT_INVOCATION_MS)
+      : Math.min(
+          options.timeoutMs ?? options.rootInvocationTimeoutMs ?? GIT_ROOT_INVOCATION_MS,
+          options.rootInvocationTimeoutMs ?? GIT_ROOT_INVOCATION_MS,
+        )
   let output: GitOutputSink | undefined
   let closed = false
   let result: ProcessResult | undefined
