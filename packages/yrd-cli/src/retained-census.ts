@@ -28,6 +28,8 @@ export type RetainedCensus =
       /** A store directory with no `manifest.json`: never a candidate. */
       noManifest: readonly string[]
       /** Diagnostic only: an invocation-owned preparation marker never grants retirement authority. */
+      /** Unusable markers explain unknown state without adding a second store category. */
+      preparationProblems?: Readonly<Record<string, string>>
       unpublished?: readonly Readonly<{
         name: string
         sourceGitDir: string
@@ -56,6 +58,7 @@ export function censusRetainedStores(root: string, now: number): RetainedCensus 
   let oldest: { at: number; text: string } | null = null
   const malformed: { name: string; reason: string }[] = []
   const noManifest: string[] = []
+  const preparationProblems: Record<string, string> = {}
   const unpublished: {
     name: string
     sourceGitDir: string
@@ -76,16 +79,14 @@ export function censusRetainedStores(root: string, now: number): RetainedCensus 
         typeof marker.createdAt !== "string" ||
         Number.isNaN(Date.parse(marker.createdAt))
       ) {
-        malformed.push({ name, reason: `preparation marker ${markerPath} is invalid; state unknown` })
+        preparationProblems[name] = `preparation marker ${markerPath} is invalid; state unknown`
         return false
       }
       unpublished.push({ name, sourceGitDir: marker.sourceGitDir, createdAt: marker.createdAt, reason })
       return true
     } catch (error) {
-      malformed.push({
-        name,
-        reason: `preparation marker ${markerPath} could not be read; state unknown: ${error instanceof Error ? error.message : String(error)}`,
-      })
+      preparationProblems[name] =
+        `preparation marker ${markerPath} could not be read; state unknown: ${error instanceof Error ? error.message : String(error)}`
       return false
     }
   }
@@ -147,6 +148,7 @@ export function censusRetainedStores(root: string, now: number): RetainedCensus 
     oldestExpired: oldest?.text ?? null,
     malformed,
     noManifest,
+    ...(Object.keys(preparationProblems).length === 0 ? {} : { preparationProblems }),
     ...(unpublished.length === 0 ? {} : { unpublished: unpublished.sort((a, b) => a.name.localeCompare(b.name)) }),
   }
 }

@@ -994,8 +994,11 @@ export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdC
   for (const name of census.expiredMissingNotCompared) io.stdout(`kept missing notCompared: ${name}\n`)
   const describeUnpublished = (name: string, fallback: string): string => {
     const preparation = census.unpublished?.find((entry) => entry.name === name)
+    const problem = census.preparationProblems?.[name]
     return preparation === undefined
-      ? fallback
+      ? problem === undefined
+        ? fallback
+        : `${fallback.trimEnd()}; ${problem}\n`
       : `unpublished preparation: ${name}: ${preparation.reason}; created ${preparation.createdAt}; source ${preparation.sourceGitDir}${preparation.reason === "interrupted publication" ? `; ${fallback.trim()}` : ""}\n`
   }
   for (const entry of census.malformed) {

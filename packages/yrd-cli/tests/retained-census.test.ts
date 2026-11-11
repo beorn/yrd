@@ -110,6 +110,35 @@ test("names unpublished preparations while valid manifests win and retirement se
   expect(census.expired).toBe(1)
 })
 
+/**
+ * @failure An unusable preparation marker double-counts one unknown store or hides its read problem.
+ * @level l1 @consumer yrd env retained summary and per-store diagnosis (31301)
+ * The valid-marker table cannot exercise invalid schema, invalid JSON or a marker read failure.
+ */
+test("keeps unusable manifest-less preparations in noManifest once and names their marker problems", () => {
+  const root = mkdtempSync(join(tmpdir(), "retained-census-unusable-"))
+  roots.push(root)
+  for (const name of ["invalid-schema", "invalid-json", "unreadable"]) store(root, name, undefined)
+  writeFileSync(join(root, "invalid-schema", "preparation.json"), JSON.stringify({ version: 2 }))
+  writeFileSync(join(root, "invalid-json", "preparation.json"), "{")
+  mkdirSync(join(root, "unreadable", "preparation.json"))
+  const census = censusRetainedStores(root, NOW)
+  expect(census.state).toBe("read")
+  if (census.state !== "read") throw new Error("fixture retained root was not read")
+  expect(census.total).toBe(3)
+  expect([...census.noManifest].sort()).toEqual(["invalid-json", "invalid-schema", "unreadable"])
+  expect(census.malformed).toEqual([])
+  expect(census.expiredEntries).toEqual([])
+  expect(census).not.toHaveProperty("unpublished")
+  expect(census).toMatchObject({
+    preparationProblems: {
+      "invalid-schema": expect.stringContaining("is invalid; state unknown"),
+      "invalid-json": expect.stringContaining("could not be read; state unknown"),
+      unreadable: expect.stringContaining("could not be read; state unknown"),
+    },
+  })
+})
+
 // @cto dc77f630: env close prints the census line only. A full census parses every manifest (9.7 s on the live
 // 8,560-store root), so the close line counts store directories alone and points at the full census.
 test("the env close line counts store directories without reading manifests and names the full census", () => {
