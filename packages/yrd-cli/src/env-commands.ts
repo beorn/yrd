@@ -1055,8 +1055,6 @@ interface EnvironmentCloseState {
   readonly dirty: readonly string[]
   readonly discarded: readonly DiscardedCommit[]
   readonly admissibleGitlinks: readonly AdmissibleGitlink[]
-  /** A detached root carries commits with content ahead of origin/main (B3), which no preserve can keep (33552). */
-  readonly contentAhead: boolean
 }
 
 /**
@@ -1110,7 +1108,6 @@ async function inspectEnvironmentCloseState(
     }
     cleanByPath.set(repo.path, ownLines.length === 0 && stagedLines.length === 0)
   }
-  let contentAhead = false
   const isSubmoduleClean = (repoPath: string): boolean =>
     cleanByPath.get(repoPath) === true &&
     ![...cleanByPath.entries()].some(([childPath, isClean]) => childPath.startsWith(`${repoPath}/`) && !isClean) &&
@@ -1230,7 +1227,6 @@ async function inspectEnvironmentCloseState(
               discarded.push({ ...entry, gitlinks: discardedGitlinks })
             }
           } else {
-            contentAhead = true
             for (const entry of aheadCommits) {
               dirty.push(
                 `detached HEAD is ahead of origin/main with content changes at ${entry.sha.slice(0, 12)} (${entry.subject})`,
@@ -1241,7 +1237,7 @@ async function inspectEnvironmentCloseState(
       }
     }
   }
-  return { dirty, discarded, admissibleGitlinks, contentAhead }
+  return { dirty, discarded, admissibleGitlinks }
 }
 
 /** One status read shared by `env open`'s existing-bay cleanliness check. */
@@ -1270,18 +1266,6 @@ function requireCleanState(state: EnvironmentCloseState, path: string, detached:
       `environment ${path} is dirty; preserve or commit these changes before continuing${hint}:\n${state.dirty.join("\n")}`,
     )
   }
-}
-
-/**
- * 33552: commits ahead on a detached HEAD (B3) have no branch for --preserve to keep them on: the worktree preserve
- * preflight refuses at `git symbolic-ref HEAD`. Refuse before any ref moves, in the preview and the call alike, naming
- * the B3 route. Uncommitted root changes on a detached HEAD stay preservable.
- */
-function requireBranchForContentAhead(state: EnvironmentCloseState, path: string): void {
-  if (!state.contentAhead) return
-  throw new Error(
-    `environment ${path} has commits ahead of origin/main on a detached HEAD, which --preserve cannot keep without a branch; attach one first (git switch -c task/<issue>, then --preserve) to keep this exact state in a durable ref:\n${state.dirty.join("\n")}`,
-  )
 }
 
 /** Retained environments preserve user work; GitSuper owns populated-submodule removal. */
@@ -1338,6 +1322,8 @@ export interface WorktreePreserveReceipt {
   slot: string
   path: string
   preserved: boolean
+  /** `preserve --check` passed and wrote nothing (33552); false on every real preserve receipt. */
+  checked: boolean
   reason: string | null
   ref: string | null
   sha: string | null
@@ -1394,6 +1380,10 @@ export function parseWorktreePreserveReceipt(stdout: string, cli: string): Workt
   if (typeof record.slot !== "string") throw receiptRefusal(cli, "slot", "expected a string")
   if (typeof record.path !== "string") throw receiptRefusal(cli, "path", "expected a string")
   if (typeof record.preserved !== "boolean") throw receiptRefusal(cli, "preserved", "expected a boolean")
+  // 33552: only a check receipt carries `checked`; absence is a real preserve's receipt, or a CLI before --check.
+  if (record.checked !== undefined && typeof record.checked !== "boolean") {
+    throw receiptRefusal(cli, "checked", "expected a boolean when present")
+  }
   if (record.reason !== null && typeof record.reason !== "string") {
     throw receiptRefusal(cli, "reason", "expected a string or null")
   }
@@ -1440,6 +1430,7 @@ export function parseWorktreePreserveReceipt(stdout: string, cli: string): Workt
     slot: record.slot,
     path: record.path,
     preserved: record.preserved,
+    checked: record.checked === true,
     reason: record.reason,
     ref: record.ref,
     sha: record.sha,
@@ -1509,6 +1500,11 @@ async function preserveEnvironmentWorktree(
       `env close --preserve: the worktree preserve CLI ${cli} exited ${String(result.exitCode)} (expected 0 with preserved:true, or ${WORKTREE_PRESERVE_NOTHING_EXIT} with preserved:false); ${stderrContext}; the environment was NOT removed`,
     )
   }
+  if (receipt.checked) {
+    throw new Error(
+      `env close --preserve: the worktree preserve CLI ${cli} answered a real preserve with a check receipt (checked:true, nothing written); ${stderrContext}; the environment was NOT removed`,
+    )
+  }
   if (result.exitCode === 0 && !receipt.preserved) {
     throw new Error(
       `env close --preserve: the worktree preserve CLI ${cli} exited 0 but reported preserved:false; ${stderrContext}; the environment was NOT removed`,
@@ -1520,6 +1516,84 @@ async function preserveEnvironmentWorktree(
     )
   }
   return receipt
+}
+
+/** bearly tools/worktree.ts `PRESERVE_REFUSED_EXIT`, mirrored like the nothing exit: `preserve --check` would refuse. */
+const WORKTREE_PRESERVE_REFUSED_EXIT = 4
+
+/** The planner's exact refusal when a worktree CLI predates `preserve --check` (bearly planCliInvocation). */
+const WORKTREE_PRESERVE_CHECK_UNKNOWN = "Unknown flag for preserve: --check"
+
+export type EnvironmentPreserveCheck =
+  | { readonly kind: "would-preserve" | "nothing" }
+  | { readonly kind: "refused"; readonly message: string }
+  | { readonly kind: "old-tool"; readonly cli: string }
+
+/**
+ * 33552: ask the worktree CLI's `preserve --check`, which runs the real preserve's selection and validation and writes
+ * nothing, whether a real preserve would refuse now. A check is not a promise: the real preserve still runs and decides.
+ * An old CLI without the flag is named and reads as neither success nor refusal; any other ending fails the close.
+ */
+export async function checkEnvironmentPreserve(
+  runner: Process,
+  root: string,
+  path: string,
+): Promise<EnvironmentPreserveCheck> {
+  const cli = worktreePreserveCliPath(root)
+  if (!existsSync(cli)) {
+    throw new Error(
+      `env close --preserve needs the worktree preserve CLI at ${cli}; it is absent, so the preserve was NOT run and the environment was NOT removed`,
+    )
+  }
+  let result: Awaited<ReturnType<Process["run"]>>
+  try {
+    result = await runner.run({ argv: ["bun", cli, "preserve", path, "--json", "--check"], cwd: root })
+  } catch (error) {
+    throw new Error(
+      `env close --preserve could not run the worktree preserve check ${cli}: ${error instanceof Error ? error.message : String(error)}; the environment was NOT removed`,
+      { cause: error },
+    )
+  }
+  if (
+    result.signal !== null ||
+    result.timedOut ||
+    result.stalled ||
+    result.sweepFailure !== undefined ||
+    result.escapedDescendant ||
+    (result.outputTruncation?.length ?? 0) > 0
+  ) {
+    throw new Error(
+      `env close --preserve: the worktree preserve check ${cli} did not settle cleanly: ${JSON.stringify(result)}; the environment was NOT removed`,
+    )
+  }
+  const stderr = result.stderr.trimEnd()
+  if (result.exitCode === 1 && stderr.includes(WORKTREE_PRESERVE_CHECK_UNKNOWN)) return { kind: "old-tool", cli }
+  if (result.exitCode === WORKTREE_PRESERVE_REFUSED_EXIT) {
+    return { kind: "refused", message: stderr.split(/\r?\n/u).slice(-20).join("\n").slice(-4096) || "(empty stderr)" }
+  }
+  const stderrContext = `stderr tail (last 20 lines, max 4096 characters): ${stderr.split(/\r?\n/u).slice(-20).join("\n").slice(-4096) || "(empty stderr)"}`
+  if (result.exitCode !== 0 && result.exitCode !== WORKTREE_PRESERVE_NOTHING_EXIT) {
+    throw new Error(
+      `env close --preserve: the worktree preserve check ${cli} exited ${String(result.exitCode)} (expected 0, ${WORKTREE_PRESERVE_NOTHING_EXIT} or ${WORKTREE_PRESERVE_REFUSED_EXIT}); ${stderrContext}; the environment was NOT removed`,
+    )
+  }
+  let receipt: WorktreePreserveReceipt
+  try {
+    receipt = parseWorktreePreserveReceipt(result.stdout, cli)
+  } catch (error) {
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}; preserve check exited ${String(result.exitCode)}; ${stderrContext}`,
+      {
+        cause: error,
+      },
+    )
+  }
+  if (receipt.preserved || receipt.checked !== (result.exitCode === 0)) {
+    throw new Error(
+      `env close --preserve: the worktree preserve check ${cli} exited ${String(result.exitCode)} with preserved:${String(receipt.preserved)} checked:${String(receipt.checked)} (a check writes nothing: expected checked:true on 0, checked:false on ${WORKTREE_PRESERVE_NOTHING_EXIT}); ${stderrContext}; the environment was NOT removed`,
+    )
+  }
+  return { kind: result.exitCode === 0 ? "would-preserve" : "nothing" }
 }
 
 export async function closeEnvironment(
@@ -1674,12 +1748,17 @@ export async function closeEnvironment(
   // 29406: the repositories the preserve consulted and skipped, named in the --json close receipt
   // below; undefined when no preserve ran, so the plain close receipt is unchanged.
   let skipped: WorktreePreserveReceipt["skipped"] | undefined
+  // The preserve and its early check (33552) both skip on this one predicate: a detached root with no dirt whose only
+  // ahead commits are empty (closeState.discarded: no content to keep) or admissible gitlink moves (each pin is
+  // reachable in its own component). The close proceeds and records them as discards. The worktree tool answers these
+  // differently on purpose: asked, its preserve --check would say "needs preserve" and refuse a detached root, so yrd
+  // does not ask.
+  const preserveSkipped = (): boolean =>
+    detached &&
+    closeState.dirty.length === 0 &&
+    (closeState.discarded.length > 0 || closeState.admissibleGitlinks.length > 0)
   const preserve = async (phase: "before teardown" | "after teardown"): Promise<void> => {
-    if (
-      detached &&
-      closeState.dirty.length === 0 &&
-      (closeState.discarded.length > 0 || closeState.admissibleGitlinks.length > 0)
-    ) {
+    if (preserveSkipped()) {
       io.stderr(`yrd: env close --preserve found nothing to preserve in ${path} ${phase}; the close proceeds\n`)
       return
     }
@@ -1746,7 +1825,20 @@ export async function closeEnvironment(
     )
   }
   if (options.preserve === true) {
-    if (detached) requireBranchForContentAhead(closeState, path)
+    // 33552: ask the real preserve, before any ref moves and in the preview and the call alike, whether it would
+    // refuse now. Same cases refuse as before; earlier, and with the next step. The real preserve below still decides.
+    if (!preserveSkipped()) {
+      const check = await checkEnvironmentPreserve(process, root, path)
+      if (check.kind === "old-tool") {
+        io.stderr(
+          `yrd: env close --preserve: the worktree CLI ${check.cli} predates preserve --check, so no early check ran; the preserve itself still decides\n`,
+        )
+      } else if (check.kind === "refused") {
+        throw new Error(
+          `environment ${path}: --preserve would fail; a real preserve refuses now: ${check.message}${detached ? "; to keep this exact state, attach a branch first (git switch -c task/<issue>, then --preserve)" : ""}; nothing was written and the environment was kept`,
+        )
+      }
+    }
     if (options.dryRun !== true) await preserve("before teardown")
   } else {
     requireCleanState(closeState, path, detached)

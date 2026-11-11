@@ -1761,9 +1761,10 @@ function buildProgram(
     .description("run teardown and remove a clean, unlocked environment, retaining its submodule stores")
     .addHelpSection(
       "Preview (--dry-run):",
-      "Read the same admission checks without changing anything. The environment would be admitted; " +
+      "Read the same admission checks without changing the environment, its branches or the queue. The environment would be admitted; " +
         "component custody, retention and teardown are proved only by the real close. " +
-        "Remote re-read is also not performed. An incomplete census fails without filing a close request.",
+        "Remote re-read is also not performed, except that --preserve asks the worktree preserve check, which reads the owning " +
+        "remotes and may refresh their fetch caches and objects (no branch or custody ref). An incomplete census fails without filing a close request.",
     )
     .addHelpSection(
       "When this caller's same-UID CWD census cannot read every pid:",

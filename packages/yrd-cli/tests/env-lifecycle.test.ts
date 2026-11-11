@@ -1236,7 +1236,14 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     const w = await world(":", teardown)
     const head = (await w.git(["rev-parse", "HEAD"])).trim()
     const { path } = await openEnvironment(w.work, head)
-    if (preserve) writeFileSync(join(path, "root-dirt.txt"), "keep these bytes\n")
+    // 33552: the preview asks the worktree CLI's preserve --check like the call does, so it needs the CLI; the stub
+    // passes the check and logs that the preview ran only the check, never a preserve.
+    const log = join(w.work, "preserve-calls.log")
+    if (preserve) {
+      installStubWorktreePreserve(w.work, { check: "pass", log })
+      writeFileSync(log, "")
+      writeFileSync(join(path, "root-dirt.txt"), "keep these bytes\n")
+    }
     const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
     const refs = await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])
     for (const json of [true, false]) {
@@ -1289,6 +1296,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
       expect(existsSync(join(dirname(path), "preview-teardown-ran.txt"))).toBe(false)
       if (preserve) expect(readFileSync(join(path, "root-dirt.txt"), "utf8")).toBe("keep these bytes\n")
     }
+    if (preserve) expect(readFileSync(log, "utf8")).toBe("check\ncheck\n")
   })
 
   /**
@@ -1443,6 +1451,14 @@ console.log(JSON.stringify(args.includes("--component-custody")
       failIfPathExists?: string
       /** Repositories the stub reports as consulted and skipped, as bearly does since 29392 (29406). */
       skipped?: ReadonlyArray<{ path: string; head: string; reason: string }>
+      /**
+       * How the stub answers `preserve --check` (33552). Default "old-tool": the planner's exact unknown-flag refusal,
+       * as a worktree CLI before --check answers. The stub models only the check's exit contract, never the real
+       * preserve's branch rule; the real verdicts are proven in the dev repo's tools/worktree-publication.slow.test.ts.
+       */
+      check?: "old-tool" | "refuse" | "pass" | "nothing" | "preserved" | "exit-5"
+      /** Append "check" or "preserve" per invocation to this file. */
+      log?: string
     } = {},
   ): void {
     mkdirSync(join(root, "tools"), { recursive: true })
@@ -1453,12 +1469,14 @@ console.log(JSON.stringify(args.includes("--component-custody")
       .replace("__FAIL_IF_PATH_EXISTS__", JSON.stringify(options.failIfPathExists ?? ""))
       .replace("__EXIT_OVERRIDE__", options.exitOverride === undefined ? '""' : String(options.exitOverride))
       .replace("__SKIPPED__", JSON.stringify(options.skipped ?? []))
+      .replace("__CHECK_MODE__", JSON.stringify(options.check ?? "old-tool"))
+      .replace("__LOG__", JSON.stringify(options.log ?? ""))
     writeFileSync(join(root, "tools", "worktree.ts"), source)
   }
 
   const STUB_WORKTREE_PRESERVE_CLI = `#!/usr/bin/env bun
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdtempSync } from "node:fs"
+import { appendFileSync, existsSync, mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 
@@ -1467,6 +1485,29 @@ const target = argv[1]
 if (argv[0] !== "preserve" || target === undefined) {
   console.error("stub worktree: usage: preserve <path> [--json]")
   process.exit(64)
+}
+const checking = argv.includes("--check")
+const log = __LOG__
+if (log !== "") appendFileSync(log, (checking ? "check" : "preserve") + "\\n")
+if (checking) {
+  const mode = __CHECK_MODE__
+  const answer = (body, code) => {
+    process.stdout.write(JSON.stringify({ schema: "bearly-worktree-preserve/1", slot: basename(target), path: target, ref: null, sha: null, submodules: [], skipped: [], ...body }) + "\\n")
+    process.exit(code)
+  }
+  if (mode === "old-tool") {
+    console.error("[worktree] Unknown flag for preserve: --check")
+    process.exit(1)
+  }
+  if (mode === "refuse") {
+    console.error("[worktree] preserve --check: a real preserve of " + basename(target) + " would refuse: attached branch  is not an eligible issue branch")
+    process.exit(4)
+  }
+  if (mode === "pass") answer({ preserved: false, checked: true, reason: "dirty" }, 0)
+  if (mode === "nothing") answer({ preserved: false, reason: "clean" }, 3)
+  if (mode === "preserved") answer({ preserved: true, checked: true, reason: "dirty" }, 0)
+  console.error("stub worktree: check crashed")
+  process.exit(5)
 }
 const git = (cwd, args, env) => {
   const r = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", ...(env === undefined ? {} : { env }) })
@@ -2766,39 +2807,80 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
   })
 
   /**
-   * @failure 33552: on a detached HEAD with content ahead, `env close --preserve --dry-run` admitted the close while
-   *          the real `--preserve` call failed later inside the worktree preserve preflight (`git symbolic-ref -q
-   *          HEAD` exits 1), so the preview and the call disagreed and the refusal named no route. --preserve keeps an
-   *          attached issue branch's state, so both refuse up front with the B3 route and keep the environment.
-   * @level   l2 (real bare remote, real worktree, real close CLI)
-   * @consumer every seat retiring a detached environment through `yrd env close --preserve`
+   * @failure 33552: `env close --preserve --dry-run` admitted a close that the real `--preserve` call then failed late
+   *          inside the worktree preserve preflight, so the preview and the call disagreed and the refusal named no
+   *          route. Env close now asks the worktree CLI's `preserve --check` before any ref moves. These rows prove
+   *          yrd's mapping of its exits only; the real verdicts per case live in the dev repo's
+   *          tools/worktree-publication.slow.test.ts, and a detached root whose only ahead commits are empty or
+   *          on-main gitlinks never asks (the 32124 and 32137 rows close those with no CLI installed).
+   * @level   l2 (real bare remote, real worktree, real close CLI, stub worktree CLI exit contract)
+   * @consumer every seat retiring an environment through `yrd env close --preserve`
    */
-  it("refuses --preserve on a detached HEAD with content ahead the same way in preview and in the call, naming B3 (33552)", async () => {
+  it("maps preserve --check: a refusal stops preview and call alike with the message and route, nothing written (33552)", async () => {
     const w = await world(":")
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const log = join(w.work, "preserve-calls.log")
+    installStubWorktreePreserve(w.work, { check: "refuse", log })
     for (const dryRun of [true, false]) {
+      writeFileSync(log, "")
       const { path } = await openEnvironment(w.work, selected)
-      const envGit = gitIn(path)
-      writeFileSync(join(path, "ahead.txt"), "content ahead on detached HEAD\n")
-      await envGit(["add", "ahead.txt"])
-      await envGit([
-        "-c",
-        "user.email=env-open@yrd.test",
-        "-c",
-        "user.name=yrd",
-        "commit",
-        "--quiet",
-        "-m",
-        "content ahead",
-      ])
-
+      writeFileSync(join(path, "unsaved.txt"), "uncommitted on a detached HEAD\n")
+      const refsBefore = await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])
       const refused = capture(w.work)
       const args = ["bun", "yrd", "env", "close", path, "--preserve", ...(dryRun ? ["--dry-run"] : []), "--json"]
       expect(await runYrdProcess(args, refused.io), `dryRun=${dryRun}`).toBe(2)
+      expect(refused.stderr()).toContain("a real preserve refuses now: [worktree] preserve --check: a real preserve of")
+      expect(refused.stderr()).toContain("attached branch  is not an eligible issue branch")
       expect(refused.stderr()).toContain("git switch -c task/<issue>, then --preserve")
-      expect(refused.stderr()).not.toContain("custody preflight")
+      expect(refused.stderr()).toContain("nothing was written and the environment was kept")
       expect(refused.stdout()).toBe("")
-      expect(existsSync(path)).toBe(true)
+      expect(existsSync(join(path, "unsaved.txt"))).toBe(true)
+      expect(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(refsBefore)
+      expect(readFileSync(log, "utf8")).toBe("check\n")
+    }
+  })
+
+  /**
+   * @failure 33552: a passing check was read as a preserve, or skipped the real one; a pre---check worktree CLI was read
+   *          as a pass or as a refusal; an unknown check ending let the close proceed.
+   * @level   l2 (real bare remote, real worktree, real close CLI, stub worktree CLI exit contract)
+   * @consumer every seat retiring an environment through `yrd env close --preserve`
+   */
+  it("maps preserve --check: pass and old tool proceed to the real preserve; any unknown ending fails closed (33552)", async () => {
+    const w = await world(":")
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const log = join(w.work, "preserve-calls.log")
+    for (const check of ["pass", "old-tool"] as const) {
+      installStubWorktreePreserve(w.work, { check, log })
+      writeFileSync(log, "")
+      const { path } = await openEnvironment(w.work, selected)
+      writeFileSync(join(path, "unsaved.txt"), `kept by the real preserve after ${check}\n`)
+      const run = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+        run.stderr(),
+      ).toBe(0)
+      expect(readFileSync(log, "utf8"), check).toBe("check\npreserve\n")
+      expect(run.stderr()).toContain("preserved dirty state")
+      if (check === "old-tool") expect(run.stderr()).toContain("predates preserve --check, so no early check ran")
+      else expect(run.stderr()).not.toContain("predates preserve --check")
+      expect(existsSync(path)).toBe(false)
+    }
+    for (const check of ["preserved", "exit-5"] as const) {
+      installStubWorktreePreserve(w.work, { check, log })
+      writeFileSync(log, "")
+      const { path } = await openEnvironment(w.work, selected)
+      writeFileSync(join(path, "unsaved.txt"), "never torn down\n")
+      const refused = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], refused.io), check).toBe(
+        2,
+      )
+      expect(refused.stderr()).toContain(
+        check === "preserved" ? "a check writes nothing" : "the worktree preserve check",
+      )
+      expect(refused.stderr()).toContain("the environment was NOT removed")
+      expect(readFileSync(log, "utf8"), check).toBe("check\n")
+      expect(existsSync(join(path, "unsaved.txt"))).toBe(true)
     }
   })
 
