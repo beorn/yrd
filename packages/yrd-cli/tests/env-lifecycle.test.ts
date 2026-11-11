@@ -2779,19 +2779,24 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       await envGit(["-c", "user.email=env@yrd.test", "-c", "user.name=yrd", "commit", "--quiet", "-m", "held"])
       const head = (await envGit(["rev-parse", "HEAD"])).trim()
       await w.git(["branch", "keeper", head])
-      const refsBefore = (await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/yrd/"])).trim()
+      const refsBefore = (
+        await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/yrd/"])
+      ).trim()
 
       const closed = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "close", path, ...(preserve ? ["--preserve"] : []), "--json"], closed.io),
+        await runYrdProcess(
+          ["bun", "yrd", "env", "close", path, ...(preserve ? ["--preserve"] : []), "--json"],
+          closed.io,
+        ),
         closed.stderr(),
       ).toBe(0)
       expect(existsSync(path)).toBe(false)
       expect(JSON.parse(closed.stdout())).toEqual({ closed: path })
       expect(closed.stderr()).toContain("commit(s) ahead of origin/main are all on refs/heads/keeper")
-      expect((await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/yrd/"])).trim()).toBe(
-        refsBefore,
-      )
+      expect(
+        (await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/yrd/"])).trim(),
+      ).toBe(refsBefore)
     },
   )
 
@@ -2841,7 +2846,10 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     // The keep route, as printed.
     await envGit(["switch", "--quiet", "-c", "task/gone"])
     const kept = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], kept.io), kept.stderr()).toBe(0)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], kept.io),
+      kept.stderr(),
+    ).toBe(0)
     expect(existsSync(path)).toBe(false)
     expect((await w.git(["rev-parse", "refs/heads/task/gone"])).trim()).toBe(head)
 
@@ -2849,7 +2857,18 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     const dropped = capture(w.work)
     expect(
       await runYrdProcess(
-        ["bun", "yrd", "drop", "task/gone", "--local", "--discard", "--tip", head, "--reason", "dropped issue leftover"],
+        [
+          "bun",
+          "yrd",
+          "drop",
+          "task/gone",
+          "--local",
+          "--discard",
+          "--tip",
+          head,
+          "--reason",
+          "dropped issue leftover",
+        ],
         dropped.io,
       ),
       dropped.stderr(),

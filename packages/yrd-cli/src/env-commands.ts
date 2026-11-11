@@ -1184,7 +1184,9 @@ async function inspectEnvironmentCloseState(
       // gitomic's private namespaces never count: they are pruned on their own schedule, so a commit only they hold
       // is not kept. When every ahead commit is held elsewhere, nothing is lost: no dirt, no discard record.
       const unique =
-        aheadLog === "" ? "" : (await treeGit(["rev-list", "HEAD", "--not", "--branches", "--remotes", "--tags"])).trim()
+        aheadLog === ""
+          ? ""
+          : (await treeGit(["rev-list", "HEAD", "--not", "--branches", "--remotes", "--tags"])).trim()
       if (aheadLog !== "" && unique === "") {
         const holder = (
           await treeGit([
@@ -1197,7 +1199,9 @@ async function inspectEnvironmentCloseState(
             "refs/tags/",
           ])
         ).trim()
-        if (holder === "") throw new Error(`${path}: rev-list found HEAD's ahead commits on a ref, for-each-ref names none`)
+        if (holder === "") {
+          throw new Error(`${path}: rev-list found HEAD's ahead commits on a ref, for-each-ref names none`)
+        }
         heldOn = { ref: holder, commits: aheadLog.split("\n").length }
       } else if (aheadLog !== "") {
         const aheadCommits = aheadLog.split("\n").map((line) => {

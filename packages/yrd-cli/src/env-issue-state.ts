@@ -27,7 +27,9 @@ export async function readEnvIssueState(
       ...(input.env === undefined ? {} : { env: input.env }),
       stderr: () => {},
     })
-    if (!outcome.ok) return { kind: "keep", reason: `issue ${named} state unreadable: ${outcome.message}`, unreadable: true }
+    if (!outcome.ok) {
+      return { kind: "keep", reason: `issue ${named} state unreadable: ${outcome.message}`, unreadable: true }
+    }
     const result: unknown = outcome.envelope.result
     const status =
       typeof result === "object" && result !== null && "status" in result
