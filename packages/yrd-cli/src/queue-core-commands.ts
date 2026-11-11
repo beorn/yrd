@@ -1536,7 +1536,7 @@ export async function coreQueueCommand(
             repo: string
             queue: string
             target: string
-            base?: string
+            base: string
             merged: readonly string[]
             update?: readonly string[]
             updateDue?: boolean

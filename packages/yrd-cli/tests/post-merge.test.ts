@@ -1495,67 +1495,89 @@ it.each([
   60000,
 )
 
+/** Appends a provider call's five operands to its sixth, one line per call. */
+const EVENT_WRITE = 'printf "%s\\t%s\\t%s\\t%s\\t%s\\n" "$1" "$2" "$3" "$4" "$5" >> "$6"; '
+/** `event` declared through a provider that logs each call to `calls`, then answers `reply`. */
+const eventDeclared = (calls: string, reply = "printf '{\"applied\":true}\\n'") => ({
+  event: ["sh", "-c", EVENT_WRITE + reply, "event", "<raw>", "<kind>", "<source>", "<text>", "<id>", calls],
+})
+
+/** A queue on a bare remote whose issues.yml is `issues(calls)`; every provider call lands in `calls`. */
+const eventQueue = async (issues: (calls: string) => Record<string, unknown>) => {
+  const root = world(),
+    remote = join(root, "remote.git"),
+    repo = join(root, "author"),
+    workdir = join(root, "queue"),
+    calls = join(root, "event-calls.tsv")
+  mkdirSync(workdir)
+  const seed = gitIn(root)
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["clone", "--quiet", remote, repo])
+  const git = gitIn(repo)
+  await git(["config", "user.email", "provider@yrd.test"])
+  await git(["config", "user.name", "fixture"])
+  await git(["checkout", "--quiet", "-b", "main"])
+  writeFileSync(join(repo, ".yrd.yml"), JSON.stringify({ issuesProvider: { update: ["sh", "-c", "true"] } }))
+  writeFileSync(join(repo, "issues.yml"), JSON.stringify(issues(calls)))
+  await git(["add", ".yrd.yml", "issues.yml"])
+  await git(["commit", "--quiet", "-m", "queue"])
+  await git(["push", "--quiet", "origin", "main"])
+  const target = (await git(["rev-parse", "HEAD"])).trim(),
+    config = await readConfig(git, target, { remote: "origin", branch: "main" })
+  if (config === undefined) throw Error("fixture queue lost config")
+  const store = createEventStore(repo, "origin", git.selection)
+  await createEventQueue(store, "main", target, config, new Date())
+  return { root, remote, repo, workdir, calls, seed, git, store }
+}
+
+/** Submits `branch` at one new commit on the remote's main, naming `issue` when given. */
+const submitChange = async (
+  queue: Readonly<{ repo: string; git: ReturnType<typeof gitIn> }>,
+  branch: string,
+  issue: string | undefined,
+  label: string,
+): Promise<void> => {
+  await queue.git(["fetch", "--quiet", "origin"])
+  await queue.git(["checkout", "--quiet", "-B", branch, "origin/main"])
+  writeFileSync(join(queue.repo, label + ".txt"), label)
+  await queue.git(["add", "."])
+  await queue.git(["commit", "--quiet", "-m", label])
+  await submit(queue.git, "origin", {
+    branch,
+    submitter: "fixture",
+    target: { remote: "origin", branch: "main" },
+    ...(issue === undefined ? {} : { issue }),
+  })
+  await queue.git(["checkout", "--quiet", "main"])
+}
+
+/** The `event` rows of every finished post-merge attempt under `workdir`. */
+const eventActionsIn = (workdir: string): Array<Record<string, unknown>> =>
+  readdirSync(join(workdir, "post-merge"))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(readFileSync(join(workdir, "post-merge", name), "utf8")) as Record<string, unknown>)
+    .filter((attempt) => attempt.status !== "running")
+    .flatMap((attempt) => (attempt.issueActions ?? []) as Array<Record<string, unknown>>)
+    .filter((action) => action.verb === "event")
+
 /** @failure A delivered change's merged item event is lost, keyed off its merge, written as a close, or a failed provider call holds the merge; or, with no event declared, a provider is called or the round records a failure. @level l2 @consumer Yrd post-merge item events (#31194, @cto 721b42d7) @testonly none */
 it.each(["recorded", "provider-fails", "undeclared"] as const)(
   "writes one merged item event per delivered change through the issues declaration: %s",
   async (mode) => {
-    const root = world(),
-      remote = join(root, "remote.git"),
-      repo = join(root, "author"),
-      workdir = join(root, "queue"),
-      calls = join(root, "event-calls.tsv")
-    mkdirSync(workdir)
-    const seed = gitIn(root)
-    await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
-    await seed(["clone", "--quiet", remote, repo])
-    const git = gitIn(repo)
-    await git(["config", "user.email", "provider@yrd.test"])
-    await git(["config", "user.name", "fixture"])
-    await git(["checkout", "--quiet", "-b", "main"])
-    writeFileSync(join(repo, ".yrd.yml"), JSON.stringify({ issuesProvider: { update: ["sh", "-c", "true"] } }))
-    const write = 'printf "%s\\t%s\\t%s\\t%s\\t%s\\n" "$1" "$2" "$3" "$4" "$5" >> "$6"; '
-    const reply = mode === "provider-fails" ? "exit 3" : "printf '{\"applied\":true}\\n'"
-    writeFileSync(
-      join(repo, "issues.yml"),
-      JSON.stringify(
-        // Production's shape today: other verbs declared, no `event`. A call of any verb lands in `calls`.
-        mode === "undeclared"
-          ? { comment: ["sh", "-c", write + "exit 9", "comment", "<key>", "<text>", "<id>", "-", "-", calls] }
-          : { event: ["sh", "-c", write + reply, "event", "<raw>", "<kind>", "<source>", "<text>", "<id>", calls] },
-      ),
+    const { remote, repo, workdir, calls, seed, git, store } = await eventQueue((calls) =>
+      // Production's shape today: other verbs declared, no `event`. A call of any verb lands in `calls`.
+      mode === "undeclared"
+        ? { comment: ["sh", "-c", EVENT_WRITE + "exit 9", "comment", "<key>", "<text>", "<id>", "-", "-", calls] }
+        : eventDeclared(calls, mode === "provider-fails" ? "exit 3" : undefined),
     )
-    await git(["add", ".yrd.yml", "issues.yml"])
-    await git(["commit", "--quiet", "-m", "queue"])
-    await git(["push", "--quiet", "origin", "main"])
-    const target = (await git(["rev-parse", "HEAD"])).trim(),
-      config = await readConfig(git, target, { remote: "origin", branch: "main" })
-    if (config === undefined) throw Error("fixture queue lost config")
-    const store = createEventStore(repo, "origin", git.selection)
-    await createEventQueue(store, "main", target, config, new Date())
     const issue = "@i/16-work-lifecycle/31194-item-events"
     for (const [branch, named] of [
       ["task/with-issue", issue],
       ["task/no-issue", undefined],
     ] as const) {
-      await git(["checkout", "--quiet", "-b", branch, "origin/main"])
-      writeFileSync(join(repo, branch.replaceAll("/", "-") + ".txt"), branch)
-      await git(["add", "."])
-      await git(["commit", "--quiet", "-m", branch])
-      await submit(git, "origin", {
-        branch,
-        submitter: "fixture",
-        target: { remote: "origin", branch: "main" },
-        ...(named === undefined ? {} : { issue: named }),
-      })
-      await git(["checkout", "--quiet", "main"])
+      await submitChange({ repo, git }, branch, named, branch.replaceAll("/", "-"))
     }
-    const eventActions = (): Array<Record<string, unknown>> =>
-      readdirSync(join(workdir, "post-merge"))
-        .filter((name) => name.endsWith(".json"))
-        .map((name) => JSON.parse(readFileSync(join(workdir, "post-merge", name), "utf8")) as Record<string, unknown>)
-        .filter((attempt) => attempt.status !== "running")
-        .flatMap((attempt) => (attempt.issueActions ?? []) as Array<Record<string, unknown>>)
-        .filter((action) => action.verb === "event")
+    const eventActions = (): Array<Record<string, unknown>> => eventActionsIn(workdir)
     const stop = new AbortController(),
       merged: string[] = [],
       diagnostics: string[] = []
@@ -1654,3 +1676,260 @@ it.each(["recorded", "provider-fails", "undeclared"] as const)(
   },
   60000,
 )
+
+const ISSUE_31194 = "@i/16-work-lifecycle/31194-item-events"
+const TWICE = "task/twice"
+/** The provider call a `merged` event of TWICE at `merge` makes: issue as held, kind, source, text, replay key. */
+const mergedCall = (remote: string, merge: string): string =>
+  [ISSUE_31194, "merged", `${remote}@${merge}`, `${TWICE} merged`, `yrd-merged-${merge}`].join("\t")
+/** The provider calls logged so far, one per line; none when the log was never written. */
+const callLines = (calls: string): string[] =>
+  existsSync(calls)
+    ? readFileSync(calls, "utf8")
+        .split("\n")
+        .filter((line) => line !== "")
+    : []
+/** The row an earlier delivery of TWICE leaves when an attempt does not write it again. */
+const notRewritten = (merge: string) =>
+  expect.objectContaining({
+    branch: TWICE,
+    mergeSha: merge,
+    status: "skipped",
+    reason: `not rewritten: merged at ${merge} before this round's base`,
+  })
+const fixtureIo = (repo: string, diagnostics: string[]) => ({
+  cwd: repo,
+  stdout: (s: string) => diagnostics.push(s),
+  stderr: (s: string) => diagnostics.push(s),
+  localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
+})
+
+/**
+ * Runs `up` until TWICE has merged twice, each merge's own attempt ending before the next submit, so the two rounds
+ * never share one attempt; returns each merge and the base its round was judged against.
+ */
+const mergeTwice = async (
+  queue: Awaited<ReturnType<typeof eventQueue>>,
+): Promise<Readonly<{ merges: readonly [string, string]; bases: readonly [string, string] }>> => {
+  await submitChange(queue, TWICE, ISSUE_31194, "first")
+  const merges: string[] = [],
+    bases: string[] = [],
+    stop = new AbortController(),
+    diagnostics: string[] = []
+  let rounds = 0
+  try {
+    expect(
+      await coreQueueCommand(
+        queue.repo,
+        fixtureIo(queue.repo, diagnostics),
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterRound: async (outcome) => {
+            rounds++
+            if (outcome.merged.includes(TWICE)) {
+              const merge = (await readStatus(queue.store, "main", TWICE)).merge!
+              merges.push(merge)
+              bases.push(outcome.base)
+              await vi.waitFor(
+                () =>
+                  expect(eventActionsIn(queue.workdir)).toContainEqual(
+                    expect.objectContaining({ mergeSha: merge, status: "fulfilled" }),
+                  ),
+                { timeout: 10000 },
+              )
+              if (merges.length === 1) await submitChange(queue, TWICE, ISSUE_31194, "second")
+              else stop.abort()
+            } else if (rounds > 12) stop.abort()
+          },
+        },
+        { workdir: queue.workdir, json: true },
+      ),
+      diagnostics.join(" "),
+    ).toBe(0)
+  } finally {
+    stop.abort()
+  }
+  expect(merges).toHaveLength(2)
+  return { merges: [merges[0]!, merges[1]!], bases: [bases[0]!, bases[1]!] }
+}
+
+/**
+ * One post-merge runner over `queue`, in a fresh workdir: a held attempt runs first, so every round in `rounds` waits
+ * as one pending attempt and coalesces; then it is released and drained. Returns that workdir's event rows and the
+ * runner's reports.
+ */
+const coalescedAttempt = async (
+  queue: Awaited<ReturnType<typeof eventQueue>>,
+  rounds: ReadonlyArray<Readonly<{ target: string; base: string }>>,
+): Promise<Readonly<{ actions: Array<Record<string, unknown>>; reports: string[] }>> => {
+  const workdir = mkdtempSync(join(queue.root, "attempt-"))
+  const held = join(workdir, "held"),
+    released = join(workdir, "released"),
+    reports: string[] = []
+  const runner = createPostMerge({
+    workdir,
+    cwd: queue.repo,
+    git: queue.git,
+    store: queue.store,
+    cleanup: async () => {},
+    report: (message) => reports.push(message),
+  })
+  try {
+    runner.nudge({
+      ...context,
+      target: "held",
+      base: "held",
+      merged: [],
+      update: ["sh", "-c", 'touch "$1"; while [ ! -e "$2" ]; do sleep 0.05; done', "hold", held, released],
+    })
+    await vi.waitFor(() => expect(existsSync(held)).toBe(true), { timeout: 10000 })
+    for (const round of rounds) {
+      runner.nudge({ ...context, ...round, merged: [TWICE], queueBranch: "main", remote: "origin" })
+    }
+    writeFileSync(released, "")
+  } finally {
+    await runner[Symbol.asyncDispose]()
+  }
+  return { actions: eventActionsIn(workdir), reports }
+}
+
+/** @failure A branch merged in a second round gets its first merge's item event written again, a second event once km's 14-day operation-id window has passed. @level l2 @consumer Yrd post-merge item events (#31194, @cto 8a9995af) @testonly none */
+it("writes each merge's item event once when one branch merges in two rounds", async () => {
+  const queue = await eventQueue((calls) => eventDeclared(calls))
+  const {
+    merges: [first, second],
+  } = await mergeTwice(queue)
+  // One provider call per merge: the second round asked only for its own.
+  expect(callLines(queue.calls)).toEqual([mergedCall(queue.remote, first), mergedCall(queue.remote, second)])
+  expect(eventActionsIn(queue.workdir)).toContainEqual(notRewritten(first))
+}, 60000)
+
+/** @failure Yrd's startup catch-up writes a twice-merged branch's earlier item event again, a second event once km's 14-day operation-id window has passed. @level l2 @consumer Yrd startup catch-up item events (its nudge in queue-core-commands.ts gives target and base both the declared target; #31194, @cto 8a9995af) @testonly none */
+it("writes only a twice-merged branch's latest item event on startup catch-up", async () => {
+  const queue = await eventQueue((calls) => eventDeclared(calls))
+  const {
+    merges: [first, second],
+  } = await mergeTwice(queue)
+  writeFileSync(queue.calls, "")
+  const declared = (await queue.seed(["--git-dir", queue.remote, "rev-parse", "main"])).trim()
+  const { actions } = await coalescedAttempt(queue, [{ target: declared, base: declared }])
+  expect(callLines(queue.calls)).toEqual([mergedCall(queue.remote, second)])
+  expect(actions).toContainEqual(notRewritten(first))
+}, 60000)
+
+/** @failure Two rounds of one branch coalesced into one post-merge attempt lose the first merge's item event (the attempt kept the newer round's base), or rounds on unrelated bases have one picked silently. @level l2 @consumer Yrd post-merge item events (#31194, @cto 8a9995af condition 2) @testonly none */
+it.each(["ordered", "unrelated"] as const)(
+  "resolves a coalesced attempt's earliest round base: %s bases",
+  async (bases) => {
+    const queue = await eventQueue((calls) => eventDeclared(calls))
+    const {
+      merges: [first, second],
+      bases: [firstBase, secondBase],
+    } = await mergeTwice(queue)
+    writeFileSync(queue.calls, "")
+    if (bases === "ordered") {
+      const { actions } = await coalescedAttempt(queue, [
+        { target: first, base: firstBase },
+        { target: second, base: secondBase },
+      ])
+      // Both deliveries are this attempt's: each written once, in history order.
+      expect(callLines(queue.calls)).toEqual([mergedCall(queue.remote, first), mergedCall(queue.remote, second)])
+      expect(actions.filter(({ status }) => status === "fulfilled").map(({ mergeSha }) => mergeSha)).toEqual([
+        first,
+        second,
+      ])
+      return
+    }
+    // Two children of the first round's base, neither an ancestor of the other: no earliest exists.
+    const tree = (await queue.git(["rev-parse", `${firstBase}^{tree}`])).trim()
+    const [left, right] = await Promise.all(
+      ["left", "right"].map(async (side) =>
+        (await queue.git(["commit-tree", tree, "-p", firstBase, "-m", side])).trim(),
+      ),
+    )
+    const { actions, reports } = await coalescedAttempt(queue, [
+      { target: first, base: left! },
+      { target: second, base: right! },
+    ])
+    const refusal = `merged events not recorded: this attempt's round bases ${left}, ${right} are unrelated; neither is an ancestor of the other`
+    expect(callLines(queue.calls)).toEqual([])
+    expect(actions).toEqual([
+      expect.objectContaining({ branch: TWICE, mergeSha: "", status: "unavailable", diagnostic: refusal }),
+    ])
+    expect(reports).toContain(refusal)
+  },
+  60000,
+)
+
+/** @failure Undetected loss (@cto 8a9995af condition 3 asked for this result): a round's post-merge attempt never completes and the same branch merges again under `run`, which runs no startup catch-up, so the earlier merge's item event is never written. @level l2 @consumer Yrd post-merge item events (#31194, @cto 8a9995af) @testonly none */
+it("never writes an earlier event whose attempt did not complete before the branch merged again without a catch-up", async () => {
+  // The provider waits for `released` before it logs anything, so the first round's attempt cannot complete.
+  const queue = await eventQueue((calls) => ({
+    event: [
+      "sh",
+      "-c",
+      'while [ ! -e "$7" ]; do sleep 0.05; done; ' + EVENT_WRITE + "printf '{\"applied\":true}\\n'",
+      "event",
+      "<raw>",
+      "<kind>",
+      "<source>",
+      "<text>",
+      "<id>",
+      calls,
+      calls + ".released",
+    ],
+  }))
+  await submitChange(queue, TWICE, ISSUE_31194, "first")
+  const stop = new AbortController(),
+    diagnostics: string[] = []
+  let first: string | undefined
+  let rounds = 0
+  try {
+    expect(
+      await coreQueueCommand(
+        queue.repo,
+        fixtureIo(queue.repo, diagnostics),
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterRound: async (outcome) => {
+            rounds++
+            if (outcome.merged.includes(TWICE)) {
+              first = (await readStatus(queue.store, "main", TWICE)).merge!
+              // Stopping `up` ends the waiting attempt with the event unwritten.
+              stop.abort()
+            } else if (rounds > 12) stop.abort()
+          },
+        },
+        { workdir: queue.workdir, json: true },
+      ),
+      diagnostics.join(" "),
+    ).toBe(0)
+  } finally {
+    stop.abort()
+  }
+  expect(first).toBeDefined()
+  expect(callLines(queue.calls)).toEqual([])
+  writeFileSync(queue.calls + ".released", "")
+  await submitChange(queue, TWICE, ISSUE_31194, "second")
+  expect(
+    await coreQueueCommand(
+      queue.repo,
+      fixtureIo(queue.repo, diagnostics),
+      { command: "run" },
+      {
+        workdir: queue.workdir,
+        json: true,
+      },
+    ),
+    diagnostics.join(" "),
+  ).toBe(0)
+  const second = (await readStatus(queue.store, "main", TWICE)).merge!
+  expect(second).not.toBe(first)
+  // The loss: only the second merge's event was ever written; the first is skipped as already delivered.
+  expect(callLines(queue.calls)).toEqual([mergedCall(queue.remote, second)])
+  expect(eventActionsIn(queue.workdir)).toContainEqual(notRewritten(first!))
+}, 60000)

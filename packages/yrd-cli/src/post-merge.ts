@@ -35,6 +35,7 @@ type Context = Readonly<{
   repo: string
   queue: string
   target: string
+  /** The target this round's judgements were made against; merged item events need it (#31194). */
   base?: string
   merged: readonly string[]
   update?: readonly string[]
@@ -439,12 +440,34 @@ export function mergedEventOperationId(mergeSha: string): string {
   return `yrd-merged-${mergeSha}`
 }
 
+/** The base every other one descends from, or undefined when two are unrelated: then none is earliest. */
+async function earliestBase(git: GitRunner, bases: readonly string[]): Promise<string | undefined> {
+  const distinct = [...new Set(bases)]
+  for (const candidate of distinct) {
+    let earliest = true
+    for (const other of distinct) {
+      if (other !== candidate && !(await isAncestor(git, candidate, other))) {
+        earliest = false
+        break
+      }
+    }
+    if (earliest) return candidate
+  }
+  return undefined
+}
+
 /**
  * One `merged` item event per delivered change, on the issue the change names (@cto 721b42d7, #31194). Yrd passes
  * the change's issue value as it holds it and the provider resolves it; the event's time is the provider's write
  * time. Replay-safe under {@link mergedEventOperationId}. A failed call is reported and kept as derived evidence: it
  * never holds or undoes the merge, and nothing here closes an issue (#29630 is the one close writer). Nothing is read
  * while issues.yml at the round's target declares no `event`: no event could be written.
+ *
+ * A branch can merge again. Its history then holds each delivery, and an earlier one's event belongs to the attempt
+ * of the round that merged it; rewriting it here would write it twice once km's replay window has passed. So only
+ * the branch's latest delivery, or one this attempt's rounds delivered (its merge is not an ancestor of the earliest
+ * round base), is written (@cto 8a9995af). The case this loses: a round's attempt never completes and the same
+ * branch merges again before any catch-up, so the earlier event is skipped for good.
  */
 async function recordMergedEvents(
   input: Readonly<{
@@ -455,6 +478,8 @@ async function recordMergedEvents(
     remote: string
     /** The target this round published; every merge it delivered is its ancestor. */
     target: string
+    /** The base of every round this attempt carries, at least one; the earliest is the one all others descend from. */
+    bases: readonly string[]
     projectRoot?: string
     cwd: string
     env?: NodeJS.ProcessEnv
@@ -496,6 +521,22 @@ async function recordMergedEvents(
     input.report(diagnostic)
     return outcomes
   }
+  let base: string | undefined
+  try {
+    base = await earliestBase(input.git, input.bases)
+  } catch (error) {
+    const diagnostic = `merged events not recorded: round bases ${input.bases.join(", ")} are unreadable: ${String(error)}`
+    for (const branch of new Set(input.branches)) record({ ...branchLevel, branch, diagnostic })
+    input.report(diagnostic)
+    return outcomes
+  }
+  if (base === undefined) {
+    // Coalesced rounds whose bases are unrelated: no earliest exists, and picking one could skip or rewrite an event.
+    const diagnostic = `merged events not recorded: this attempt's round bases ${[...new Set(input.bases)].join(", ")} are unrelated; neither is an ancestor of the other`
+    for (const branch of new Set(input.branches)) record({ ...branchLevel, branch, diagnostic })
+    input.report(diagnostic)
+    return outcomes
+  }
   let recorded = 0
   for (const branch of new Set(input.branches)) {
     if (input.stop?.aborted) break
@@ -508,9 +549,12 @@ async function recordMergedEvents(
       record({ ...branchLevel, branch, diagnostic: String(error) }, "history unavailable")
       continue
     }
-    for (const segment of segments) {
+    const delivered = segments.filter(
+      (segment) => segment.state.status === "merged" && segment.state.ending?.kind === "merged",
+    )
+    const latest = delivered.at(-1)
+    for (const segment of delivered) {
       if (input.stop?.aborted) break
-      if (segment.state.status !== "merged" || segment.state.ending?.kind !== "merged") continue
       const mergedEvent = segment.events.findLast((event) => event.type === "merged")
       const mergeSha = segment.state.merge
       if (mergedEvent === undefined || mergeSha === undefined) {
@@ -520,6 +564,24 @@ async function recordMergedEvents(
       }
       const providerId = mergedEventOperationId(mergeSha)
       const identity = { branch, mergedEvent: mergedEvent.id, mergeSha, providerId }
+      if (segment !== latest) {
+        let before: boolean
+        try {
+          before = await isAncestor(input.git, mergeSha, base)
+        } catch (error) {
+          record({ ...identity, status: "failed", diagnostic: String(error) }, String(error))
+          continue
+        }
+        if (before) {
+          // What the code knows is the ancestry, never that the earlier event exists.
+          record({
+            ...identity,
+            status: "skipped",
+            reason: `not rewritten: merged at ${mergeSha} before this round's base`,
+          })
+          continue
+        }
+      }
       const issue = segment.state.issue
       if (issue === undefined || issue === "") {
         // Named only once the event is live at that merge; before then no change is counted.
@@ -616,7 +678,8 @@ export function createPostMerge<C extends Context>(
     }
   }
   const process = createProcess({ cwd: options.cwd, env: options.env })
-  let pending: C | undefined
+  /** The next attempt's context, and the base of every round coalesced into it: the attempt resolves the earliest. */
+  let pending: Readonly<{ context: C; bases: ReadonlyArray<string | undefined> }> | undefined
   let active: Promise<void> | undefined
   let cleanupPending: C | undefined
   let cleanupActive: Promise<void> | undefined
@@ -634,7 +697,7 @@ export function createPostMerge<C extends Context>(
   const dropPending = (): void => {
     if (pending === undefined) return
     options.report(
-      JSON.stringify(pending.merged) +
+      JSON.stringify(pending.context.merged) +
         ": pending post-merge attempt dropped during shutdown; startup catch-up handles remaining environment rows; branches without rows need branch triage",
     )
     pending = undefined
@@ -676,17 +739,30 @@ export function createPostMerge<C extends Context>(
   /** The round's `merged` item events; a failure is reported and returned, never thrown into the update or close. */
   const mergedEvents = async (
     context: C,
+    rounds: ReadonlyArray<string | undefined>,
   ): Promise<Readonly<{ actions: Array<Record<string, unknown>>; failed: boolean }>> => {
     if (context.merged.length === 0) return { actions: [], failed: false }
     const { git, store } = options
     const { queueBranch, remote } = context
-    if (git === undefined || store === undefined || queueBranch === undefined || remote === undefined) {
+    const bases = rounds.filter((base): base is string => base !== undefined)
+    if (
+      git === undefined ||
+      store === undefined ||
+      queueBranch === undefined ||
+      remote === undefined ||
+      bases.length === 0 ||
+      bases.length < rounds.length
+    ) {
       const missing = [
         ...(git === undefined ? ["git"] : []),
         ...(store === undefined ? ["store"] : []),
         ...(queueBranch === undefined ? ["queueBranch"] : []),
         ...(remote === undefined ? ["remote"] : []),
+        ...(bases.length === 0 || bases.length < rounds.length ? ["base"] : []),
       ]
+      // Reported, not counted as failed: production cannot arrive here. queue-core-commands.ts creates this runner
+      // with git and store, and its context type requires queueBranch, remote and base; only the unit tests of the
+      // update, close and cleanup lifetimes omit them.
       options.report(`merged events not recorded: missing input(s) ${missing.join(", ")}`)
       return { actions: [], failed: false }
     }
@@ -698,6 +774,7 @@ export function createPostMerge<C extends Context>(
         git,
         remote,
         target: context.target,
+        bases,
         ...(context.projectRoot === undefined ? {} : { projectRoot: context.projectRoot }),
         cwd: options.cwd,
         env: options.env,
@@ -710,13 +787,13 @@ export function createPostMerge<C extends Context>(
       return { actions: [], failed: true }
     }
   }
-  const attempt = async (context: C): Promise<void> => {
+  const attempt = async (context: C, bases: ReadonlyArray<string | undefined>): Promise<void> => {
     const id = new Date().toISOString().replaceAll(":", "-") + "-" + randomUUID()
     const path = join(directory, id + ".json")
     const stdout = join(directory, id + ".stdout.log")
     const stderr = join(directory, id + ".stderr.log")
     const startedAt = new Date().toISOString()
-    const provenance = { ...context, argv: context.update ?? [], cwd: options.cwd, startedAt, stdout, stderr }
+    const provenance = { ...context, bases, argv: context.update ?? [], cwd: options.cwd, startedAt, stdout, stderr }
     evidence(stdout, () => {
       writeFileSync(stdout, "")
     })
@@ -735,7 +812,7 @@ export function createPostMerge<C extends Context>(
     let eventsFailed = false
     try {
       // Before the update and the close, so an issue reads merged, then closed. Never needs --project-root.
-      const events = await mergedEvents(context)
+      const events = await mergedEvents(context, bases)
       issueActions = events.actions
       eventsFailed = events.failed
       try {
@@ -853,7 +930,7 @@ export function createPostMerge<C extends Context>(
     while (pending !== undefined && !options.stop?.aborted) {
       const next = pending
       pending = undefined
-      await attempt(next)
+      await attempt(next.context, next.bases)
     }
     if (options.stop?.aborted) dropPending()
   }
@@ -867,7 +944,8 @@ export function createPostMerge<C extends Context>(
   }
   const nudge = (context: C): void => {
     if (closing) return
-    pending = coalesce(pending, context)
+    // Coalescing keeps the newest round's context; its bases keep every round's, so no delivery is skipped (#31194).
+    pending = { context: coalesce(pending?.context, context), bases: [...(pending?.bases ?? []), context.base] }
     if (active !== undefined) return
     start()
   }
