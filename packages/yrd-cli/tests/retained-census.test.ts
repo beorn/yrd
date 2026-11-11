@@ -98,7 +98,7 @@ test("names unpublished preparations while valid manifests win and retirement se
       { name: "preparing", sourceGitDir: marker.sourceGitDir, createdAt: marker.createdAt, reason: "preparing" },
     ],
   })
-  expect(census.noManifest).toEqual(["preparing", "unmarked-unknown"])
+  expect([...census.noManifest].sort()).toEqual(["preparing", "unmarked-unknown"])
   expect(census.malformed).toEqual([
     expect.objectContaining({
       name: "interrupted-publication",
