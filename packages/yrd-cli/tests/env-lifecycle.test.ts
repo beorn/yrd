@@ -2793,7 +2793,9 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       ).toBe(0)
       expect(existsSync(path)).toBe(false)
       expect(JSON.parse(closed.stdout())).toEqual({ closed: path })
-      expect(closed.stderr()).toContain("commit(s) ahead of origin/main are all on refs/heads/keeper")
+      expect(closed.stderr()).toContain(
+        `the detached HEAD ${head}'s 1 commit(s) ahead of origin/main are all on refs/heads/keeper`,
+      )
       expect(
         (await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/yrd/"])).trim(),
       ).toBe(refsBefore)
@@ -2842,6 +2844,7 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     expect(refused.stderr()).toContain("issue 33555-gone was dropped and its branch is gone")
     expect(refused.stderr()).toContain(keep)
     expect(refused.stderr()).toContain(discard)
+    expect(refused.stderr()).toContain("removes the local name only; the branch --preserve pushed stays on origin")
 
     // The keep route, as printed.
     await envGit(["switch", "--quiet", "-c", "task/gone"])

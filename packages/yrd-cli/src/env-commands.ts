@@ -1307,7 +1307,8 @@ async function droppedIssueRoutes(path: string, treeGit: Git, head: string, root
     `; issue ${issue} was dropped and its branch is gone. To keep this exact state: ` +
     `git -C ${shellQuote(path)} switch -c ${branch}, then yrd env close ${shellQuote(path)} --preserve ` +
     `(re-creates the dropped branch). To discard on purpose, recorded: do that, then ` +
-    `yrd drop ${branch} --local --discard --tip ${head} --reason <why>`
+    `yrd drop ${branch} --local --discard --tip ${head} --reason <why> ` +
+    `(removes the local name only; the branch --preserve pushed stays on origin until deleted there)`
   )
 }
 
@@ -1803,7 +1804,7 @@ export async function closeEnvironment(
   const dropped = (): Promise<string> => droppedIssueRoutes(path, treeGit, commit, root)
   if (closeState.heldOn !== undefined) {
     io.stderr(
-      `yrd: env close: the detached HEAD's ${closeState.heldOn.commits} commit(s) ahead of origin/main are all on ${closeState.heldOn.ref} (remote-tracking refs as of the last fetch); nothing to keep, so no ref is written\n`,
+      `yrd: env close: the detached HEAD ${commit}'s ${closeState.heldOn.commits} commit(s) ahead of origin/main are all on ${closeState.heldOn.ref} (remote-tracking refs as of the last fetch); nothing to keep, so no ref is written\n`,
     )
   }
   // Both saves use the same worktree preserve operation. Keep custody from the
