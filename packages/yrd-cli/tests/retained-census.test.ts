@@ -62,6 +62,54 @@ test("counts live, expired, legacy, malformed and manifest-less stores by name, 
   expect(census.state === "read" && [...census.expiredEntries].sort()).toEqual(["expired-a", "expired-b"])
 })
 
+/**
+ * @failure A crash preparation is indistinguishable from damaged published custody, or its marker authorizes retirement.
+ * @level l1 @consumer yrd env retained and the existing retained retirement selection (31301)
+ * The existing census table has only unmarked manifest-less entries and cannot identify a preparation's age/source.
+ */
+test("names unpublished preparations while valid manifests win and retirement selection stays unchanged", () => {
+  const root = mkdtempSync(join(tmpdir(), "retained-census-preparing-"))
+  roots.push(root)
+  const marker = {
+    version: 1,
+    state: "preparing",
+    sourceGitDir: "/source/admin",
+    createdAt: "2026-11-10T10:00:00.000Z",
+  }
+  store(root, "preparing", undefined)
+  store(root, "interrupted-publication", "{")
+  store(root, "published-with-marker", { retainUntil: "2026-11-01T00:00:00.000Z", writerLocks: [], notCompared: [] })
+  store(root, "unmarked-unknown", undefined)
+  for (const name of ["preparing", "interrupted-publication", "published-with-marker"]) {
+    writeFileSync(join(root, name, "preparation.json"), JSON.stringify(marker))
+  }
+
+  const census = censusRetainedStores(root, NOW)
+  expect(census.state).toBe("read")
+  if (census.state !== "read") throw new Error("fixture retained root was not read")
+  expect(census).toMatchObject({
+    unpublished: [
+      {
+        name: "interrupted-publication",
+        sourceGitDir: marker.sourceGitDir,
+        createdAt: marker.createdAt,
+        reason: "interrupted publication",
+      },
+      { name: "preparing", sourceGitDir: marker.sourceGitDir, createdAt: marker.createdAt, reason: "preparing" },
+    ],
+  })
+  expect(census.noManifest).toEqual(["preparing", "unmarked-unknown"])
+  expect(census.malformed).toEqual([
+    expect.objectContaining({
+      name: "interrupted-publication",
+      reason: expect.stringContaining("interrupted publication"),
+    }),
+  ])
+  // Existing selection still takes only manifest-backed writerLocks + notCompared; the marker contributes no authority.
+  expect(census.expiredEntries).toEqual(["published-with-marker"])
+  expect(census.expired).toBe(1)
+})
+
 // @cto dc77f630: env close prints the census line only. A full census parses every manifest (9.7 s on the live
 // 8,560-store root), so the close line counts store directories alone and points at the full census.
 test("the env close line counts store directories without reading manifests and names the full census", () => {
