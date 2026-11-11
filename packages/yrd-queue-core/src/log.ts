@@ -37,13 +37,17 @@
  */
 
 import { atomicWriteFileSync } from "@bearly/durable-file"
+import { createHash } from "node:crypto"
 import {
   appendFileSync,
   closeSync,
+  linkSync,
   mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   statSync,
   writeFileSync,
   writeSync,
@@ -311,6 +315,38 @@ export function openLog(
     render?.(full)
     return full
   }
+  // 33388 (@cto 92a1a75b): a round repeats the same `ls-tree -r` output many times. A closed output whose size and
+  // sha256 match one this run already holds becomes a hard link to it: every recorded path stays valid and
+  // byte-identical, the run folder stays the retention unit. A sink refuses writes once closed, so nothing appends
+  // to a linked file. Any failure keeps the written copy and journals a warning.
+  const firstOutputByContent = new Map<string, string>()
+  const shareIdenticalOutput = (output: string): void => {
+    let temporary: string | undefined
+    try {
+      const bytes = readFileSync(output)
+      if (bytes.byteLength === 0) return
+      const key = `${bytes.byteLength}:${createHash("sha256").update(bytes).digest("hex")}`
+      const first = firstOutputByContent.get(key)
+      if (first === undefined) {
+        firstOutputByContent.set(key, output)
+        return
+      }
+      temporary = `${output}.link-${process.pid}`
+      linkSync(first, temporary)
+      renameSync(temporary, output)
+      temporary = undefined
+    } catch (error) {
+      const reasons = [`kept the copy ${output}: ${error instanceof Error ? error.message : String(error)}`]
+      if (temporary !== undefined) {
+        try {
+          rmSync(temporary, { force: true })
+        } catch (cleanupError) {
+          reasons.push(`could not remove ${temporary}: ${String(cleanupError)}`)
+        }
+      }
+      write({ kind: "warning", subject: "git-output-dedup", reason: reasons.join("; ") })
+    }
+  }
   return {
     id,
     path,
@@ -334,7 +370,7 @@ export function openLog(
     openGitOutput() {
       mkdirSync(gitDirectory, { recursive: true })
       const stem = join(gitDirectory, String(++invocationCount))
-      return openGitOutput(`${stem}.stdout.bin`, `${stem}.stderr.bin`)
+      return openGitOutput(`${stem}.stdout.bin`, `${stem}.stderr.bin`, shareIdenticalOutput)
     },
     writeGitInvocation(invocation) {
       mkdirSync(gitDirectory, { recursive: true })
@@ -384,8 +420,8 @@ export function openLog(
   }
 }
 
-/** Run-owned raw artifacts; Process is still the only stream reader. */
-function openGitOutput(stdout: string, stderr: string): GitOutputSink {
+/** Run-owned raw artifacts; Process is still the only stream reader. `onClosed` sees each file once it is closed. */
+function openGitOutput(stdout: string, stderr: string, onClosed: (path: string) => void): GitOutputSink {
   const out = openSync(stdout, "wx")
   let err: number
   try {
@@ -427,6 +463,8 @@ function openGitOutput(stdout: string, stderr: string): GitOutputSink {
         errors.push(error)
       }
       if (errors.length > 0) throw new AggregateError(errors, `could not close raw Git output ${stdout}, ${stderr}`)
+      onClosed(stdout)
+      onClosed(stderr)
     },
   }
 }
