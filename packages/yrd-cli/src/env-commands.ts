@@ -1964,6 +1964,8 @@ export async function closeEnvironment(
           : ["--component-custody", JSON.stringify(options.componentCustody)]),
         ...preservedRefs.flatMap((ref) => ["--preserved", ref]),
       ])
+      // A successful git() records its result before resolving; failure throws before reaching here.
+      // oxlint-disable-next-line typescript/no-non-null-assertion
       const removalStderr = git.lastInvocation!.result!.stderr
       if (removalStderr !== "") io.stderr(removalStderr)
       removed = JSON.parse(removalOutput)
