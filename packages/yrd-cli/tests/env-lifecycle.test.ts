@@ -124,6 +124,24 @@ async function openEnvironment(cwd: string, commit: string): Promise<Readonly<{ 
   return JSON.parse(run.stdout()) as { path: string; head: string }
 }
 
+/**
+ * An environment on its own issue branch, as `yrd env open <commit> --bay <bay>` makes it. The real worktree preserve
+ * writes only to that attached branch and refuses a detached HEAD (33557, @cto 0576f4ca), so every row that proves
+ * yrd's handling of a SUCCESSFUL preserve opens its environment this way.
+ */
+async function openAttachedEnvironment(
+  cwd: string,
+  commit: string,
+  bay: string,
+): Promise<Readonly<{ path: string; branch: string }>> {
+  const run = capture(cwd)
+  expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", bay, "--json"], run.io), run.stderr()).toBe(0)
+  const opened = JSON.parse(run.stdout()) as { path: string; branch: string; head: string }
+  expect(opened.head).toBe(commit)
+  expect((await gitIn(opened.path)(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${opened.branch}`)
+  return opened
+}
+
 type World = Readonly<{ git: ReturnType<typeof gitIn>; work: string }>
 
 // Accepted #33010 requirement: the existing CLI selects expired stores, defaults to dry run, and diagnoses an
@@ -1452,13 +1470,19 @@ console.log(JSON.stringify(args.includes("--component-custody")
       /** Repositories the stub reports as consulted and skipped, as bearly does since 29392 (29406). */
       skipped?: ReadonlyArray<{ path: string; head: string; reason: string }>
       /**
-       * How the stub answers `preserve --check` (33552). Default "old-tool": the planner's exact unknown-flag refusal,
-       * as a worktree CLI before --check answers. The stub models only the check's exit contract, never the real
-       * preserve's branch rule; the real verdicts are proven in the dev repo's tools/worktree-publication.slow.test.ts.
+       * How the stub answers `preserve --check` (33552). Default "real": the real tool's verdict shape — refuse (4) an
+       * environment whose root or dirty component is not on an eligible attached branch, nothing (3) when clean, else
+       * pass (0). "old-tool" is a worktree CLI from before --check (the planner's unknown-flag refusal). The real
+       * verdicts are proven in the dev repo's tools/worktree-publication.slow.test.ts (33557, @cto 0576f4ca).
        */
-      check?: "old-tool" | "refuse" | "pass" | "nothing" | "preserved" | "exit-5"
+      check?: "real" | "old-tool" | "refuse" | "pass" | "nothing" | "preserved" | "exit-5"
       /** Append "check" or "preserve" per invocation to this file. */
       log?: string
+      /**
+       * Fault seam (30814): every preserve after the first answers clean, exit 3. The real tool re-saves surviving dirt
+       * on a second pass, so this ending is reachable only through a tool fault or a future tool change.
+       */
+      cleanAfterFirst?: boolean
     } = {},
   ): void {
     mkdirSync(join(root, "tools"), { recursive: true })
@@ -1469,14 +1493,15 @@ console.log(JSON.stringify(args.includes("--component-custody")
       .replace("__FAIL_IF_PATH_EXISTS__", JSON.stringify(options.failIfPathExists ?? ""))
       .replace("__EXIT_OVERRIDE__", options.exitOverride === undefined ? '""' : String(options.exitOverride))
       .replace("__SKIPPED__", JSON.stringify(options.skipped ?? []))
-      .replace("__CHECK_MODE__", JSON.stringify(options.check ?? "old-tool"))
+      .replace("__CHECK_MODE__", JSON.stringify(options.check ?? "real"))
       .replace("__LOG__", JSON.stringify(options.log ?? ""))
+      .replaceAll("__CLEAN_AFTER_FIRST__", options.cleanAfterFirst === true ? "true" : "false")
     writeFileSync(join(root, "tools", "worktree.ts"), source)
   }
 
   const STUB_WORKTREE_PRESERVE_CLI = `#!/usr/bin/env bun
 import { spawnSync } from "node:child_process"
-import { appendFileSync, existsSync, mkdtempSync } from "node:fs"
+import { appendFileSync, existsSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 
@@ -1486,6 +1511,49 @@ if (argv[0] !== "preserve" || target === undefined) {
   console.error("stub worktree: usage: preserve <path> [--json]")
   process.exit(64)
 }
+const git = (cwd, args, env) => {
+  const r = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", ...(env === undefined ? {} : { env }) })
+  if (r.status !== 0) {
+    console.error("stub worktree: git " + args.join(" ") + " failed: " + r.stderr)
+    process.exit(70)
+  }
+  return r.stdout.trim()
+}
+const dirty = (cwd) =>
+  git(cwd, ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=all"]).length > 0
+// The real preserve writes each repository's snapshot onto its ATTACHED issue branch and refuses a detached HEAD or
+// main before any write (dev tools/worktree.ts selectPreserveDestinations). The stub keeps that destination rule so a
+// yrd row can never pass on a destination the real tool does not use (33557).
+const attached = (cwd) => {
+  const r = spawnSync("git", ["-C", cwd, "symbolic-ref", "-q", "HEAD"], { encoding: "utf8" })
+  return r.status === 0 ? r.stdout.trim() : ""
+}
+const eligible = (ref) => ref.startsWith("refs/heads/") && ref !== "refs/heads/main"
+const snapshot = (cwd) => {
+  const index = join(mkdtempSync(join(tmpdir(), "stub-preserve-")), "index")
+  const env = { ...process.env, GIT_INDEX_FILE: index }
+  git(cwd, ["read-tree", "HEAD"], env)
+  git(cwd, ["add", "-A"], env)
+  const tree = git(cwd, ["write-tree"], env)
+  return git(cwd, ["commit-tree", tree, "-p", git(cwd, ["rev-parse", "HEAD"]), "-m", "stub worktree preserve"], env)
+}
+const components = []
+if (existsSync(join(target, ".gitmodules"))) {
+  for (const line of git(target, ["config", "-f", ".gitmodules", "--list"]).split("\\n")) {
+    const eq = line.indexOf("=")
+    if (eq < 0 || !line.slice(0, eq).endsWith(".path")) continue
+    components.push(line.slice(eq + 1))
+  }
+}
+const dirtyComponents = components.filter((path) => existsSync(join(target, path)) && dirty(join(target, path)))
+const required = dirtyComponents.length > 0 || dirty(target) ? [".", ...dirtyComponents] : []
+const ineligible = required
+  .map((path) => ({ path, ref: attached(path === "." ? target : join(target, path)) }))
+  .find((entry) => !eligible(entry.ref))
+const refusal = ineligible === undefined
+  ? undefined
+  : "preserve: " + ineligible.path + " (" + target + ") custody preflight failed: attached branch " + ineligible.ref +
+    " is not an eligible issue branch; no preserve refs written; retain the environment"
 const checking = argv.includes("--check")
 const log = __LOG__
 if (log !== "") appendFileSync(log, (checking ? "check" : "preserve") + "\\n")
@@ -1494,6 +1562,14 @@ if (checking) {
   const answer = (body, code) => {
     process.stdout.write(JSON.stringify({ schema: "bearly-worktree-preserve/1", slot: basename(target), path: target, ref: null, sha: null, submodules: [], skipped: [], ...body }) + "\\n")
     process.exit(code)
+  }
+  if (mode === "real") {
+    if (refusal !== undefined) {
+      console.error("[worktree] preserve --check: a real preserve of " + basename(target) + " would refuse: " + refusal)
+      process.exit(4)
+    }
+    if (required.length === 0) answer({ preserved: false, reason: "clean" }, 3)
+    answer({ preserved: false, checked: true, reason: "dirty" }, 0)
   }
   if (mode === "old-tool") {
     console.error("[worktree] Unknown flag for preserve: --check")
@@ -1508,26 +1584,6 @@ if (checking) {
   if (mode === "preserved") answer({ preserved: true, checked: true, reason: "dirty" }, 0)
   console.error("stub worktree: check crashed")
   process.exit(5)
-}
-const git = (cwd, args, env) => {
-  const r = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", ...(env === undefined ? {} : { env }) })
-  if (r.status !== 0) {
-    console.error("stub worktree: git " + args.join(" ") + " failed: " + r.stderr)
-    process.exit(70)
-  }
-  return r.stdout.trim()
-}
-const dirty = (cwd) =>
-  git(cwd, ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=all"]).length > 0
-const snapshot = (cwd, ref) => {
-  const index = join(mkdtempSync(join(tmpdir(), "stub-preserve-")), "index")
-  const env = { ...process.env, GIT_INDEX_FILE: index }
-  const previous = spawnSync("git", ["-C", cwd, "rev-parse", "--verify", "refs/heads/" + ref], { encoding: "utf8" })
-  const parent = previous.status === 0 ? previous.stdout.trim() : git(cwd, ["rev-parse", "HEAD"])
-  git(cwd, ["read-tree", "HEAD"], env)
-  git(cwd, ["add", "-A"], env)
-  const tree = git(cwd, ["write-tree"], env)
-  return git(cwd, ["commit-tree", tree, "-p", parent, "-m", "stub worktree preserve"], env)
 }
 const bad = __BAD_RECEIPT__
 const badPath = __BAD_PATH__
@@ -1548,40 +1604,30 @@ const receipt = (body) => {
   process.stdout.write(JSON.stringify(out) + "\\n")
 }
 const slot = basename(target)
-const ref = "wip/" + slot + "-preserve-stub"
-const components = []
-if (existsSync(join(target, ".gitmodules"))) {
-  for (const line of git(target, ["config", "-f", ".gitmodules", "--list"]).split("\\n")) {
-    const eq = line.indexOf("=")
-    if (eq < 0 || !line.slice(0, eq).endsWith(".path")) continue
-    components.push(line.slice(eq + 1))
-  }
+const firstDone = process.argv[1] + "." + basename(target) + ".first-done"
+if (__CLEAN_AFTER_FIRST__ && existsSync(firstDone)) {
+  receipt({ schema: "bearly-worktree-preserve/1", slot, path: target, preserved: false, reason: "clean", ref: null, sha: null, submodules: [], skipped })
+  process.exit(3)
 }
-const submodules = []
-let rootDirty = dirty(target)
-for (const path of components) {
-  const component = join(target, path)
-  if (!existsSync(component) || !dirty(component)) continue
-  const sha = snapshot(component, ref)
-  git(component, ["update-ref", "refs/heads/" + ref, sha])
-  git(component, ["push", "origin", "refs/heads/" + ref + ":refs/heads/" + ref])
-  submodules.push({ path, ref, sha })
-  rootDirty = true
-}
-if (!rootDirty) {
+if (required.length === 0) {
   receipt({ schema: "bearly-worktree-preserve/1", slot, path: target, preserved: false, reason: "clean", ref: null, sha: null, submodules: [], skipped })
   process.exit(exitOverride === "" ? 3 : Number(exitOverride))
 }
-const sha = snapshot(target, ref)
-const prior = spawnSync("git", ["-C", target, "rev-parse", "--verify", "refs/heads/" + ref], { encoding: "utf8" })
-if (prior.status === 0 && submodules.length === 0 &&
-    git(target, ["rev-parse", sha + "^{tree}"]) === git(target, ["rev-parse", prior.stdout.trim() + "^{tree}"])) {
-  receipt({ schema: "bearly-worktree-preserve/1", slot, path: target, preserved: false, reason: "unchanged", ref: null, sha: null, submodules: [], skipped })
-  process.exit(exitOverride === "" ? 3 : Number(exitOverride))
+if (refusal !== undefined) {
+  console.error("[worktree] " + refusal)
+  process.exit(exitOverride === "" ? 1 : Number(exitOverride))
 }
-git(target, ["update-ref", "refs/heads/" + ref, sha])
-git(target, ["push", "origin", "refs/heads/" + ref + ":refs/heads/" + ref])
-receipt({ schema: "bearly-worktree-preserve/1", slot, path: target, preserved: true, reason: "dirty", ref, sha, submodules, skipped })
+const save = (cwd) => {
+  const ref = attached(cwd)
+  const sha = snapshot(cwd)
+  git(cwd, ["update-ref", ref, sha])
+  git(cwd, ["push", "origin", sha + ":" + ref])
+  return { ref, sha }
+}
+const submodules = dirtyComponents.map((path) => ({ path, ...save(join(target, path)) }))
+const root = save(target)
+if (__CLEAN_AFTER_FIRST__) writeFileSync(firstDone, "")
+receipt({ schema: "bearly-worktree-preserve/1", slot, path: target, preserved: true, reason: "dirty", ref: root.ref, sha: root.sha, submodules, skipped })
 process.exit(exitOverride === "" ? 0 : Number(exitOverride))
 `
 
@@ -1602,7 +1648,13 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     await addMaterializedDependency(w)
     // yrd resolves the preserve CLI through the superproject root it already holds (one stated path).
     installStubWorktreePreserve(w.work)
-    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const { path, branch } = await openAttachedEnvironment(
+      w.work,
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+      "preserve-1",
+    )
+    // The real preserve refuses a dirty component on a detached HEAD too, so the component works on its own issue branch.
+    await gitIn(join(path, "vendor/dependency"))(["switch", "--quiet", "-c", `${branch}-dependency`])
 
     // Dirty root AND dirty component: the class the plain close refuses.
     writeFileSync(join(path, "root-dirt.txt"), "root preserved\n")
@@ -1633,15 +1685,11 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     expect(help.stdout()).not.toContain("a staged version that differs from it is not kept")
     expect(help.stdout()).toMatch(/preserve again\s+after a successful teardown/u)
 
-    // The root recovery ref resolves in the root store yrd handed `git super --preserved`, and
-    // carries the ROOT dirt's bytes (the component's own custody lives in vendor/bearly's suite).
-    const rootRefs = (await w.git(["for-each-ref", "--format=%(refname)", "refs/heads/wip/"]))
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-    expect(rootRefs).toHaveLength(1)
-    const rootRef = rootRefs[0]!
-    expect((await w.git(["show", `${rootRef}:root-dirt.txt`])).trim()).toBe("root preserved")
+    // The receipt's root ref (the environment's own issue branch, as the real preserve writes it) resolves in the
+    // root store yrd handed `git super --preserved`; what the snapshot holds is the real tool's fact, proven in the
+    // dev repo's tools/worktree-publication.slow.test.ts (33557).
+    expect(run.stderr()).toContain(`refs/heads/${branch}`)
+    expect((await w.git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim()).toMatch(/^[0-9a-f]{40}$/u)
   })
 
   /**
@@ -1657,7 +1705,11 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     const w = await world(":")
     expect((await w.git(["ls-tree", "HEAD", "--", ".gitmodules"])).trim()).toBe("")
     installStubWorktreePreserve(w.work)
-    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const { path, branch } = await openAttachedEnvironment(
+      w.work,
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+      "preserve-plain",
+    )
 
     writeFileSync(join(path, "root-dirt.txt"), "root preserved\n")
     const refused = capture(w.work)
@@ -1674,12 +1726,8 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     expect(run.stderr()).toContain("preserved dirty state")
     expect(run.stderr()).toContain("retained environment removal proof")
     expect(existsSync(path)).toBe(false)
-    const refs = (await w.git(["for-each-ref", "--format=%(refname)", "refs/heads/wip/"]))
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-    expect(refs).toHaveLength(1)
-    expect((await w.git(["show", `${refs[0]}:root-dirt.txt`])).trim()).toBe("root preserved")
+    // yrd's half: the receipt's ref is the custody it relied on before removing the environment.
+    expect((await w.git(["show", `refs/heads/${branch}:root-dirt.txt`])).trim()).toBe("root preserved")
   })
 
   /**
@@ -1694,7 +1742,11 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       "printf 'after\\n' > root-dirt.txt; printf 'new\\n' > teardown-new.txt; git add root-dirt.txt",
     )
     installStubWorktreePreserve(w.work)
-    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const { path, branch } = await openAttachedEnvironment(
+      w.work,
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+      "preserve-2",
+    )
     writeFileSync(join(path, "root-dirt.txt"), "before\n")
 
     const run = capture(w.work)
@@ -1703,7 +1755,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       run.stderr(),
     ).toBe(0)
     expect(existsSync(path)).toBe(false)
-    const ref = `refs/heads/wip/${basename(path)}-preserve-stub`
+    const ref = `refs/heads/${branch}`
     expect((await w.git(["show", `${ref}^:root-dirt.txt`])).trim()).toBe("before")
     expect((await w.git(["show", `${ref}:root-dirt.txt`])).trim()).toBe("after")
     expect((await w.git(["show", `${ref}:teardown-new.txt`])).trim()).toBe("new")
@@ -1714,21 +1766,25 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
    *          allowed author retirement to consume its branch. Existing no-op coverage starts clean.
    * @level l2 @consumer preserved close with an unchanged teardown
    */
-  it("keeps first-pass custody when teardown leaves the snapshot unchanged", async () => {
+  it("keeps first-pass custody when a second preserve answers clean (fault seam)", async () => {
+    // The real tool re-saves surviving dirt on a second pass, so a clean second answer is reachable only through a tool
+    // fault or a future tool change, and that is exactly why yrd must not trust it to replace the first pass's custody.
     const w = await world(":", ":")
-    installStubWorktreePreserve(w.work)
-    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
-    writeFileSync(join(path, "root-dirt.txt"), "before\n")
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path: author, branch } = await openAttachedEnvironment(w.work, head, "custody-noop")
+    installStubWorktreePreserve(w.work, { cleanAfterFirst: true })
+    writeFileSync(join(author, "root-dirt.txt"), "before\n")
     const run = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
+      await runYrdProcess(["bun", "yrd", "env", "close", author, "--preserve", "--json"], run.io),
       run.stderr(),
     ).toBe(0)
-    expect(run.stderr()).toContain(`found nothing to preserve in ${path} after teardown`)
-    expect(existsSync(path)).toBe(false)
-    const ref = `refs/heads/wip/${basename(path)}-preserve-stub`
-    expect((await w.git(["show", `${ref}:root-dirt.txt`])).trim()).toBe("before")
-  })
+    expect(existsSync(author)).toBe(false)
+    // The first pass's custody (the issue branch, moved to its snapshot) survives the clean second answer.
+    const saved = (await w.git(["rev-parse", `refs/heads/${branch}`])).trim()
+    expect(saved).not.toBe(head)
+    expect((await w.git(["rev-parse", `${saved}^`])).trim()).toBe(head)
+  }, 60_000)
 
   /**
    * @failure 30814: a second-pass refusal must leave the source and report the
@@ -1738,17 +1794,19 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
   it("keeps the environment and first custody ref when the second save fails", async () => {
     const w = await world(":", "printf 'after\\n' > teardown-new.txt")
     installStubWorktreePreserve(w.work, { failIfPathExists: "teardown-new.txt" })
-    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const { path, branch } = await openAttachedEnvironment(
+      w.work,
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+      "preserve-4",
+    )
     writeFileSync(join(path, "root-dirt.txt"), "before\n")
     const run = capture(w.work)
     expect(
       await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
       run.stderr(),
     ).toBe(2)
-    const ref = `refs/heads/wip/${basename(path)}-preserve-stub`
-    expect(run.stderr()).toContain(
-      `preservation after teardown failed; completed custody refs: wip/${basename(path)}-preserve-stub`,
-    )
+    const ref = `refs/heads/${branch}`
+    expect(run.stderr()).toContain(`preservation after teardown failed; completed custody refs: ${ref}`)
     expect(existsSync(path)).toBe(true)
     expect(readFileSync(join(path, "teardown-new.txt"), "utf8")).toBe("after\n")
     expect((await w.git(["show", `${ref}:root-dirt.txt`])).trim()).toBe("before")
@@ -1762,15 +1820,19 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
   it("keeps the environment and first custody ref when teardown fails", async () => {
     const w = await world(":", "exit 23")
     installStubWorktreePreserve(w.work)
-    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const { path, branch } = await openAttachedEnvironment(
+      w.work,
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+      "preserve-5",
+    )
     writeFileSync(join(path, "root-dirt.txt"), "before\n")
     const run = capture(w.work)
     expect(
       await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], run.io),
       run.stderr(),
     ).toBe(2)
-    const ref = `refs/heads/wip/${basename(path)}-preserve-stub`
-    expect(run.stderr()).toContain(`completed custody refs: wip/${basename(path)}-preserve-stub`)
+    const ref = `refs/heads/${branch}`
+    expect(run.stderr()).toContain(`completed custody refs: ${ref}`)
     expect(existsSync(path)).toBe(true)
     expect((await w.git(["show", `${ref}:root-dirt.txt`])).trim()).toBe("before")
   })
@@ -1783,9 +1845,13 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
   it.each(["deleted", "rewound"] as const)("keeps the environment when fresh remote custody is %s", async (mode) => {
     const w = await world(":", ":")
     installStubWorktreePreserve(w.work)
-    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const { path, branch } = await openAttachedEnvironment(
+      w.work,
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+      `preserve-6-${mode}`,
+    )
     writeFileSync(join(path, "root-dirt.txt"), "before\n")
-    const ref = `refs/heads/wip/${basename(path)}-preserve-stub`
+    const ref = `refs/heads/${branch}`
     let reads = 0
     const run = capture(w.work)
     await expect(
@@ -1794,7 +1860,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
           await w.git(mode === "deleted" ? ["push", "origin", `:${ref}`] : ["push", "--force", "origin", `main:${ref}`])
         }
       }),
-    ).rejects.toThrow(/origin push URL .*refs\/heads\/wip\/.*no longer contains preserved/u)
+    ).rejects.toThrow(/origin push URL .*refs\/heads\/task\/preserve-6-.*no longer contains preserved/u)
     expect(reads).toBe(2)
     expect(existsSync(path)).toBe(true)
     expect((await w.git(["show", `${ref}:root-dirt.txt`])).trim()).toBe("before")
@@ -1808,7 +1874,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
   it("reads custody from the captured push URL after origin is repointed", async () => {
     const w = await world(":", ":")
     installStubWorktreePreserve(w.work)
-    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const { path } = await openAttachedEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim(), "preserve-7")
     writeFileSync(join(path, "root-dirt.txt"), "before\n")
     const alternate = join(dirname(w.work), "alternate.git")
     await w.git(["init", "--quiet", "--bare", alternate])
@@ -1832,7 +1898,11 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
   it("refuses a CWD holder before the first preserve ref write", async () => {
     const w = await world(":")
     installStubWorktreePreserve(w.work)
-    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const { path, branch } = await openAttachedEnvironment(
+      w.work,
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+      "preserve-8",
+    )
     writeFileSync(join(path, "root-dirt.txt"), "before\n")
     processCensus.mockResolvedValue(await holderCensus(4242, path))
     const run = capture(w.work)
@@ -1841,28 +1911,29 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       run.stderr(),
     ).toBe(2)
     expect(existsSync(path)).toBe(true)
-    expect((await w.git(["for-each-ref", "--format=%(refname)", "refs/heads/wip/"])).trim()).toBe("")
+    expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+    )
   })
 
   /**
-   * @failure 30814: author retirement was captured before teardown and could delete an
-   *          unchanged withdrawn tip even after the first pass established custody.
-   *          Ordinary clean retirement tests never return a preserve ref.
-   * @level l3 @consumer a landed author whose environment also carries unsaved bytes
+   * @failure 33557: author retirement deletes the captured author branch only while that branch still stands at its
+   *          merged submission; a tip that moved after the merge (here an empty commit, the one ahead shape a close
+   *          admits) must be kept, or the commit goes with the branch. No other row moves an author tip after merge.
+   * @level l3 @consumer a landed author whose environment gained a commit after its merge
    */
-  it("retains an unchanged withdrawn author branch when preservation establishes custody", async () => {
+  it("keeps a landed author branch whose tip moved after the merge", async () => {
     const w = await world(":")
     await birthEventQueue(w.work, "main", { localStore: false })
     const opened = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "custody-retention", "--keep", "--json"], opened.io),
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "moved-tip", "--keep", "--json"], opened.io),
       opened.stderr(),
     ).toBe(0)
     const author = (JSON.parse(opened.stdout()) as { path: string }).path
     const authorGit = gitIn(author)
-    const branch = "task/custody-retention"
-    await authorGit(["commit", "--quiet", "--allow-empty", "-m", "author work\n\nRefs: @example/30814-retention"])
-    const head = (await authorGit(["rev-parse", "HEAD"])).trim()
+    const branch = "task/moved-tip"
+    await authorGit(["commit", "--quiet", "--allow-empty", "-m", "author work\n\nRefs: @example/33557-moved-tip"])
     const submitted = capture(author)
     expect(await runYrdProcess(["bun", "yrd", "submit", "--json"], submitted.io), submitted.stderr()).toBe(0)
     const landed = capture(w.work)
@@ -1871,16 +1942,17 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       landed.stderr(),
     ).toBe(0)
     expect(JSON.parse(landed.stdout())).toMatchObject({ merged: [branch] })
-    expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
-    installStubWorktreePreserve(w.work)
-    writeFileSync(join(author, "unsaved.txt"), "custody\n")
+    await authorGit(["commit", "--quiet", "--allow-empty", "-m", "after the merge"])
+    const moved = (await authorGit(["rev-parse", "HEAD"])).trim()
     const closed = capture(w.work)
-    expect(
-      await runYrdProcess(["bun", "yrd", "env", "close", author, "--preserve", "--json"], closed.io),
-      closed.stderr(),
-    ).toBe(0)
+    const code = await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io)
+    expect({ code, stderr: closed.stderr() }).toMatchObject({ code: 0 })
     expect(existsSync(author)).toBe(false)
-    expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
+    expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(moved)
+    // The capture refuses first; the release's own compare-and-swap ("branch moved ... branch kept") is the second line.
+    expect(closed.stderr()).toContain(
+      `${branch}@${moved}: checkout no longer matches its merged submission and local ref`,
+    )
   }, 60_000)
 
   /**
@@ -1898,7 +1970,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       reason: "clean on its recorded pin; shared main has no primary store for it",
     }
     installStubWorktreePreserve(w.work, { skipped: [skipped] })
-    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const { path } = await openAttachedEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim(), "preserve-9")
     writeFileSync(join(path, "root-dirt.txt"), "root preserved\n")
 
     const run = capture(w.work)
@@ -1947,7 +2019,11 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       const cause = "km/apps/maddoc: ENOENT; preserve and resolve it before removal"
       const stderr = mode === "short" ? cause : `discarded earlier output\r\n${"noise".repeat(1200)}\r\n${cause}\r\n`
       installStubWorktreePreserve(w.work, { noReceipt: true, exitOverride: 7, stderr })
-      const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+      const { path } = await openAttachedEnvironment(
+        w.work,
+        (await w.git(["rev-parse", "HEAD"])).trim(),
+        `preserve-10-${mode}`,
+      )
       writeFileSync(join(path, "root-dirt.txt"), "must remain intact\n")
 
       const run = capture(w.work)
@@ -1978,7 +2054,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
   it("env close --preserve refuses a receipt it cannot validate, removing nothing (29073)", async () => {
     const w = await world(":")
     installStubWorktreePreserve(w.work, { badReceipt: true, stderr: "schema producer diagnostic" })
-    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const { path } = await openAttachedEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim(), "preserve-11")
     writeFileSync(join(path, "root-dirt.txt"), "must not be discarded\n")
 
     const run = capture(w.work)
@@ -2007,7 +2083,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
   it("env close --preserve refuses a receipt missing the path field, removing nothing (29073)", async () => {
     const w = await world(":")
     installStubWorktreePreserve(w.work, { badPath: true, stderr: "path producer diagnostic" })
-    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const { path } = await openAttachedEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim(), "preserve-12")
     writeFileSync(join(path, "root-dirt.txt"), "must not be discarded\n")
 
     const run = capture(w.work)
@@ -2035,7 +2111,7 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
   it("env close --preserve accepts the clean no-op (exit 3) and removes the environment (29073)", async () => {
     const w = await world(":")
     installStubWorktreePreserve(w.work)
-    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const { path } = await openAttachedEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim(), "preserve-13")
 
     const run = capture(w.work)
     expect(
@@ -2103,7 +2179,7 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
   it("env close --preserve refuses a non-zero preserve exit, removing nothing (29073)", async () => {
     const w = await world(":")
     installStubWorktreePreserve(w.work, { exitOverride: 9, stderr: "preserve could not finish" })
-    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const { path } = await openAttachedEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim(), "preserve-14")
     writeFileSync(join(path, "root-dirt.txt"), "must not be discarded\n")
 
     const run = capture(w.work)
@@ -2853,7 +2929,7 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     for (const check of ["pass", "old-tool"] as const) {
       installStubWorktreePreserve(w.work, { check, log })
       writeFileSync(log, "")
-      const { path } = await openEnvironment(w.work, selected)
+      const { path } = await openAttachedEnvironment(w.work, selected, `check-${check}`)
       writeFileSync(join(path, "unsaved.txt"), `kept by the real preserve after ${check}\n`)
       const run = capture(w.work)
       expect(
