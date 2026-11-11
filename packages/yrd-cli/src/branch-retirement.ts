@@ -2849,7 +2849,13 @@ export async function advancedCure(
   } catch (error) {
     return `; whether ${targetLabel} holds ${head} is unknown (${error instanceof Error ? error.message : String(error)})`
   }
-  if (!held) return `; it holds commits ${targetLabel} lacks: submit them, and drop the branch after they land`
+  if (!held) {
+    return (
+      `; it holds commits ${targetLabel} lacks: submit only wanted work; ` +
+      "for withdrawn or superseded work, run yrd drop --help for --local --discard, " +
+      "which records the exact tip before removing its local name"
+    )
+  }
   return (
     `; ${targetLabel} already holds ${head}, so nothing is lost: move the branch back with ` +
     `git -C ${shellQuote(repo)} update-ref ${shellQuote(`refs/heads/${branch}`)} ${shellQuote(recorded)} ${shellQuote(head)}, then ` +

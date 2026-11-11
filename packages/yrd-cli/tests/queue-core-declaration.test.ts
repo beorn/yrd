@@ -4223,10 +4223,10 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect(report.kept).toEqual([expect.objectContaining({ branch, head: tip, reason: "advanced" })])
         const detail = report.kept[0]!.detail
         expect(detail.startsWith(refused), detail).toBe(true)
-        // A third seat gets today's refusal, word for word.
+        // 33160: superseded work must reach the existing tip-preserving discard route, not unconditional submission.
         if (mode === "third seat") {
           expect(detail).toBe(
-            `${refused}; it holds commits origin/main lacks: submit them, and drop the branch after they land`,
+            `${refused}; it holds commits origin/main lacks: submit only wanted work; for withdrawn or superseded work, run yrd drop --help for --local --discard, which records the exact tip before removing its local name`,
           )
         }
         if (mode === "no reason") expect(detail).toContain("--reason <why>")
@@ -4358,10 +4358,10 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect(report.kept).toEqual([expect.objectContaining({ branch, head: tip, reason: "advanced" })])
         const detail = report.kept[0]!.detail
         if (mode === "no reason") expect(detail).toContain("--reason <why>")
-        // A third seat gets today's refusal, word for word.
+        // 33160: superseded work must reach the existing tip-preserving discard route, not unconditional submission.
         if (mode === "third seat") {
           expect(detail).toBe(
-            `current tip ${tip} differs from recorded change tip ${recorded}; it holds commits origin/main lacks: submit them, and drop the branch after they land`,
+            `current tip ${tip} differs from recorded change tip ${recorded}; it holds commits origin/main lacks: submit only wanted work; for withdrawn or superseded work, run yrd drop --help for --local --discard, which records the exact tip before removing its local name`,
           )
         }
         expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(tip)
