@@ -3,6 +3,7 @@
  *          corrupts a recorded artifact.
  * @level l1
  * @consumer @i/4-supervision/27335-streamline-host-resources/33388-yrd-log-tree-grows-net
+ * @reach fs-walk <fixture-only: the temporary run's git output folder>
  * @testonly none
  */
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs"
