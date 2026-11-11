@@ -27,6 +27,13 @@ export type RetainedCensus =
       malformed: readonly Readonly<{ name: string; reason: string }>[]
       /** A store directory with no `manifest.json`: never a candidate. */
       noManifest: readonly string[]
+      /** Diagnostic only: an invocation-owned preparation marker never grants retirement authority. */
+      unpublished?: readonly Readonly<{
+        name: string
+        sourceGitDir: string
+        createdAt: string
+        reason: "preparing" | "interrupted publication"
+      }>[]
     }>
 
 /**
@@ -49,6 +56,39 @@ export function censusRetainedStores(root: string, now: number): RetainedCensus 
   let oldest: { at: number; text: string } | null = null
   const malformed: { name: string; reason: string }[] = []
   const noManifest: string[] = []
+  const unpublished: {
+    name: string
+    sourceGitDir: string
+    createdAt: string
+    reason: "preparing" | "interrupted publication"
+  }[] = []
+  const notePreparation = (name: string, reason: "preparing" | "interrupted publication"): boolean => {
+    const markerPath = join(root, name, "preparation.json")
+    if (!existsSync(markerPath)) return false
+    try {
+      const value: unknown = JSON.parse(readFileSync(markerPath, "utf8"))
+      const marker = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {}
+      if (
+        marker.version !== 1 ||
+        marker.state !== "preparing" ||
+        typeof marker.sourceGitDir !== "string" ||
+        marker.sourceGitDir === "" ||
+        typeof marker.createdAt !== "string" ||
+        Number.isNaN(Date.parse(marker.createdAt))
+      ) {
+        malformed.push({ name, reason: `preparation marker ${markerPath} is invalid; state unknown` })
+        return false
+      }
+      unpublished.push({ name, sourceGitDir: marker.sourceGitDir, createdAt: marker.createdAt, reason })
+      return true
+    } catch (error) {
+      malformed.push({
+        name,
+        reason: `preparation marker ${markerPath} could not be read; state unknown: ${error instanceof Error ? error.message : String(error)}`,
+      })
+      return false
+    }
+  }
   const names = readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
@@ -56,15 +96,17 @@ export function censusRetainedStores(root: string, now: number): RetainedCensus 
     const path = join(root, name, "manifest.json")
     if (!existsSync(path)) {
       noManifest.push(name)
+      notePreparation(name, "preparing")
       continue
     }
     let manifest: unknown
     try {
       manifest = JSON.parse(readFileSync(path, "utf8"))
     } catch (error) {
+      const interrupted = notePreparation(name, "interrupted publication")
       malformed.push({
         name,
-        reason: `manifest is not JSON: ${error instanceof Error ? error.message : String(error)}`,
+        reason: `${interrupted ? "interrupted publication; " : ""}manifest is not JSON: ${error instanceof Error ? error.message : String(error)}`,
       })
       continue
     }
@@ -72,12 +114,14 @@ export function censusRetainedStores(root: string, now: number): RetainedCensus 
     const retainUntil = record.retainUntil
     const at = typeof retainUntil === "string" ? Date.parse(retainUntil) : Number.NaN
     if (typeof retainUntil !== "string" || Number.isNaN(at)) {
+      const interrupted = notePreparation(name, "interrupted publication")
       malformed.push({
         name,
         reason:
-          retainUntil === undefined
+          (interrupted ? "interrupted publication; " : "") +
+          (retainUntil === undefined
             ? "manifest records no retainUntil"
-            : `retainUntil ${JSON.stringify(retainUntil)} is not a date`,
+            : `retainUntil ${JSON.stringify(retainUntil)} is not a date`),
       })
       continue
     }
@@ -103,5 +147,6 @@ export function censusRetainedStores(root: string, now: number): RetainedCensus 
     oldestExpired: oldest?.text ?? null,
     malformed,
     noManifest,
+    ...(unpublished.length === 0 ? {} : { unpublished: unpublished.sort((a, b) => a.name.localeCompare(b.name)) }),
   }
 }
