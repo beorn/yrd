@@ -30,8 +30,9 @@ test("counts live, expired, legacy, malformed and manifest-less stores by name, 
   const root = mkdtempSync(join(tmpdir(), "retained-census-"))
   roots.push(root)
   store(root, "live-a", { retainUntil: "2026-11-12T00:00:00.000Z", writerLocks: [] })
-  store(root, "expired-a", { retainUntil: "2026-11-01T00:00:00.000Z", writerLocks: [] })
-  store(root, "expired-b", { retainUntil: "2026-10-02T16:56:18.000Z", writerLocks: [] })
+  store(root, "expired-a", { retainUntil: "2026-11-01T00:00:00.000Z", writerLocks: [], notCompared: [] })
+  store(root, "expired-b", { retainUntil: "2026-10-02T16:56:18.000Z", writerLocks: [], notCompared: [] })
+  store(root, "expired-missing-notCompared", { retainUntil: "2026-11-01T00:00:00.000Z", writerLocks: [] })
   store(root, "expired-legacy", { retainUntil: "2026-10-01T00:00:00.000Z" })
   store(root, "no-deadline", { writerLocks: [] })
   store(root, "bad-deadline", { retainUntil: "soon", writerLocks: [] })
@@ -43,10 +44,11 @@ test("counts live, expired, legacy, malformed and manifest-less stores by name, 
   expect(census).toMatchObject({
     root,
     state: "read",
-    total: 8,
+    total: 9,
     live: 1,
-    expired: 3,
+    expired: 4,
     expiredLegacy: 1,
+    expiredMissingNotCompared: ["expired-missing-notCompared"],
     oldestExpired: "2026-10-01T00:00:00.000Z",
   })
   expect(census.state === "read" && census.malformed.map((entry) => entry.name).sort()).toEqual([

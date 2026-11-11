@@ -895,8 +895,10 @@ export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdC
   io.stdout(
     `${census.total} retained store(s) under ${retentionRoot}: ${census.live} live, ${census.expired} past retainUntil ` +
       `(${census.expiredLegacy} with a legacy manifest${census.oldestExpired === null ? "" : `, oldest ${census.oldestExpired}`}), ` +
+      `${census.expiredMissingNotCompared.length} expired without notCompared, ` +
       `${census.malformed.length} malformed, ${census.noManifest.length} without a manifest\n`,
   )
+  for (const name of census.expiredMissingNotCompared) io.stdout(`kept missing notCompared: ${name}\n`)
   for (const entry of census.malformed) io.stdout(`malformed: ${entry.name}: ${entry.reason}\n`)
   for (const name of census.noManifest) io.stdout(`no manifest: ${name}\n`)
   return 0

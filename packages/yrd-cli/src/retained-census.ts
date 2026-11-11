@@ -18,6 +18,10 @@ export type RetainedCensus =
       expired: number
       /** Expired, but the manifest predates `writerLocks`; git-super keeps these as legacy-unrecorded. */
       expiredLegacy: number
+      /** Expired non-legacy manifests missing notCompared: named separately and never retired. */
+      expiredMissingNotCompared: readonly string[]
+      /** Expired non-legacy entries with notCompared recorded; retirement still re-verifies every gate. */
+      expiredEntries: readonly string[]
       oldestExpired: string | null
       /** A manifest with no, or an unparseable, `retainUntil`, or one that is not JSON: never a candidate. */
       malformed: readonly Readonly<{ name: string; reason: string }>[]
@@ -40,6 +44,8 @@ export function censusRetainedStores(root: string, now: number): RetainedCensus 
   let live = 0
   let expired = 0
   let expiredLegacy = 0
+  const expiredMissingNotCompared: string[] = []
+  const expiredEntries: string[] = []
   let oldest: { at: number; text: string } | null = null
   const malformed: { name: string; reason: string }[] = []
   const noManifest: string[] = []
@@ -81,6 +87,8 @@ export function censusRetainedStores(root: string, now: number): RetainedCensus 
     }
     expired++
     if (!("writerLocks" in record)) expiredLegacy++
+    else if (!("notCompared" in record)) expiredMissingNotCompared.push(name)
+    else expiredEntries.push(name)
     if (oldest === null || at < oldest.at) oldest = { at, text: retainUntil }
   }
   return {
@@ -90,6 +98,8 @@ export function censusRetainedStores(root: string, now: number): RetainedCensus 
     live,
     expired,
     expiredLegacy,
+    expiredMissingNotCompared,
+    expiredEntries,
     oldestExpired: oldest?.text ?? null,
     malformed,
     noManifest,

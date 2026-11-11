@@ -126,6 +126,24 @@ async function openEnvironment(cwd: string, commit: string): Promise<Readonly<{ 
 
 type World = Readonly<{ git: ReturnType<typeof gitIn>; work: string }>
 
+// Accepted #33010 requirement: the existing CLI selects expired stores, defaults to dry run, and diagnoses an
+// incomplete estate declaration before invoking retirement. Census-only tests cannot exercise its flags.
+it("retained drain uses the production CLI in dry-run mode and requires its namespace", async () => {
+  const w = await world(":")
+  const retain = join(dirname(w.work), "retained-modules")
+  mkdirSync(join(retain, "old"), { recursive: true })
+  writeFileSync(join(retain, "old", "manifest.json"), JSON.stringify({
+    retainUntil: "2020-01-01T00:00:00Z", writerLocks: [], notCompared: [],
+  }))
+  const missing = capture(w.work)
+  expect(await runYrdProcess(["bun", "yrd", "env", "retained", "--retire-expired", "--retain", retain, "--artifact-dir", join(dirname(w.work), "proof")], missing.io)).toBe(2)
+  expect(missing.stderr()).toContain("namespace")
+  const run = capture(w.work)
+  expect(await runYrdProcess(["bun", "yrd", "env", "retained", "--retire-expired", "--retain", retain, "--namespace", dirname(w.work), "--artifact-dir", join(dirname(w.work), "proof"), "--json"], run.io), run.stderr()).toBe(0)
+  expect(JSON.parse(run.stdout())).toMatchObject({ apply: false, rows: [{ entry: join(retain, "old"), outcome: "kept" }] })
+  expect(existsSync(join(retain, "old", "manifest.json"))).toBe(true)
+})
+
 it("cleanup provenance excludes inherited history and refuses incomplete or unknown HEAD evidence", async () => {
   const w = await world(":")
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
