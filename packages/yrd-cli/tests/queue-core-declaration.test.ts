@@ -1736,6 +1736,48 @@ describe("a queue is the selected origin branch carrying config", () => {
     )
   })
 
+  /** @failure The queue is read before the change chains, which take most of a listing, so a queue event written
+   * during the chain read ends the whole listing in "moved during listing": on a busy queue every
+   * `list --watch` round is thrown away and the watch never prints or exits (33495).
+   * @level l2 @consumer `yrd list --watch` and every queue listing
+   */
+  it("reads a queue that moved during the change-chain read and lists its newer state", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, head, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture declaration absent")
+    await createQueue(repo, "main", head, new Date())
+    const tip = (await readEventQueue(store, "main")).tip
+    const workdir = await workdirOf(git, { cwd: repo })
+    const list = store.backend.listRefs
+    if (list === undefined) throw new Error("fixture backend lacks ref listing")
+    // The listing takes its own `refs/` inventory first; the chain read then takes a second one. The queue event is
+    // written at that second inventory: after the listing's inventory, inside the chain read.
+    let inventories = 0
+    let writing = false
+    let moved: string | undefined
+    using chainRead = vi.spyOn(store.backend, "listRefs").mockImplementation(async (...args) => {
+      if (args[1] === "refs/") inventories++
+      // The write lists refs itself; the flag is set before it so that listing passes straight through.
+      if (!writing && inventories === 2) {
+        writing = true
+        moved = await writeQueueEvent(store, "main", {
+          type: "paused",
+          by: "yrd",
+          reason: "pause written during the chain read",
+          at: new Date(),
+        })
+      }
+      return list(...args)
+    })
+    const reading = await readEventListing(git, config, repo, workdir, head, store, { forceFresh: true })
+    expect(moved).not.toBeUndefined()
+    expect(moved).not.toBe(tip)
+    expect(reading.pause).toMatchObject({ reason: "pause written during the chain read" })
+  })
+
   // @failure A reopened change reads journals belonging to an older, undisplayed segment.
   // @level l2; @consumer default queue list and full branch detail
   it("reads journals for the listed current segment while branch detail retains older runs", async () => {

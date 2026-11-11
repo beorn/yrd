@@ -3553,9 +3553,12 @@ export async function readEventQueueWithChanges(
 ): Promise<Readonly<{ queue: EventQueue } & ChangeHistories>> {
   const prefixes = [`${queueRefPrefix(queue)}/changes/`, archivedChangesPrefix(queue)]
   // One after the other: run together, the whole queue chain and every tip's metadata were live at once, which set
-  // the read's high-water mark even with a collection between phases (28925).
-  const queueState = await readEventQueue(store, queue)
+  // the read's high-water mark even with a collection between phases (28925). The queue is read LAST: the chain read
+  // takes most of a listing (48 s of 50 on the live queue), and a queue read before it went stale for that whole
+  // time, so on a busy queue every watch round ended in "moved during listing" and printed nothing (33495). A queue
+  // that moved after the listing's inventory is caught by the listing's fence, which reads it again.
   const chains = await readEventChains(prefixes, store, recent, undefined, listed)
+  const queueState = await readEventQueue(store, queue)
   return { queue: queueState, ...projectChangeHistories(chains, prefixes, store.repo) }
 }
 
