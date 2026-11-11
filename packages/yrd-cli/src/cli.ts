@@ -1772,9 +1772,11 @@ function buildProgram(
         "runs the same close lifecycle and journals the outcome. That queued consumer applies direct " +
         "admission (clean, unlocked, no holder), without the sweep's ancestry check: an environment the " +
         "sweep kept only for ancestry IS closed by a standing request; an environment with a recorded " +
-        "hold is not: the request is journaled STALE and dropped. That ending exits 4, named `queued` " +
-        "in --json, because the environment still exists. A request this caller cannot write is " +
-        "refused loudly instead.",
+        "hold is not: the request is journaled STALE and dropped. That ending EXITS 0 and is named " +
+        "`queued: true, closed: false` in --json, with the words `queued, not closed` and the count " +
+        "of pid(s) this caller could not read: the request was accepted, and the queue's round is the " +
+        "certifying authority, so it is a success that never claims the environment is gone. " +
+        "A request this caller cannot write is refused loudly, non-zero, instead.",
     )
     .option(
       "--retain <directory>",

@@ -3204,7 +3204,7 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
   )
 
   it.runIf(process.platform === "linux").each(["default", "automatic"] as const)(
-    "queues the close for a capable context when this caller's census is incomplete (22894 T1, %s intent)",
+    "accepts — exit 0, queued not closed — the close for a capable context when this caller's census is incomplete (22894 T1, 31807, %s intent)",
     async (intent) => {
       const w = await world(":")
       const state = join(dirname(w.work), "state")
@@ -3234,17 +3234,23 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       const originalMtime = original === undefined ? undefined : statSync(file).mtimeMs
       processCensus.mockResolvedValue(await incompleteCensus())
       const run = capture(w.work)
-      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], run.io), run.stderr()).toBe(4)
+      // 31807 (@cto a12b2c1a): a durable request is a SUCCESS. Exit 0 says "accepted"; the receipt
+      // says the environment is still there, so nobody can read this as a completed close.
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], run.io), run.stderr()).toBe(0)
       const receipt = JSON.parse(run.stdout()) as Record<string, unknown>
       expect(receipt, run.stderr()).toMatchObject({
-        queued: path,
+        queued: true,
+        closed: false,
+        path,
         reason: "incomplete-census",
         request: file,
+        unreadable: 1,
         census: { mechanism: "proc", complete: false, rows: 0, unreadable: 1, uncleared: 1 },
       })
+      expect(run.stderr()).toContain("queued, not closed")
+      expect(run.stderr()).toContain("1 same-UID pid(s) were unreadable here")
       expect(run.stderr()).toContain("cannot certify the close")
       expect(run.stderr()).toContain("queued request")
-      expect(run.stderr()).toContain("exit 4 means queued, not closed yet")
       expect(run.stderr()).toContain(`unlinks ${file} when consumed`)
       expect(run.stderr()).toContain(join(workdir, "logs", "post-merge"))
       expect(readCloseRequest(file)).toMatchObject({
@@ -3286,9 +3292,11 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       const standing = readCloseRequest(file)
       if (standing?.intent !== "close") throw new Error("expected the filed close intent")
       const again = capture(w.work)
-      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], again.io), again.stderr()).toBe(4)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], again.io), again.stderr()).toBe(0)
       expect(JSON.parse(again.stdout())).toMatchObject({
-        queued: path,
+        queued: true,
+        closed: false,
+        path,
         alreadyQueued: true,
         standing: {
           requester: standing.requester,
@@ -3299,8 +3307,9 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       })
       expect(readCloseRequest(file)).toEqual(standing)
       const human = capture(w.work)
-      expect(await runYrdProcess(["bun", "yrd", "env", "close", path], human.io), human.stderr()).toBe(4)
-      expect(human.stdout()).toContain("exit 4 means queued, not closed yet")
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path], human.io), human.stderr()).toBe(0)
+      expect(human.stdout()).toContain("queued, not closed")
+      expect(human.stdout()).toContain("1 same-UID pid(s) unreadable here")
       expect(human.stdout()).toContain(`unlink ${file} when consumed`)
       expect(human.stdout()).toContain(join(workdir, "logs", "post-merge"))
       // A request for the same path with DIFFERENT options is a conflict, named
