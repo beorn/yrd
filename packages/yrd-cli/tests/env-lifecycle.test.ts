@@ -135,10 +135,7 @@ async function openAttachedEnvironment(
   bay: string,
 ): Promise<Readonly<{ path: string; branch: string }>> {
   const run = capture(cwd)
-  expect(
-    await runYrdProcess(["bun", "yrd", "env", "open", "--bay", bay, "--json"], run.io),
-    run.stderr(),
-  ).toBe(0)
+  expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", bay, "--json"], run.io), run.stderr()).toBe(0)
   const opened = JSON.parse(run.stdout()) as { path: string; branch: string; head: string }
   expect(opened.head).toBe(commit)
   expect((await gitIn(opened.path)(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${opened.branch}`)
@@ -1651,7 +1648,11 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     await addMaterializedDependency(w)
     // yrd resolves the preserve CLI through the superproject root it already holds (one stated path).
     installStubWorktreePreserve(w.work)
-    const { path, branch } = await openAttachedEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim(), "preserve-1")
+    const { path, branch } = await openAttachedEnvironment(
+      w.work,
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+      "preserve-1",
+    )
     // The real preserve refuses a dirty component on a detached HEAD too, so the component works on its own issue branch.
     await gitIn(join(path, "vendor/dependency"))(["switch", "--quiet", "-c", `${branch}-dependency`])
 
@@ -1741,7 +1742,11 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       "printf 'after\\n' > root-dirt.txt; printf 'new\\n' > teardown-new.txt; git add root-dirt.txt",
     )
     installStubWorktreePreserve(w.work)
-    const { path, branch } = await openAttachedEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim(), "preserve-2")
+    const { path, branch } = await openAttachedEnvironment(
+      w.work,
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+      "preserve-2",
+    )
     writeFileSync(join(path, "root-dirt.txt"), "before\n")
 
     const run = capture(w.work)
@@ -1789,7 +1794,11 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
   it("keeps the environment and first custody ref when the second save fails", async () => {
     const w = await world(":", "printf 'after\\n' > teardown-new.txt")
     installStubWorktreePreserve(w.work, { failIfPathExists: "teardown-new.txt" })
-    const { path, branch } = await openAttachedEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim(), "preserve-4")
+    const { path, branch } = await openAttachedEnvironment(
+      w.work,
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+      "preserve-4",
+    )
     writeFileSync(join(path, "root-dirt.txt"), "before\n")
     const run = capture(w.work)
     expect(
@@ -1811,7 +1820,11 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
   it("keeps the environment and first custody ref when teardown fails", async () => {
     const w = await world(":", "exit 23")
     installStubWorktreePreserve(w.work)
-    const { path, branch } = await openAttachedEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim(), "preserve-5")
+    const { path, branch } = await openAttachedEnvironment(
+      w.work,
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+      "preserve-5",
+    )
     writeFileSync(join(path, "root-dirt.txt"), "before\n")
     const run = capture(w.work)
     expect(
@@ -1832,7 +1845,11 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
   it.each(["deleted", "rewound"] as const)("keeps the environment when fresh remote custody is %s", async (mode) => {
     const w = await world(":", ":")
     installStubWorktreePreserve(w.work)
-    const { path, branch } = await openAttachedEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim(), `preserve-6-${mode}`)
+    const { path, branch } = await openAttachedEnvironment(
+      w.work,
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+      `preserve-6-${mode}`,
+    )
     writeFileSync(join(path, "root-dirt.txt"), "before\n")
     const ref = `refs/heads/${branch}`
     let reads = 0
@@ -1881,7 +1898,11 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
   it("refuses a CWD holder before the first preserve ref write", async () => {
     const w = await world(":")
     installStubWorktreePreserve(w.work)
-    const { path, branch } = await openAttachedEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim(), "preserve-8")
+    const { path, branch } = await openAttachedEnvironment(
+      w.work,
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+      "preserve-8",
+    )
     writeFileSync(join(path, "root-dirt.txt"), "before\n")
     processCensus.mockResolvedValue(await holderCensus(4242, path))
     const run = capture(w.work)
@@ -1890,7 +1911,9 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       run.stderr(),
     ).toBe(2)
     expect(existsSync(path)).toBe(true)
-    expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe((await w.git(["rev-parse", "HEAD"])).trim())
+    expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(
+      (await w.git(["rev-parse", "HEAD"])).trim(),
+    )
   })
 
   /**
@@ -1927,7 +1950,9 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     expect(existsSync(author)).toBe(false)
     expect((await w.git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(moved)
     // The capture refuses first; the release's own compare-and-swap ("branch moved ... branch kept") is the second line.
-    expect(closed.stderr()).toContain(`${branch}@${moved}: checkout no longer matches its merged submission and local ref`)
+    expect(closed.stderr()).toContain(
+      `${branch}@${moved}: checkout no longer matches its merged submission and local ref`,
+    )
   }, 60_000)
 
   /**
@@ -1994,7 +2019,11 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       const cause = "km/apps/maddoc: ENOENT; preserve and resolve it before removal"
       const stderr = mode === "short" ? cause : `discarded earlier output\r\n${"noise".repeat(1200)}\r\n${cause}\r\n`
       installStubWorktreePreserve(w.work, { noReceipt: true, exitOverride: 7, stderr })
-      const { path } = await openAttachedEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim(), `preserve-10-${mode}`)
+      const { path } = await openAttachedEnvironment(
+        w.work,
+        (await w.git(["rev-parse", "HEAD"])).trim(),
+        `preserve-10-${mode}`,
+      )
       writeFileSync(join(path, "root-dirt.txt"), "must remain intact\n")
 
       const run = capture(w.work)
