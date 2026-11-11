@@ -2830,8 +2830,9 @@ export function discardActorNote(
  * The next step for a branch drop keeps because it moved past its recorded change tip (29579). When the target already
  * holds the current tip, as after a fast-forward to it while verifying, nothing is lost by moving the branch back to
  * the recorded tip, after which the same drop retires it (a `--local` one with `--tip` at that recorded tip);
- * otherwise the branch holds work the target lacks, which lands by being submitted. An unanswerable ancestry read is
- * named, never guessed.
+ * otherwise the branch holds work the target lacks. Wanted work can be submitted; withdrawn or superseded work uses
+ * the explicit local discard route, whose dropped event keeps the exact tip before its local name is removed.
+ * An unanswerable ancestry read is named, never guessed.
  */
 export async function advancedCure(
   git: Git,
