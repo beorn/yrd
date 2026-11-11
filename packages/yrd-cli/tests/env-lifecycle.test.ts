@@ -2781,7 +2781,16 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       const envGit = gitIn(path)
       writeFileSync(join(path, "ahead.txt"), "content ahead on detached HEAD\n")
       await envGit(["add", "ahead.txt"])
-      await envGit(["-c", "user.email=env-open@yrd.test", "-c", "user.name=yrd", "commit", "--quiet", "-m", "content ahead"])
+      await envGit([
+        "-c",
+        "user.email=env-open@yrd.test",
+        "-c",
+        "user.name=yrd",
+        "commit",
+        "--quiet",
+        "-m",
+        "content ahead",
+      ])
 
       const refused = capture(w.work)
       const args = ["bun", "yrd", "env", "close", path, "--preserve", ...(dryRun ? ["--dry-run"] : []), "--json"]
