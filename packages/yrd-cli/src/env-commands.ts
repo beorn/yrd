@@ -971,7 +971,7 @@ export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdC
       if (result?.stderr) io.stderr(result.stderr)
       io.stderr(
         result?.timedOut === true
-          ? `retained batch under ${retentionRoot}: scan exceeded 1200 s; child killed; inspect its evidence before retrying\n`
+          ? `retained batch under ${retentionRoot}: batch exceeded 1200 s; child killed; inspect its evidence before retrying\n`
           : `retained batch under ${retentionRoot}: ${error instanceof Error ? error.message : String(error)}\n`,
       )
       return 2
