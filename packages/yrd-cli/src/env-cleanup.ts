@@ -85,11 +85,8 @@ import type { WorktreeRemovalProof } from "./branch-retirement.ts"
  * this path measured 4 per row).
  */
 const SWEEP_INSPECTION_BATCH = 8
-// Each route yields after two locked closes, including a kept result or a throw. One per round could not drain the
-// backlog: measured 2026-10-28, 42 requests stood after 9 h while the fleet filed about 15 an hour (@i/10-yrd/31420).
-// @cto's 2026-11-11 ruling set 2 first and made the drain measurable — 4 is approved only if the journal shows merges
-// never wait behind a close round; if they do, closes move off the merge loop instead of the constant rising.
-const CLOSE_ATTEMPTS_PER_ROUTE = 2
+// Each route yields after one locked close, including a kept result or a throw.
+const CLOSE_ATTEMPTS_PER_ROUTE = 1
 // A delegated release unblocks a seat now; it has its own budget, ahead of the close backlog (29772).
 const RELEASE_ATTEMPTS_PER_ROUND = 1
 
