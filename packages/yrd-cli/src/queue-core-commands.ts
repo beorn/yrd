@@ -7525,22 +7525,24 @@ export async function readEventListing(
           const pending =
             preExecution && cancelled.length === 0 && (row.state === "queued" || row.state === "verifying")
           // Advanced local retirement appends another dropped custody event to an already-cancelled change.
-          // Complete pre-execution history still proves expected absence when every cancellation is a drop.
-          const dropped =
+          // Complete pre-execution history still proves expected absence when every cancellation is a drop, or a
+          // `yrd withdraw`, which ends open work with reason "withdrawn" (withdraw.ts; 33323).
+          const endings = cancelled.map((event) => trailer(event, EVENT_TRAILERS.reason))
+          const ended =
             preExecution &&
             row.state === "cancelled" &&
             cancelled.length > 0 &&
-            cancelled.every((event) => trailer(event, EVENT_TRAILERS.reason) === "dropped")
+            endings.every((reason) => reason === "dropped" || reason === "withdrawn")
           return {
             branch: row.branch,
             head: row.head,
             ...(opening === undefined ? {} : { segment: opening.id }),
             state: row.state,
-            expected: pending || dropped,
+            expected: pending || ended,
             reason: pending
               ? "pending Run linkage: complete recorded segment has not entered execution"
-              : dropped
-                ? "dropped before execution: complete recorded segment has no execution event"
+              : ended
+                ? `${endings.includes("withdrawn") ? "withdrawn" : "dropped"} before execution: complete recorded segment has no execution event`
                 : "unresolved: recorded history does not establish an expected pre-execution absence of a Run trailer",
           }
         })

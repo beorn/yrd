@@ -24,6 +24,7 @@ import {
   readBranchHistory,
   readJournals,
   submit,
+  withdraw,
 } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
@@ -849,5 +850,37 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     expect(page).toContain("has no Run trailer")
     expect(page).toContain("unlinked journal files were not searched")
     expect(page).toContain("/logs")
+  })
+
+  // @failure 33323: `yrd withdraw` ends a change that never ran with reason "withdrawn", and the Run-absence check
+  // accepted only "dropped", so one withdrawn segment made every `yrd list` report journal incompleteness.
+  // @consumer anyone reading `yrd list` to learn whether the recorded journal history is complete
+  it("a change withdrawn before it ran is an expected Run absence, like a dropped one", async () => {
+    const work = await queueWithOneChange()
+    const git = gitIn(work)
+    await git(["config", "yrd.workdir", join(work, "..", "queue")])
+    // The real writer, so the segment has the live shape: opened, then cancelled "withdrawn" at the submitted head.
+    await withdraw(git, "origin", { branch: "task/one", target: { remote: "origin", branch: "main" }, by: "@dev/2" })
+    const history = await readBranchHistory(createEventStore(work, "origin", git.selection), "main", "task/one")
+    expect(history.history?.events.map((event) => event.type)).toEqual(["opened", "cancelled"])
+    const listed = await yrd(work, { color: false }, "list", "--json")
+    expect(listed.exitCode, listed.report).toBe(0)
+    const document = JSON.parse(listed.stdout) as {
+      journal: {
+        absent?: string
+        coverage: {
+          missingRunTrailers: readonly { branch: string; state: string; expected: boolean; reason: string }[]
+        }
+      }
+    }
+    expect(document.journal.coverage.missingRunTrailers).toContainEqual(
+      expect.objectContaining({
+        branch: "task/one",
+        state: "cancelled",
+        expected: true,
+        reason: expect.stringMatching(/withdrawn before execution/i),
+      }),
+    )
+    expect(document.journal.absent ?? "").not.toContain("has no Run trailer")
   })
 })
