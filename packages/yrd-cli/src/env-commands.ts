@@ -1950,22 +1950,23 @@ export async function closeEnvironment(
       }
     }
     try {
-      removed = JSON.parse(
-        await git([
-          "super",
-          "--json",
-          "worktree",
-          "remove",
-          path,
-          "--retain",
-          retain,
-          ...(options.noRehome === true ? ["--no-rehome"] : []),
-          ...(options.componentCustody === undefined
-            ? []
-            : ["--component-custody", JSON.stringify(options.componentCustody)]),
-          ...preservedRefs.flatMap((ref) => ["--preserved", ref]),
-        ]),
-      )
+      const removalOutput = await git([
+        "super",
+        "--json",
+        "worktree",
+        "remove",
+        path,
+        "--retain",
+        retain,
+        ...(options.noRehome === true ? ["--no-rehome"] : []),
+        ...(options.componentCustody === undefined
+          ? []
+          : ["--component-custody", JSON.stringify(options.componentCustody)]),
+        ...preservedRefs.flatMap((ref) => ["--preserved", ref]),
+      ])
+      const removalStderr = git.lastInvocation!.result!.stderr
+      if (removalStderr !== "") io.stderr(removalStderr)
+      removed = JSON.parse(removalOutput)
     } catch (error) {
       if (await concurrentClose(error)) return 0
       await restoreAlignedGitlinks()

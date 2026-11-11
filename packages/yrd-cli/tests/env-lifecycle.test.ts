@@ -2006,6 +2006,51 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     expect(await w.git(["worktree", "list", "--porcelain"])).not.toContain(path)
   })
 
+  /** @failure A successful GitSuper removal can hide its phase diagnostic while env close still prints success JSON.
+   * @level l2 (real close lifecycle with a fake removal executable and real worktree removal)
+   * @consumer callers relying on stderr diagnostics from a successful environment removal
+   */
+  it("forwards successful removal child stderr and keeps the close JSON on stdout", async () => {
+    const w = await world(":")
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const shim = join(dirname(w.work), "successful-removal-git-super")
+    const phase = "fixture removal phase: worktree remove started"
+    writeFileSync(
+      shim,
+      `#!${process.execPath}
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+if (args[0] !== "--json" || args[1] !== "worktree" || args[2] !== "remove" || args[3] === undefined) {
+  console.error("fixture removal: unexpected git-super arguments " + JSON.stringify(args));
+  process.exit(64);
+}
+process.stderr.write(${JSON.stringify(phase + "\n")});
+const removed = spawnSync("git", ["-C", process.cwd(), "worktree", "remove", args[3]], { encoding: "utf8" });
+if (removed.error) throw removed.error;
+if (removed.status !== 0) {
+  process.stderr.write(removed.stderr);
+  process.exit(removed.status ?? 70);
+}
+process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { manifest: "fixture-removal-proof" } }) + "\\n");
+`,
+      { mode: 0o700 },
+    )
+    vi.stubEnv("YRD_GIT_SUPER_BIN", shim)
+
+    const closed = capture(w.work)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "env", "close", path, "--retain", join(dirname(path), "retained-modules"), "--json"],
+        closed.io,
+      ),
+      closed.stderr(),
+    ).toBe(0)
+
+    expect(JSON.parse(closed.stdout())).toEqual({ closed: path })
+    expect(existsSync(path)).toBe(false)
+    expect(closed.stderr()).toContain(phase)
+  })
+
   /**
    * @failure 29073 (@cto must 2026-10-13): acceptance says a failed preserve BLOCKS removal. A
    *          non-zero exit that is neither the honest clean ending (3) nor a settled success means
