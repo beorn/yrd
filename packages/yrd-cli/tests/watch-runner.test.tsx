@@ -490,6 +490,50 @@ describe("readRunnerFacts", () => {
       published: { signal: "silent" },
     }
     expect(runnerWord(silent, false)).toBe("silent")
+    // CONTROL 3 (33569): the published claim goes silent on a beat that did not
+    // arrive, and a step longer than the beat window writes no beat while it
+    // works — measured 2026-11-11, a five-minute notify published its claim at
+    // 19:24:16Z and kept appending its journal until 19:29:40Z. A journal newer
+    // than the claim is progress this machine can see, so it outranks the claim.
+    const claimAt = new Date("2026-11-11T19:24:16.068Z")
+    const working: RunnerFacts = {
+      journalDir: "/w/logs",
+      service: { kind: "beating", state: "merging" },
+      published: {
+        signal: "silent",
+        claim: {
+          Runner: "queue-host/42",
+          Started: claimAt.toISOString(),
+          At: claimAt.toISOString(),
+          Beat: "60000ms",
+          State: "merging",
+          Since: claimAt.toISOString(),
+        },
+      },
+      latest: {
+        id: "q-20261111T192307964Z-21b095eb",
+        startedAt: claimAt,
+        lastWriteAt: new Date("2026-11-11T19:29:40.509Z"),
+        alive: true,
+        activeStep: { kind: "step", name: "notify", phase: "merge", start: claimAt },
+      },
+    }
+    expect(runnerWord(working, false)).toBe("merging")
+    // The control that makes the first assertion mean something: the SAME silent
+    // claim with a journal that has not grown past it still reads silent.
+    expect(
+      runnerWord(
+        { ...working, latest: { ...working.latest!, lastWriteAt: new Date("2026-11-11T19:24:16.000Z") } },
+        false,
+      ),
+    ).toBe("silent")
+    // A journal newer than the claim cannot revive a writer that stopped.
+    expect(
+      runnerWord(
+        { ...working, service: { kind: "stopped", graceful: false, why: "no process", cause: "gone" } },
+        false,
+      ),
+    ).toBe("stopped")
   })
 
   /**

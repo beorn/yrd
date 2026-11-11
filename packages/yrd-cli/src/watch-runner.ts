@@ -919,7 +919,9 @@ function running(pid: number): boolean {
  * reading says `unpublished` rather than inventing a phase. The hand-runner
  * case has a journal but no service document, so its own pid supplies local
  * liveness. Journal age never supplies `silent`: a healthy long check writes
- * no new journal boundary until it finishes.
+ * no new journal boundary until it finishes. It does REMOVE one: a journal
+ * appended after the claim proves the round is executing, so that claim's
+ * missed beat reads as a lagging publication, not a dead runner (33569).
  *
  * A round-lock BODY never supplies a word either: the body is a claim,
  * never the flock, so a released round leaves a body naming a live service
@@ -970,6 +972,25 @@ export function activeStepStage(step: ActiveRunnerStep): "provisioning" | "check
   return "provisioning"
 }
 
+/**
+ * Did this machine's newest run journal grow after the published runner claim was
+ * written? The claim is a heartbeat; the journal is an append per step, so a
+ * journal newer than the claim is evidence the round is executing.
+ *
+ * Only the local journal can answer this, which is why it never INVENTS a word
+ * (the ladder's rule) — it only stops the published silence from outranking
+ * measured progress on the machine that can see both. A reader with no journal
+ * (another host) keeps reading the claim's silence exactly as before.
+ */
+function journalAdvancedAfterClaim(facts: RunnerFacts | undefined): boolean {
+  const claimedAt = facts?.published?.claim?.At
+  const journalAt = facts?.latest?.lastWriteAt
+  if (claimedAt === undefined || journalAt === undefined) return false
+  const claim = new Date(claimedAt)
+  if (Number.isNaN(claim.getTime())) return false
+  return journalAt.getTime() > claim.getTime()
+}
+
 export function runnerWord(
   facts: RunnerFacts | undefined,
   underCheck: boolean,
@@ -979,7 +1000,13 @@ export function runnerWord(
   // A dead writer is a measured local stop. Its last runner ref may remain
   // fresh for three beats after the exit, but cannot turn that stop back into work.
   if (facts?.service.kind === "stopped") return "stopped"
-  if (facts?.published?.signal === "silent") return "silent"
+  // A published claim goes silent on a beat that did not arrive, and a step that
+  // runs longer than its beat window (a five-minute notify, a slow merge) writes
+  // no beat while it works. So the claim alone cannot say the runner is dead: when
+  // the local journal was appended AFTER the claim was written, the runner is
+  // measurably alive and the publication is what lagged. Fall through to the
+  // local ladder rather than reporting a working round as silent (33569).
+  if (facts?.published?.signal === "silent" && !journalAdvancedAfterClaim(facts)) return "silent"
   if (facts?.published?.signal === "fresh") {
     const state = facts.published.claim?.State
     if (state !== undefined) return state
