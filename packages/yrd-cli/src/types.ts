@@ -24,11 +24,13 @@
  * exited 2 would be making two claims that disagree, which is the defect this
  * whole bead is about, one layer down.
  *
- * 4 is `yrd env close`'s ACCEPTED-NOT-DONE (22894): the environment is still
- * there and its close has been queued for a context whose same-UID census reads
- * every pid. It is not 0 because a caller chaining on success would otherwise
- * treat a live environment as gone; it is not 2 because nothing was refused.
- * Same class as hab run's `HAB_RUN_REPORT_EXIT = 4`.
+ * 4 is a QUEUE-DELEGATED verb's accepted-not-done: its intent was filed as a
+ * request for the queue's own round (today: checkout release delegation,
+ * 29772). It is not 0 because nothing was carried out here; it is not 2 because
+ * nothing was refused. `yrd env close` is NOT in this class since 31807: a
+ * close this caller cannot certify is exit 0 with `{ queued: true, closed:
+ * false }`, because the queue's round is the certifying authority (@cto
+ * a12b2c1a).
  */
 export type YrdCliExitCode = 0 | 1 | 2 | 3 | 4
 

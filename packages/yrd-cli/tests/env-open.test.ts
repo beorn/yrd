@@ -22,7 +22,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { formatYrdRuntimeVersion } from "../src/version.ts"
 import type { YrdCliIO } from "../src/types.ts"
-import { ENV_CLOSE_QUEUED_EXIT, sharedIdentityMoved } from "../src/env-commands.ts"
+import { sharedIdentityMoved } from "../src/env-commands.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
 process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
@@ -961,21 +961,27 @@ describe("yrd env open prepares the retained environment", () => {
         ])
         const recipe = `${commands[0]!.recipe} && ${commands[1]!.recipe}`
         expect(second.stderr()).toContain(recipe)
-        expect(second.stderr()).toContain("exit 4 means accepted, not closed")
+        expect(second.stderr()).toContain("close must finish before reopening")
+        expect(second.stderr()).toContain("queued, not closed")
         const remote = gitIn(join(dirname(w.work), "remote.git"))
         const refs = await remote(["for-each-ref", "--format=%(refname) %(objectname)"])
         const continued = await command(dirname(w.work), ["/bin/sh", "-c", recipe])
-        expect([0, ENV_CLOSE_QUEUED_EXIT], continued.stderr).toContain(continued.exit)
-        if (continued.exit === ENV_CLOSE_QUEUED_EXIT) {
+        if (continued.stderr.includes("queued, not closed")) {
+          // 31807: a queued close exits 0, so the recipe's `&&` goes on to the reopen, which
+          // refuses because the environment is still there. The pair therefore exits 2, and
+          // nothing was removed.
+          expect(continued.exit, continued.stderr).toBe(2)
           expect(continued.stderr).toContain("queued request")
           expect(continued.stderr).not.toContain("reused local")
           expect((await tree(["rev-parse", "HEAD"])).trim()).toBe(head)
           const close = capture(w.work)
-          expect(await runYrdProcess(["bun", "yrd", "env", "close", bay], close.io), close.stderr()).toBe(0)
+          expect(await runYrdProcess(["bun", "yrd", "env", "close", bay, "--json"], close.io), close.stderr()).toBe(0)
+          expect(JSON.parse(close.stdout())).not.toMatchObject({ queued: true })
           const reopened = capture(w.work)
           expect(await runYrdProcess(["bun", "yrd", ...reopenArgs], reopened.io), reopened.stderr()).toBe(0)
           expect(reopened.stderr()).toContain("reused local")
         } else {
+          expect(continued.exit, continued.stderr).toBe(0)
           expect(continued.stderr).toContain("reused local")
           expect(
             JSON.parse(

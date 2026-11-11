@@ -114,14 +114,17 @@ export type EnvCloseOptions = Readonly<{
 }>
 
 /**
- * The close was ACCEPTED, not done: this caller's same-UID CWD census could not
- * certify it, so a context whose census reads every pid (the queue's own round,
- * ruling 27723) will run the same close lifecycle.
+ * The exit code a verb returns when its intent was FILED for the queue's own
+ * round instead of being carried out here (today: checkout release delegation,
+ * 29772).
  *
- * Distinct from 0 on purpose. The caller asked for a close and the environment
- * still exists, so `yrd env close X && <assumes X gone>` must not proceed on a
- * lie — the exit-0-on-disagreement class. Precedent: hab run's accepted-not-done
- * `HAB_RUN_REPORT_EXIT = 4` (hab-subcommands/run.ts).
+ * `yrd env close` used this code for its own queued outcome until 31807 and no
+ * longer does: a close request this caller cannot certify is ACCEPTED, so it is
+ * exit 0 with a `{ queued: true, closed: false }` receipt and the queue's round
+ * is the certifying authority (@cto a12b2c1a). Only a true refusal (a holder
+ * read inside the environment, or an uncertifiable request after teardown) and
+ * a request this caller cannot write are non-zero. The value stays 4 because
+ * the release paths and their callers read it.
  */
 export const ENV_CLOSE_QUEUED_EXIT = 4
 
@@ -655,7 +658,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
         root,
       )
       throw new Error(
-        `environment ${existing.path} is clean and merged into requested base ${base}; close must finish before reopening; exit 4 means accepted, not closed. If close is queued, wait for completion before reopening. To continue: ${close} && ${reopen}`,
+        `environment ${existing.path} is clean and merged into requested base ${base}; close must finish before reopening. A close this caller cannot certify is queued, not closed: it exits 0 and says so, and the queue's round finishes it — wait for that before reopening. To continue: ${close} && ${reopen}`,
       )
     }
     const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
@@ -2123,6 +2126,12 @@ function uncertified(
  * File the durable close request for a context that can take a complete census
  * (22894). A write this process cannot make is a loud refusal naming the file
  * and the cure — never a silent `queued`, never a removal.
+ *
+ * 31807 (@cto a12b2c1a): a request that WAS written is a success — exit 0 with
+ * `{ queued: true, closed: false }` and the words "queued, not closed", because
+ * the queue's round, not this caller, is the certifying authority. The caller
+ * still cannot claim the environment is gone, so the receipt says exactly what
+ * stands.
  */
 function queueDelegatedClose(
   path: string,
@@ -2164,15 +2173,19 @@ function queueDelegatedClose(
     )
   }
   io.stderr(
-    `yrd: env close ${path}: ${admission.refusal}; this caller cannot certify the close; ` +
-      `queued request ${file} (exit 4 means queued, not closed yet) for the queue's own round, which reads every same-UID pid, unlinks ${file} when consumed, and journals the outcome under ${journalDir}\n`,
+    `yrd: env close ${path}: queued, not closed: ${admission.refusal}; ` +
+      `${admission.census.unreadable} same-UID pid(s) were unreadable here, so this caller cannot certify the close; ` +
+      `queued request ${file} for the queue's own round, which reads every same-UID pid, runs the same close lifecycle, unlinks ${file} when consumed, and journals the outcome under ${journalDir}\n`,
   )
   io.stdout(
     options.json === true
       ? `${JSON.stringify({
-          queued: path,
+          queued: true,
+          closed: false,
+          path,
           reason: "incomplete-census",
           request: file,
+          unreadable: admission.census.unreadable,
           census: admission.census,
           ...(queued.alreadyStood
             ? {
@@ -2186,9 +2199,9 @@ function queueDelegatedClose(
               }
             : {}),
         })}\n`
-      : `queued environment close for ${path} (exit 4 means queued, not closed yet): ${admission.refusal}; a context that can read every same-UID pid will close it, unlink ${file} when consumed, and journal the outcome under ${journalDir}; request ${file}\n`,
+      : `queued, not closed: environment ${path}: ${admission.refusal}; ${admission.census.unreadable} same-UID pid(s) unreadable here; a context that can read every same-UID pid will close it, unlink ${file} when consumed, and journal the outcome under ${journalDir}; request ${file}\n`,
   )
-  return ENV_CLOSE_QUEUED_EXIT
+  return 0
 }
 
 /** A local branch whose path contains `branch`, or sits inside it: git can store only one of the two (25850). */
