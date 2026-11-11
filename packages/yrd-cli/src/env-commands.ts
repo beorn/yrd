@@ -70,7 +70,8 @@ import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 import { censusRetainedStores, retainedCloseLine } from "./retained-census.ts"
 import { formatYrdCommand } from "./command-format.ts"
-import { envOpenRecordFromFlags, writeEnvOpenRecord } from "./env-open-record.ts"
+import { envOpenRecordFromFlags, readEnvOpenRecord, writeEnvOpenRecord } from "./env-open-record.ts"
+import { readEnvIssueState } from "./env-issue-state.ts"
 import {
   admitEnvironmentClose,
   assertNoLiveEnvironmentUse,
@@ -1055,6 +1056,12 @@ interface EnvironmentCloseState {
   readonly dirty: readonly string[]
   readonly discarded: readonly DiscardedCommit[]
   readonly admissibleGitlinks: readonly AdmissibleGitlink[]
+  /**
+   * 33555 (@cto 5a8ec5a1, a5953bad): a detached HEAD whose commits ahead of origin/main are each reachable from some
+   * branch, remote-tracking ref or tag loses nothing on close. `ref` names one ref that holds them, so the close says
+   * where they are instead of closing with no record.
+   */
+  readonly heldOn?: Readonly<{ ref: string; commits: number }>
 }
 
 /**
@@ -1167,11 +1174,36 @@ async function inspectEnvironmentCloseState(
     }
   }
   const discarded: DiscardedCommit[] = []
+  let heldOn: EnvironmentCloseState["heldOn"]
   if (detached) {
     const originMain = await refAt(treeGit, "refs/remotes/origin/main")
     if (originMain !== undefined) {
       const aheadLog = (await treeGit(["log", "--format=%H\t%s", `${originMain}..HEAD`])).trim()
-      if (aheadLog !== "") {
+      // 33555: content ahead is judged against every ref a person keeps work on: branches, remote-tracking refs and
+      // tags. A remote-tracking ref means "on the remote as of the last fetch"; no fetch is done here. Yrd's and
+      // gitomic's private namespaces never count: they are pruned on their own schedule, so a commit only they hold
+      // is not kept. When every ahead commit is held elsewhere, nothing is lost: no dirt, no discard record.
+      const unique =
+        aheadLog === ""
+          ? ""
+          : (await treeGit(["rev-list", "HEAD", "--not", "--branches", "--remotes", "--tags"])).trim()
+      if (aheadLog !== "" && unique === "") {
+        const holder = (
+          await treeGit([
+            "for-each-ref",
+            "--count=1",
+            "--contains=HEAD",
+            "--format=%(refname)",
+            "refs/heads/",
+            "refs/remotes/",
+            "refs/tags/",
+          ])
+        ).trim()
+        if (holder === "") {
+          throw new Error(`${path}: rev-list found HEAD's ahead commits on a ref, for-each-ref names none`)
+        }
+        heldOn = { ref: holder, commits: aheadLog.split("\n").length }
+      } else if (aheadLog !== "") {
         const aheadCommits = aheadLog.split("\n").map((line) => {
           const tab = line.indexOf("\t")
           return tab < 0
@@ -1237,7 +1269,7 @@ async function inspectEnvironmentCloseState(
       }
     }
   }
-  return { dirty, discarded, admissibleGitlinks }
+  return { dirty, discarded, admissibleGitlinks, ...(heldOn === undefined ? {} : { heldOn }) }
 }
 
 /** One status read shared by `env open`'s existing-bay cleanliness check. */
@@ -1256,11 +1288,40 @@ async function requireClean(git: Git, path: string, hint = ""): Promise<void> {
   }
 }
 
+/**
+ * 33555 (@cto 5a8ec5a1, a5953bad, 71c8125b): the extra clause a detached refusal carries when the environment's
+ * recorded issue was dropped, so the generic `git switch -c task/<issue>` route would re-create a branch the drop
+ * removed. It names that route with the real branch, path and head, and the recorded discard that runs after it.
+ * Drop state changes only this wording, never the refusal. A failed issue read adds one clause saying why and
+ * changes nothing else. Read on the refusal path only.
+ */
+async function droppedIssueRoutes(path: string, treeGit: Git, head: string, root: string): Promise<string> {
+  const opening = readEnvOpenRecord((await treeGit(["rev-parse", "--absolute-git-dir"])).trim())
+  const issue = opening.status === "recorded" ? opening.record.issue : undefined
+  if (opening.status !== "recorded" || issue === undefined || issue === "") return ""
+  const state = await readEnvIssueState({ issue, projectRoot: root, cwd: root, timeoutMs: ISSUE_DISPLAY_TIMEOUT_MS })
+  if (state.kind === "keep") return state.unreadable === true ? `; ${state.reason}` : ""
+  if (state.kind !== "dropped") return ""
+  const branch = `task/${opening.record.bay ?? issue}`
+  return (
+    `; issue ${issue} was dropped and its branch is gone. To keep this exact state: ` +
+    `git -C ${shellQuote(path)} switch -c ${branch}, then yrd env close ${shellQuote(path)} --preserve ` +
+    `(re-creates the dropped branch). To discard on purpose, recorded: do that, then ` +
+    `yrd drop ${branch} --local --discard --tip ${head} --reason <why> ` +
+    `(removes the local name only; the branch --preserve pushed stays on origin until deleted there)`
+  )
+}
+
 /** Refuse before running user teardown; a dirty tree is work, not garbage. */
-function requireCleanState(state: EnvironmentCloseState, path: string, detached: boolean): void {
+async function requireCleanState(
+  state: EnvironmentCloseState,
+  path: string,
+  detached: boolean,
+  dropped: () => Promise<string>,
+): Promise<void> {
   if (state.dirty.length > 0) {
     const hint = detached
-      ? " — or attach a branch first (git switch -c task/<issue>, then --preserve) to keep this exact state in a durable ref"
+      ? ` — or attach a branch first (git switch -c task/<issue>, then --preserve) to keep this exact state in a durable ref${await dropped()}`
       : " — or re-run with --preserve to keep this exact state in a durable ref first"
     throw new Error(
       `environment ${path} is dirty; preserve or commit these changes before continuing${hint}:\n${state.dirty.join("\n")}`,
@@ -1740,6 +1801,12 @@ export async function closeEnvironment(
   }
   const detached = registered.branch === undefined
   let closeState = await inspectEnvironmentCloseState(path, treeGit, process, selection, detached)
+  const dropped = (): Promise<string> => droppedIssueRoutes(path, treeGit, commit, root)
+  if (closeState.heldOn !== undefined) {
+    io.stderr(
+      `yrd: env close: the detached HEAD ${commit}'s ${closeState.heldOn.commits} commit(s) ahead of origin/main are all on ${closeState.heldOn.ref} (remote-tracking refs as of the last fetch); nothing to keep, so no ref is written\n`,
+    )
+  }
   // Both saves use the same worktree preserve operation. Keep custody from the
   // first pass even if the second pass reports no changes.
   const preservedRefs: string[] = []
@@ -1756,7 +1823,7 @@ export async function closeEnvironment(
   const preserveSkipped = (): boolean =>
     detached &&
     closeState.dirty.length === 0 &&
-    (closeState.discarded.length > 0 || closeState.admissibleGitlinks.length > 0)
+    (closeState.discarded.length > 0 || closeState.admissibleGitlinks.length > 0 || closeState.heldOn !== undefined)
   const preserve = async (phase: "before teardown" | "after teardown"): Promise<void> => {
     if (preserveSkipped()) {
       io.stderr(`yrd: env close --preserve found nothing to preserve in ${path} ${phase}; the close proceeds\n`)
@@ -1835,13 +1902,13 @@ export async function closeEnvironment(
         )
       } else if (check.kind === "refused") {
         throw new Error(
-          `environment ${path}: --preserve would fail; a real preserve refuses now: ${check.message}${detached ? "; to keep this exact state, attach a branch first (git switch -c task/<issue>, then --preserve)" : ""}; nothing was written and the environment was kept`,
+          `environment ${path}: --preserve would fail; a real preserve refuses now: ${check.message}${detached ? `; to keep this exact state, attach a branch first (git switch -c task/<issue>, then --preserve)${await dropped()}` : ""}; nothing was written and the environment was kept`,
         )
       }
     }
     if (options.dryRun !== true) await preserve("before teardown")
   } else {
-    requireCleanState(closeState, path, detached)
+    await requireCleanState(closeState, path, detached, dropped)
   }
   const config = await readConfig(
     treeGit,
@@ -1976,7 +2043,7 @@ export async function closeEnvironment(
     }
     closeState = await inspectEnvironmentCloseState(path, treeGit, process, selection, detached)
     if (options.preserve !== true) {
-      requireCleanState(closeState, path, detached)
+      await requireCleanState(closeState, path, detached, dropped)
     } else {
       await preserve("after teardown")
     }
