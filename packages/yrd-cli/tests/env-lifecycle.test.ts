@@ -126,6 +126,107 @@ async function openEnvironment(cwd: string, commit: string): Promise<Readonly<{ 
 
 type World = Readonly<{ git: ReturnType<typeof gitIn>; work: string }>
 
+// Accepted #33010 requirement: the existing CLI selects expired stores, defaults to dry run, and diagnoses an
+// incomplete estate declaration before invoking retirement. Census-only tests cannot exercise its flags.
+it("retained drain uses the production CLI in dry-run mode and requires its namespace", async () => {
+  const w = await world(":")
+  // Retirement opens an existing common writer lease; creating one is the writer's job, even in this fixture.
+  mkdirSync(join(w.work, ".git", "yrd-worktree-mutations"), { recursive: true })
+  writeFileSync(join(w.work, ".git", "yrd-worktree-mutations", "writer.lock"), "")
+  const retain = join(dirname(w.work), "retained-modules")
+  mkdirSync(join(retain, "old"), { recursive: true })
+  writeFileSync(
+    join(retain, "old", "manifest.json"),
+    JSON.stringify({
+      retainUntil: "2020-01-01T00:00:00Z",
+      writerLocks: [],
+      notCompared: [],
+    }),
+  )
+  const missing = capture(w.work)
+  expect(
+    await runYrdProcess(
+      [
+        "bun",
+        "yrd",
+        "env",
+        "retained",
+        "--retire-expired",
+        "--retain",
+        retain,
+        "--artifact-dir",
+        join(dirname(w.work), "proof"),
+      ],
+      missing.io,
+    ),
+  ).toBe(2)
+  expect(missing.stderr()).toContain("namespace")
+  const run = capture(w.work)
+  expect(
+    await runYrdProcess(
+      [
+        "bun",
+        "yrd",
+        "env",
+        "retained",
+        "--retire-expired",
+        "--retain",
+        retain,
+        "--namespace",
+        dirname(w.work),
+        "--artifact-dir",
+        join(dirname(w.work), "proof"),
+        "--json",
+      ],
+      run.io,
+    ),
+    run.stderr(),
+  ).toBe(0)
+  expect(JSON.parse(run.stdout())).toMatchObject({
+    apply: false,
+    rows: [{ entry: join(retain, "old"), outcome: "kept" }],
+  })
+  expect(existsSync(join(retain, "old", "manifest.json"))).toBe(true)
+})
+
+// CTO d35ae483: live apply must use the exact granted list, never a fresh census or a silently shortened list.
+// The dry-run integration above cannot prove either apply refusal.
+it.each([
+  { mode: "an unnamed apply", extra: [], diagnostic: "--entry" },
+  {
+    mode: "an oversized explicit list",
+    extra: ["--entry", "one", "--entry", "two", "--limit", "1"],
+    diagnostic: "--limit",
+  },
+])("retained drain refuses $mode before starting a batch", async ({ extra, diagnostic }) => {
+  const w = await world(":")
+  const run = capture(w.work)
+  const proof = join(dirname(w.work), "refused-proof")
+  expect(
+    await runYrdProcess(
+      [
+        "bun",
+        "yrd",
+        "env",
+        "retained",
+        "--retire-expired",
+        "--apply",
+        "--retain",
+        join(dirname(w.work), "retained-modules"),
+        "--namespace",
+        dirname(w.work),
+        "--artifact-dir",
+        proof,
+        ...extra,
+      ],
+      run.io,
+    ),
+  ).toBe(2)
+  expect(run.stderr()).toContain(diagnostic)
+  expect(run.stdout()).toBe("")
+  expect(existsSync(proof)).toBe(false)
+})
+
 it("cleanup provenance excludes inherited history and refuses incomplete or unknown HEAD evidence", async () => {
   const w = await world(":")
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
@@ -2773,6 +2874,10 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
       expect(proofLine).toBeTypeOf("string")
       const proof = proofLine!.slice("retained environment removal proof ".length)
       expect(readFileSync(proof, "utf8")).toContain("vendor/dependency/config")
+      // #33010: the close names how many stores the retention root now holds, never the expired count (too slow).
+      expect(closed.stderr()).toMatch(
+        /\n1 retained store\(s\) under .*retained-modules; yrd env retained counts the expired ones\n/,
+      )
     }
   })
 

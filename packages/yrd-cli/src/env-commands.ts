@@ -68,6 +68,7 @@ import { runIssuesVerb } from "./issues/run.ts"
 import { originHead } from "./queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
+import { censusRetainedStores, retainedCloseLine } from "./retained-census.ts"
 import { formatYrdCommand } from "./command-format.ts"
 import { envOpenRecordFromFlags, writeEnvOpenRecord } from "./env-open-record.ts"
 import {
@@ -867,6 +868,133 @@ export async function environmentInventory(
       ...(branch === undefined ? {} : { branch }),
     }))
   return { roots, rows }
+}
+
+export type EnvRetainedOptions = Readonly<{
+  json?: boolean
+  retain?: string
+  retireExpired?: boolean
+  apply?: boolean
+  limit?: number
+  namespace?: readonly string[]
+  artifactDir?: string
+  entry?: readonly string[]
+}>
+
+// The approved batch scan measured 469-665 s; this caller alone needs room beyond gitIn's normal 300 s ceiling.
+const RETAINED_BATCH_TIMEOUT_MS = 1_200_000
+
+/**
+ * `yrd env retained` — the census of the stores `env close` retained (#33010): live, past their own retainUntil,
+ * legacy, malformed and manifest-less, read from manifests with no size walk. --retire-expired selects a batch;
+ * it is a dry run unless --apply is explicit. The existing Git transport owns frozen-binary selection and killing.
+ */
+export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+  if (options.apply === true && options.retireExpired !== true) {
+    throw new Error("--apply requires --retire-expired; no retained stores were touched")
+  }
+  if (options.apply === true && !options.entry?.length) {
+    throw new Error(
+      "--apply requires explicit --entry names from the granted dry-run list; no retained stores were touched",
+    )
+  }
+  const limit = options.limit ?? 20
+  if (options.retireExpired === true) {
+    if (!Number.isInteger(limit) || limit < 1) throw new Error("--limit must be a positive whole number")
+    if (options.entry !== undefined && options.entry.length > limit) {
+      throw new Error(
+        `${options.entry.length} explicit --entry names exceed --limit ${limit}; the granted list cannot be shortened; no retained stores were touched`,
+      )
+    }
+  }
+  if (options.retireExpired === true && (!options.namespace?.length || !options.artifactDir)) {
+    throw new Error(
+      "--retire-expired requires the complete --namespace <managed-root> declaration and --artifact-dir <external-evidence-dir>; no retained stores were touched",
+    )
+  }
+  const root = requireRepository(io)
+  const selection = await resolveGitSelection(root)
+  await using process = createProcess({ cwd: root })
+  const git = gitIn(root, process, selection)
+  const retentionRoot =
+    options.retain === undefined ? join(await workdirOf(git), "retained-modules") : resolve(io.cwd, options.retain)
+  const census = censusRetainedStores(retentionRoot, Date.now())
+  if (options.retireExpired === true) {
+    const names = options.entry?.length
+      ? [...options.entry]
+      : census.state === "read"
+        ? [...census.expiredEntries].sort().slice(0, limit)
+        : []
+    for (const name of names) {
+      if (basename(name) !== name || name === "." || name === "..") {
+        throw new Error(`--entry ${name} must name one direct child of ${retentionRoot}`)
+      }
+    }
+    const entries = names.map((name) => join(retentionRoot, name))
+    if (entries.length === 0) {
+      const reason = `no selected expired stores with writerLocks and notCompared under ${retentionRoot}; legacy, missing-field, malformed and manifest-less stores excluded`
+      io.stdout(
+        options.json === true
+          ? `${JSON.stringify({ root: retentionRoot, apply: options.apply === true, rows: [], reason, census })}\n`
+          : `${reason}\n`,
+      )
+      return 0
+    }
+    const batch = gitIn(root, process, selection, {
+      timeoutMs: RETAINED_BATCH_TIMEOUT_MS,
+      rootInvocationTimeoutMs: RETAINED_BATCH_TIMEOUT_MS,
+    })
+    const args = [
+      "super",
+      ...(options.json === true ? ["--json"] : []),
+      "worktree",
+      "retention",
+      "retire-batch",
+      "--root",
+      retentionRoot,
+      "--common",
+      (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim(),
+      ...(options.namespace ?? []).flatMap((path) => ["--namespace", resolve(io.cwd, path)]),
+      "--artifact-dir",
+      resolve(io.cwd, options.artifactDir as string),
+      ...(options.apply === true ? ["--apply"] : []),
+      ...entries,
+    ]
+    try {
+      io.stdout(await batch(args))
+      const stderr = batch.lastInvocation?.result?.stderr
+      if (stderr) io.stderr(stderr)
+      return 0
+    } catch (error) {
+      const result = batch.lastInvocation?.result
+      if (result?.stdout) io.stdout(result.stdout)
+      if (result?.stderr) io.stderr(result.stderr)
+      io.stderr(
+        result?.timedOut === true
+          ? `retained batch under ${retentionRoot}: batch exceeded 1200 s; child killed; inspect its evidence before retrying\n`
+          : `retained batch under ${retentionRoot}: ${error instanceof Error ? error.message : String(error)}\n`,
+      )
+      return 2
+    }
+  }
+  if (options.json === true) {
+    io.stdout(`${JSON.stringify(census)}\n`)
+    return 0
+  }
+  if (census.state === "absent") {
+    io.stdout(`no retained stores: ${retentionRoot} does not exist (no environment has closed into it)\n`)
+    return 0
+  }
+  io.stdout(
+    `${census.total} retained store(s) under ${retentionRoot}: ${census.live} live, ${census.expired} past retainUntil ` +
+      `(${census.expiredLegacy} with a legacy manifest${census.oldestExpired === null ? "" : `, oldest ${census.oldestExpired}`}), ` +
+      `${census.expiredMissingNotCompared.length} expired without notCompared, ` +
+      `${census.malformed.length} malformed, ${census.noManifest.length} without a manifest\n`,
+  )
+  for (const name of census.expiredMissingNotCompared) io.stdout(`kept missing notCompared: ${name}\n`)
+  for (const entry of census.malformed) io.stdout(`malformed: ${entry.name}: ${entry.reason}\n`)
+  for (const name of census.noManifest) io.stdout(`no manifest: ${name}\n`)
+  return 0
 }
 
 /** `yrd env list` — the environments this repository holds, as git holds them. */
@@ -1934,6 +2062,7 @@ export async function closeEnvironment(
     }
     removalProof = removed.proof as WorktreeRemovalProof
     io.stderr(`retained environment removal proof ${removalProof.manifest}\n`)
+    io.stderr(`${retainedCloseLine(retain)}\n`)
   } else {
     // No submodules recorded at this commit, so there is no gitlink for
     // git-super to materialize on the way out. The helper re-asks before it

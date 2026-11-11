@@ -47,7 +47,7 @@ import {
   yrdQueueRunnerDeclarations,
 } from "@yrd/queue-core"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
-import { closeEnvironment, listEnvironments, openEnvironment } from "./env-commands.ts"
+import { closeEnvironment, listEnvironments, openEnvironment, retainedEnvironments } from "./env-commands.ts"
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { repositoryHere, unaddressedRepository } from "./declaration.ts"
@@ -1718,6 +1718,43 @@ function buildProgram(
     .description("the environments this repository holds")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await listEnvironments(options as Parameters<typeof listEnvironments>[0], io)))
+  env_
+    .command("retained")
+    .description(
+      "count the stores env close retained: live, past their own retainUntil, legacy, malformed and without a " +
+        "manifest, read from manifests only; --retire-expired plans a batch, --apply deletes after re-verification",
+    )
+    .option(
+      "--retain <directory>",
+      "durable GitSuper retention directory; defaults to the workdir retained-modules directory",
+    )
+    .option("--json", "emit stable JSON")
+    .option("--retire-expired", "select expired non-legacy stores for a dry-run batch; no deletion by default")
+    .option(
+      "--apply",
+      "apply the granted retirement batch after held re-verification; requires --retire-expired and explicit --entry names",
+    )
+    .option(
+      "--limit <count>",
+      "select at most this many entries (default 20; first live grant must be at most 20)",
+      Number,
+    )
+    .option(
+      "--namespace <path>",
+      "complete managed estate root; repeat for every root",
+      (value: string, previous: string[]) => [...previous, value],
+      [],
+    )
+    .option("--artifact-dir <directory>", "external caller-owned directory for retirement evidence")
+    .option(
+      "--entry <name>",
+      "select the exact direct-child name from a reviewed dry-run list; repeat for that list",
+      (value: string, previous: string[]) => [...previous, value],
+      [],
+    )
+    .action(async (options) =>
+      setExit(await retainedEnvironments(options as Parameters<typeof retainedEnvironments>[0], io)),
+    )
 
   env_
     .command("close <path>")
