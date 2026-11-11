@@ -56,7 +56,10 @@ export function censusRetainedStores(root: string, now: number): RetainedCensus 
     try {
       manifest = JSON.parse(readFileSync(path, "utf8"))
     } catch (error) {
-      malformed.push({ name, reason: `manifest is not JSON: ${error instanceof Error ? error.message : String(error)}` })
+      malformed.push({
+        name,
+        reason: `manifest is not JSON: ${error instanceof Error ? error.message : String(error)}`,
+      })
       continue
     }
     const record = typeof manifest === "object" && manifest !== null ? (manifest as Record<string, unknown>) : {}
@@ -66,7 +69,9 @@ export function censusRetainedStores(root: string, now: number): RetainedCensus 
       malformed.push({
         name,
         reason:
-          retainUntil === undefined ? "manifest records no retainUntil" : `retainUntil ${JSON.stringify(retainUntil)} is not a date`,
+          retainUntil === undefined
+            ? "manifest records no retainUntil"
+            : `retainUntil ${JSON.stringify(retainUntil)} is not a date`,
       })
       continue
     }

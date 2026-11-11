@@ -21,10 +21,7 @@ const NOW = Date.parse("2026-11-10T12:00:00.000Z")
 function store(root: string, name: string, manifest: unknown): void {
   mkdirSync(join(root, name, "modules"), { recursive: true })
   if (manifest !== undefined) {
-    writeFileSync(
-      join(root, name, "manifest.json"),
-      typeof manifest === "string" ? manifest : JSON.stringify(manifest),
-    )
+    writeFileSync(join(root, name, "manifest.json"), typeof manifest === "string" ? manifest : JSON.stringify(manifest))
   }
 }
 
