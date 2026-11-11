@@ -1,4 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
+import { lstat, readdir } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
@@ -58,6 +59,7 @@ import {
   type StoredReleaseRequest,
 } from "./env-close-requests.ts"
 import { environmentProvenance } from "./env-cleanup-provenance.ts"
+import { readEnvIssueState, type EnvIssueState } from "./env-issue-state.ts"
 import {
   mergedCloseKeepReason,
   readEnvOpenRecord,
@@ -106,6 +108,13 @@ export type ReleaseCheckoutRound = (request: StoredReleaseRequest) => Promise<
 >
 // Covers opening through the first commit, including time waiting for review.
 const FRESH_ENVIRONMENT_GRACE_MS = 24 * 60 * 60 * 1000
+/**
+ * 33170: the wall time one round may spend reading recorded issues' states. A read costs about 1.5 s against the
+ * hh vault (measured 2026-11-10), and a round inspects at most SWEEP_INSPECTION_BATCH rows.
+ */
+const ISSUE_READ_BUDGET_MS = 5_000
+/** 33170: how long the size read before a removal may take; past it the size is "unknown". */
+const SIZE_READ_TIMEOUT_MS = 30_000
 
 /**
  * Resume state for the sweep. The cursor is a HINT read from the run's own
@@ -1123,8 +1132,20 @@ async function proveEnvironmentRemovable(input: {
   originBranch: string
   treeGit: ReturnType<typeof gitIn>
   ancestor: (root: string, head: string, target: string) => Promise<void>
+  /**
+   * 33170 (disk rule 3): the one route that releases a head NOT on the target — its recorded issue closed or
+   * dropped, and every root commit published. It runs only after every other check below has passed, so the
+   * issue read is spent on candidates nothing else keeps; absent, an off-target head is kept as before.
+   */
+  closedIssue?: (offTarget: unknown) => Promise<void>
 }): Promise<void> {
-  await input.ancestor(input.path, input.head, input.target)
+  let offTarget: { cause: unknown } | undefined
+  try {
+    await input.ancestor(input.path, input.head, input.target)
+  } catch (cause) {
+    if (input.closedIssue === undefined) throw cause
+    offTarget = { cause }
+  }
   // A private store is reported by its own class and retire route (#27120 AC2). Removal inspection refuses an empty
   // checkout whose store survives as an unknown submodule state (#30563), so the private-store question goes first.
   const adminDir = (await input.treeGit.at(input.path)(["rev-parse", "--absolute-git-dir"])).trim()
@@ -1150,6 +1171,71 @@ async function proveEnvironmentRemovable(input: {
       throw new Error(`component ${component.root}: origin ${remoteRef} publication unproven: ${reasonText(cause)}`, {
         cause,
       })
+    }
+  }
+  if (offTarget !== undefined) await input.closedIssue?.(offTarget.cause)
+}
+
+/**
+ * 33170: the disk an environment holds, read just before its removal so the closed row names what it freed. The
+ * read never fails the close or the round: an error or a timeout reads "unknown", never 0 (@cto 1a7a3153
+ * condition 6).
+ */
+async function environmentBytes(path: string): Promise<number | "unknown"> {
+  const deadline = Date.now() + SIZE_READ_TIMEOUT_MS
+  try {
+    let bytes = 0
+    const pending = [path]
+    for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+      if (Date.now() > deadline) return "unknown"
+      const stat = await lstat(next)
+      // Allocated blocks, as du counts them; a symlink is its own small entry, never followed.
+      bytes += stat.blocks * 512
+      if (!stat.isDirectory()) continue
+      for (const entry of await readdir(next)) pending.push(join(next, entry))
+    }
+    return bytes
+  } catch {
+    // silent-fallback-allow: a size is a report, never a gate; "unknown" names that it was not read
+    return "unknown"
+  }
+}
+
+/**
+ * 33170 @cto 1a7a3153 condition 2: an off-target head is removable only when the root commit at HEAD and the tip of
+ * its local branch are each contained in what `origin` publishes now — its target branch or the same-named branch —
+ * read from the remote, never from a remote-tracking ref that may be stale. Removing the environment never deletes
+ * the branch (closeEnvironment removes the worktree only), so a reopened issue finds `task/<name>` on the remote
+ * and `yrd env open --issue <ref> --bay <name>` adopts it into a new environment.
+ */
+async function proveRootPublished(
+  git: ReturnType<typeof gitIn>,
+  input: Readonly<{ head: string; branch: string | undefined; targetBranch: string }>,
+): Promise<void> {
+  const refs = [`refs/heads/${input.targetBranch}`]
+  if (input.branch !== undefined && input.branch !== "") refs.push(`refs/heads/${input.branch}`)
+  const published: string[] = []
+  for (const ref of refs) {
+    const commit = await readRemoteCommit(git, "origin", ref)
+    if (commit !== undefined) published.push(commit)
+  }
+  const tips = [{ name: "HEAD", commit: input.head }]
+  if (input.branch !== undefined && input.branch !== "") {
+    const local = await refAt(git, `refs/heads/${input.branch}`)
+    if (local !== undefined) tips.push({ name: `local ${input.branch}`, commit: local })
+  }
+  for (const tip of tips) {
+    let contained = false
+    for (const commit of published) {
+      if (await isAncestor(git, tip.commit, commit)) {
+        contained = true
+        break
+      }
+    }
+    if (!contained) {
+      throw new Error(
+        `${tip.name} ${tip.commit} is on no remote (origin ${refs.join(", ")} does not contain it); kept with its commits`,
+      )
     }
   }
 }
@@ -1224,7 +1310,7 @@ async function cleanupEnvironments(
     path: string,
     result: string,
     why: string,
-    timing?: Readonly<{ started_at: string; elapsed_ms: number }>,
+    timing?: Readonly<{ started_at: string; elapsed_ms: number; bytes?: number | "unknown"; issue?: string }>,
   ): void => {
     // A kept folder is written once per CHANGE of reason, never once per round (#29679 row 5, log-retention
     // ruling "Not archival"): a live registry reprinted ~50 unchanged keeps every 2 minutes, which is writer
@@ -1535,6 +1621,33 @@ async function cleanupEnvironments(
   closed += requests.closed
   const lookups = 0
   const startedAt = Date.now()
+  // 33170 @cto 1a7a3153: one issue read per distinct issue per round, only for a candidate every other keep has
+  // passed, inside a stated budget; a candidate past the budget is kept and read on a later round.
+  const issueReads = new Map<string, Promise<EnvIssueState>>()
+  let issueReadMs = 0
+  const issueStateOf = (issue: string): Promise<EnvIssueState> => {
+    const cached = issueReads.get(issue)
+    if (cached !== undefined) return cached
+    const remaining = ISSUE_READ_BUDGET_MS - issueReadMs
+    if (remaining <= 0) {
+      return Promise.resolve({
+        kind: "keep",
+        reason: `issue read budget of ${ISSUE_READ_BUDGET_MS}ms spent this round; read on a later round`,
+      })
+    }
+    const readStartedAt = Date.now()
+    const pending = readEnvIssueState({
+      issue,
+      projectRoot: registry,
+      cwd: registry,
+      ...(input.env === undefined ? {} : { env: input.env }),
+      timeoutMs: remaining,
+    }).finally(() => {
+      issueReadMs += Date.now() - readStartedAt
+    })
+    issueReads.set(issue, pending)
+    return pending
+  }
   // Resume where the last round ran out of budget, so a row that keeps failing
   // a cheap check cannot starve the tail of the registry.
   const offset = inventory.rows.length === 0 ? 0 : progress.cursor % inventory.rows.length
@@ -1571,6 +1684,8 @@ async function cleanupEnvironments(
       // A corrupt change chain still refuses the close. This is a live read, not the
       // deleted custody-refusal cache: a thrown history keeps the environment.
       if (row.branch !== undefined && row.branch !== "") await historyOf(row.branch)
+      const recordedIssue = opening.status === "recorded" ? opening.record.issue : undefined
+      let released: Readonly<{ issue: string; state: "closed" | "dropped" }> | undefined
       await proveEnvironmentRemovable({
         path: row.path,
         head,
@@ -1580,6 +1695,19 @@ async function cleanupEnvironments(
         originBranch: config.target.branch,
         treeGit,
         ancestor,
+        closedIssue: async (offTarget) => {
+          if (recordedIssue === undefined || recordedIssue === "") {
+            throw new Error(`${reasonText(offTarget)}; its open record names no issue, so no issue close releases it`)
+          }
+          const state = await issueStateOf(recordedIssue)
+          if (state.kind === "keep") throw new Error(`${reasonText(offTarget)}; ${state.reason}`)
+          await proveRootPublished(treeGit.at(row.path), {
+            head,
+            branch: row.branch,
+            targetBranch: config.target.branch,
+          })
+          released = { issue: recordedIssue, state: state.kind }
+        },
       })
       // A kept or refused close spends this route's allowance too.
       if (sweepAttempted >= CLOSE_ATTEMPTS_PER_ROUTE) {
@@ -1601,6 +1729,8 @@ async function cleanupEnvironments(
       if (finalProtection !== undefined) throw new Error(finalProtection)
       let output = ""
       let closedProof: WorktreeRemovalProof | undefined
+      // Read before removal; a size that cannot be read is "unknown", never 0, and never fails the close.
+      const bytes = await environmentBytes(row.path)
       const closeStartedAt = Date.now()
       const timing = { started_at: new Date(closeStartedAt).toISOString(), elapsed_ms: 0 }
       closeTiming = timing
@@ -1651,8 +1781,10 @@ async function cleanupEnvironments(
         record(
           row.path,
           "closed",
-          `native retained removal proof accepted${failed === undefined ? "" : `; branch retirement failed: ${failed.join("; ")}`}`,
-          timing,
+          `native retained removal proof accepted${
+            released === undefined ? "" : `; head not on target, released by issue ${released.issue} ${released.state}`
+          }${failed === undefined ? "" : `; branch retirement failed: ${failed.join("; ")}`}`,
+          { ...timing, bytes, ...(released === undefined ? {} : { issue: released.issue }) },
         )
         // Telling never gates the close (29720): the close is already
         // committed, so a telling failure is named here, at the source, and
