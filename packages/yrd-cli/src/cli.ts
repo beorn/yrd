@@ -1729,7 +1729,10 @@ function buildProgram(
     )
     .option("--json", "emit stable JSON")
     .option("--retire-expired", "select expired non-legacy stores for a dry-run batch; no deletion by default")
-    .option("--apply", "apply the granted retirement batch after held re-verification; requires --retire-expired")
+    .option(
+      "--apply",
+      "apply the granted retirement batch after held re-verification; requires --retire-expired and explicit --entry names",
+    )
     .option(
       "--limit <count>",
       "select at most this many entries (default 20; first live grant must be at most 20)",

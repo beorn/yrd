@@ -38,6 +38,8 @@ test("counts live, expired, legacy, malformed and manifest-less stores by name, 
   store(root, "bad-deadline", { retainUntil: "soon", writerLocks: [] })
   store(root, "torn", "{")
   store(root, "no-manifest", undefined)
+  // A partial retirement leaves module files but no manifest; it must stay outside expiredEntries.
+  writeFileSync(join(root, "no-manifest", "modules", "leftover-object"), "interrupted removal\n")
 
   const census = censusRetainedStores(root, NOW)
 
@@ -57,6 +59,7 @@ test("counts live, expired, legacy, malformed and manifest-less stores by name, 
     "torn",
   ])
   expect(census.state === "read" && census.noManifest).toEqual(["no-manifest"])
+  expect(census.state === "read" && [...census.expiredEntries].sort()).toEqual(["expired-a", "expired-b"])
 })
 
 // @cto dc77f630: env close prints the census line only. A full census parses every manifest (9.7 s on the live

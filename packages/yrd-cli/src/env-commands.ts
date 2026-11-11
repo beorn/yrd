@@ -893,6 +893,20 @@ export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdC
   if (options.apply === true && options.retireExpired !== true) {
     throw new Error("--apply requires --retire-expired; no retained stores were touched")
   }
+  if (options.apply === true && !options.entry?.length) {
+    throw new Error(
+      "--apply requires explicit --entry names from the granted dry-run list; no retained stores were touched",
+    )
+  }
+  const limit = options.limit ?? 20
+  if (options.retireExpired === true) {
+    if (!Number.isInteger(limit) || limit < 1) throw new Error("--limit must be a positive whole number")
+    if (options.entry !== undefined && options.entry.length > limit) {
+      throw new Error(
+        `${options.entry.length} explicit --entry names exceed --limit ${limit}; the granted list cannot be shortened; no retained stores were touched`,
+      )
+    }
+  }
   if (options.retireExpired === true && (!options.namespace?.length || !options.artifactDir)) {
     throw new Error(
       "--retire-expired requires the complete --namespace <managed-root> declaration and --artifact-dir <external-evidence-dir>; no retained stores were touched",
@@ -906,19 +920,17 @@ export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdC
     options.retain === undefined ? join(await workdirOf(git), "retained-modules") : resolve(io.cwd, options.retain)
   const census = censusRetainedStores(retentionRoot, Date.now())
   if (options.retireExpired === true) {
-    const limit = options.limit ?? 20
-    if (!Number.isInteger(limit) || limit < 1) throw new Error("--limit must be a positive whole number")
     const names = options.entry?.length
       ? [...options.entry]
       : census.state === "read"
-        ? [...census.expiredEntries].sort()
+        ? [...census.expiredEntries].sort().slice(0, limit)
         : []
     for (const name of names) {
       if (basename(name) !== name || name === "." || name === "..") {
         throw new Error(`--entry ${name} must name one direct child of ${retentionRoot}`)
       }
     }
-    const entries = names.slice(0, limit).map((name) => join(retentionRoot, name))
+    const entries = names.map((name) => join(retentionRoot, name))
     if (entries.length === 0) {
       const reason = `no selected expired stores with writerLocks and notCompared under ${retentionRoot}; legacy, missing-field, malformed and manifest-less stores excluded`
       io.stdout(

@@ -189,6 +189,44 @@ it("retained drain uses the production CLI in dry-run mode and requires its name
   expect(existsSync(join(retain, "old", "manifest.json"))).toBe(true)
 })
 
+// CTO d35ae483: live apply must use the exact granted list, never a fresh census or a silently shortened list.
+// The dry-run integration above cannot prove either apply refusal.
+it.each([
+  { mode: "an unnamed apply", extra: [], diagnostic: "--entry" },
+  {
+    mode: "an oversized explicit list",
+    extra: ["--entry", "one", "--entry", "two", "--limit", "1"],
+    diagnostic: "--limit",
+  },
+])("retained drain refuses $mode before starting a batch", async ({ extra, diagnostic }) => {
+  const w = await world(":")
+  const run = capture(w.work)
+  const proof = join(dirname(w.work), "refused-proof")
+  expect(
+    await runYrdProcess(
+      [
+        "bun",
+        "yrd",
+        "env",
+        "retained",
+        "--retire-expired",
+        "--apply",
+        "--retain",
+        join(dirname(w.work), "retained-modules"),
+        "--namespace",
+        dirname(w.work),
+        "--artifact-dir",
+        proof,
+        ...extra,
+      ],
+      run.io,
+    ),
+  ).toBe(2)
+  expect(run.stderr()).toContain(diagnostic)
+  expect(run.stdout()).toBe("")
+  expect(existsSync(proof)).toBe(false)
+})
+
 it("cleanup provenance excludes inherited history and refuses incomplete or unknown HEAD evidence", async () => {
   const w = await world(":")
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
