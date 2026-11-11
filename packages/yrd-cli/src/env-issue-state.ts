@@ -7,7 +7,7 @@ import { runIssuesVerb } from "./issues/run.ts"
  */
 export type EnvIssueState =
   | Readonly<{ kind: "closed" | "dropped"; issue: string }>
-  | Readonly<{ kind: "keep"; reason: string }>
+  | Readonly<{ kind: "keep"; reason: string; unreadable?: true }>
 
 /**
  * The state is read through the project's own issues interface (`issues.yml` `view`), the same provider every
@@ -27,7 +27,7 @@ export async function readEnvIssueState(
       ...(input.env === undefined ? {} : { env: input.env }),
       stderr: () => {},
     })
-    if (!outcome.ok) return { kind: "keep", reason: `issue ${named} state unreadable: ${outcome.message}` }
+    if (!outcome.ok) return { kind: "keep", reason: `issue ${named} state unreadable: ${outcome.message}`, unreadable: true }
     const result: unknown = outcome.envelope.result
     const status =
       typeof result === "object" && result !== null && "status" in result
@@ -35,13 +35,14 @@ export async function readEnvIssueState(
         : undefined
     if (status === "closed" || status === "dropped") return { kind: status, issue: input.issue }
     if (typeof status !== "string") {
-      return { kind: "keep", reason: `issue ${named} has no status in its provider answer` }
+      return { kind: "keep", reason: `issue ${named} has no status in its provider answer`, unreadable: true }
     }
     return { kind: "keep", reason: `issue ${named} is ${status}, not closed or dropped` }
   } catch (cause) {
     return {
       kind: "keep",
       reason: `issue ${named} state unreadable: ${cause instanceof Error ? cause.message : String(cause)}`,
+      unreadable: true,
     }
   }
 }

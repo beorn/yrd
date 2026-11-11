@@ -40,12 +40,12 @@ it.each(["open", "wip", "blocked", "draft"])("%s keeps, naming the status", asyn
 
 it("an answer without a status keeps", async () => {
   answer({ title: "no status" })
-  expect(await read()).toEqual({ kind: "keep", reason: `issue "${ISSUE}" has no status in its provider answer` })
+  expect(await read()).toEqual({ kind: "keep", reason: `issue "${ISSUE}" has no status in its provider answer`, unreadable: true })
 })
 
 it("a provider failure (an unknown id) keeps with the provider's message", async () => {
   vi.mocked(runIssuesVerb).mockResolvedValue({ ok: false, message: "no issue matches the key" } as never)
-  expect(await read()).toEqual({ kind: "keep", reason: `issue "${ISSUE}" state unreadable: no issue matches the key` })
+  expect(await read()).toEqual({ kind: "keep", reason: `issue "${ISSUE}" state unreadable: no issue matches the key`, unreadable: true })
 })
 
 it("a reader that throws keeps with its error", async () => {
@@ -56,5 +56,5 @@ it("a reader that throws keeps with its error", async () => {
       throw new Error("spawn km ENOENT")
     },
   } as never)
-  expect(await read()).toEqual({ kind: "keep", reason: `issue "${ISSUE}" state unreadable: spawn km ENOENT` })
+  expect(await read()).toEqual({ kind: "keep", reason: `issue "${ISSUE}" state unreadable: spawn km ENOENT`, unreadable: true })
 })

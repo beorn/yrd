@@ -2761,6 +2761,137 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
   })
 
   /**
+   * @failure 33555 (@cto 5a8ec5a1): a detached HEAD whose content commit ahead of origin/main is already on another
+   *          branch loses nothing on close, yet close judged it against origin/main alone and refused, so the owner
+   *          had to re-create a dropped issue's branch to close. Close proceeds, writes no ref, and names the ref.
+   * @level   l2 (real bare remote, real worktree close)
+   * @consumer every seat closing a detached environment whose commits another branch already carries
+   */
+  it.each([false, true])(
+    "closes a detached HEAD whose content ahead is held on another branch, writing no ref (preserve %s)",
+    async (preserve) => {
+      const w = await world(":")
+      const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+      const { path } = await openEnvironment(w.work, selected)
+      const envGit = gitIn(path)
+      writeFileSync(join(path, "ahead.txt"), "content another branch already holds\n")
+      await envGit(["add", "ahead.txt"])
+      await envGit(["-c", "user.email=env@yrd.test", "-c", "user.name=yrd", "commit", "--quiet", "-m", "held"])
+      const head = (await envGit(["rev-parse", "HEAD"])).trim()
+      await w.git(["branch", "keeper", head])
+      const refsBefore = (await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/yrd/"])).trim()
+
+      const closed = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "close", path, ...(preserve ? ["--preserve"] : []), "--json"], closed.io),
+        closed.stderr(),
+      ).toBe(0)
+      expect(existsSync(path)).toBe(false)
+      expect(JSON.parse(closed.stdout())).toEqual({ closed: path })
+      expect(closed.stderr()).toContain("commit(s) ahead of origin/main are all on refs/heads/keeper")
+      expect((await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/yrd/"])).trim()).toBe(
+        refsBefore,
+      )
+    },
+  )
+
+  /**
+   * @failure 33555 (@cto 5a8ec5a1, 71c8125b): a detached HEAD whose content commit is on no ref refuses, and for a
+   *          dropped issue the generic `git switch -c task/<issue>` route re-creates a branch the drop removed with
+   *          no word about it, and names no recorded discard. The refusal now names both with the real branch, path
+   *          and head, and this row runs every printed route to its end: keep and close, then the recorded drop.
+   * @level   l2 (real bare remote, real issues provider subprocess, real worktree close and drop)
+   * @consumer the owner of a dropped issue's leftover detached environment
+   */
+  it("names a dropped issue's keep and recorded-discard routes with real names, and both run to the end", async () => {
+    const w = await world(":")
+    const provider = join(import.meta.dirname, "support", "fake-issues-provider.ts")
+    writeFileSync(
+      join(w.work, "issues.yml"),
+      `view: ${JSON.stringify([process.execPath, provider, "reply", JSON.stringify({ status: "dropped" })])}\n`,
+    )
+    await w.git(["add", "issues.yml"])
+    await w.git(["commit", "--quiet", "-m", "declare the issues interface"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    await birthEventQueue(w.work, "main", { localStore: false })
+    installStubWorktreePreserve(w.work)
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "gone", "--issue", "33555-gone", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const path = (JSON.parse(opened.stdout()) as { path: string }).path
+    const envGit = gitIn(path)
+    await envGit(["switch", "--quiet", "--detach"])
+    await w.git(["branch", "-D", "task/gone"])
+    writeFileSync(join(path, "ahead.txt"), "work no ref holds\n")
+    await envGit(["add", "ahead.txt"])
+    await envGit(["-c", "user.email=env@yrd.test", "-c", "user.name=yrd", "commit", "--quiet", "-m", "unique work"])
+    const head = (await envGit(["rev-parse", "HEAD"])).trim()
+
+    const refused = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
+    expect(existsSync(path)).toBe(true)
+    const keep = `git -C '${path}' switch -c task/gone, then yrd env close '${path}' --preserve`
+    const discard = `yrd drop task/gone --local --discard --tip ${head} --reason <why>`
+    expect(refused.stderr()).toContain("issue 33555-gone was dropped and its branch is gone")
+    expect(refused.stderr()).toContain(keep)
+    expect(refused.stderr()).toContain(discard)
+
+    // The keep route, as printed.
+    await envGit(["switch", "--quiet", "-c", "task/gone"])
+    const kept = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--preserve", "--json"], kept.io), kept.stderr()).toBe(0)
+    expect(existsSync(path)).toBe(false)
+    expect((await w.git(["rev-parse", "refs/heads/task/gone"])).trim()).toBe(head)
+
+    // Then the recorded discard, as printed, with no environment holding the tip.
+    const dropped = capture(w.work)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "drop", "task/gone", "--local", "--discard", "--tip", head, "--reason", "dropped issue leftover"],
+        dropped.io,
+      ),
+      dropped.stderr(),
+    ).toBe(0)
+    expect((await w.git(["for-each-ref", "refs/heads/task/gone"])).trim()).toBe("")
+  }, 60_000)
+
+  /**
+   * @failure 33555 (@cto a5953bad Q3): reading the issue state on the refusal path must never change or hide the
+   *          refusal. A provider that fails leaves today's refusal unchanged, plus one clause saying why the state
+   *          could not be read.
+   * @level   l2 (real bare remote, real issues provider subprocess that fails)
+   * @consumer the owner of a detached environment whose project's issues provider is down
+   */
+  it("keeps today's detached refusal and names an unreadable issue state when the provider fails", async () => {
+    const w = await world(":")
+    const provider = join(import.meta.dirname, "support", "fake-issues-provider.ts")
+    writeFileSync(join(w.work, "issues.yml"), `view: ${JSON.stringify([process.execPath, provider, "exit3"])}\n`)
+    await w.git(["add", "issues.yml"])
+    await w.git(["commit", "--quiet", "-m", "declare the issues interface"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "down", "--issue", "33555-down", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const path = (JSON.parse(opened.stdout()) as { path: string }).path
+    const envGit = gitIn(path)
+    await envGit(["switch", "--quiet", "--detach"])
+    writeFileSync(join(path, "ahead.txt"), "work no ref holds\n")
+    await envGit(["add", "ahead.txt"])
+    await envGit(["-c", "user.email=env@yrd.test", "-c", "user.name=yrd", "commit", "--quiet", "-m", "unique work"])
+
+    const refused = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
+    expect(existsSync(path)).toBe(true)
+    expect(refused.stderr()).toContain("git switch -c task/<issue>, then --preserve")
+    expect(refused.stderr()).toContain('issue "33555-down" state unreadable')
+    expect(refused.stderr()).not.toContain("was dropped")
+  }, 60_000)
+
+  /**
    * @failure 32124 (@cto ruling 3cb041cd): `yrd env close` treated a clean submodule gitlink whose HEAD
    *          was on its remote-tracking main as dirty, prescribed `--preserve` alone for a detached HEAD,
    *          and failed to close a detached HEAD whose only commit ahead of origin/main was an empty bind
