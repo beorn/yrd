@@ -33,6 +33,9 @@ yrd check <name...>                                 run the named checks here, n
 yrd env open ([commit] | --bay <name> | --issue <ref>) [--hold [reason]]
     keep a commit checked out, or open a task branch; prints the path
 yrd env list                                        this repository's environments
+yrd env retained [--retain <directory>]              count retained stores by their recorded deadlines
+yrd env retained --retire-expired --namespace <root> --artifact-dir <directory> [--limit 20] [--entry <name>...] [--apply]
+    plan a retirement batch; --apply re-verifies and deletes the selected entries
 yrd env close <path> [--retain <directory>] [--preserve] [--dry-run]  close an environment or preview its admission
 yrd drop ...                                        retire branches whose tips main or an event keeps; see below
 ```
@@ -127,6 +130,9 @@ An environment is a separate Git worktree for one branch or commit.
 - With `--issue`, a first commit with a `Refs:` trailer records the binding before setup. A matching binding adds nothing; a conflicting one refuses.
 - `--hold [reason]` locks the worktree before setup, so a later failure leaves it locked. The reason defaults to `manual`. `env list --json` reports it as `hold` (`null` when unlocked). It is free text, not proof of ownership. `git worktree unlock <path>` clears it.
 - `yrd env close` runs teardown from the environment's current commit, then removes it. It refuses a held, dirty, locked, unregistered or out-of-root path, and keeps the environment if teardown fails. Submodule stores are kept.
+- After close, one line counts retained directories and names `yrd env retained` for the full census. The census reads manifests without a size walk and reports live, expired, legacy, missing-`notCompared`, malformed and manifest-less stores. It names missing fields and absent roots explicitly.
+- `retained --retire-expired` defaults to a dry run of at most 20 selected expired entries. Supply every managed estate root with repeated `--namespace`, and an external evidence directory with `--artifact-dir`. Legacy, missing-`notCompared`, malformed and manifest-less stores stay outside automatic selection; other entries still need every git-super retirement gate.
+- Review the dry-run list before `--apply`; repeat `--entry <name>` to select those exact direct children rather than a newly enumerated list. `--limit` bounds the selection. Output preserves git-super's per-entry outcomes and reasons, scan and lease timings, and any completed deletions before a stop. A partial or timed-out operation exits nonzero; inspect evidence before retrying. The batch call alone has a 1,200-second outer bound; other Git calls retain their ordinary bound.
 - `close --dry-run` reads those admission checks and reports `admitted`, `checked` and `notChecked` (`--json` gives the machine view). It changes no refs or files and files no close request. Component custody, retention, remote re-read and teardown remain unproved until the real close. With `--preserve`, it reports dirty entries without saving them.
 - `close` also refuses while a submodule marked `private = true` in `.gitmodules` is checked out in the environment.
 - In a superproject, `git super status`, `git super diff` and `git super push` work across submodule boundaries.
