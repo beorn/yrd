@@ -4,6 +4,7 @@
  *   silently drops a store with no manifest, or reports an absent root as an empty one.
  * @level l1 (pure census over a temporary retained root)
  * @consumer yrd env retained; the #33010 drain dry-run.
+ * @testonly none
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
