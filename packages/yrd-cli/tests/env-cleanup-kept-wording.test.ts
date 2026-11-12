@@ -267,6 +267,34 @@ it("names a kept environment's keep reason without an Error: prefix", async () =
   expect(existsSync(w.env), "the environment is kept, untouched").toBe(true)
 })
 
+// Step 3 of #33599: a round walks the process table ONCE and the receipt says how much of the round
+// that walk cost. The mocked census is made slow on purpose: an instant one would report 0ms and the
+// split assertion would pass on any implementation that recorded a constant.
+it("walks the process table once per round and reports the census as a split of the round's own time", async () => {
+  const at = new Date().toISOString()
+  const w = await world(at)
+  const census = vi.mocked(removely.inspectProcessCwds)
+  const before = census.mock.calls.length
+  census.mockImplementationOnce(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    return { mechanism: "proc", complete: true, rows: [], unreadable: [] }
+  })
+
+  const rows = await runRound(w, createEnvironmentCleanup(), "census-split", [])
+
+  expect(census.mock.calls.length - before, "a round walks the process table exactly once").toBe(1)
+  const footer = rows.find((row) => row.census !== undefined)
+  expect(footer, JSON.stringify(rows)).toBeDefined()
+  const receipt = footer?.census as { mechanism: string; rows: number; elapsed_ms: number }
+  expect(typeof receipt.elapsed_ms, "the receipt carries the census duration, not only its facts").toBe("number")
+  expect(receipt.elapsed_ms, "the split measures the walk that was made slow, not a constant").toBeGreaterThanOrEqual(
+    25,
+  )
+  // The census is a phase BEFORE the sweep clock starts (`startedAt`), so `ms` does not contain it:
+  // the split is census-phase plus sweep-phase, and neither is a share of the other.
+  expect(typeof footer?.ms, "the sweep phase keeps its own number beside the census phase").toBe("number")
+})
+
 it("reports a close request that already stands as a no-op naming it, never file-failed", async () => {
   const at = new Date().toISOString()
   const w = await world(at)

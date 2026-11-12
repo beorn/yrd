@@ -1341,10 +1341,25 @@ async function cleanupEnvironments(
   }
   /** The service's own coverage receipt; the CWD ruling requires rows, unreadable and uncleared from this process. */
   let censusReceipt:
-    | Readonly<{ mechanism: string; complete: boolean; rows: number; unreadable: number; uncleared: number }>
+    | Readonly<{
+        mechanism: string
+        complete: boolean
+        rows: number
+        unreadable: number
+        uncleared: number
+        /**
+         * What this one census cost, in its own phase. The census is taken BEFORE the sweep's clock
+         * (`startedAt`), so the round's `ms` does not contain this number: the two are sequential
+         * phases of one round, and reporting both is the split. Never read `elapsed_ms` as a share
+         * of `ms`; measured 30ms census against a 7ms sweep is normal, not an overrun.
+         */
+        elapsed_ms: number
+      }>
     | undefined
   const census = async (): Promise<ProcessCwdProjection> => {
+    const censusStartedAt = Date.now()
     const snapshot = await inspectProcessCwds({ deadlineMs: 2_000 })
+    const censusElapsedMs = Date.now() - censusStartedAt
     // A denied same-UID read is cleared only by removely's own identity
     // predicate. Anything it cannot clear could be a holder, so the run keeps
     // the environment and names the pid, command and denial it could not rule out.
@@ -1355,6 +1370,7 @@ async function cleanupEnvironments(
       rows: snapshot.rows.length,
       unreadable: snapshot.unreadable.length,
       uncleared: coverage.uncleared.length,
+      elapsed_ms: censusElapsedMs,
     }
     if (coverage.refusal !== undefined) throw new Error(coverage.refusal)
     return snapshot
