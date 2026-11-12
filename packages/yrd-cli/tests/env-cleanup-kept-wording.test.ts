@@ -285,14 +285,79 @@ it("walks the process table once per round and reports the census as a split of 
   expect(census.mock.calls.length - before, "a round walks the process table exactly once").toBe(1)
   const footer = rows.find((row) => row.census !== undefined)
   expect(footer, JSON.stringify(rows)).toBeDefined()
-  const receipt = footer?.census as { mechanism: string; rows: number; elapsed_ms: number }
+  const receipt = footer?.census as {
+    mechanism: string
+    rows: number
+    calls: number
+    elapsed_ms: number
+    first_walk_ms: number
+    decision_ages_ms: number[]
+  }
   expect(typeof receipt.elapsed_ms, "the receipt carries the census duration, not only its facts").toBe("number")
   expect(receipt.elapsed_ms, "the split measures the walk that was made slow, not a constant").toBeGreaterThanOrEqual(
     25,
   )
+  // `calls` says how many walks the round actually made, because `elapsed_ms` is their TOTAL: a round that
+  // removes nothing walks once, and the number agrees with the walks this process really made. A round that
+  // removes N environments adds N pre-removal walks (the next test), so the total STRADDLES the sweep
+  // clock: no-removal rounds time entirely before `ms`, and a round with closes times walks 2..N+1 inside
+  // `ms`. This assertion covers the first case; the next test covers the second.
+  expect(receipt.calls, "the receipt counts the walks it timed").toBe(1)
+  expect(receipt.calls, "the count matches the walks the process table actually saw").toBe(
+    census.mock.calls.length - before,
+  )
+  expect(receipt.first_walk_ms, "one walk, so walk 1 IS the total").toBe(receipt.elapsed_ms)
+  expect(receipt.decision_ages_ms, "nothing was removed, so no close decision rested on a stale snapshot").toEqual([])
   // The census is a phase BEFORE the sweep clock starts (`startedAt`), so `ms` does not contain it:
   // the split is census-phase plus sweep-phase, and neither is a share of the other.
   expect(typeof footer?.ms, "the sweep phase keeps its own number beside the census phase").toBe("number")
+})
+
+// Step 3 of #33599, second half: the round re-censuses immediately before it removes a row, so a round
+// that removes N environments makes N+1 walks. The receipt counts them and records how old the round's
+// snapshot was at each close decision. @cto declined replacing the per-request walks with the round
+// snapshot (40ms each is not worth a wider window on a seat-requested close): this MEASURES the window
+// the round carries instead of reusing it, and changes no round behaviour.
+it("re-censuses before a removal and records each close decision's snapshot age", async () => {
+  const stale = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString()
+  const w = await world(stale)
+  const census = vi.mocked(removely.inspectProcessCwds)
+  const before = census.mock.calls.length
+
+  const rows = await runRound(w, createEnvironmentCleanup(), "census-close-age", [])
+
+  expect(
+    rows.filter((row) => row.result === "closed").map((row) => row.path),
+    JSON.stringify(rows),
+  ).toEqual([w.env])
+  const footer = rows.find((row) => row.census !== undefined)
+  expect(footer, JSON.stringify(rows)).toBeDefined()
+  const receipt = footer?.census as {
+    calls: number
+    elapsed_ms: number
+    first_walk_ms: number
+    decision_ages_ms: number[]
+  }
+  expect(receipt.calls, "the round's own census, plus the fresh walk before the removal").toBe(2)
+  expect(receipt.calls, "the count matches the walks the process table actually saw").toBe(
+    census.mock.calls.length - before,
+  )
+  expect(receipt.decision_ages_ms, "one close decision, so one age").toHaveLength(1)
+  for (const age of receipt.decision_ages_ms) {
+    expect(Number.isInteger(age), "an age in whole ms").toBe(true)
+    expect(age, "measured FROM the round's first snapshot, so never negative").toBeGreaterThanOrEqual(0)
+  }
+  expect(typeof receipt.elapsed_ms, "the total of the walks").toBe("number")
+  // The straddle, as arithmetic: walk 1 runs before the sweep clock (so outside `ms`) and walks 2..N+1
+  // run inside it, which means `elapsed_ms - first_walk_ms` is what the round's own `ms` contains.
+  expect(
+    receipt.first_walk_ms,
+    "walk 1 is timed on its own so the split is not a subtraction guess",
+  ).toBeGreaterThanOrEqual(0)
+  expect(
+    receipt.elapsed_ms - receipt.first_walk_ms,
+    "two walks, so the inside-ms remainder is the second",
+  ).toBeGreaterThanOrEqual(0)
 })
 
 it("reports a close request that already stands as a no-op naming it, never file-failed", async () => {

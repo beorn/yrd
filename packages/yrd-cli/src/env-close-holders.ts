@@ -97,6 +97,8 @@ export type CloseCensusReceipt = Readonly<{
   rows: number
   unreadable: number
   uncleared: number
+  /** What this admission's own walk cost. One close request is one walk here, so this is the whole cost. */
+  elapsed_ms: number
 }>
 
 /**
@@ -119,6 +121,7 @@ export async function admitEnvironmentClose(
   io: YrdCliIO,
   censusSource?: () => Promise<ProcessCensus<"same-uid">>,
 ): Promise<CloseAdmission> {
+  const censusStartedAt = Date.now()
   let snapshot: ProcessCwdProjection
   const exempt = new Set<number>([process.pid])
   let ancestryAvailable = false
@@ -154,6 +157,10 @@ export async function admitEnvironmentClose(
   } else {
     snapshot = await inspectProcessCwds({ deadlineMs: 2_000 })
   }
+  // The walk and the projection built from it are this admission's census phase. One close request is
+  // one walk here — @cto declined reusing the round's snapshot across requests (40ms is not worth a
+  // wider window on a seat-requested close) — so this number is the whole cost of the census.
+  const censusElapsedMs = Date.now() - censusStartedAt
   const coverage = processCwdCoverage(snapshot)
   io.stderr(
     `yrd: env close ${snapshot.mechanism === "proc" ? "same-UID holders inspected; other-UID holders are not inspectable" : "lsof cwd holders inspected; UID scope and ancestry are unproven"}; exempt PIDs: ${[...exempt].join(", ")}; identity-cleared unreadable PIDs: ${coverage.cleared.length === 0 ? "none" : coverage.cleared.join(", ")}. This scan is non-atomic: a process can enter after the check.\n`,
@@ -178,6 +185,7 @@ export async function admitEnvironmentClose(
         rows: snapshot.rows.length,
         unreadable: snapshot.unreadable.length,
         uncleared: coverage.uncleared.length,
+        elapsed_ms: censusElapsedMs,
       },
     }
   }

@@ -1348,18 +1348,49 @@ async function cleanupEnvironments(
         unreadable: number
         uncleared: number
         /**
-         * What this one census cost, in its own phase. The census is taken BEFORE the sweep's clock
-         * (`startedAt`), so the round's `ms` does not contain this number: the two are sequential
-         * phases of one round, and reporting both is the split. Never read `elapsed_ms` as a share
-         * of `ms`; measured 30ms census against a 7ms sweep is normal, not an overrun.
+         * How many walks this round actually made. Not always one: the round re-censuses immediately
+         * before removing a row, so a round that closes N environments makes N+1 walks.
+         *
+         * `elapsed_ms` is the TOTAL of those walks, and they STRADDLE the sweep clock (`startedAt`).
+         * Walk 1 runs before it, so it is outside `ms`; walks 2..N+1 run inside the removal loop after
+         * it, so they are inside `ms`. A round that closes nothing reports a total entirely outside `ms`
+         * (measured 30ms census against a 7ms sweep is normal, not an overrun); a round with closes
+         * reports a total `ms` already contains, less walk 1. Neither is a share of the other.
+         *
+         * `rows`, `unreadable` and `uncleared` come from the LAST walk only, while `calls` and
+         * `elapsed_ms` aggregate every walk: they describe different walks, and adding them up means
+         * nothing.
          */
+        calls: number
         elapsed_ms: number
+        /**
+         * Walk 1 alone, the only walk that runs before the sweep clock. `elapsed_ms - first_walk_ms` is
+         * exactly what the round spent on censuses INSIDE its own `ms`, so the straddle above is
+         * arithmetic rather than inference.
+         */
+        first_walk_ms: number
       }>
     | undefined
+  let censusCalls = 0
+  let censusElapsedTotal = 0
+  /** Walk 1's own duration: the only census phase taken before the round's sweep clock starts. */
+  let firstWalkElapsed: number | undefined
+  /** When this round first read the process table; the age recorded at each close decision is from here. */
+  let roundCensusAt: number | undefined
+  /**
+   * Age of the round's FIRST snapshot (walk 1) at each environment's pre-removal check, in ms. Spread
+   * into BOTH round receipts as `decision_ages_ms`: one entry per close decision, none when the round
+   * removed nothing, so the field never claims a decision that was not made.
+   */
+  const decisionAges: number[] = []
   const census = async (): Promise<ProcessCwdProjection> => {
     const censusStartedAt = Date.now()
+    censusCalls += 1
+    roundCensusAt ??= censusStartedAt
     const snapshot = await inspectProcessCwds({ deadlineMs: 2_000 })
     const censusElapsedMs = Date.now() - censusStartedAt
+    censusElapsedTotal += censusElapsedMs
+    firstWalkElapsed ??= censusElapsedMs
     // A denied same-UID read is cleared only by removely's own identity
     // predicate. Anything it cannot clear could be a holder, so the run keeps
     // the environment and names the pid, command and denial it could not rule out.
@@ -1370,7 +1401,9 @@ async function cleanupEnvironments(
       rows: snapshot.rows.length,
       unreadable: snapshot.unreadable.length,
       uncleared: coverage.uncleared.length,
-      elapsed_ms: censusElapsedMs,
+      calls: censusCalls,
+      elapsed_ms: censusElapsedTotal,
+      first_walk_ms: firstWalkElapsed,
     }
     if (coverage.refusal !== undefined) throw new Error(coverage.refusal)
     return snapshot
@@ -1610,7 +1643,7 @@ async function cleanupEnvironments(
     for (const row of inventory.rows) preserve(row.path, reasonText(cause))
     appendFileSync(
       outcome.log,
-      `${JSON.stringify({ kind: "observation", run: outcome.run, at: new Date().toISOString(), scope: "environment-cleanup", registry, closed, kept, deferred: 0, remaining: inventory.rows.length - closed, ...(censusReceipt === undefined ? {} : { census: censusReceipt }) })}\n`,
+      `${JSON.stringify({ kind: "observation", run: outcome.run, at: new Date().toISOString(), scope: "environment-cleanup", registry, closed, kept, deferred: 0, remaining: inventory.rows.length - closed, ...(censusReceipt === undefined ? {} : { census: { ...censusReceipt, decision_ages_ms: decisionAges } }) })}\n`,
     )
     // A refusal preserves the WHOLE registry with one reason: the map must remember it here, or the next
     // round writes the same ~50 rows again (@dev/review2, 2026-10-17).
@@ -1731,6 +1764,10 @@ async function cleanupEnvironments(
         stoppedAt = index
         break
       }
+      // How stale the round snapshot was at the moment this environment was about to be removed. The
+      // fresh census below nearly always makes the removal decision on current facts, so this number
+      // measures the window the round snapshot carried, not a window the removal relied on.
+      if (roundCensusAt !== undefined) decisionAges.push(Date.now() - roundCensusAt)
       const freshHolder = busy(row.path, await census())
       if (freshHolder !== undefined) throw new Error(freshHolder)
       const current = (await environmentInventory(registry, registryGit, workdir)).rows.find(
@@ -1855,7 +1892,7 @@ async function cleanupEnvironments(
       remaining: inventory.rows.length - closed,
       ms: Date.now() - startedAt,
       lookups,
-      ...(censusReceipt === undefined ? {} : { census: censusReceipt }),
+      ...(censusReceipt === undefined ? {} : { census: { ...censusReceipt, decision_ages_ms: decisionAges } }),
     })}\n`,
   )
   return proofs

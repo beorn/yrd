@@ -3556,7 +3556,16 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
         reason: "incomplete-census",
         request: file,
         unreadable: 1,
-        census: { mechanism: "proc", complete: false, rows: 0, unreadable: 1, uncleared: 1 },
+        // @33599 step 3 (a): the admission's own walk is timed, so the receipt says what this one
+        // close request's census cost rather than leaving it inside the command's total time.
+        census: {
+          mechanism: "proc",
+          complete: false,
+          rows: 0,
+          unreadable: 1,
+          uncleared: 1,
+          elapsed_ms: expect.any(Number),
+        },
       })
       expect(run.stderr()).toContain("queued, not closed")
       expect(run.stderr()).toContain("1 same-UID pid(s) were unreadable here")
