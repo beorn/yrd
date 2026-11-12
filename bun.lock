@@ -84,7 +84,7 @@
   },
   "overrides": {
     "git-super": "github:beorn/git-super#27c201128792a0723df3a31c5d2640492a4a2781",
-    "gitomic": "github:beorn/gitomic#50cc1e9862d0c815427bd9853d8370f84695d9a4",
+    "gitomic": "github:beorn/gitomic#f822e20a21d5638e5817e7aef6431aee8b5a2e20",
     "loggily": "github:beorn/loggily#2bf30bc776f570d2ff5adf1a03d715912deb9589",
   },
   "packages": {
@@ -382,7 +382,7 @@
 
     "git-super": ["git-super@github:beorn/git-super#27c2011", { "dependencies": { "@bearly/flock": "0.2.3", "@bearly/pacing": "^0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "gitomic": "^0.4.0", "loggily": "^0.10.2", "react": "19.3.1", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-27c2011", "sha512-IkT81MVs6D2GFiAQwhRH4tepIPtQ+6La5pxtu9XxpGKDRsmzw5/idzHBRel1z8i7LtE74qNqo+9HDPHtcokRVQ=="],
 
-    "gitomic": ["gitomic@github:beorn/gitomic#50cc1e9", { "dependencies": { "@bearly/cli-process": "^0.1.0", "@bearly/flock": "^0.2.2", "@bearly/pacing": "^0.1.0" }, "peerDependencies": { "isomorphic-git": "^1.38.7" }, "optionalPeers": ["isomorphic-git"], "bin": { "gitomic": "./src/bin.ts" } }, "beorn-gitomic-50cc1e9", "sha512-W8ZfgtIFVyruhsV1mMXeW+J9RBzjBrl13JTVa0y6w/Pt1OzSjp3lba0SSx2YmOfBJ6l7jEEPi8ERpJTdGHoMPQ=="],
+    "gitomic": ["gitomic@github:beorn/gitomic#f822e20", { "dependencies": { "@bearly/cli-process": "^0.1.0", "@bearly/flock": "^0.2.2", "@bearly/pacing": "^0.1.0" }, "peerDependencies": { "isomorphic-git": "^1.38.7" }, "optionalPeers": ["isomorphic-git"], "bin": { "gitomic": "./src/bin.ts" } }, "beorn-gitomic-f822e20", "sha512-xBXxMEJgx6Am2NxR3Q0mENLUiU5+mlv5iC5ZJxfraznf1gpJfUelxVI4vvQtDMdWxr7Fgev6UZHBdolq48EQMg=="],
 
     "hast-util-to-html": ["hast-util-to-html@9.0.5", "", { "dependencies": { "@types/hast": "^3.0.0", "@types/unist": "^3.0.0", "ccount": "^2.0.0", "comma-separated-tokens": "^2.0.0", "hast-util-whitespace": "^3.0.0", "html-void-elements": "^3.0.0", "mdast-util-to-hast": "^13.0.0", "property-information": "^7.0.0", "space-separated-tokens": "^2.0.0", "stringify-entities": "^4.0.0", "zwitch": "^2.0.4" } }, "sha512-OguPdidb+fbHQSU4Q4ZiLKnzWo8Wwsf5bZfbvu7//a9oTYoqD/fWpe96NuHkoS9h0ccGOTe0C4NGXdtS0iObOw=="],
 
