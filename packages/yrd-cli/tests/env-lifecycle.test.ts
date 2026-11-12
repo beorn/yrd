@@ -61,16 +61,30 @@ process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
 process.env.GIT_CONFIG_VALUE_0 = "always"
 
 // A spy cannot replace a binding of an installed ESM package's namespace (standalone CI), so the seam is a module mock.
+//
+// 33659: BOTH census seams are mocked. The cleanup and close paths read `inspectProcessCwds`, a different export
+// from the `inspectProcessCensus` this file wrapped first, so `...actual` handed the real one through and the
+// in-process lifecycle tests read the caller host's process table while the comment below claimed they did not —
+// which reds them on any host whose pids the caller cannot read, on unmodified main. A test that needs a REAL
+// holder overrides explicitly (see the `caller child` arm; a cwds holder fixture gets the real export with
+// `vi.importActual("removely")` the way `realProcessCensus` does above), and a default stub cannot hide a missing
+// holder: the arms that assert a refusal fail loudly instead.
 vi.mock("removely", async (importOriginal) => {
   const actual = await importOriginal<typeof import("removely")>()
-  return { ...actual, inspectProcessCensus: vi.fn(actual.inspectProcessCensus) }
+  return {
+    ...actual,
+    inspectProcessCensus: vi.fn(actual.inspectProcessCensus),
+    inspectProcessCwds: vi.fn(actual.inspectProcessCwds),
+  }
 })
 
 const roots: string[] = []
 const realProcessCensus = (await vi.importActual<typeof import("removely")>("removely")).inspectProcessCensus
 const processCensus = vi.mocked(removely.inspectProcessCensus)
+const processCwds = vi.mocked(removely.inspectProcessCwds)
 // Non-holder lifecycle rows inject this external boundary; host process churn is not their subject.
 beforeEach(async () => {
+  processCwds.mockResolvedValue({ mechanism: "proc", complete: true, rows: [], unreadable: [] })
   if (process.platform !== "linux") return
   const observed = await realProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
   processCensus.mockResolvedValue({
@@ -81,6 +95,7 @@ beforeEach(async () => {
 })
 afterEach(() => {
   processCensus.mockReset()
+  processCwds.mockReset()
   vi.unstubAllEnvs()
 })
 
