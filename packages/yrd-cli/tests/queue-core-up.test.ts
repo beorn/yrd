@@ -7234,9 +7234,6 @@ esac
     30_000,
   )
 
-  /** @failure 25708: three unreadable publication witnesses killed the service while its health stayed stale.
-   * @level l2 @consumer Hab health probe and queue list/watch reader
-   */
   // @failure 33946: reboot left an empty loose object in the queue's workdir clone while health looked healthy.
   // @level l2 @consumer existing queue service-health document; transport injection misses local object corruption.
   it("reports unhealthy when a local loose object becomes unreadable after a healthy round", async () => {
@@ -7244,6 +7241,7 @@ esac
     const oid = (await w.git(["rev-parse", "HEAD:.yrd.yml"])).trim()
     const objectPath = resolve(w.work, (await w.git(["rev-parse", "--git-path", `objects/${oid.slice(0, 2)}/${oid.slice(2)}`])).trim())
     const original = readFileSync(objectPath)
+    const originalMode = statSync(objectPath).mode
     const stop = new AbortController()
     const deadline = setTimeout(() => stop.abort(), 20_000)
     const run = capture(w.work)
@@ -7261,6 +7259,8 @@ esac
             stop: stop.signal,
             afterHealth: (document) => {
               if (!corrupted && document.state === "healthy") {
+                // Git stores loose objects read-only; only this private fixture is made writable.
+                chmodSync(objectPath, originalMode | 0o200)
                 writeFileSync(objectPath, "")
                 corrupted = true
               } else if (document.state === "unhealthy") {
@@ -7277,7 +7277,8 @@ esac
     } finally {
       clearTimeout(deadline)
       stop.abort()
-      writeFileSync(objectPath, original)
+      if (corrupted) writeFileSync(objectPath, original)
+      chmodSync(objectPath, originalMode)
     }
     const diagnostic = `${run.stderr()}\n${failure instanceof Error ? failure.message : String(failure ?? "")}`
     expect(corrupted, diagnostic).toBe(true)
@@ -7285,6 +7286,9 @@ esac
     expect(published?.state, diagnostic).toBe("unhealthy")
   }, 60_000)
 
+  /** @failure 25708: three unreadable publication witnesses killed the service while its health stayed stale.
+   * @level l2 @consumer Hab health probe and queue list/watch reader
+   */
   it("keeps the service alive through repeated failed remote-read rounds, pages once, and clears after recovery", async () => {
     const w = await world(false)
     const commit = (await w.git(["rev-parse", "main"])).trim()
