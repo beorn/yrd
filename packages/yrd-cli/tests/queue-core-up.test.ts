@@ -7319,8 +7319,11 @@ esac
     const run = capture(w.work)
     let restored = false
     let failure: unknown
+    let exit: number | undefined
+    let finalHealth: QueueHealthDocument | undefined
     const restore = () => {
       for (const [path, original] of originals) {
+        chmodSync(path, original.mode | 0o200)
         writeFileSync(path, original.bytes)
         chmodSync(path, original.mode)
       }
@@ -7352,7 +7355,7 @@ esac
     })
     try {
       try {
-        await coreQueueCommand(w.work, run.io, {
+        exit = await coreQueueCommand(w.work, run.io, {
           command: "up",
           intervalSeconds: 0,
           stop: stop.signal,
@@ -7369,12 +7372,13 @@ esac
       } catch (error) {
         failure = error
       }
+      finalHealth = parseQueueHealthDocument(readFileSync(join(w.workdir, QUEUE_HEALTH_DOCUMENT), "utf8"))
     } finally {
       clearTimeout(deadline)
       stop.abort()
       restore()
     }
-    const diagnostic = `${run.stderr()}\n${run.stdout()}\n${String(failure ?? "")}\n${JSON.stringify(seen)}`
+    const diagnostic = `${run.stderr()}\n${run.stdout()}\n${String(failure ?? "")}\n${JSON.stringify({ exit, finalHealth, errors, seen })}`
     expect(originals.size, diagnostic).toBeGreaterThan(0)
     expect(errors.join("\n"), diagnostic).toMatch(/object[^\n]*(?:empty|corrupt)/i)
     const unhealthy = seen.find((document) => document.state === "unhealthy")
