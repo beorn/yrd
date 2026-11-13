@@ -7349,6 +7349,7 @@ esac
     const deadline = setTimeout(() => stop.abort(), 20_000)
     const run = capture(w.work)
     let restored = false
+    let resumed = false
     let failure: unknown
     let exit: number | undefined
     let finalHealth: QueueHealthDocument | undefined
@@ -7390,12 +7391,19 @@ esac
           command: "up",
           intervalSeconds: 0,
           stop: stop.signal,
-          afterHealth: (document) => {
+          afterHealth: async (document) => {
             seen.push(document)
             if (!restored && document.state === "unhealthy") {
               restore()
               restored = true
-            } else if (restored && document.state === "healthy") {
+            } else if (restored && !resumed) {
+              expect(document.state).toBe("unhealthy")
+              const repair = capture(w.work)
+              expect(await coreQueueCommand(w.work, repair.io, {
+                by: "@chief", command: "resume", reason: "private corrupt object restored",
+              }, { workdir: w.workdir }), repair.stderr()).toBe(0)
+              resumed = true
+            } else if (resumed && document.state === "healthy") {
               stop.abort()
             }
           },
@@ -7416,6 +7424,8 @@ esac
     expect(unhealthy, diagnostic).toMatchObject({ state: "unhealthy", verdict: { kind: "running" } })
     expect(JSON.stringify(unhealthy), diagnostic).toMatch(/object[^\n]*(?:empty|corrupt)/i)
     expect(restored, diagnostic).toBe(true)
+    expect(resumed, diagnostic).toBe(true)
+    expect(exit, diagnostic).toBe(0)
     expect(seen.at(-1)?.state, diagnostic).toBe("healthy")
   }, 60_000)
 

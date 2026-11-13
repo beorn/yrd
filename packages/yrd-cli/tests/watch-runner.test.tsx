@@ -779,22 +779,27 @@ describe("readRunnerService, the loop's own liveness", () => {
   })
 
   /** @failure The service knew why it exited, but the stopped queue row named only a dead writer. @level l1 */
-  it("reads a detected off-relaunch exit from the service's last document", async () => {
-    const exited = exitedHealthDocument(SERVICE, {
-      kind: "gitlink-absent",
-      detail: "runtime gitlink vendor/yrd is absent at the target",
+  it.each(["gitlink-absent", "round-failed"] as const)("reads a detected %s exit from the service's last document", async (kind) => {
+    const fact = {
+      kind,
+      detail: "the service stopped with its original cause",
       exitCode: 2,
       at: NOW.toISOString(),
-    })
+    }
+    const exited = exitedHealthDocument(SERVICE, fact)
     const workdir = workdirWith({ ageMs: 1_000, health: JSON.stringify(exited) })
     const service = await readRunnerService(workdir, NOW)
-    expect(service).toMatchObject({ kind: "stopped", cause: expect.stringContaining("gitlink vendor/yrd is absent") })
-    expect(runnerLine({ journalDir: workdir, service }, NOW).detail).toContain("gitlink vendor/yrd is absent")
+    expect(service).toMatchObject({ kind: "stopped", graceful: false, cause: expect.stringContaining("the service stopped with its original cause") })
+    expect(runnerLine({ journalDir: workdir, service }, NOW).detail).toContain("the service stopped with its original cause")
     const invalid = { ...exited, error: { code: "invented", cause: "wrong", resolution: [] } }
     expect(await readRunnerService(workdirWith({ ageMs: 1_000, health: JSON.stringify(invalid) }), NOW)).toMatchObject({
       kind: "unreadable",
       why: expect.stringContaining("malformed facts.serviceExited"),
     })
+    const future = { ...exited, facts: { serviceExited: { ...fact, kind: "future-exit" } } }
+    const unknown = await readRunnerService(workdirWith({ ageMs: 1_000, health: JSON.stringify(future) }), NOW)
+    expect(unknown).toMatchObject({ kind: "unreadable", why: expect.stringContaining("malformed facts.serviceExited") })
+    expect(runnerLine({ journalDir: workdir, service: unknown }, NOW).detail).toContain("malformed facts.serviceExited")
   })
 
   it("reads a graceful stop's last document as who stopped the service and why (25430)", async () => {

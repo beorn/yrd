@@ -55,9 +55,9 @@ const operatorStop: PauseRecord = {
 
 describe("the health document", () => {
   /** @failure An off-relaunch exit left a running document that aged overdue without its known cause. @level l1 */
-  test("a detected terminal exit leaves a parseable stopped document without an error or deadline", () => {
+  test.each(["declaration-unreadable", "round-failed"] as const)("a detected %s terminal exit leaves a parseable stopped document without an error or deadline", (kind) => {
     const exited = {
-      kind: "declaration-unreadable" as const,
+      kind,
       detail: "origin/main has malformed .yrd.yml",
       exitCode: 2,
       at: NOW.toISOString(),
