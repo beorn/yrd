@@ -246,7 +246,7 @@ function discardedJudgementReason(current: EventChange, error: unknown): string 
 }
 
 /** Keep every diagnostic character while meeting Gitomic's single-line trailer contract. */
-function noticeReason(reason: string): string {
+function trailerReason(reason: string): string {
   const written = reason.trim().replace(/[\x00-\x1f\x7f]/gu, (char) => JSON.stringify(char).slice(1, -1))
   if (written === "") throw new Error("notification failure has no reason to retain")
   return written
@@ -389,11 +389,11 @@ async function settleEventNotice(
       ...(delivered.refused === undefined ? {} : { refused: delivered.refused }),
     })
     if (delivered.delivery === "sent") return { result: "delivered" }
-    if (delivered.refused !== undefined) return { result: "refused", reason: noticeReason(delivered.refused) }
+    if (delivered.refused !== undefined) return { result: "refused", reason: trailerReason(delivered.refused) }
     if (attempt === 2) {
       return {
         result: "failed",
-        reason: noticeReason(delivered.failure ?? `notify ${entry.name} gave no delivery receipt`),
+        reason: trailerReason(delivered.failure ?? `notify ${entry.name} gave no delivery receipt`),
       }
     }
   }
@@ -2127,7 +2127,9 @@ export async function eventQueueRun(
             if (read.line === undefined) throw new Error(`${ref} refused publication before the line was read`)
             read.line = { ...read.line, casRefused: { branch, ref, marker, count } }
           } else {
-            const stuckReason = `${branch}: publication did not land for ${ref} at ${marker} in ${String(count)} consecutive rounds: ${cause}`
+            const stuckReason = trailerReason(
+              `${branch}: publication did not land for ${ref} at ${marker} in ${String(count)} consecutive rounds: ${cause}`,
+            )
             const ended = await appendOwnedChange("frozenComponentWrite", store, queue, branch, marker, {
               type: "stuck",
               at: new Date(),

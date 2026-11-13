@@ -55,19 +55,22 @@ const operatorStop: PauseRecord = {
 
 describe("the health document", () => {
   /** @failure An off-relaunch exit left a running document that aged overdue without its known cause. @level l1 */
-  test("a detected terminal exit leaves a parseable stopped document without an error or deadline", () => {
-    const exited = {
-      kind: "declaration-unreadable" as const,
-      detail: "origin/main has malformed .yrd.yml",
-      exitCode: 2,
-      at: NOW.toISOString(),
-    }
-    const doc = exitedHealthDocument("yrd", exited)
-    expect(doc).toMatchObject({ state: "absent", verdict: { kind: "stopped" }, facts: { serviceExited: exited } })
-    expect(doc).not.toHaveProperty("error")
-    expect(doc.facts).not.toHaveProperty("staleAfter")
-    expect(parseQueueHealthDocument(JSON.stringify(doc))).toEqual(doc)
-  })
+  test.each(["declaration-unreadable", "round-failed"] as const)(
+    "a detected %s terminal exit leaves a parseable stopped document without an error or deadline",
+    (kind) => {
+      const exited = {
+        kind,
+        detail: "origin/main has malformed .yrd.yml",
+        exitCode: 2,
+        at: NOW.toISOString(),
+      }
+      const doc = exitedHealthDocument("yrd", exited)
+      expect(doc).toMatchObject({ state: "absent", verdict: { kind: "stopped" }, facts: { serviceExited: exited } })
+      expect(doc).not.toHaveProperty("error")
+      expect(doc.facts).not.toHaveProperty("staleAfter")
+      expect(parseQueueHealthDocument(JSON.stringify(doc))).toEqual(doc)
+    },
+  )
   test("a running line is healthy and running, and says it is not stopped", () => {
     const doc = roundHealthDocument("yrd", undefined, INTERVAL, NOW)
     expect(doc).toMatchObject({ schema: QUEUE_HEALTH_SCHEMA, state: "healthy", verdict: { kind: "running" } })

@@ -7241,6 +7241,241 @@ esac
     30_000,
   )
 
+  // @failure 33946: reboot left an empty loose object in the queue's workdir clone while health looked healthy.
+  // @level l2 @consumer existing queue service-health document; transport injection misses local object corruption.
+  it("reports a stopped service and corruption cause when its local declaration object becomes unreadable", async () => {
+    const w = await world()
+    const oid = (await w.git(["rev-parse", "HEAD:.yrd.yml"])).trim()
+    const objectPath = resolve(
+      w.work,
+      (await w.git(["rev-parse", "--git-path", `objects/${oid.slice(0, 2)}/${oid.slice(2)}`])).trim(),
+    )
+    const original = readFileSync(objectPath)
+    const originalMode = statSync(objectPath).mode
+    const stop = new AbortController()
+    const deadline = setTimeout(() => stop.abort(), 20_000)
+    const run = capture(w.work)
+    let corrupted = false
+    let corruptionError: unknown
+    let exit: number | undefined
+    let failure: unknown
+    let published: QueueHealthDocument | undefined
+    try {
+      try {
+        exit = await coreQueueCommand(
+          w.work,
+          run.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterHealth: async (document) => {
+              if (!corrupted && document.state === "healthy") {
+                // Git stores loose objects read-only; only this private fixture is made writable.
+                chmodSync(objectPath, originalMode | 0o200)
+                writeFileSync(objectPath, "")
+                corrupted = true
+                try {
+                  await w.git(["cat-file", "-p", oid])
+                } catch (error) {
+                  corruptionError = error
+                }
+              } else if (document.state === "unhealthy") {
+                stop.abort()
+              }
+            },
+          },
+          { json: true, workdir: w.workdir },
+        )
+      } catch (error) {
+        failure = error
+      }
+      published = parseQueueHealthDocument(readFileSync(join(w.workdir, QUEUE_HEALTH_DOCUMENT), "utf8"))
+    } finally {
+      clearTimeout(deadline)
+      stop.abort()
+      if (corrupted) writeFileSync(objectPath, original)
+      chmodSync(objectPath, originalMode)
+    }
+    const diagnostic = `${run.stderr()}\n${run.stdout()}\n${failure instanceof Error ? failure.message : String(failure ?? "")}\n${JSON.stringify(published)}`
+    expect(corrupted, diagnostic).toBe(true)
+    expect(String(corruptionError), diagnostic).toMatch(/(?:object[^\n]*(?:empty|corrupt)|unable to read[^\n]*object)/i)
+    expect(exit, diagnostic).toBe(2)
+    expect(published, diagnostic).toMatchObject({
+      state: "absent",
+      verdict: { kind: "stopped" },
+      facts: {
+        serviceExited: {
+          kind: "declaration-unreadable",
+          exitCode: 2,
+          detail: expect.stringMatching(/object[^\n]*(?:empty|corrupt)/i),
+        },
+      },
+    })
+  }, 60_000)
+
+  // @failure 33946: an ordinary round exception must not leave a healthy running document after exit 2.
+  // @level l2 @consumer the stored queue health reader after a terminal round failure.
+  it("records a stopped round-failed document when an ordinary round throws after a healthy round", async () => {
+    const w = await world()
+    const originalRun = queueCore.queueRun
+    let rounds = 0
+    using _round = vi.spyOn(queueCore, "queueRun").mockImplementation(async (options) => {
+      if (++rounds === 2) throw new Error("fixture ordinary round failure")
+      return originalRun(options)
+    })
+    const run = capture(w.work)
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+      },
+      { json: true, workdir: w.workdir },
+    )
+    const health = parseQueueHealthDocument(readFileSync(join(w.workdir, QUEUE_HEALTH_DOCUMENT), "utf8"))
+    expect(rounds, run.stdout()).toBe(2)
+    expect(exit, run.stdout()).toBe(2)
+    expect(health).toMatchObject({
+      state: "absent",
+      verdict: { kind: "stopped" },
+      facts: {
+        serviceExited: {
+          kind: "round-failed",
+          exitCode: 2,
+          detail: expect.stringContaining("fixture ordinary round failure"),
+        },
+      },
+    })
+  }, 60_000)
+
+  // @failure 33946: corrupt staged event objects must not leave a failing publication loop healthy.
+  // @level l2 @consumer Hab's queue health reader; transport throws do not exercise native corrupt-object failures.
+  it("reports unhealthy during native publication object corruption and recovers after restoration", async () => {
+    const w = await world()
+    const branch = "task/object-recovery"
+    const head = await oneChange(w, branch)
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const ref = changesRef("main", branch)
+    const originals = new Map<string, { bytes: Buffer; mode: number }>()
+    const errors: string[] = []
+    const seen: QueueHealthDocument[] = []
+    const stop = new AbortController()
+    const deadline = setTimeout(() => stop.abort(), 20_000)
+    const run = capture(w.work)
+    let restored = false
+    let resumed = false
+    let failure: unknown
+    let exit: number | undefined
+    let finalHealth: QueueHealthDocument | undefined
+    const restore = () => {
+      for (const [path, original] of originals) {
+        chmodSync(path, original.mode | 0o200)
+        writeFileSync(path, original.bytes)
+        chmodSync(path, original.mode)
+      }
+    }
+    const originalBackend = gitomic.createShellBackend
+    using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
+      const backend = originalBackend(options)
+      const publish = backend.publish
+      if (publish === undefined) throw new Error("fixture needs Gitomic publish")
+      return {
+        ...backend,
+        publish: async (repo, updates, remote) => {
+          const update = updates.find((update) => update.ref === ref)
+          if (!restored && update?.oid && updates.some((update) => update.ref === "refs/heads/main")) {
+            const oid = update.oid
+            const path = resolve(
+              w.work,
+              (await w.git(["rev-parse", "--git-path", `objects/${oid.slice(0, 2)}/${oid.slice(2)}`])).trim(),
+            )
+            if (!originals.has(path)) originals.set(path, { bytes: readFileSync(path), mode: statSync(path).mode })
+            chmodSync(path, statSync(path).mode | 0o200)
+            writeFileSync(path, "")
+          }
+          try {
+            return await publish(repo, updates, remote)
+          } catch (error) {
+            errors.push(error instanceof Error ? error.message : String(error))
+            throw error
+          }
+        },
+      }
+    })
+    try {
+      try {
+        exit = await coreQueueCommand(
+          w.work,
+          run.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterHealth: async (document) => {
+              seen.push(document)
+              if (!restored && document.state === "unhealthy") {
+                expect(await readStatus(store, "main", branch)).toMatchObject({
+                  commit: head,
+                  status: "stuck",
+                  reason: expect.stringMatching(/object[^\n]*(?:empty|corrupt)/i),
+                })
+                expect(document.facts).toMatchObject({
+                  stopped: { by: "yrd", cause: "stuck", change: `${branch}@${head}` },
+                })
+                restore()
+                restored = true
+              } else if (restored && !resumed) {
+                expect(document.state).toBe("unhealthy")
+                const repair = capture(w.work)
+                expect(
+                  await coreQueueCommand(
+                    w.work,
+                    repair.io,
+                    {
+                      by: "@chief",
+                      command: "resume",
+                      reason: "private corrupt object restored",
+                    },
+                    { workdir: w.workdir },
+                  ),
+                  repair.stderr(),
+                ).toBe(0)
+                resumed = true
+              } else if (resumed && document.state === "healthy") {
+                stop.abort()
+              }
+            },
+          },
+          { json: true, workdir: w.workdir },
+        )
+      } catch (error) {
+        failure = error
+      }
+      finalHealth = parseQueueHealthDocument(readFileSync(join(w.workdir, QUEUE_HEALTH_DOCUMENT), "utf8"))
+    } finally {
+      clearTimeout(deadline)
+      stop.abort()
+      restore()
+    }
+    const diagnostic = `${run.stderr()}\n${run.stdout()}\n${String(failure ?? "")}\n${JSON.stringify({ exit, finalHealth, errors, seen })}`
+    expect(originals.size, diagnostic).toBeGreaterThan(0)
+    expect(errors.join("\n"), diagnostic).toMatch(/object[^\n]*(?:empty|corrupt)/i)
+    const unhealthy = seen.find((document) => document.state === "unhealthy")
+    expect(unhealthy, diagnostic).toMatchObject({ state: "unhealthy", verdict: { kind: "running" } })
+    expect(JSON.stringify(unhealthy), diagnostic).toMatch(/object[^\n]*(?:empty|corrupt)/i)
+    expect(restored, diagnostic).toBe(true)
+    expect(resumed, diagnostic).toBe(true)
+    expect(exit, diagnostic).toBe(0)
+    expect(seen.at(-1)?.state, diagnostic).toBe("healthy")
+    expect(await readStatus(store, "main", branch), diagnostic).toMatchObject({
+      commit: head,
+      status: "merged",
+      ending: { kind: "merged" },
+    })
+  }, 60_000)
+
   /** @failure 25708: three unreadable publication witnesses killed the service while its health stayed stale.
    * @level l2 @consumer Hab health probe and queue list/watch reader
    */

@@ -466,7 +466,10 @@ function serviceExitedFact(document: QueueHealthDocument): ServiceExitFact | "un
   if (typeof raw !== "object" || raw === null) return "unreadable"
   const fact = raw as Readonly<Record<string, unknown>>
   if (
-    (fact.kind !== "declaration-unreadable" && fact.kind !== "gitlink-absent" && fact.kind !== "signal") ||
+    (fact.kind !== "declaration-unreadable" &&
+      fact.kind !== "gitlink-absent" &&
+      fact.kind !== "signal" &&
+      fact.kind !== "round-failed") ||
     typeof fact.detail !== "string" ||
     fact.detail.length === 0 ||
     typeof fact.at !== "string" ||

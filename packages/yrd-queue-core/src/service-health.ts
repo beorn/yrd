@@ -735,7 +735,7 @@ export type ServiceIntentFact = Readonly<{ since: string; by?: string; reason?: 
 
 /** An off-relaunch exit that the service observed before it stopped. */
 export type ServiceExitFact = Readonly<{
-  kind: "declaration-unreadable" | "gitlink-absent" | "signal"
+  kind: "declaration-unreadable" | "gitlink-absent" | "signal" | "round-failed"
   detail: string
   at: string
   exitCode?: number

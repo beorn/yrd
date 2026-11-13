@@ -1554,6 +1554,7 @@ export async function coreQueueCommand(
     stopAtMs?: number,
     noCheck?: boolean,
     onRecord?: (record: LogRecord) => void,
+    onTerminalExit?: (kind: ServiceExitFact["kind"], detail: string) => void,
   ): Promise<QueueRunOutcome | ReadFailedRound | RetryExhaustedRound | LegacyOverrideRound | undefined> => {
     let outcome: QueueRunOutcome
     try {
@@ -1634,7 +1635,9 @@ export async function coreQueueCommand(
         )
         return { kind: "read-failed", ref: error.authority, error }
       }
-      stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
+      const detail = `the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`
+      onTerminalExit?.("round-failed", detail)
+      stuck(detail)
       // silent-fallback-allow: stuck() emitted the full run failure; undefined only makes the command exit 2.
       return undefined
     }
@@ -1806,7 +1809,7 @@ export async function coreQueueCommand(
       stop?: AbortSignal
       noCheck?: boolean
       onRecord?: (record: LogRecord) => void
-      onTerminalDeclaration?: (detail: string) => void
+      onTerminalExit?: (kind: ServiceExitFact["kind"], detail: string) => void
       waiting?: Readonly<{
         onWait: (wait: RoundLockWait) => void
         onStall: (wait: RoundLockWait & Readonly<{ waitedMs: number }>) => void
@@ -1876,19 +1879,27 @@ export async function coreQueueCommand(
         declared = await declaration()
       } catch (error) {
         const detail = `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`
-        round.onTerminalDeclaration?.(detail)
+        round.onTerminalExit?.("declaration-unreadable", detail)
         return stuck(detail)
       }
       if (declared === undefined) {
         const detail = `${targetLabel} no longer carries a .yrd.yml`
-        round.onTerminalDeclaration?.(detail)
+        round.onTerminalExit?.("declaration-unreadable", detail)
         return stuck(detail)
       }
       const before = await round.before?.(declared)
       if (before !== undefined) return before
       let outcome: Awaited<ReturnType<typeof oneRound>>
       try {
-        outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs, round.noCheck, round.onRecord)
+        outcome = await oneRound(
+          declared,
+          round.only,
+          round.tier,
+          round.stopAtMs,
+          round.noCheck,
+          round.onRecord,
+          round.onTerminalExit,
+        )
       } finally {
         // An otherwise empty round can still publish queue observations or
         // cleanup. Long foreground runs repeat rounds before command exit.
@@ -4443,9 +4454,9 @@ export async function coreQueueCommand(
             stop: request.stop,
             waiting,
             onRecord: recordRunnerState,
-            onTerminalDeclaration: (detail) => {
+            onTerminalExit: (kind, detail) => {
               const exited = exitedHealthDocument(SERVICE, {
-                kind: "declaration-unreadable",
+                kind,
                 detail,
                 exitCode: 2,
                 at: new Date().toISOString(),
