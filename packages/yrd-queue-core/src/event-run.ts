@@ -2127,7 +2127,9 @@ export async function eventQueueRun(
             if (read.line === undefined) throw new Error(`${ref} refused publication before the line was read`)
             read.line = { ...read.line, casRefused: { branch, ref, marker, count } }
           } else {
-            const stuckReason = trailerReason(`${branch}: publication did not land for ${ref} at ${marker} in ${String(count)} consecutive rounds: ${cause}`)
+            const stuckReason = trailerReason(
+              `${branch}: publication did not land for ${ref} at ${marker} in ${String(count)} consecutive rounds: ${cause}`,
+            )
             const ended = await appendOwnedChange("frozenComponentWrite", store, queue, branch, marker, {
               type: "stuck",
               at: new Date(),

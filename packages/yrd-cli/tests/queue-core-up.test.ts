@@ -7239,7 +7239,10 @@ esac
   it("reports a stopped service and corruption cause when its local declaration object becomes unreadable", async () => {
     const w = await world()
     const oid = (await w.git(["rev-parse", "HEAD:.yrd.yml"])).trim()
-    const objectPath = resolve(w.work, (await w.git(["rev-parse", "--git-path", `objects/${oid.slice(0, 2)}/${oid.slice(2)}`])).trim())
+    const objectPath = resolve(
+      w.work,
+      (await w.git(["rev-parse", "--git-path", `objects/${oid.slice(0, 2)}/${oid.slice(2)}`])).trim(),
+    )
     const original = readFileSync(objectPath)
     const originalMode = statSync(objectPath).mode
     const stop = new AbortController()
@@ -7315,10 +7318,15 @@ esac
       return originalRun(options)
     })
     const run = capture(w.work)
-    const exit = await coreQueueCommand(w.work, run.io, {
-      command: "up",
-      intervalSeconds: 0,
-    }, { json: true, workdir: w.workdir })
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+      },
+      { json: true, workdir: w.workdir },
+    )
     const health = parseQueueHealthDocument(readFileSync(join(w.workdir, QUEUE_HEALTH_DOCUMENT), "utf8"))
     expect(rounds, run.stdout()).toBe(2)
     expect(exit, run.stdout()).toBe(2)
@@ -7372,7 +7380,10 @@ esac
           const update = updates.find((update) => update.ref === ref)
           if (!restored && update?.oid && updates.some((update) => update.ref === "refs/heads/main")) {
             const oid = update.oid
-            const path = resolve(w.work, (await w.git(["rev-parse", "--git-path", `objects/${oid.slice(0, 2)}/${oid.slice(2)}`])).trim())
+            const path = resolve(
+              w.work,
+              (await w.git(["rev-parse", "--git-path", `objects/${oid.slice(0, 2)}/${oid.slice(2)}`])).trim(),
+            )
             if (!originals.has(path)) originals.set(path, { bytes: readFileSync(path), mode: statSync(path).mode })
             chmodSync(path, statSync(path).mode | 0o200)
             writeFileSync(path, "")
@@ -7388,35 +7399,50 @@ esac
     })
     try {
       try {
-        exit = await coreQueueCommand(w.work, run.io, {
-          command: "up",
-          intervalSeconds: 0,
-          stop: stop.signal,
-          afterHealth: async (document) => {
-            seen.push(document)
-            if (!restored && document.state === "unhealthy") {
-              expect(await readStatus(store, "main", branch)).toMatchObject({
-                commit: head,
-                status: "stuck",
-                reason: expect.stringMatching(/object[^\n]*(?:empty|corrupt)/i),
-              })
-              expect(document.facts).toMatchObject({
-                stopped: { by: "yrd", cause: "stuck", change: `${branch}@${head}` },
-              })
-              restore()
-              restored = true
-            } else if (restored && !resumed) {
-              expect(document.state).toBe("unhealthy")
-              const repair = capture(w.work)
-              expect(await coreQueueCommand(w.work, repair.io, {
-                by: "@chief", command: "resume", reason: "private corrupt object restored",
-              }, { workdir: w.workdir }), repair.stderr()).toBe(0)
-              resumed = true
-            } else if (resumed && document.state === "healthy") {
-              stop.abort()
-            }
+        exit = await coreQueueCommand(
+          w.work,
+          run.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterHealth: async (document) => {
+              seen.push(document)
+              if (!restored && document.state === "unhealthy") {
+                expect(await readStatus(store, "main", branch)).toMatchObject({
+                  commit: head,
+                  status: "stuck",
+                  reason: expect.stringMatching(/object[^\n]*(?:empty|corrupt)/i),
+                })
+                expect(document.facts).toMatchObject({
+                  stopped: { by: "yrd", cause: "stuck", change: `${branch}@${head}` },
+                })
+                restore()
+                restored = true
+              } else if (restored && !resumed) {
+                expect(document.state).toBe("unhealthy")
+                const repair = capture(w.work)
+                expect(
+                  await coreQueueCommand(
+                    w.work,
+                    repair.io,
+                    {
+                      by: "@chief",
+                      command: "resume",
+                      reason: "private corrupt object restored",
+                    },
+                    { workdir: w.workdir },
+                  ),
+                  repair.stderr(),
+                ).toBe(0)
+                resumed = true
+              } else if (resumed && document.state === "healthy") {
+                stop.abort()
+              }
+            },
           },
-        }, { json: true, workdir: w.workdir })
+          { json: true, workdir: w.workdir },
+        )
       } catch (error) {
         failure = error
       }

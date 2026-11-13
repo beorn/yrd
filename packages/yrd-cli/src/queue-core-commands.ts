@@ -1891,7 +1891,15 @@ export async function coreQueueCommand(
       if (before !== undefined) return before
       let outcome: Awaited<ReturnType<typeof oneRound>>
       try {
-        outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs, round.noCheck, round.onRecord, round.onTerminalExit)
+        outcome = await oneRound(
+          declared,
+          round.only,
+          round.tier,
+          round.stopAtMs,
+          round.noCheck,
+          round.onRecord,
+          round.onTerminalExit,
+        )
       } finally {
         // An otherwise empty round can still publish queue observations or
         // cleanup. Long foreground runs repeat rounds before command exit.
