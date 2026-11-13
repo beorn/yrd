@@ -1407,12 +1407,19 @@ describe("yrd queue up, the service", () => {
         // them, which is the CWD ruling's acceptance evidence.
         const records = cleanupRows(w.workdir)
         expect(records.length, run.stderr()).toBeGreaterThan(0)
+        // 0658070e added the walk telemetry: a closing round walks twice (walk 1, then the
+        // pre-removal check) and records one decision age; a kept round walks once and records
+        // none. Durations are native measurements, so only their shape is pinned.
         expect(records.at(-1)?.census, run.stderr()).toEqual({
           mechanism: "proc",
           complete: projection.complete,
           rows: projection.rows.length,
           unreadable: projection.unreadable.length,
           uncleared: coverage === "uncleared-denial" ? 1 : 0,
+          calls: allowsClose ? 2 : 1,
+          elapsed_ms: expect.any(Number),
+          first_walk_ms: expect.any(Number),
+          decision_ages_ms: allowsClose ? [expect.any(Number)] : [],
         })
       } finally {
         census.mockRestore()
