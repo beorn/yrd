@@ -7237,6 +7237,54 @@ esac
   /** @failure 25708: three unreadable publication witnesses killed the service while its health stayed stale.
    * @level l2 @consumer Hab health probe and queue list/watch reader
    */
+  // @failure 33946: reboot left an empty loose object in the queue's workdir clone while health looked healthy.
+  // @level l2 @consumer existing queue service-health document; transport injection misses local object corruption.
+  it("reports unhealthy when a local loose object becomes unreadable after a healthy round", async () => {
+    const w = await world()
+    const oid = (await w.git(["rev-parse", "HEAD:.yrd.yml"])).trim()
+    const objectPath = resolve(w.work, (await w.git(["rev-parse", "--git-path", `objects/${oid.slice(0, 2)}/${oid.slice(2)}`])).trim())
+    const original = readFileSync(objectPath)
+    const stop = new AbortController()
+    const deadline = setTimeout(() => stop.abort(), 20_000)
+    const run = capture(w.work)
+    let corrupted = false
+    let failure: unknown
+    let published: QueueHealthDocument | undefined
+    try {
+      try {
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterHealth: (document) => {
+              if (!corrupted && document.state === "healthy") {
+                writeFileSync(objectPath, "")
+                corrupted = true
+              } else if (document.state === "unhealthy") {
+                stop.abort()
+              }
+            },
+          },
+          { json: true, workdir: w.workdir },
+        )
+      } catch (error) {
+        failure = error
+      }
+      published = parseQueueHealthDocument(readFileSync(join(w.workdir, QUEUE_HEALTH_DOCUMENT), "utf8"))
+    } finally {
+      clearTimeout(deadline)
+      stop.abort()
+      writeFileSync(objectPath, original)
+    }
+    const diagnostic = `${run.stderr()}\n${failure instanceof Error ? failure.message : String(failure ?? "")}`
+    expect(corrupted, diagnostic).toBe(true)
+    expect(diagnostic).toMatch(/(?:object[^\n]*(?:empty|corrupt)|unable to read[^\n]*object)/i)
+    expect(published?.state, diagnostic).toBe("unhealthy")
+  }, 60_000)
+
   it("keeps the service alive through repeated failed remote-read rounds, pages once, and clears after recovery", async () => {
     const w = await world(false)
     const commit = (await w.git(["rev-parse", "main"])).trim()
