@@ -7236,7 +7236,7 @@ esac
 
   // @failure 33946: reboot left an empty loose object in the queue's workdir clone while health looked healthy.
   // @level l2 @consumer existing queue service-health document; transport injection misses local object corruption.
-  it("reports unhealthy when a local loose object becomes unreadable after a healthy round", async () => {
+  it("reports a stopped service and corruption cause when its local declaration object becomes unreadable", async () => {
     const w = await world()
     const oid = (await w.git(["rev-parse", "HEAD:.yrd.yml"])).trim()
     const objectPath = resolve(w.work, (await w.git(["rev-parse", "--git-path", `objects/${oid.slice(0, 2)}/${oid.slice(2)}`])).trim())
@@ -7247,11 +7247,12 @@ esac
     const run = capture(w.work)
     let corrupted = false
     let corruptionError: unknown
+    let exit: number | undefined
     let failure: unknown
     let published: QueueHealthDocument | undefined
     try {
       try {
-        await coreQueueCommand(
+        exit = await coreQueueCommand(
           w.work,
           run.io,
           {
@@ -7289,7 +7290,18 @@ esac
     const diagnostic = `${run.stderr()}\n${run.stdout()}\n${failure instanceof Error ? failure.message : String(failure ?? "")}\n${JSON.stringify(published)}`
     expect(corrupted, diagnostic).toBe(true)
     expect(String(corruptionError), diagnostic).toMatch(/(?:object[^\n]*(?:empty|corrupt)|unable to read[^\n]*object)/i)
-    expect(published?.state, diagnostic).toBe("unhealthy")
+    expect(exit, diagnostic).toBe(2)
+    expect(published, diagnostic).toMatchObject({
+      state: "absent",
+      verdict: { kind: "stopped" },
+      facts: {
+        serviceExited: {
+          kind: "declaration-unreadable",
+          exitCode: 2,
+          detail: expect.stringMatching(/object[^\n]*(?:empty|corrupt)/i),
+        },
+      },
+    })
   }, 60_000)
 
   /** @failure 25708: three unreadable publication witnesses killed the service while its health stayed stale.
