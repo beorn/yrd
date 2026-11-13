@@ -7340,7 +7340,8 @@ esac
   it("reports unhealthy during native publication object corruption and recovers after restoration", async () => {
     const w = await world()
     const branch = "task/object-recovery"
-    await oneChange(w, branch)
+    const head = await oneChange(w, branch)
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
     const ref = changesRef("main", branch)
     const originals = new Map<string, { bytes: Buffer; mode: number }>()
     const errors: string[] = []
@@ -7394,6 +7395,14 @@ esac
           afterHealth: async (document) => {
             seen.push(document)
             if (!restored && document.state === "unhealthy") {
+              expect(await readStatus(store, "main", branch)).toMatchObject({
+                commit: head,
+                status: "stuck",
+                reason: expect.stringMatching(/object[^\n]*(?:empty|corrupt)/i),
+              })
+              expect(document.facts).toMatchObject({
+                stopped: { by: "yrd", cause: "stuck", change: `${branch}@${head}` },
+              })
               restore()
               restored = true
             } else if (restored && !resumed) {
@@ -7427,6 +7436,11 @@ esac
     expect(resumed, diagnostic).toBe(true)
     expect(exit, diagnostic).toBe(0)
     expect(seen.at(-1)?.state, diagnostic).toBe("healthy")
+    expect(await readStatus(store, "main", branch), diagnostic).toMatchObject({
+      commit: head,
+      status: "merged",
+      ending: { kind: "merged" },
+    })
   }, 60_000)
 
   /** @failure 25708: three unreadable publication witnesses killed the service while its health stayed stale.
