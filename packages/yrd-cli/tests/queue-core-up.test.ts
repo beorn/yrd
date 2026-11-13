@@ -7280,7 +7280,7 @@ esac
       if (corrupted) writeFileSync(objectPath, original)
       chmodSync(objectPath, originalMode)
     }
-    const diagnostic = `${run.stderr()}\n${failure instanceof Error ? failure.message : String(failure ?? "")}`
+    const diagnostic = `${run.stderr()}\n${failure instanceof Error ? failure.message : String(failure ?? "")}\n${published?.error?.cause ?? ""}`
     expect(corrupted, diagnostic).toBe(true)
     expect(diagnostic).toMatch(/(?:object[^\n]*(?:empty|corrupt)|unable to read[^\n]*object)/i)
     expect(published?.state, diagnostic).toBe("unhealthy")
