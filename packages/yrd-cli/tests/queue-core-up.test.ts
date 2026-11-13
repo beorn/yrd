@@ -7304,6 +7304,86 @@ esac
     })
   }, 60_000)
 
+  // @failure 33946: corrupt staged event objects must not leave a failing publication loop healthy.
+  // @level l2 @consumer Hab's queue health reader; transport throws do not exercise native corrupt-object failures.
+  it("reports unhealthy during native publication object corruption and recovers after restoration", async () => {
+    const w = await world()
+    const branch = "task/object-recovery"
+    await oneChange(w, branch)
+    const ref = changesRef("main", branch)
+    const originals = new Map<string, { bytes: Buffer; mode: number }>()
+    const errors: string[] = []
+    const seen: QueueHealthDocument[] = []
+    const stop = new AbortController()
+    const deadline = setTimeout(() => stop.abort(), 20_000)
+    const run = capture(w.work)
+    let restored = false
+    let failure: unknown
+    const restore = () => {
+      for (const [path, original] of originals) {
+        writeFileSync(path, original.bytes)
+        chmodSync(path, original.mode)
+      }
+    }
+    const originalBackend = gitomic.createShellBackend
+    using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
+      const backend = originalBackend(options)
+      const publish = backend.publish
+      if (publish === undefined) throw new Error("fixture needs Gitomic publish")
+      return {
+        ...backend,
+        publish: async (repo, updates, remote) => {
+          const update = updates.find((update) => update.ref === ref)
+          if (!restored && update?.oid && updates.some((update) => update.ref === "refs/heads/main")) {
+            const oid = update.oid
+            const path = resolve(w.work, (await w.git(["rev-parse", "--git-path", `objects/${oid.slice(0, 2)}/${oid.slice(2)}`])).trim())
+            if (!originals.has(path)) originals.set(path, { bytes: readFileSync(path), mode: statSync(path).mode })
+            chmodSync(path, statSync(path).mode | 0o200)
+            writeFileSync(path, "")
+          }
+          try {
+            return await publish(repo, updates, remote)
+          } catch (error) {
+            errors.push(error instanceof Error ? error.message : String(error))
+            throw error
+          }
+        },
+      }
+    })
+    try {
+      try {
+        await coreQueueCommand(w.work, run.io, {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterHealth: (document) => {
+            seen.push(document)
+            if (!restored && document.state === "unhealthy") {
+              restore()
+              restored = true
+            } else if (restored && document.state === "healthy") {
+              stop.abort()
+            }
+          },
+        }, { json: true, workdir: w.workdir })
+      } catch (error) {
+        failure = error
+      }
+    } finally {
+      clearTimeout(deadline)
+      stop.abort()
+      restore()
+    }
+    const diagnostic = `${run.stderr()}\n${run.stdout()}\n${String(failure ?? "")}\n${JSON.stringify(seen)}`
+    expect(originals.size, diagnostic).toBeGreaterThan(0)
+    expect(errors.join("\n"), diagnostic).toMatch(/object[^\n]*(?:empty|corrupt)/i)
+    const unhealthy = seen.find((document) => document.state === "unhealthy")
+    expect(unhealthy, diagnostic).toMatchObject({ state: "unhealthy", verdict: { kind: "running" } })
+    expect(JSON.stringify(unhealthy), diagnostic).toMatch(/object[^\n]*(?:empty|corrupt)/i)
+    expect(restored, diagnostic).toBe(true)
+    expect(seen.at(-1)?.state, diagnostic).toBe("healthy")
+  }, 60_000)
+
   /** @failure 25708: three unreadable publication witnesses killed the service while its health stayed stale.
    * @level l2 @consumer Hab health probe and queue list/watch reader
    */
