@@ -7304,6 +7304,37 @@ esac
     })
   }, 60_000)
 
+  // @failure 33946: an ordinary round exception must not leave a healthy running document after exit 2.
+  // @level l2 @consumer the stored queue health reader after a terminal round failure.
+  it("records a stopped round-failed document when an ordinary round throws after a healthy round", async () => {
+    const w = await world()
+    const originalRun = queueCore.queueRun
+    let rounds = 0
+    using _round = vi.spyOn(queueCore, "queueRun").mockImplementation(async (options) => {
+      if (++rounds === 2) throw new Error("fixture ordinary round failure")
+      return originalRun(options)
+    })
+    const run = capture(w.work)
+    const exit = await coreQueueCommand(w.work, run.io, {
+      command: "up",
+      intervalSeconds: 0,
+    }, { json: true, workdir: w.workdir })
+    const health = parseQueueHealthDocument(readFileSync(join(w.workdir, QUEUE_HEALTH_DOCUMENT), "utf8"))
+    expect(rounds, run.stdout()).toBe(2)
+    expect(exit, run.stdout()).toBe(2)
+    expect(health).toMatchObject({
+      state: "absent",
+      verdict: { kind: "stopped" },
+      facts: {
+        serviceExited: {
+          kind: "round-failed",
+          exitCode: 2,
+          detail: expect.stringContaining("fixture ordinary round failure"),
+        },
+      },
+    })
+  }, 60_000)
+
   // @failure 33946: corrupt staged event objects must not leave a failing publication loop healthy.
   // @level l2 @consumer Hab's queue health reader; transport throws do not exercise native corrupt-object failures.
   it("reports unhealthy during native publication object corruption and recovers after restoration", async () => {
