@@ -7246,6 +7246,7 @@ esac
     const deadline = setTimeout(() => stop.abort(), 20_000)
     const run = capture(w.work)
     let corrupted = false
+    let corruptionError: unknown
     let failure: unknown
     let published: QueueHealthDocument | undefined
     try {
@@ -7257,12 +7258,17 @@ esac
             command: "up",
             intervalSeconds: 0,
             stop: stop.signal,
-            afterHealth: (document) => {
+            afterHealth: async (document) => {
               if (!corrupted && document.state === "healthy") {
                 // Git stores loose objects read-only; only this private fixture is made writable.
                 chmodSync(objectPath, originalMode | 0o200)
                 writeFileSync(objectPath, "")
                 corrupted = true
+                try {
+                  await w.git(["cat-file", "-p", oid])
+                } catch (error) {
+                  corruptionError = error
+                }
               } else if (document.state === "unhealthy") {
                 stop.abort()
               }
@@ -7280,9 +7286,9 @@ esac
       if (corrupted) writeFileSync(objectPath, original)
       chmodSync(objectPath, originalMode)
     }
-    const diagnostic = `${run.stderr()}\n${failure instanceof Error ? failure.message : String(failure ?? "")}\n${published?.error?.cause ?? ""}`
+    const diagnostic = `${run.stderr()}\n${run.stdout()}\n${failure instanceof Error ? failure.message : String(failure ?? "")}\n${JSON.stringify(published)}`
     expect(corrupted, diagnostic).toBe(true)
-    expect(diagnostic).toMatch(/(?:object[^\n]*(?:empty|corrupt)|unable to read[^\n]*object)/i)
+    expect(String(corruptionError), diagnostic).toMatch(/(?:object[^\n]*(?:empty|corrupt)|unable to read[^\n]*object)/i)
     expect(published?.state, diagnostic).toBe("unhealthy")
   }, 60_000)
 
