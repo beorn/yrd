@@ -8,7 +8,7 @@
  * @consumer an agent checking where its submitted change stands in the queue
  * @testonly none
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -115,7 +115,7 @@ describe("`yrd queue show` and the merge-line position (#29342)", () => {
     const chain = await openEvents({ ...store, ref })
     const times = [0, 1, 2, 3].map((hour) => new Date(`2026-09-22T0${hour}:00:00.000Z`))
     const reason = "pipe | `code` <tag> ```"
-    await chain.append(
+    const written = await chain.append(
       [
         changeInput("opened", { queueTip, at: times[0]!, commit: head, by: "@dev/10" }),
         ...Array.from({ length: 46 }, (_, index) =>
@@ -133,9 +133,48 @@ describe("`yrd queue show` and the merge-line position (#29342)", () => {
       { expect: null },
     )
     const tip = await chain.head()
-    const read = await yrd(work, "queue", "show", branch, "--markdown")
+    if (tip === null) throw new Error("the 50-event fixture has no tip")
+    const eventIds = new Set(written.events.map((event) => event.id))
+    // Optional named-ref transport may fetch a same-prefix neighbor into its
+    // private cache. That must not select or walk the neighbor's malformed chain.
+    await (
+      await openEvents({ ...store, ref: ref + "-lookalike" })
+    ).append([changeInput("ignored", { queueTip, at: times[0]!, by: "@dev/10", reason: "not the selected chain" })], {
+      expect: null,
+    })
+    const tracePath = join(work, "markdown-git-trace.jsonl")
+    const previousTrace = process.env.GIT_TRACE2_EVENT
+    let read: Ran
+    try {
+      process.env.GIT_TRACE2_EVENT = tracePath
+      read = await yrd(work, "queue", "show", branch, "--markdown")
+    } finally {
+      if (previousTrace === undefined) delete process.env.GIT_TRACE2_EVENT
+      else process.env.GIT_TRACE2_EVENT = previousTrace
+    }
+    const commands = readFileSync(tracePath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { event: string; argv?: string[] })
+      .filter((entry) => entry.event === "start" && entry.argv !== undefined)
+      .map((entry) => entry.argv ?? [])
+    const fetches = commands.filter((args) => args.includes("fetch"))
+    expect(fetches, JSON.stringify(commands)).toHaveLength(1)
+    expect(fetches[0]?.join(" ")).toContain(ref)
+    expect(fetches[0]?.join(" ")).toContain(`refs/yrd-archive/main/${branch}`)
+    expect(fetches[0]?.join(" ")).not.toContain("+refs/yrd/main/changes/*")
+    expect(fetches[0]?.join(" ")).not.toContain("+refs/yrd-archive/main/*")
+    const historyReads = commands.filter((args) => args.includes("--first-parent") && args.includes("--max-count=52"))
+    expect(historyReads, JSON.stringify(commands)).toHaveLength(1)
+    expect(
+      commands.filter((args) => args.some((arg) => eventIds.has(arg))),
+      JSON.stringify(commands),
+    ).toHaveLength(0)
     expect(read.exitCode, read.report).toBe(0)
     expect(read.stderr, read.report).toBe("")
+    const expectedMarkdown = readFileSync(new URL("./fixtures/queue-show-markdown.md", import.meta.url), "utf8")
+      .replaceAll("{{HEAD}}", head).replaceAll("{{TIP}}", tip)
+    expect(read.stdout).toBe(expectedMarkdown)
     const blocks = [...read.stdout.matchAll(/```json\n([\s\S]*?)\n```/gu)].map((match) => JSON.parse(match[1]!))
     expect(blocks).toEqual([
       { branch, ref, tip, complete: true, events: 50, maxEvents: 50 },
@@ -166,6 +205,7 @@ describe("`yrd queue show` and the merge-line position (#29342)", () => {
     ])
     expect(read.stdout.startsWith("# Yrd change history\n\n")).toBe(true)
     expect(read.stdout).not.toContain("Source:")
+    expect(read.stdout).not.toContain("lookalike")
     expect(await chain.head()).toBe(tip)
     for (const args of [
       ["--markdown"],
@@ -187,6 +227,17 @@ describe("`yrd queue show` and the merge-line position (#29342)", () => {
     const activeBlocks = [...active.stdout.matchAll(/```json\n([\s\S]*?)\n```/gu)].map((match) => JSON.parse(match[1]!))
     expect(activeBlocks[1]).toEqual([expect.objectContaining({ state: "queued" })])
     expect(activeBlocks[1]).toEqual([expect.not.objectContaining({ position: expect.anything() })])
+    const invalidRef = changesRef("main", "task/invalid")
+    await (
+      await openEvents({ ...store, ref: invalidRef })
+    ).append([changeInput("ignored", { queueTip, at: times[0]!, by: "@dev/10", reason: "invalid root fixture" })], {
+      expect: null,
+    })
+    const invalid = await yrd(work, "queue", "show", "task/invalid", "--markdown")
+    expect(invalid.exitCode, invalid.report).not.toBe(0)
+    expect(invalid.stdout).toBe("")
+    expect(invalid.stderr).toContain(invalidRef)
+    expect(invalid.stderr).toContain("yrd-ignore-change-ended:")
     await chain.append(
       [changeInput("retained", { queueTip, at: times[3]!, commit: head, by: "@dev/10", reason: "overflow fixture" })],
       { expect: tip },

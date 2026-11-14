@@ -5091,11 +5091,13 @@ describe("the queue-format boundary", () => {
   //          multi-prefix reader failed a round on a race it could have re-read in place.
   // @level l1 @consumer queue list acquisition and the queue run (listChangeHistories)
   it("re-inventories a moved multi-prefix selection in the reader itself, bounded and typed", async () => {
-    for (const [moves, outcome] of [
-      [3, "recovers"],
-      [8, "exhausts"],
+    for (const [moves, outcome, mode] of [
+      [3, "recovers", "listing"],
+      [8, "exhausts", "listing"],
+      [3, "recovers", "bounded"],
+      [8, "exhausts", "bounded"],
     ] as const) {
-      const { store, location } = remoteMemStore(`yrd-bounded-reinventory-${outcome}`)
+      const { store, location } = remoteMemStore(`yrd-bounded-reinventory-${outcome}-${mode}`)
       const target = await open({ ...store, ref: "refs/heads/lab" })
       const head = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
       const queueTip = await seedEventQueue(location, "lab", head, new Date("2026-09-22T14:00:00.000Z"))
@@ -5127,6 +5129,7 @@ describe("the queue-format boundary", () => {
               ],
               { expect: tip },
             )
+            if (mode === "bounded") throw new Conflict("selected ref moved during acquisition", { refs: [ref] })
           }
           return original(...args)
         },
@@ -5134,7 +5137,12 @@ describe("the queue-format boundary", () => {
       let readError: unknown
       let histories: readonly string[] = []
       try {
-        histories = [...(await readEventQueueWithChanges(location, "lab")).histories.keys()]
+        if (mode === "bounded") {
+          const selected = await readBranchHistory(location, "lab", branch, { maxEvents: 50 })
+          histories = selected.history === undefined ? [] : [branch]
+        } else {
+          histories = [...(await readEventQueueWithChanges(location, "lab")).histories.keys()]
+        }
       } catch (error) {
         readError = error
       }
