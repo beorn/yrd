@@ -164,11 +164,13 @@ export async function readEventCommitMetadata(
   return new Map([...raw].map(([id, buffer]) => [id, parseCommit(id, buffer)]))
 }
 
-/** Read a complete chain from one fixed tip, including events older than one page. */
-export async function readEventChain(chain: Chain, acquiredTip?: Oid): Promise<Event[]> {
+/** Read one fixed tip completely, or one bounded window plus its overflow event. */
+export async function readEventChain(chain: Chain, acquiredTip?: Oid, maxEvents?: number): Promise<Event[]> {
   const tip = acquiredTip ?? (await chain.head())
   if (tip === null) return []
-  const events = await chain.events({ at: tip, limit: EVENT_READ_LIMIT, complete: true })
+  const events = await chain.events(
+    maxEvents === undefined ? { at: tip, limit: EVENT_READ_LIMIT, complete: true } : { at: tip, limit: maxEvents + 1 },
+  )
   if (events.length === 0 || events.at(-1)?.id !== tip) {
     throw new Error(`event chain at ${tip}: tip was not readable`)
   }
@@ -198,13 +200,31 @@ export async function readEventChains(
   recent?: RecentEventReadOptions,
   also?: AlsoRead,
   listed?: ReadonlyMap<string, Oid>,
+  maxEvents?: number,
 ): Promise<ReadonlyMap<string, Event[]>> {
+  if (
+    maxEvents !== undefined &&
+    (!Number.isSafeInteger(maxEvents) || maxEvents < 1 || maxEvents >= Number.MAX_SAFE_INTEGER)
+  ) {
+    throw new RangeError("maxEvents must be a positive safe integer with room for one overflow event")
+  }
+  // One lookahead event distinguishes a complete short chain from a clipped long one.
+  // Omission preserves the existing complete walk, including its page size and calls.
+  const checked = (chains: ReadonlyMap<string, Event[]>): ReadonlyMap<string, Event[]> => {
+    if (maxEvents !== undefined) {
+      for (const [ref, events] of chains) {
+        if (events.length > maxEvents) throw new RangeError(`${ref}: event history exceeds maxEvents=${maxEvents}`)
+      }
+    }
+    return chains
+  }
   if (listed !== undefined && (typeof prefix === "string" || store.remote !== undefined)) {
     throw new TypeError("a shared refs/ listing serves only a local multi-prefix event read")
   }
   if (typeof prefix === "string") {
     if (also !== undefined) throw new TypeError("refs read alongside event chains need named chain refs, not a prefix")
-    return chainsUnder(prefix, { ...store, limit: EVENT_READ_LIMIT, complete: true })
+    if (maxEvents === undefined) return chainsUnder(prefix, { ...store, limit: EVENT_READ_LIMIT, complete: true })
+    return checked(await readMultiPrefixInventory([prefix], store, recent, also, listed, maxEvents))
   }
   // The multi-prefix reader is the ONE place two inventories can disagree: between this read's
   // advertisement and its fetch an ordinary queue move lands, and mixing the two would return a
@@ -215,7 +235,9 @@ export async function readEventChains(
   for (let attempt = 1; ; attempt++) {
     try {
       // A retry is after a move, so only the first attempt may use the caller's listing.
-      return await readMultiPrefixInventory(prefix, store, recent, also, attempt === 1 ? listed : undefined)
+      return checked(
+        await readMultiPrefixInventory(prefix, store, recent, also, attempt === 1 ? listed : undefined, maxEvents),
+      )
     } catch (error) {
       if (!(error instanceof EventRefsMoved)) throw error
       if (attempt >= EVENT_REFS_ACQUIRE_ATTEMPTS) throw new EventRefsAcquireExhausted(attempt, error.movedRefs)
@@ -227,9 +249,10 @@ export async function readEventChains(
 async function readMultiPrefixInventory(
   prefix: readonly string[],
   store: ChainStore,
-  recent?: RecentEventReadOptions,
-  also?: AlsoRead,
-  listed?: ReadonlyMap<string, Oid>,
+  recent: RecentEventReadOptions | undefined,
+  also: AlsoRead | undefined,
+  listed: ReadonlyMap<string, Oid> | undefined,
+  maxEvents: number | undefined,
 ): Promise<ReadonlyMap<string, Event[]>> {
   // One advertisement is the selection boundary. Listing hot and cold separately can miss a chain that
   // atomically moves between them. Fetch only selected event refs, never all advertised branch objects.
@@ -292,6 +315,19 @@ async function readMultiPrefixInventory(
       if (moved.length > 0) throw new EventRefsMoved(moved)
       return selected
     },
+  }
+  // chainsUnder requires reaching the root even without complete, so it cannot
+  // return a long-chain overflow witness. Reuse the existing fixed-tip reader's
+  // Gitomic events window instead; acquisition and its retry remain shared.
+  if (maxEvents !== undefined) {
+    return new Map(
+      await Promise.all(
+        [...selected].map(async ([ref, tip]): Promise<[string, Event[]]> => {
+          const chain = await openEvents({ ...store, remote: undefined, backend: captured, ref })
+          return [ref, await readEventChain(chain, tip, maxEvents)]
+        }),
+      ),
+    )
   }
   // Gitomic still owns the one complete, batched event walk and immutable-tip decoding.
   if (recent !== undefined && !exact) {

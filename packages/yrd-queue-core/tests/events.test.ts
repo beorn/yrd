@@ -4651,6 +4651,70 @@ describe("the queue-format boundary", () => {
     expect((await readStatus(location, "lab", "task/42")).status).toBe("queued")
   })
 
+  /** @failure A bounded Markdown producer reads unbounded history or presents a clipped chain as complete.
+   * @level l1 @consumer readBranchHistory's explicit maxEvents option
+   * Existing status/history fixtures require complete reads and do not exercise an explicit event ceiling.
+   */
+  it.each([
+    ["hot", 50],
+    ["hot", 51],
+    ["hot", 600],
+    ["cold", 50],
+    ["cold", 51],
+    ["cold", 600],
+  ] as const)("reads at most 50 complete events from a %s chain containing %i events", async (custody, count) => {
+    const { store, location } = remoteMemStore(`yrd-bounded-${custody}-${count}`)
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const head = (await target.transact(async (map) => map.set("work.txt", "bounded history"), "work")).oid
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const queueTip = await seedEventQueue(location, "lab", head, at)
+    const branch = "task/bounded"
+    const hotRef = changesRef("lab", branch)
+    const selectedRef = custody === "hot" ? hotRef : `refs/yrd-archive/lab/${branch}`
+    const chain = await openEvents({ ...store, ref: hotRef })
+    await chain.append(
+      [
+        changeInput("opened", { queueTip, at, commit: head, by: "@dev/10" }),
+        ...Array.from({ length: count - 1 }, (_, index) =>
+          changeInput(index % 2 === 0 ? "ignored" : "unignored", {
+            queueTip,
+            at,
+            by: "@dev/10",
+            ...(index % 2 === 0 ? { reason: "bounded fixture" } : {}),
+          }),
+        ),
+      ],
+      { expect: null },
+    )
+    if (custody === "cold") {
+      const tip = await chain.head()
+      await store.backend.publish!(
+        store.repo,
+        [
+          { ref: selectedRef, expect: "0".repeat(40), oid: tip! },
+          { ref: hotRef, expect: tip!, oid: null },
+        ],
+        "origin",
+      )
+    }
+    const reads = vi.spyOn(location.backend, "readHistory")
+    const fetches = vi.spyOn(location.backend, "fetchRefs")
+    const complete = await readBranchHistory(location, "lab", branch)
+    expect(complete.ref).toBe(selectedRef)
+    expect(complete.history?.events).toHaveLength(count)
+    expect(reads).toHaveBeenCalledTimes(1)
+    expect(fetches).toHaveBeenCalledTimes(1)
+    expect(reads.mock.calls[0]?.[2]).toEqual({ limit: 1025 })
+    reads.mockClear()
+    fetches.mockClear()
+    const bounded = readBranchHistory(location, "lab", branch, { maxEvents: 50 })
+    if (count === 50) await expect(bounded).resolves.toEqual(complete)
+    else await expect(bounded).rejects.toThrow(/event history exceeds maxEvents=50/)
+    expect(reads).toHaveBeenCalledTimes(1)
+    expect(fetches).toHaveBeenCalledTimes(1)
+    expect(reads.mock.calls[0]?.[2]).toEqual({ limit: 52 })
+  })
+
   /** @failure A retained tip makes hot/cold history unreadable or loses the extra commit parent.
    * @level l1 @consumer selected change history, list and detail readers
    * Existing custody fixtures have no retained event and cannot expose an old-reader diagnostic.
