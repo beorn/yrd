@@ -110,6 +110,26 @@ describe("patch equivalence off the target", () => {
     await git(["checkout", "--quiet", "main"])
     await expect(patchEquivalentOffTarget(git, "main", tip)).resolves.toBe(false)
   })
+
+  // @failure Two commits with no patch share git's empty patch-id, so an unrelated empty commit in the target
+  // makes the branch's graph-only commit read as landed and the branch is deleted with its own history
+  // (@dev/4 real-Git counterexample, 34265).
+  // @level l2; @consumer branch retirement; @testonly none
+  it("keeps a graph-only commit even when the target also has one", async () => {
+    const { root, git } = await equivalenceFixture("patch-equivalent-empty-both-sides")
+    const base = await commitFiles(root, git, { "r.txt": "r\n" }, "root")
+    await commitFiles(root, git, { "a.txt": "1\n" }, "main a")
+    await git(["commit", "--quiet", "--allow-empty", "-m", "target graph only"])
+    await git(["checkout", "--quiet", base])
+    await commitFiles(root, git, { "a.txt": "1\n" }, "branch a")
+    await git(["commit", "--quiet", "--allow-empty", "-m", "branch graph only"])
+    const tip = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    const listed = (await git(["cherry", "main", tip])).trim().split("\n")
+    expect(listed).toHaveLength(2)
+    expect(listed.every((line) => line.startsWith("- "))).toBe(true)
+    await expect(patchEquivalentOffTarget(git, "main", tip)).resolves.toBe(false)
+  })
 })
 
 async function equivalenceFixture(name: string): Promise<{ root: string; git: ReturnType<typeof gitIn> }> {
