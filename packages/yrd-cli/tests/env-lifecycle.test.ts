@@ -3644,6 +3644,11 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
         },
       })
       expect(readCloseRequest(file)).toEqual(standing)
+      // 34317: the standing request's optional ending must be named, never rendered as the word
+      // "undefined" — the ordinary idempotent re-file of a default close records no ending at all.
+      expect(again.stderr()).not.toContain("undefined")
+      if (intent === "default") expect(again.stderr()).toContain("ending (none)")
+      else expect(again.stderr()).toContain("recorded-ending")
       const human = capture(w.work)
       expect(await runYrdProcess(["bun", "yrd", "env", "close", path], human.io), human.stderr()).toBe(0)
       expect(human.stdout()).toContain("queued, not closed")
@@ -3662,6 +3667,10 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       ).toBe(2)
       expect(conflict.stderr()).toContain("already stands")
       expect(conflict.stderr()).toContain(requester)
+      // 34317, second site: the conflicting-ending refusal renders both optional endings, so a
+      // conflict between two default closes used to say "ending undefined" twice.
+      expect(conflict.stderr()).not.toContain("undefined")
+      if (intent === "default") expect(conflict.stderr()).toContain("ending (none)")
       expect(readCloseRequest(file)).toEqual(standing)
       if (intent === "default") {
         // An explicit internal option remains a declaration, unlike the public default.

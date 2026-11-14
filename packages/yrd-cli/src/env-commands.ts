@@ -2365,7 +2365,9 @@ function queueDelegatedClose(
           ? "your default close asked for rehome; "
           : "") +
         `standing request from ${standing.requester} at ${standing.at} closes ` +
-        `${standing.options.noRehome === true ? "without" : "with"} rehome under ending ${JSON.stringify(standing.ending)}; ` +
+        `${standing.options.noRehome === true ? "without" : "with"} rehome under ending ${
+          standing.ending === undefined ? "(none)" : JSON.stringify(standing.ending)
+        }; ` +
         `it stands unchanged\n`,
     )
   }

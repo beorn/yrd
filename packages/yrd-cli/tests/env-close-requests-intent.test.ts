@@ -18,6 +18,7 @@ import {
   releaseRequestFile,
   writeCloseRequest,
   writeReleaseRequest,
+  type EnvCloseRequest,
   type EnvReleaseRequest,
 } from "../src/env-close-requests.ts"
 
@@ -49,6 +50,33 @@ function store(): string {
   mkdirSync(closeRequestsDirectory(workdir), { recursive: true })
   return workdir
 }
+
+// 34317: `ending` is optional on both sides of the conflict message, so the refusal must name the
+// absence instead of interpolating JSON.stringify(undefined), which prints the word "undefined".
+it("34317: names an absent optional ending in the conflict refusal instead of printing undefined", () => {
+  const workdir = store()
+  const standing: EnvCloseRequest = {
+    intent: "close",
+    name: "34317-fixture",
+    path,
+    requester: "@dev/luna3",
+    uid,
+    at: "2026-11-14T20:00:00.000Z",
+    predicate: "direct-admission",
+    options: {},
+    head: "a".repeat(40),
+  }
+  writeCloseRequest(workdir, standing)
+  let message = ""
+  try {
+    writeCloseRequest(workdir, { ...standing, options: { noRehome: true } })
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error)
+  }
+  expect(message).toContain("already stands")
+  expect(message).not.toContain("undefined")
+  expect(message.match(/ending \(none\)/gu)).toHaveLength(2)
+})
 
 it("keys a release apart from a close for the same path, and re-filing the same release matches it", () => {
   const workdir = store()
