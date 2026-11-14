@@ -57,6 +57,8 @@ import {
   unstageCloseRequest,
   writeCloseRequest,
   type EnvCloseRequest,
+  type EnvCloseRequestOptions,
+  type EnvReleaseRequest,
   type StoredEnvRequest,
   type StoredReleaseRequest,
 } from "./env-close-requests.ts"
@@ -269,6 +271,34 @@ function blockedCustodyRefusalRecord(
     why: input.why,
     recordedAt: new Date().toISOString(),
   }
+}
+
+/**
+ * The remedy for a retired RELEASE request: the direct verb's own invocation, carrying the recorded branch,
+ * tip, issue, reason and flags, so re-filing cannot silently become a different operation (@cto 13:21 PST,
+ * ruling correction 2). Nothing here claims a capable reader exists.
+ */
+function releaseRemedy(release: EnvReleaseRequest["release"]): string {
+  const flags = [
+    release.submodules ? "--submodules" : undefined,
+    release.discard === true ? "--discard" : undefined,
+  ].filter((flag): flag is string => flag !== undefined)
+  const tail = flags.length === 0 ? "" : ` ${flags.join(" ")}`
+  return `re-file the same release from the same repository: yrd drop ${release.branch} --local --release-checkout --tip ${release.tip} --issue ${release.issue} --reason ${JSON.stringify(release.reason)}${tail} (previews unless --apply)`
+}
+
+/**
+ * The remedy for a retired CLOSE request: its recorded options, and the one precondition that failed, with no
+ * claim that a capable reader is available on this host (@cto 13:21 PST, ruling corrections 2 and 4).
+ */
+function closeRemedy(options: EnvCloseRequestOptions): string {
+  const flags = [
+    options.retain === undefined ? undefined : `--retain ${options.retain}`,
+    options.noRehome === true ? "--no-rehome" : undefined,
+    options.preserve === true ? "--preserve" : undefined,
+  ].filter((flag): flag is string => flag !== undefined)
+  const withOptions = flags.length === 0 ? "with no options" : flags.join(" ")
+  return `re-file the same close ${withOptions} from a context that can read every same-UID pid's cwd`
 }
 
 /**
@@ -503,7 +533,7 @@ async function consumeCloseRequests(
           retried,
           request.path,
           "retired",
-          `coverage refused ${attempts} times; last: ${rows(report.needsDelegation)}`,
+          `the census could not certify coverage in ${attempts} rounds (bound ${MAX_COVERAGE_ATTEMPTS}); pending request retired; last: ${rows(report.needsDelegation)}; ${releaseRemedy(request.release)}`,
           undefined,
           timing,
         )
@@ -695,7 +725,7 @@ async function consumeCloseRequests(
             retired,
             request.path,
             "retired",
-            `coverage refused ${attempts} times; last: ${cause.refusal} (${censusReaderLine(cause.census)})`,
+            `the census could not certify coverage in ${attempts} rounds (bound ${MAX_COVERAGE_ATTEMPTS}); pending request retired; last: ${cause.refusal} (${censusReaderLine(cause.census)}); ${closeRemedy(request.options)}`,
             fingerprint,
             timing,
           )
@@ -731,7 +761,7 @@ async function consumeCloseRequests(
             refused,
             request.path,
             "retired",
-            `a private submodule store refused the close ${attempts} times; last: ${named}`,
+            `a private submodule store refused the close in ${attempts} rounds (bound ${MAX_COVERAGE_ATTEMPTS}); pending request retired; last: ${named}`,
             fingerprint,
             timing,
           )
