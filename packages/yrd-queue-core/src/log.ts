@@ -267,7 +267,7 @@ export type QueueRunLog = Readonly<{
  */
 function persistJournalProjection(path: string, id: string): void {
   const before = journalSource(path, id)
-  const records = runLogRecords(readFileSync(path, "utf8"), true)
+  const { records } = runLogRecords(readFileSync(path, "utf8"), true)
   // A writer never produces what its reader rejects: the reader names an
   // artifact with no run header "partial", and "partial" is repairable, so
   // persisting one would be rewritten on every read, forever.
@@ -696,19 +696,65 @@ export function runStartedAt(id: string): Date | undefined {
 
 /** One run's journal, read: every record it wrote, in order. A line that is not a record is skipped and counted, never guessed at. */
 export function readRunLog(dir: string, run: string): readonly LogRecord[] {
+  return readRunLogWithMalformed(dir, run).records
+}
+
+function readRunLogWithMalformed(dir: string, run: string) {
   return runLogRecords(readFileSync(join(dir, `${run}.jsonl`), "utf8"))
 }
 
+/**
+ * One physical post-header line. A zero-filled record may erase its newline
+ * and leave the next intact record after leading NULs: recover only that
+ * suffix, once, while naming the damage. Never search for a brace or trim a
+ * corrupt suffix. Header readers and projection publication remain strict.
+ */
+export function readJournalLine(
+  line: string,
+  number: number,
+): Readonly<{ value?: Readonly<Record<string, unknown> & { kind: string }>; malformed?: string }> {
+  let value: unknown
+  let malformed: string | undefined
+  try {
+    value = JSON.parse(line)
+  } catch (error) {
+    const nuls = /^\0+/u.exec(line)?.[0].length ?? 0
+    if (nuls === 0) return { malformed: `record ${number} is not JSON: ${String(error)}` }
+    try {
+      value = JSON.parse(line.slice(nuls))
+      malformed = `record ${number} skipped ${nuls} leading NUL bytes; kept the following record`
+    } catch (suffixError) {
+      return { malformed: `record ${number} is not JSON after ${nuls} leading NUL bytes: ${String(suffixError)}` }
+    }
+  }
+  if (typeof value !== "object" || value === null || typeof (value as Record<string, unknown>).kind !== "string") {
+    return {
+      malformed: `record ${number} is not a journal object with a kind${malformed === undefined ? "" : `; ${malformed}`}`,
+    }
+  }
+  return {
+    value: value as Readonly<Record<string, unknown> & { kind: string }>,
+    ...(malformed === undefined ? {} : { malformed }),
+  }
+}
+
 /** Projection publication must preserve the runner's stricter opening contract. */
-function runLogRecords(text: string, projecting = false): readonly LogRecord[] {
+function runLogRecords(
+  text: string,
+  projecting = false,
+): Readonly<{ records: readonly LogRecord[]; malformed: readonly string[] }> {
   const records: LogRecord[] = []
+  const malformed: string[] = []
   const lines = text.split("\n")
   if (lines.at(-1) === "") lines.pop()
   let headed = false
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
     if (projecting && !headed && line.trim() === "") throw new Error("empty record before run header")
     if (line.trim() === "") continue
-    const parsed: unknown = JSON.parse(line)
+    const read = projecting || !headed ? { value: JSON.parse(line) as unknown } : readJournalLine(line, index + 1)
+    if ("malformed" in read && read.malformed !== undefined) malformed.push(read.malformed)
+    const parsed = read.value
+    if (parsed === undefined) continue
     if (projecting && !headed) {
       const prefix = parsed as LogRecord | null
       if (
@@ -724,6 +770,7 @@ function runLogRecords(text: string, projecting = false): readonly LogRecord[] {
     }
     if (typeof parsed !== "object" || parsed === null) continue
     const record = parsed as LogRecord
+    if (record.kind === "run") headed = true
     if (
       projecting &&
       typeof record.kind === "string" &&
@@ -734,7 +781,7 @@ function runLogRecords(text: string, projecting = false): readonly LogRecord[] {
     if (typeof record.kind !== "string" || typeof record.run !== "string" || typeof record.at !== "string") continue
     records.push(record)
   }
-  return records
+  return { records, malformed }
 }
 
 const journalFileCache = new Map<
@@ -998,7 +1045,8 @@ export function readJournalProjection(
       try {
         // The compact artifact owns summary facts; complete command and step
         // detail stays in the canonical raw fold. Never fabricate empty arrays.
-        runs = runsIn(readRunLog(dir, id), id, startedAt)
+        const read = readRunLogWithMalformed(dir, id)
+        runs = runsIn(read.records, id, startedAt, "include", read.malformed)
       } catch (error) {
         return raw("unreadable", `${path}: full journal detail could not be read: ${String(error)}`)
       }
@@ -1239,9 +1287,10 @@ function cachedRunsIn(
   // cutoff: an old round can be the ONLY journal a currently listed change has,
   // and a bound that reached it would drop that change's fact while the page
   // still read complete (@i/10-yrd/28799 finding 1).
-  const rawRecords = readRunLog(dir, id)
+  const read = readRunLogWithMalformed(dir, id)
+  const rawRecords = read.records
   const commandJournal = rawRecords.find((record) => record.kind === "run")?.command !== undefined
-  const runs = [...runsIn(rawRecords, id, startedAt, detail)]
+  const runs = [...runsIn(rawRecords, id, startedAt, detail, read.malformed)]
   let persist: JournalPersistOutcome | undefined
   if (projection.source !== undefined) {
     try {
@@ -1695,18 +1744,26 @@ function commandOf(record: LogRecord): JournalCommand | undefined {
   }
 }
 
-function runsIn(records: readonly LogRecord[], id: string, startedAt: Date, detail?: "include"): readonly JournalRun[]
+function runsIn(
+  records: readonly LogRecord[],
+  id: string,
+  startedAt: Date,
+  detail?: "include",
+  malformed?: readonly string[],
+): readonly JournalRun[]
 function runsIn(
   records: readonly LogRecord[],
   id: string,
   startedAt: Date,
   detail: "include" | "omit",
+  malformed?: readonly string[],
 ): readonly JournalSummary[]
 function runsIn(
   records: readonly LogRecord[],
   id: string,
   startedAt: Date,
   detail: "include" | "omit" = "include",
+  malformed: readonly string[] = [],
 ): readonly JournalSummary[] {
   // READER VERSION SKEW (24735, @cto 056e31bf): kinds this build knows are
   // folded; kinds it does not are NAMED, never dropped and never malformed.
@@ -1744,7 +1801,13 @@ function runsIn(
   const base = records.find((record) => record.kind === "run")?.base
   const held = (branch: string, head: string, at: Date) => {
     const key = journalKey(branch, head)
-    const found = byChange.get(key) ?? { at, branch, checks: [], head }
+    const found = byChange.get(key) ?? {
+      at,
+      branch,
+      checks: [],
+      head,
+      ...(malformed.length === 0 ? {} : { malformed: malformed.map((message) => `run journal ${id} ${message}`) }),
+    }
     found.at = at
     byChange.set(key, found)
     return found

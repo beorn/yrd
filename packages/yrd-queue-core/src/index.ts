@@ -176,6 +176,7 @@ export {
   journalKey,
   openLog,
   readJournals,
+  readJournalLine,
   readJournalProjection,
   FULL_READ_RUNS_MS,
   READ_HORIZON_MS,

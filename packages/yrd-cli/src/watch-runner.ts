@@ -34,6 +34,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import {
   LOG_KINDS,
+  readJournalLine,
   readJournalProjection,
   runDiedInPreamble,
   runStartedAt,
@@ -113,6 +114,8 @@ export type RunnerRun = Readonly<{
    * still read, and only its own row says this reading is partial.
    */
   unknownKinds?: readonly string[]
+  /** Damaged records skipped while retaining the journal's other facts. */
+  malformed?: readonly string[]
   /**
    * The run threw in its Git preamble: it is not executing and it never reached
    * the queue it was for. A terminal outcome with its own cure, and deliberately
@@ -617,6 +620,8 @@ export type JournalHead = Readonly<{
   line?: RoundLine
   /** Record kinds this build does not know, NAMED rather than dropped (24735). */
   unknownKinds?: readonly string[]
+  /** Damaged records skipped while retaining the journal's other facts. */
+  malformed?: readonly string[]
 }>
 
 /** The run's own reading of its line: the last `observation` record with subject `line` (25669). */
@@ -670,20 +675,13 @@ export function readRunHeader(path: string, projected?: readonly LogRecord[]): J
   const openSteps: ActiveRunnerStep[] = []
   const allSteps: RunnerJournalStep[] = []
   const unknownKinds = new Set<string>()
+  const malformed: string[] = []
   for (const [index, line] of lines.entries()) {
     if (header !== undefined) {
-      // PAST THE HEADER the journal is the run's ordinary business, which this
-      // reader neither validates nor understands. It reads steps and checks to
-      // track the active step, skipping unparseable lines as readRunLog does.
-      let after: unknown
-      try {
-        after = JSON.parse(line)
-      } catch {
-        continue
-      }
-      if (typeof after !== "object" || after === null) continue
-      const record = after as Record<string, unknown>
-      if (typeof record.kind !== "string") continue
+      const read = readJournalLine(line, index + 1)
+      if (read.malformed !== undefined) malformed.push(`run journal ${path} ${read.malformed}`)
+      if (read.value === undefined) continue
+      const record = read.value
       // A KIND THIS BUILD DOES NOT KNOW is reader version skew, never a failed
       // load (24735, @cto 056e31bf). The reader keeps folding every kind it
       // knows - a writer may add one without breaking a reader - and NAMES the
@@ -812,6 +810,7 @@ export function readRunHeader(path: string, projected?: readonly LogRecord[]): J
     ...(allSteps.length === 0 ? {} : { steps: allSteps }),
     ...(line === undefined ? {} : { line }),
     ...(unknownKinds.size === 0 ? {} : { unknownKinds: [...unknownKinds].sort() }),
+    ...(malformed.length === 0 ? {} : { malformed }),
     died,
     ended,
     headed: true,
@@ -858,6 +857,7 @@ function journalVerdict(
   | "ended"
   | "line"
   | "unknownKinds"
+  | "malformed"
   | "unstarted"
 > {
   const unstarted = !alive && read.died
@@ -876,6 +876,7 @@ function journalVerdict(
     ...(read.ended ? { ended: true as const } : {}),
     ...(read.line === undefined ? {} : { line: read.line }),
     ...(read.unknownKinds === undefined ? {} : { unknownKinds: read.unknownKinds }),
+    ...(read.malformed === undefined ? {} : { malformed: read.malformed }),
     ...(unstarted ? { unstarted: true as const } : {}),
   }
 }
@@ -1193,7 +1194,12 @@ function runnerLineOf(
       ? ""
       : `journal ${facts.latest.id} carries record kind ${facts.latest.unknownKinds.join(", ")} this watch does not know; restart the watch from the landing root`
   const skewedDetail = readSkew === "" ? localDetail : localDetail === "" ? readSkew : `${localDetail} · ${readSkew}`
-  const rawDetail = publishedDetail === undefined ? skewedDetail : `${publishedDetail} · ${skewedDetail}`
+  const damage = facts?.latest?.malformed
+  const damagedDetail =
+    damage === undefined
+      ? skewedDetail
+      : `${skewedDetail} · ${damage.length} malformed journal record(s): ${damage.join("; ")}`
+  const rawDetail = publishedDetail === undefined ? damagedDetail : `${publishedDetail} · ${damagedDetail}`
   const detail = rawDetail.replace(/[—\s]+$/u, "")
   switch (state) {
     case "provisioning":
