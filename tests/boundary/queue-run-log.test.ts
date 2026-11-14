@@ -156,8 +156,9 @@ it.each(["middle", "header", "garbage", "many", "no-change", "matching-projectio
       // recorded identity is deliberately made to match the damaged source.
       const artifact = JSON.parse(projection.toString()) as { source: Record<string, string> }
       const source = await stat(log.path, { bigint: true })
-      for (const key of ["dev", "ino", "size", "mtimeNs", "ctimeNs"] as const)
+      for (const key of ["dev", "ino", "size", "mtimeNs", "ctimeNs"] as const) {
         artifact.source[key] = String(source[key])
+      }
       projection = Buffer.from(JSON.stringify(artifact))
       await writeFile(projectionPath, projection)
       expect(readJournalProjection(dir, log.id, { detail: "include" })).toMatchObject({
