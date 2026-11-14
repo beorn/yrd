@@ -2065,8 +2065,9 @@ export async function retireMergedRootAuthor(
     throw new Error(`${branch}: root retirement requires an exact merged or withdrawn submission and event tip`)
   }
   const ancestry = await isAncestor(git, tip, input.target)
-  // A rebuilt or squashed landing carries no ancestry link but also no unmerged content (34265); an empty or
-  // graph-only commit has no patch to match, so the same test still keeps it here.
+  // A rebuilt landing (re-landed as its own commits) carries no ancestry link but also no unmerged content
+  // (34265). An empty or graph-only commit has no patch to match and a multi-commit squash is not proved by
+  // per-commit matches, so both still keep here.
   const rebuilt = !ancestry && !withdrawn && (await patchEquivalentOffTarget(git, input.target, tip))
   if (!withdrawn && !ancestry && !rebuilt) {
     const result = {
@@ -2722,9 +2723,10 @@ export function createLandedBranchRetirement(
       if (reasons.length > 0) return { outcome: "kept", reason: "held", detail: reasons.join("; ") }
     }
     const ancestry = await isAncestor(git, candidate.tip, target)
-    // A rebuilt or squashed landing carries no ancestry link but also no unmerged content: every commit the
-    // target lacks from the tip has a patch-equivalent commit there (34265). An empty/graph-only commit has
-    // no patch to match and stays unique, so tree equality alone never licenses a retirement (29450).
+    // A rebuilt landing (re-landed as its own commits) carries no ancestry link but also no unmerged content:
+    // every commit the target lacks from the tip has a patch-equivalent commit there (34265). An empty or
+    // graph-only commit has no patch to match and a multi-commit squash is not proved by per-commit matches,
+    // so both stay unique; tree equality alone never licenses a retirement (29450).
     const rebuilt = ancestry ? false : await patchEquivalentOffTarget(git, target, candidate.tip)
     const custody = ancestry || rebuilt ? target : undefined
     const proof = ancestry ? { kind: "ancestry" as const } : { kind: "content" as const, via: "patch-id" as const }
