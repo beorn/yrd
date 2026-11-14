@@ -4877,7 +4877,10 @@ describe("a queue is the selected origin branch carrying config", () => {
     if (kind === "bay") {
       const opened = capture(repo)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "merge-retirement", "--json", "--expires", "1d"], opened.io),
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", "--bay", "merge-retirement", "--json", "--expires", "1d"],
+          opened.io,
+        ),
         opened.stderr(),
       ).toBe(0)
       author = (JSON.parse(opened.stdout()) as { path: string }).path
@@ -7772,6 +7775,12 @@ describe("drop --local --release-checkout", () => {
       // caller cannot mistake the hold for a host-wide /proc restriction.
       expect(detail).toContain("this reader: NoNewPrivs=")
       expect(detail).toMatch(/this reader: NoNewPrivs=(0|1|absent|unreadable), CapEff=/u)
+      // 34329 (@cto 2026-11-14): the refusal records WHICH process read the
+      // census and WHEN. Two same-UID readers on this host answer the same
+      // /proc question differently; the cause is unknown, so the next reader's
+      // answer has to be comparable with this one instead of merged into it.
+      expect(detail).toContain(`census read by pid ${process.pid} uid `)
+      expect(detail).toMatch(/census read by pid \d+ uid \d+ at \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/u)
       expect(detail).not.toContain("outside any sandbox restricting /proc reads")
       // Nothing was archived or deleted under an uncertified census.
       expect(await fixture.git(["for-each-ref", "refs/archive/"])).toBe("")

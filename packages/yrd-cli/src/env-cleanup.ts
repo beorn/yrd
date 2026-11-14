@@ -28,6 +28,7 @@ import {
 import { inspectProcessCwds, resolveContainedPath, type ProcessCwdProjection } from "removely"
 import {
   assertNoLiveEnvironmentUse,
+  censusReaderLine,
   environmentCwdHolder,
   processCwdCoverage,
   validateLiveEnvironmentUses,
@@ -693,7 +694,7 @@ async function consumeCloseRequests(
             retired,
             request.path,
             "retired",
-            `coverage refused ${attempts} times; last: ${cause.refusal}`,
+            `coverage refused ${attempts} times; last: ${cause.refusal} (${censusReaderLine(cause.census)})`,
             fingerprint,
             timing,
           )
@@ -704,7 +705,7 @@ async function consumeCloseRequests(
             retired,
             request.path,
             "kept",
-            `coverage refused ${attempts} of ${MAX_COVERAGE_ATTEMPTS}; retried next round: ${cause.refusal}`,
+            `coverage refused ${attempts} of ${MAX_COVERAGE_ATTEMPTS}; retried next round: ${cause.refusal} (${censusReaderLine(cause.census)})`,
             fingerprint,
             timing,
           )

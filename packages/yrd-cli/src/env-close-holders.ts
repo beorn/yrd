@@ -97,9 +97,26 @@ export type CloseCensusReceipt = Readonly<{
   rows: number
   unreadable: number
   uncleared: number
+  /**
+   * Which process asked and when (@cto 2026-11-14, 34329). Two same-UID readers
+   * on this host answer the same /proc question differently, so a refusal that
+   * records only counts cannot be compared with the next reader's answer. The
+   * cause is unknown; the identity and time make the next comparison possible.
+   */
+  reader: Readonly<{ pid: number; uid: number }>
+  observed_at: string
   /** What this admission's own walk cost. One close request is one walk here, so this is the whole cost. */
   elapsed_ms: number
 }>
+
+/**
+ * Which process read the census and when (@cto 2026-11-14, 34329). One spelling
+ * for every surface that records a refusal, so two readers' answers can be
+ * compared instead of merged: the cause of their disagreement is still unknown.
+ */
+export function censusReaderLine(census: CloseCensusReceipt): string {
+  return `census read by pid ${census.reader.pid} uid ${census.reader.uid} at ${census.observed_at}`
+}
 
 /**
  * What one admission decided.
@@ -122,6 +139,7 @@ export async function admitEnvironmentClose(
   censusSource?: () => Promise<ProcessCensus<"same-uid">>,
 ): Promise<CloseAdmission> {
   const censusStartedAt = Date.now()
+  const observedAt = new Date(censusStartedAt).toISOString()
   let snapshot: ProcessCwdProjection
   const exempt = new Set<number>([process.pid])
   let ancestryAvailable = false
@@ -185,6 +203,8 @@ export async function admitEnvironmentClose(
         rows: snapshot.rows.length,
         unreadable: snapshot.unreadable.length,
         uncleared: coverage.uncleared.length,
+        reader: { pid: process.pid, uid: typeof process.getuid === "function" ? process.getuid() : -1 },
+        observed_at: observedAt,
         elapsed_ms: censusElapsedMs,
       },
     }
