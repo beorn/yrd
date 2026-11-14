@@ -58,9 +58,11 @@
  * the setup did are the queue's, a failing check the submitter's. A passing
  * result is nobody's, so only the stuck case below reads it.
  */
-import { readdir, readFile, stat } from "node:fs/promises"
+import { readdir, readFile, stat, writeFile } from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { openLog, readJournals } from "@yrd/queue-core"
+import { readRunnerFacts } from "../../packages/yrd-cli/src/watch-runner.ts"
 import {
   boundaryRepository,
   type LogRecord,
@@ -69,9 +71,48 @@ import {
   queueRunOnce,
   removeTemporaryRoots,
   submitOneCommit,
+  temporaryLog,
 } from "./fixture.ts"
 
 afterEach(removeTemporaryRoots)
+
+// C2/C8: production writers can leave a NUL-filled record with its newline
+// erased. Projection parity and malformed-prefix tests miss the intact next
+// row being consumed with that record. Exercise both public readers, without
+// a queue round: this is a reader contract, not a claim about service startup.
+it.each(["middle", "header"] as const)("reads a writer journal after %s record overwrite", async (damage) => {
+  const workdir = dirname(await temporaryLog("damaged-journal"))
+  const dir = join(workdir, "logs")
+  const log = openLog(dir)
+  const branch = "task/journal-damage"
+  const head = "a".repeat(40)
+  log.write({ kind: "run", target: "main", queue: "main" })
+  log.write({ kind: "step", name: "overwritten", phase: "merge", branch, head, start: new Date().toISOString() })
+  log.write({ kind: "step", name: "survivor", phase: "merge", branch, head, start: new Date().toISOString() })
+  log.write({ kind: "change", branch, head, decision: "failed" })
+  log.finish()
+
+  expect((await readRunnerFacts(workdir)).latest?.steps?.map((step) => step.name)).toEqual(["overwritten", "survivor"])
+  expect(
+    readJournals(dir, { runIds: [log.id] })
+      .runs.get(`${branch}@${head}`)?.[0]
+      ?.steps.map((step) => step.name),
+  ).toEqual(["overwritten", "survivor"])
+  const bytes = await readFile(log.path)
+  const headerEnd = bytes.indexOf(10) + 1
+  const stepEnd = bytes.indexOf(10, headerEnd) + 1
+  bytes.fill(0, damage === "header" ? 0 : headerEnd, damage === "header" ? headerEnd : stepEnd)
+  await writeFile(log.path, bytes)
+
+  if (damage === "header") {
+    await expect(readRunnerFacts(workdir)).rejects.toThrow(/record 1 before the run header is not JSON/u)
+    expect(() => readJournals(dir, { runIds: [log.id] })).toThrow(/cannot read run journal/u)
+    return
+  }
+  expect.soft((await readRunnerFacts(workdir)).latest?.steps?.map((step) => step.name)).toEqual(["survivor"])
+  const detail = readJournals(dir, { runIds: [log.id] })
+  expect(detail.runs.get(`${branch}@${head}`)?.[0]?.steps.map((step) => step.name)).toEqual(["survivor"])
+})
 
 /** Every record of one kind. */
 function ofKind(records: readonly LogRecord[], kind: string): readonly LogRecord[] {
