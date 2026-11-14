@@ -7916,7 +7916,9 @@ esac
   // 25669: the FIRST round after a start has no flow in the loop yet, and it is
   // the round the 09-24 cut-over stood still in. Its own journalled line makes
   // it judgeable: the beats state the waiting count and the phase it is in.
-  it("the first round after a start is judged from its own journal's line", async () => {
+  // C8/33944: reader-only damage tests cannot prove the resident continues,
+  // completes its real round, and starts again on the same damaged files.
+  it("the first round survives journal damage, names it, and a fresh owner starts on the same files", async () => {
     const w = await world(false)
     const held = heldSetup(w.workdir)
     await redeclare(w, `setup: ${held.command}\n`)
@@ -7954,8 +7956,88 @@ esac
         },
         { timeout: 10_000 },
       )
+      const beforeDamage = await readRunnerFacts(w.workdir)
+      const firstRun = beforeDamage.latest?.id
+      const active = beforeDamage.latest?.activeStep
+      expect(firstRun, "the real owner has opened its journal").toBeDefined()
+      expect(active?.name, "the actual setup is still held").toContain("setup")
+      const path = join(w.workdir, "logs", `${firstRun}.jsonl`)
+      const original = readFileSync(path)
+      let offset = 0
+      const spans = original
+        .toString("utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => {
+          const start = offset
+          offset += Buffer.byteLength(line) + 1
+          return { start, end: offset, row: JSON.parse(line) as Record<string, unknown> }
+        })
+      const erased = spans.find((span) => span.row.kind === "queue")
+      const survivor = spans.find(
+        (span) => span.row.kind === active?.kind && span.row.name === active?.name && span.row.end === undefined,
+      )
+      expect(erased, "the writer supplies a non-header record to overwrite").toBeDefined()
+      expect(survivor, "a later actual step, not a fabricated record, must survive").toBeDefined()
+      expect(erased!.end).toBeLessThanOrEqual(survivor!.start)
+      const damaged = Buffer.concat([original, Buffer.alloc(32)])
+      damaged.fill(0, erased!.start, erased!.end)
+      writeFileSync(path, damaged)
+      expect(readFileSync(path).subarray(survivor!.start, survivor!.end)).toEqual(
+        original.subarray(survivor!.start, survivor!.end),
+      )
+      const damagedSince = Date.now()
+      const listed = capture(w.work)
+      expect(
+        await coreQueueCommand(w.work, listed.io, { command: "list", all: true }, { json: true, workdir: w.workdir }),
+        listed.stderr(),
+      ).toBe(0)
+      const diagnostic = JSON.stringify(records(listed)[0]?.journal)
+      expect(diagnostic, "the public queue read must name the damaged record").toContain("leading NUL bytes")
+      expect(diagnostic).toContain(firstRun)
+      await vi.waitFor(
+        () => {
+          const last = published.writes.filter((write) => write.at >= damagedSince).at(-1)
+          expect(last?.document.facts?.flow, run.stderr()).toMatchObject({
+            roundOpen: { phase: expect.stringContaining("setup") },
+          })
+        },
+        { timeout: 10_000 },
+      )
+      expect((await readRunnerFacts(w.workdir)).latest?.activeStep?.name).toBe(active?.name)
       held.release()
       expect(await service, run.stderr()).toBe(0)
+      const restarted = capture(w.work)
+      const nextStop = new AbortController()
+      let freshRound: string | undefined
+      let freshHealth: QueueHealthDocument | undefined
+      try {
+        expect(
+          await coreQueueCommand(
+            w.work,
+            restarted.io,
+            {
+              command: "up",
+              intervalSeconds: 0,
+              stop: nextStop.signal,
+              afterHealth: (document) => {
+                freshHealth = document
+              },
+              afterRound: (outcome) => {
+                freshRound = outcome.run
+                nextStop.abort()
+              },
+            },
+            { json: true, workdir: w.workdir },
+          ),
+          restarted.stderr(),
+        ).toBe(0)
+        expect(freshRound, "the second owner produces a new round, not the first run's history").toBeDefined()
+        expect(freshRound).not.toBe(firstRun)
+        expect(freshHealth?.state, "the new owner's readiness is published").toBe("healthy")
+      } finally {
+        nextStop.abort()
+      }
     } finally {
       held.release()
       stop.abort()
