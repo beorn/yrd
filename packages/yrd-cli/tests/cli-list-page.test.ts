@@ -852,6 +852,39 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     expect(page).toContain("/logs")
   })
 
+  // @failure 34258: old pre-check failures have no durable Run link. Name that
+  // missing fact without inventing a run or excusing journal incompleteness.
+  it("names a pre-fix failed row without inventing a Run", async () => {
+    const work = await queueWithOneChange()
+    const git = gitIn(work)
+    await git(["config", "yrd.workdir", join(work, "..", "queue")])
+    const store = createEventStore(work, "origin", git.selection)
+    const history = await readBranchHistory(store, "main", "task/one")
+    const tip = history.history?.state.tip
+    if (tip === undefined) throw new Error("submitted fixture has no event-chain tip")
+    await appendChangeEvent(store, "main", "task/one", tip, {
+      type: "failed",
+      at: new Date(),
+      reason: "gitlink-compose-refused: component merge conflicts; no commit was written",
+    })
+    const listed = await yrd(work, { color: false }, "list", "--json", "task/one")
+    expect(listed.exitCode, listed.report).toBe(0)
+    const document = JSON.parse(listed.stdout)
+    expect(document.journal.coverage.missingRunTrailers).toContainEqual(
+      expect.objectContaining({
+        branch: "task/one",
+        state: "failed",
+        expected: false,
+        reason: "run not recorded (pre-fix row)",
+        selected: true,
+      }),
+    )
+    expect(document.journal.absent).toContain("has no Run trailer")
+    const human = await yrd(work, { color: false }, "list", "task/one")
+    expect(human.exitCode, human.report).toBe(0)
+    expect(stripAnsi(human.stdout).replace(/\s+/gu, " ")).toContain("run not recorded (pre-fix row)")
+  })
+
   // @failure 33323: `yrd withdraw` ends a change that never ran with reason "withdrawn", and the Run-absence check
   // accepted only "dropped", so one withdrawn segment made every `yrd list` report journal incompleteness.
   // @consumer anyone reading `yrd list` to learn whether the recorded journal history is complete

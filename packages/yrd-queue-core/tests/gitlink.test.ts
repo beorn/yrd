@@ -27,6 +27,7 @@ import {
   createEventStore,
   drop,
   queueRun,
+  readChangeEvents,
   readConfig,
   readStatus,
   setBranchIgnored,
@@ -766,6 +767,11 @@ it.each(["compose", "capture"] as const)("sends one failed notice for a gitlink 
   expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/diverged-pin"], merged: [] })
   const status = await readStatus(eventStore(w), "main", "task/diverged-pin")
   expect(status).toMatchObject({ status: "failed", commit: head })
+  // A pre-check failure still ran inside a queue round. Without its Run link,
+  // the history reader cannot attribute the real journal (34258).
+  const events = await readChangeEvents(eventStore(w), "main", "task/diverged-pin", status.tip)
+  const failure = events.find((event) => event.type === "failed")
+  expect(failure?.props).toContainEqual(["Run", expect.stringMatching(/^q-\S+$/u)])
   expect(status.reason).toContain(phase === "compose" ? "gitlink-compose-refused" : "from its first-parent chain")
   if (phase === "capture") {
     expect(status.reason).toContain("Start a new branch from submodule's current main at the moment you act")

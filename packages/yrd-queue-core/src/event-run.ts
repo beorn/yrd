@@ -545,6 +545,9 @@ export async function eventQueueRun(
     site: string,
     ...args: Parameters<typeof appendChangeEvent>
   ): Promise<StagedEvent> => {
+    // Early failures can precede checking, whose marker normally carries Run.
+    // Preserve their actual round identity without changing other decisions.
+    const write = args[4].type === "failed" && args[4].run === undefined ? { ...args[4], run: log.id } : args[4]
     const onPrepared = (oid: string, number?: number): void => {
       prepared({ oid, ...(number === undefined ? {} : { number }) })
     }
@@ -554,12 +557,12 @@ export async function eventQueueRun(
     if (runNumber !== undefined) {
       return {
         oid: await withRemoteSeamGap(site, () =>
-          appendChangeEvent(args[0], args[1], args[2], args[3], args[4], onPrepared),
+          appendChangeEvent(args[0], args[1], args[2], args[3], write, onPrepared),
         ),
       }
     }
     const written = await withRemoteSeamGap(site, () =>
-      appendNumberedChangeEvent(args[0], args[1], args[2], args[3], args[4], runIdentity, onPrepared),
+      appendNumberedChangeEvent(args[0], args[1], args[2], args[3], write, runIdentity, onPrepared),
     )
     recordRunNumber(written.number)
     return { oid: written.event, number: written.number }

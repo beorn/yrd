@@ -7556,7 +7556,9 @@ export async function readEventListing(
               ? "pending Run linkage: complete recorded segment has not entered execution"
               : ended
                 ? `${endings.includes("withdrawn") ? "withdrawn" : "dropped"} before execution: complete recorded segment has no execution event`
-                : "unresolved: recorded history does not establish an expected pre-execution absence of a Run trailer",
+                : row.state === "failed"
+                  ? "run not recorded (pre-fix row)"
+                  : "unresolved: recorded history does not establish an expected pre-execution absence of a Run trailer",
           }
         })
       const acquired = [...history.values()].flat()
