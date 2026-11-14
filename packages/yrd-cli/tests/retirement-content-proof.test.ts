@@ -14,6 +14,32 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { patchEquivalentOffTarget } from "../src/retirement-content-proof.ts"
 
 describe("patch equivalence off the target", () => {
+  // @failure A parentless graph-only root is admitted when a missing tree reply is read as an object id.
+  // @level l2; @consumer branch retirement; @testonly none
+  it("keeps a parentless empty root matched by an unrelated empty target root", async () => {
+    const { git } = await equivalenceFixture("patch-equivalent-empty-roots")
+    await git(["commit", "--quiet", "--allow-empty", "-m", "target graph-only root"])
+    const tree = (await git(["rev-parse", "HEAD^{tree}"])).trim()
+    const tip = (await git(["commit-tree", tree, "-m", "branch graph-only root"])).trim()
+    expect((await git(["cherry", "main", tip])).trim()).toBe(`- ${tip}`)
+    await expect(patchEquivalentOffTarget(git, "main", tip)).resolves.toBe(false)
+  })
+
+  // @failure An unreadable tree is mistaken for a nonempty commit and reaches patch comparison.
+  // @level l2; @consumer branch retirement; @testonly none
+  it("keeps an off-target commit whose tree cannot be read", async () => {
+    const { root, git } = await equivalenceFixture("patch-equivalent-missing-tree")
+    const base = await commitFiles(root, git, { "r.txt": "root\n" }, "root")
+    const author = (await git(["var", "GIT_AUTHOR_IDENT"])).trim()
+    const tip = (
+      await git(
+        ["hash-object", "-t", "commit", "-w", "--stdin"],
+        `tree ${"1".repeat(40)}\nparent ${base}\nauthor ${author}\ncommitter ${author}\n\nunavailable tree\n`,
+      )
+    ).trim()
+    await expect(patchEquivalentOffTarget(git, "main", tip)).resolves.toBe(false)
+  })
+
   // @failure A rebuilt landing keeps its branch forever because reachability ignores equivalent patches (34265).
   // @level l2; @consumer branch retirement; @testonly none
   it("accepts a landing re-landed as its own commits without ancestry", async () => {

@@ -46,15 +46,17 @@ export async function patchEquivalentOffTarget(git: Git, target: string, tip: st
  * commit whose parent or tree cannot be read is kept rather than assumed empty or assumed non-empty.
  */
 async function holdsEmptyCommit(git: Git, commits: readonly (readonly string[])[]): Promise<boolean> {
-  const query = commits.flatMap(([commit, parent]) => [`${commit}^{tree}`, `${parent ?? ""}^{tree}`])
+  if (commits.some(([, parent]) => parent === undefined)) return true
+  const query = commits.flatMap(([commit, parent]) => [`${commit}^{tree}`, `${parent}^{tree}`])
   const trees = (await git(["cat-file", "--batch-check"], `${query.join("\n")}\n`))
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line !== "")
   return commits.some((_, index) => {
-    const own = trees[index * 2]?.split(" ")[0]
-    const parent = trees[index * 2 + 1]?.split(" ")[0]
-    if (own === undefined || parent === undefined || own === "missing" || parent === "missing") return true
-    return own === parent
+    const own = trees[index * 2]?.split(" ")
+    const parent = trees[index * 2 + 1]?.split(" ")
+    // Missing replies are `<query> missing`; only a reported tree supplies an object id to compare.
+    if (own?.[1] !== "tree" || parent?.[1] !== "tree") return true
+    return own[0] === parent[0]
   })
 }
