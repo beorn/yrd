@@ -7150,7 +7150,8 @@ function journalDiagnostics<Run extends JournalSummary>(
   }))
   const malformed = base.malformed.map((entry) => ({
     ...entry,
-    selected: selectedKeys === undefined ? (entry.selected ?? true) : selectedKeys.has(entry.key),
+    selected:
+      entry.key === undefined || selectedKeys === undefined ? (entry.selected ?? true) : selectedKeys.has(entry.key),
   }))
   const selectedMissing = missing.filter((entry) => entry.selected && entry.expected !== true)
   const missingCount = missing.filter((entry) => !entry.selected && entry.expected !== true).length
@@ -7231,7 +7232,8 @@ function narrateJournalReading(
     }
   }
   for (const defect of journals.malformed) {
-    const line = `yrd: run journal ${defect.run} has a row that could not be read for ${defect.key}, state ${defect.state ?? "unknown"}: ${defect.message}; the row was skipped — fix the writer (26230)\n`
+    const attribution = defect.key === undefined ? "" : ` for ${defect.key}, state ${defect.state ?? "unknown"}`
+    const line = `yrd: run journal ${defect.run} has a row that could not be read${attribution}: ${defect.message}; the row was skipped — fix the writer (26230)\n`
     if (said.has(line)) continue
     said.add(line)
     io.stderr(line)

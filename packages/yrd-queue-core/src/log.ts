@@ -629,14 +629,14 @@ export type Journals<Run extends JournalSummary = JournalRun> = Readonly<{
   }>[]
   /**
    * Every journal row in the window that could not be read, each naming the run
-   * it was in, the `<branch>@<head>` it was about, and what was wrong with it.
+   * it was in, the `<branch>@<head>` when attributable, and what was wrong with it.
    * Empty when the window was clean — never absent, because a caller that
    * prints nothing here is stating that every row read, and a skipped row that
    * nobody prints is exactly the silent error this reader must not commit.
    */
   malformed: readonly Readonly<{
     run: string
-    key: string
+    key?: string
     message: string
     reason?: string
     /** Identity from acquired event history only; absent when unattributable. */
@@ -786,7 +786,7 @@ function runLogRecords(
 
 const journalFileCache = new Map<
   string,
-  { source: JournalSource; runs: readonly JournalSummary[]; commandJournal: boolean }
+  { source: JournalSource; runs: readonly JournalSummary[]; malformed: readonly string[]; commandJournal: boolean }
 >()
 
 // Change the fold identity whenever JournalRun or runner interpretation changes.
@@ -1046,7 +1046,7 @@ export function readJournalProjection(
         // The compact artifact owns summary facts; complete command and step
         // detail stays in the canonical raw fold. Never fabricate empty arrays.
         const read = readRunLogWithMalformed(dir, id)
-        runs = runsIn(read.records, id, startedAt, "include", read.malformed)
+        runs = runsIn(read.records, id, startedAt, "include")
       } catch (error) {
         return raw("unreadable", `${path}: full journal detail could not be read: ${String(error)}`)
       }
@@ -1259,6 +1259,7 @@ function cachedRunsIn(
   explicitRun: boolean,
 ): Readonly<{
   runs: readonly JournalSummary[]
+  malformed: readonly string[]
   fallback?: JournalProjectionFallback
   persist?: JournalPersistOutcome
 }> {
@@ -1266,12 +1267,12 @@ function cachedRunsIn(
   const cacheKey = `${path}\0${detail}`
   const projection = readJournalProjection(dir, id, { detail })
   if (projection.kind === "projection") {
-    return { runs: projection.runs }
+    return { runs: projection.runs, malformed: [] }
   }
   const hit = journalFileCache.get(cacheKey)
   if (hit !== undefined && projection.source !== undefined && sameJournalSource(hit.source, projection.source)) {
     if (!explicitRun && hit.commandJournal) {
-      return { runs: hit.runs }
+      return { runs: hit.runs, malformed: hit.malformed }
     }
     // A cache hit over a projection that still cannot be reused: an earlier
     // read in this process rebuilt from raw, so persist that rebuild now
@@ -1281,7 +1282,12 @@ function cachedRunsIn(
       projection.fallback !== undefined && repairableProjection(dir, id, projection.fallback, sourceTerminal)
         ? attemptJournalPersist(dir, id, projection.source)
         : undefined
-    return { runs: hit.runs, fallback: projection.fallback, ...(persist === undefined ? {} : { persist }) }
+    return {
+      runs: hit.runs,
+      malformed: hit.malformed,
+      fallback: projection.fallback,
+      ...(persist === undefined ? {} : { persist }),
+    }
   }
   // Every round whose projection cannot be reused is read RAW. There is no
   // cutoff: an old round can be the ONLY journal a currently listed change has,
@@ -1290,12 +1296,12 @@ function cachedRunsIn(
   const read = readRunLogWithMalformed(dir, id)
   const rawRecords = read.records
   const commandJournal = rawRecords.find((record) => record.kind === "run")?.command !== undefined
-  const runs = [...runsIn(rawRecords, id, startedAt, detail, read.malformed)]
+  const runs = [...runsIn(rawRecords, id, startedAt, detail)]
   let persist: JournalPersistOutcome | undefined
   if (projection.source !== undefined) {
     try {
       if (sameJournalSource(projection.source, journalSource(path, id))) {
-        journalFileCache.set(cacheKey, { source: projection.source, runs, commandJournal })
+        journalFileCache.set(cacheKey, { source: projection.source, runs, malformed: read.malformed, commandJournal })
         // The raw rebuild just paid for these facts: persist them through the
         // one projection writer so the next read finds the projection present
         // instead of rebuilding (and re-noticing) forever. The writer folds
@@ -1316,10 +1322,11 @@ function cachedRunsIn(
       // Raw facts were read successfully. Optional process caching must not
       // turn a failed metadata check into a refusal of those facts.
       if (!explicitRun && commandJournal) {
-        return { runs }
+        return { runs, malformed: read.malformed }
       }
       return {
         runs,
+        malformed: read.malformed,
         fallback: {
           run: id,
           reason: error instanceof UnsupportedJournalIdentity ? "unsupported-identity" : "unreadable",
@@ -1333,9 +1340,14 @@ function cachedRunsIn(
   // and carry `command` on their `run` header. When scanning `logs/` without an explicit
   // run selection, do not report their absent projection as a queue round fallback (30401).
   if (!explicitRun && commandJournal) {
-    return { runs }
+    return { runs, malformed: read.malformed }
   }
-  return { runs, fallback: projection.fallback, ...(persist === undefined ? {} : { persist }) }
+  return {
+    runs,
+    malformed: read.malformed,
+    fallback: projection.fallback,
+    ...(persist === undefined ? {} : { persist }),
+  }
 }
 
 /** The service pages after this many consecutive publication refusals. */
@@ -1574,7 +1586,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
   // @i/10-yrd/28799). Every round in the window gets it: the summary bounds what
   // a read PRINTS, never which facts it reads (@i/10-yrd/28799 finding 1).
   const runs = new Map<string, JournalSummary[]>()
-  const malformed: { run: string; key: string; message: string }[] = []
+  const malformed: { run: string; key?: string; message: string }[] = []
   const fallbacks: JournalProjectionFallback[] = []
   const persists: JournalPersistOutcome[] = []
   const unavailable: string[] = []
@@ -1609,6 +1621,9 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
     }
     if (read.fallback !== undefined) fallbacks.push(read.fallback)
     if (read.persist !== undefined) persists.push(read.persist)
+    // Syntax damage belongs to the journal, even when no change survives.
+    // Keep it once here; attributable semantic defects remain on change rows.
+    for (const message of read.malformed) malformed.push({ run: id, message: `run journal ${id} ${message}` })
     for (const run of read.runs) {
       if (options.branch !== undefined && run.branch !== options.branch) continue
       const key = journalKey(run.branch, run.head)
@@ -1744,26 +1759,18 @@ function commandOf(record: LogRecord): JournalCommand | undefined {
   }
 }
 
-function runsIn(
-  records: readonly LogRecord[],
-  id: string,
-  startedAt: Date,
-  detail?: "include",
-  malformed?: readonly string[],
-): readonly JournalRun[]
+function runsIn(records: readonly LogRecord[], id: string, startedAt: Date, detail?: "include"): readonly JournalRun[]
 function runsIn(
   records: readonly LogRecord[],
   id: string,
   startedAt: Date,
   detail: "include" | "omit",
-  malformed?: readonly string[],
 ): readonly JournalSummary[]
 function runsIn(
   records: readonly LogRecord[],
   id: string,
   startedAt: Date,
   detail: "include" | "omit" = "include",
-  malformed: readonly string[] = [],
 ): readonly JournalSummary[] {
   // READER VERSION SKEW (24735, @cto 056e31bf): kinds this build knows are
   // folded; kinds it does not are NAMED, never dropped and never malformed.
@@ -1801,14 +1808,11 @@ function runsIn(
   const base = records.find((record) => record.kind === "run")?.base
   const held = (branch: string, head: string, at: Date) => {
     const key = journalKey(branch, head)
-    // Detail is grouped by change: journal-wide damage is repeated on each
-    // change row. With no change row, only the runner reports that damage.
     const found = byChange.get(key) ?? {
       at,
       branch,
       checks: [],
       head,
-      ...(malformed.length === 0 ? {} : { malformed: malformed.map((message) => `run journal ${id} ${message}`) }),
     }
     found.at = at
     byChange.set(key, found)
