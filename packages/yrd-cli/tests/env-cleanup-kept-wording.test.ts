@@ -290,9 +290,15 @@ it("walks the process table once per round and reports the census as a split of 
     rows: number
     calls: number
     elapsed_ms: number
+    reader: { pid: number; uid: number }
+    observed_at: string
     first_walk_ms: number
     decision_ages_ms: number[]
   }
+  // 34329: the round's receipt says WHICH process read the census and WHEN, so a disagreement
+  // with a seat's own walk is comparable instead of merged (cause still unknown).
+  expect(receipt.reader.pid, "the round names the process that read the census").toBe(process.pid)
+  expect(receipt.observed_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u)
   expect(typeof receipt.elapsed_ms, "the receipt carries the census duration, not only its facts").toBe("number")
   expect(receipt.elapsed_ms, "the split measures the walk that was made slow, not a constant").toBeGreaterThanOrEqual(
     25,

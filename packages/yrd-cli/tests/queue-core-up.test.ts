@@ -1449,6 +1449,8 @@ describe("yrd queue up, the service", () => {
           uncleared: coverage === "uncleared-denial" ? 1 : 0,
           calls: allowsClose ? 2 : 1,
           elapsed_ms: expect.any(Number),
+          reader: { pid: process.pid, uid: expect.any(Number) },
+          observed_at: expect.any(String),
           first_walk_ms: expect.any(Number),
           decision_ages_ms: allowsClose ? [expect.any(Number)] : [],
         })

@@ -28,6 +28,7 @@ import {
 import { inspectProcessCwds, resolveContainedPath, type ProcessCwdProjection } from "removely"
 import {
   assertNoLiveEnvironmentUse,
+  censusReader,
   censusReaderLine,
   environmentCwdHolder,
   processCwdCoverage,
@@ -1365,6 +1366,13 @@ async function cleanupEnvironments(
         calls: number
         elapsed_ms: number
         /**
+         * Which process made walk 1 and when (@cto 2026-11-14, 34329). The round's walk and a
+         * seat's walk can disagree on this host, so the receipt has to say whose answer this is
+         * before the two can be compared instead of merged.
+         */
+        reader: Readonly<{ pid: number; uid: number }>
+        observed_at: string
+        /**
          * Walk 1 alone, the only walk that runs before the sweep clock. `elapsed_ms - first_walk_ms` is
          * exactly what the round spent on censuses INSIDE its own `ms`, so the straddle above is
          * arithmetic rather than inference.
@@ -1404,6 +1412,8 @@ async function cleanupEnvironments(
       uncleared: coverage.uncleared.length,
       calls: censusCalls,
       elapsed_ms: censusElapsedTotal,
+      reader: censusReader(),
+      observed_at: new Date(roundCensusAt ?? censusStartedAt).toISOString(),
       first_walk_ms: firstWalkElapsed,
     }
     if (coverage.refusal !== undefined) throw new Error(coverage.refusal)

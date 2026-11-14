@@ -118,6 +118,14 @@ export function censusReaderLine(census: CloseCensusReceipt): string {
   return `census read by pid ${census.reader.pid} uid ${census.reader.uid} at ${census.observed_at}`
 }
 
+/** The process reading a census, in one spelling for every receipt (@cto 2026-11-14, 34329). */
+export function censusReader(): Readonly<{ pid: number; uid: number }> {
+  return {
+    pid: globalThis.process.pid,
+    uid: typeof globalThis.process.getuid === "function" ? globalThis.process.getuid() : -1,
+  }
+}
+
 /**
  * What one admission decided.
  *
@@ -203,7 +211,7 @@ export async function admitEnvironmentClose(
         rows: snapshot.rows.length,
         unreadable: snapshot.unreadable.length,
         uncleared: coverage.uncleared.length,
-        reader: { pid: process.pid, uid: typeof process.getuid === "function" ? process.getuid() : -1 },
+        reader: censusReader(),
         observed_at: observedAt,
         elapsed_ms: censusElapsedMs,
       },
