@@ -8000,10 +8000,20 @@ esac
     using published = await publishedHealth(w.workdir)
     const run = capture(w.work)
     const stop = new AbortController()
+    let completedRun: string | undefined
     const service = coreQueueCommand(
       w.work,
       run.io,
-      { command: "up", intervalSeconds: 0, stop: stop.signal, ...HEARTBEAT, afterHealth: async () => stop.abort() },
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        ...HEARTBEAT,
+        afterRound: (outcome) => {
+          completedRun = outcome.run
+          stop.abort()
+        },
+      },
       { json: true, workdir: w.workdir },
     )
     try {
@@ -8012,6 +8022,7 @@ esac
       await vi.waitFor(
         () => {
           const last = published.writes.filter((write) => write.at >= heldSince).at(-1)
+          expect(last?.document.state, "the first owner's readiness is published").toBe("healthy")
           expect(last?.document.facts?.flow, run.stderr()).toMatchObject({
             oldestWaiting: { branch: "task/first" },
             roundOpen: { phase: expect.stringContaining("setup") },
@@ -8062,6 +8073,7 @@ esac
       await vi.waitFor(
         () => {
           const last = published.writes.filter((write) => write.at >= damagedSince).at(-1)
+          expect(last?.document.state, "the damaged owner stays healthy while the real check is held").toBe("healthy")
           expect(last?.document.facts?.flow, run.stderr()).toMatchObject({
             roundOpen: { phase: expect.stringContaining("setup") },
           })
@@ -8070,6 +8082,9 @@ esac
       )
       expect((await readRunnerFacts(w.workdir)).latest?.activeStep?.name).toBe(active?.name)
       held.release()
+      await vi.waitFor(() => expect(completedRun, "the damaged first round actually completes").toBe(firstRun), {
+        timeout: 20_000,
+      })
       expect(await service, run.stderr()).toBe(0)
       const restarted = capture(w.work)
       const nextStop = new AbortController()
