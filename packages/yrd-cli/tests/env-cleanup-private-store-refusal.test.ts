@@ -119,21 +119,23 @@ it("keeps the close request standing and continues when a private store refuses 
     health: { stallAfterMs: 0, declared: false },
     blob: w.head,
   }
-  await cleanup({
-    repo: w.repo,
-    git: w.git,
-    config,
-    workdir: w.workdir,
-    io: {
-      localBranchProtections: null,
-      cwd: w.repo,
-      stdout: () => {},
-      stderr: () => {},
-    },
-    selection: w.git.selection,
-    // Nothing merged in this round: the request already stands, as the merged-close filer leaves it.
-    outcome: { run: "cleanup-private-store", log, merged: [] } as never,
-  })
+  const runRound = async () =>
+    await cleanup({
+      repo: w.repo,
+      git: w.git,
+      config,
+      workdir: w.workdir,
+      io: {
+        localBranchProtections: null,
+        cwd: w.repo,
+        stdout: () => {},
+        stderr: () => {},
+      },
+      selection: w.git.selection,
+      // Nothing merged in this round: the request already stands, as the merged-close filer leaves it.
+      outcome: { run: "cleanup-private-store", log, merged: [] } as never,
+    })
+  await runRound()
 
   // Skipped and NAMED, never retired: the tree stays, the request stays, and the round returns.
   expect(existsSync(w.env), "the refused environment is kept").toBe(true)
@@ -143,6 +145,18 @@ it("keeps the close request standing and continues when a private store refuses 
   expect(named, JSON.stringify(rows)).toBeDefined()
   expect(String(named?.why)).toContain("private submodule store")
   expect(String(named?.why)).toContain("retried next round")
-  census.mockRestore()
   expect(rows.some((row) => row.result === "retired")).toBe(false)
+
+  // @cto 13:21 PST correction 3: when the retry bound is reached the private store keeps its OWN structured
+  // remedy (the store and the route that retires it), and no process-reading advice is appended to it.
+  await runRound()
+  await runRound()
+  const retired = cleanupRows(w.workdir).find((row) => row.result === "retired")
+  expect(retired, JSON.stringify(cleanupRows(w.workdir))).toBeDefined()
+  const retiredWhy = String(retired?.why)
+  expect(retiredWhy).toContain("a private submodule store refused the close in 3 rounds (bound 3)")
+  expect(retiredWhy).toContain("pending request retired")
+  expect(retiredWhy).toContain("/modules/vendor/secret")
+  expect(retiredWhy).not.toContain("same-UID pid")
+  census.mockRestore()
 })

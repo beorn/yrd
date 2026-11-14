@@ -1633,6 +1633,21 @@ describe("yrd queue up, the service", () => {
       // Fix 1: the request pass refuses rather than delegating, so no second
       // request file is ever written into the slot it just staged away.
       expect(listCloseRequests(workdir), run.stderr()).toEqual([])
+      // @cto 13:21 PST (@hh/var/@cto/do-20261114T1623/34329-retirement-diagnostic-ruling.md): the retirement
+      // names the requested operation, the bound, the pending request's fate and the close's own recorded
+      // options, and it carries no routing owner (ADR 0007).
+      const retiredClose = allCleanupRows(workdir).find(
+        (row) => row.result === "retired" && row.path === environment.path,
+      )
+      const retirement = String(retiredClose?.why)
+      expect(retirement).toContain("close not performed:")
+      expect(retirement).toContain("the census could not certify coverage in 3 rounds (bound 3)")
+      expect(retirement).toContain("pending request retired")
+      expect(retirement).toContain("EACCES")
+      expect(retirement).toContain(
+        "re-file the same close --no-rehome from a context that can read every same-UID pid's cwd",
+      )
+      expect(retirement).not.toMatch(/\bowner\b/i)
     } finally {
       stop.abort()
       roundCensus.mockRestore()
@@ -1743,6 +1758,85 @@ describe("yrd queue up, the service", () => {
       expect((await filed.inEnv(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${filed.branch}`)
       expect(readFileSync(join(filed.environment, "payload.txt"), "utf8")).toBe("private committed work\n")
     }, 120_000)
+
+    /**
+     * @failure @cto 13:21 PST (34329): a retired release request reported as a generic close, or whose remedy
+     *          says yrd env close, changes the operation the requester asked for.
+     * @level   l2
+     * @consumer the seat that filed a release and must be able to re-file the SAME intent
+     * @testonly none
+     */
+    it("retires a release request after three incomplete-census rounds with the release remedy, not a close", async () => {
+      const filed = await filedRelease("retire-release")
+      const uid = process.getuid?.()
+      if (uid === undefined) throw new Error("this queue case needs a real unix uid")
+      const roundCensus = vi
+        .spyOn(removely, "inspectProcessCwds")
+        .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+      const observed = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+      vi.mocked(removely.inspectProcessCensus).mockResolvedValue({
+        rows: [],
+        coverage: {
+          ...observed.coverage,
+          complete: false,
+          unreadable: [
+            {
+              pid: 5252,
+              uid,
+              comm: "bun",
+              denied: ["process"],
+              issues: [{ source: "process", resource: "cwd", reason: "denied", code: "EACCES" }],
+              argv: ["bun", "private-argument-must-not-be-reported"],
+            },
+          ],
+        },
+      })
+      const stop = new AbortController()
+      let rounds = 0
+      const run = capture(filed.w.work)
+      run.io.liveEnvironmentUse = async () => []
+      run.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
+      try {
+        expect(
+          await coreQueueCommand(
+            filed.w.work,
+            run.io,
+            {
+              command: "up",
+              intervalSeconds: 0,
+              stop: stop.signal,
+              afterRound: () => {
+                rounds++
+                if (rounds === 3) stop.abort()
+              },
+            },
+            { json: true, workdir: filed.workdir },
+          ),
+          run.stderr(),
+        ).toBe(0)
+      } finally {
+        stop.abort()
+        roundCensus.mockRestore()
+      }
+      const rows = allCleanupRows(filed.workdir).filter(
+        (row) => (row.request as { intent?: string } | undefined)?.intent === "release-checkout",
+      )
+      const retired = rows.find((row) => row.result === "retired")
+      expect(retired, JSON.stringify(rows)).toBeDefined()
+      const why = String(retired?.why)
+      expect(why).toContain("release not performed:")
+      expect(why).toContain("the census could not certify coverage in 3 rounds (bound 3)")
+      expect(why).toContain("pending request retired")
+      expect(why).toContain(
+        `yrd drop ${filed.branch} --local --release-checkout --tip ${filed.tip} --issue 29772 --reason "retain checkout"`,
+      )
+      expect(why).not.toContain("yrd env close")
+      expect(existsSync(filed.file), run.stderr()).toBe(false)
+      // A retirement is not a release: the branch, its checkout bytes and the worktree all survive.
+      expect(await filed.w.git(["for-each-ref", `refs/heads/${filed.branch}`])).toContain(filed.branch)
+      expect((await filed.inEnv(["rev-parse", "HEAD"])).trim()).toBe(filed.tip)
+      expect(readFileSync(join(filed.environment, "payload.txt"), "utf8")).toBe("private committed work\n")
+    }, 180_000)
 
     it("releases the branch in the round and keeps the checkout bytes", async () => {
       const filed = await filedRelease("released")
