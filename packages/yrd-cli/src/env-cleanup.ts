@@ -274,6 +274,34 @@ function blockedCustodyRefusalRecord(
 }
 
 /**
+ * The remedy for a retired RELEASE request: the direct verb's own invocation, carrying the recorded branch,
+ * tip, issue, reason and flags, so re-filing cannot silently become a different operation (@cto 13:21 PST,
+ * ruling correction 2). Nothing here claims a capable reader exists.
+ */
+function releaseRemedy(release: EnvReleaseRequest["release"]): string {
+  const flags = [
+    release.submodules ? "--submodules" : undefined,
+    release.discard === true ? "--discard" : undefined,
+  ].filter((flag): flag is string => flag !== undefined)
+  const tail = flags.length === 0 ? "" : ` ${flags.join(" ")}`
+  return `re-file the same release from the same repository: yrd drop ${release.branch} --local --release-checkout --tip ${release.tip} --issue ${release.issue} --reason ${JSON.stringify(release.reason)}${tail} (previews unless --apply)`
+}
+
+/**
+ * The remedy for a retired CLOSE request: its recorded options, and the one precondition that failed, with no
+ * claim that a capable reader is available on this host (@cto 13:21 PST, ruling corrections 2 and 4).
+ */
+function closeRemedy(options: EnvCloseRequestOptions): string {
+  const flags = [
+    options.retain === undefined ? undefined : `--retain ${options.retain}`,
+    options.noRehome === true ? "--no-rehome" : undefined,
+    options.preserve === true ? "--preserve" : undefined,
+  ].filter((flag): flag is string => flag !== undefined)
+  const withOptions = flags.length === 0 ? "with no options" : flags.join(" ")
+  return `re-file the same close ${withOptions} from a context that can read every same-UID pid's cwd`
+}
+
+/**
  * Consume the durable close requests a caller filed because its own same-UID CWD
  * census could not certify the close (22894). This round IS the capable context:
  * it runs the SAME `closeEnvironment` lifecycle the direct verb runs, under the
