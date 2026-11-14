@@ -1196,9 +1196,9 @@ function runnerLineOf(
   const skewedDetail = readSkew === "" ? localDetail : localDetail === "" ? readSkew : `${localDetail} · ${readSkew}`
   const damage = facts?.latest?.malformed
   const damagedDetail =
-    damage === undefined
+    damage === undefined || damage.length === 0
       ? skewedDetail
-      : `${skewedDetail} · ${damage.length} malformed journal record(s): ${damage.join("; ")}`
+      : `${skewedDetail} · ${damage.length} malformed journal record${damage.length === 1 ? "" : "s"}, first: ${damage[0]}`
   const rawDetail = publishedDetail === undefined ? damagedDetail : `${publishedDetail} · ${damagedDetail}`
   const detail = rawDetail.replace(/[—\s]+$/u, "")
   switch (state) {

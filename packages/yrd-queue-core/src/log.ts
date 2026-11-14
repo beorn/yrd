@@ -1801,6 +1801,8 @@ function runsIn(
   const base = records.find((record) => record.kind === "run")?.base
   const held = (branch: string, head: string, at: Date) => {
     const key = journalKey(branch, head)
+    // Detail is grouped by change: journal-wide damage is repeated on each
+    // change row. With no change row, only the runner reports that damage.
     const found = byChange.get(key) ?? {
       at,
       branch,

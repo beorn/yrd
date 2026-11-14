@@ -80,7 +80,7 @@ afterEach(removeTemporaryRoots)
 // erased. Projection parity and malformed-prefix tests miss the intact next
 // row being consumed with that record. Exercise both public readers, without
 // a queue round: this is a reader contract, not a claim about service startup.
-it.each(["middle", "header", "garbage"] as const)(
+it.each(["middle", "header", "garbage", "many"] as const)(
   "reads a writer journal after %s record overwrite",
   async (damage) => {
     const workdir = dirname(await temporaryLog("damaged-journal"))
@@ -108,7 +108,13 @@ it.each(["middle", "header", "garbage"] as const)(
     const projection = await readFile(projectionPath)
     const headerEnd = bytes.indexOf(10) + 1
     const stepEnd = bytes.indexOf(10, headerEnd) + 1
-    if (damage === "garbage") {
+    if (damage === "many") {
+      bytes = Buffer.concat([
+        bytes.subarray(0, headerEnd),
+        Buffer.from("bad-one\nbad-two\nbad-three\n"),
+        bytes.subarray(stepEnd),
+      ])
+    } else if (damage === "garbage") {
       // The valid JSON inside this junk must not be recovered by scanning for
       // a brace: only leading NULs may expose the next intact record.
       bytes = Buffer.concat([bytes.subarray(0, headerEnd), Buffer.from("not-json"), bytes.subarray(headerEnd)])
@@ -122,15 +128,24 @@ it.each(["middle", "header", "garbage"] as const)(
     }
     const runner = await readRunnerFacts(workdir)
     expect(runner.latest?.steps?.map((step) => step.name)).toEqual(["survivor"])
-    expect(runner.latest?.malformed).toHaveLength(1)
+    const malformedCount = damage === "many" ? 3 : 1
+    expect(runner.latest?.malformed).toHaveLength(malformedCount)
     expect(runner.latest?.malformed?.[0]).toContain("record 2")
     expect(runner.latest?.malformed?.[0]).toContain(
       damage === "middle" ? `${stepEnd - headerEnd} leading NUL bytes` : "not JSON",
     )
-    expect(runnerLine(runner, new Date()).detail).toContain("1 malformed journal record(s)")
+    const summary = runnerLine(runner, new Date()).detail
+    expect(summary).toContain(`${malformedCount} malformed journal record`)
+    expect(summary).toContain(runner.latest?.malformed?.[0])
+    // R1: single-damage cases cannot catch a row growing with the entire
+    // diagnostic list. Keep all facts, but display only the first sentence.
+    if (damage === "many") {
+      expect(summary).not.toContain(runner.latest?.malformed?.[1])
+      expect(summary).not.toContain(runner.latest?.malformed?.[2])
+    }
     const detail = readJournals(dir, { runIds: [log.id] })
     expect(detail.runs.get(`${branch}@${head}`)?.[0]?.steps.map((step) => step.name)).toEqual(["survivor"])
-    expect(detail.malformed).toHaveLength(1)
+    expect(detail.malformed).toHaveLength(malformedCount)
     expect(detail.malformed[0]?.message).toContain("record 2")
     expect(detail.malformed[0]?.message).toContain(
       damage === "middle" ? `${stepEnd - headerEnd} leading NUL bytes` : "not JSON",
