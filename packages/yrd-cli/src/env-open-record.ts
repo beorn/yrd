@@ -19,10 +19,8 @@ export type EnvOpenRecord = Readonly<{
   lifetime: EnvLifetime
   bay?: string
   issue?: string
-  /** ISO instant after which a close may proceed; recorded at open, never inferred from age. */
+  /** ISO instant after which the automatic pass may close the bay; recorded at open, never inferred from age. */
   expiresAt?: string
-  /** The commit the environment stood at when it opened; an expired close also requires HEAD to still be this. */
-  openedCommit?: string
   at: string
 }>
 
@@ -114,7 +112,7 @@ export function throwIfStandingLifetime(opening: EnvOpenRecordRead): void {
 }
 
 export function envOpenRecordFromFlags(
-  options: Readonly<{ keep?: boolean; bay?: string; issue?: string; expiresAt?: string; openedCommit?: string }>,
+  options: Readonly<{ keep?: boolean; bay?: string; issue?: string }>,
 ): EnvOpenRecord {
   return {
     version: 1,
@@ -122,8 +120,6 @@ export function envOpenRecordFromFlags(
     at: new Date().toISOString(),
     ...(options.bay === undefined ? {} : { bay: options.bay }),
     ...(options.issue === undefined ? {} : { issue: options.issue }),
-    ...(options.expiresAt === undefined ? {} : { expiresAt: options.expiresAt }),
-    ...(options.openedCommit === undefined ? {} : { openedCommit: options.openedCommit }),
   }
 }
 
@@ -160,7 +156,6 @@ export function readEnvOpenRecord(gitDir: string): EnvOpenRecordRead {
       ...(typeof row.bay === "string" ? { bay: row.bay } : {}),
       ...(typeof row.issue === "string" ? { issue: row.issue } : {}),
       ...(typeof row.expiresAt === "string" ? { expiresAt: row.expiresAt } : {}),
-      ...(typeof row.openedCommit === "string" ? { openedCommit: row.openedCommit } : {}),
     },
   }
 }

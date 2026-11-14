@@ -1585,7 +1585,6 @@ describe("yrd env open keep-rule (33758): an issue or an expiry, never neither",
     const recordPath = join(gitDir, "yrd-open.json")
     const record = JSON.parse(readFileSync(recordPath, "utf8")) as Record<string, unknown>
     expect(record.expiresAt).toBeTypeOf("string")
-    expect(record.openedCommit).toMatch(/^[0-9a-f]{40}$/u)
     // The expiry binds the automatic pass, not a person: a deliberate close of a clean bay is still allowed.
     const early = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "close", path], early.io), early.stderr()).toBe(0)

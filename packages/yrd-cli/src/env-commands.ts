@@ -450,11 +450,15 @@ async function recordOpenedLifetime(
   process: Parameters<typeof gitIn>[1],
   selection: Awaited<ReturnType<typeof resolveGitSelection>>,
   options: EnvOpenOptions,
-  recorded: Readonly<{ expiresAt?: string; openedCommit?: string }> = {},
+  /** The parsed instant from `--expires`; recorded beside the flags it came from. */
+  expiresAt?: string,
 ): Promise<void> {
   const gitDir = (await gitIn(path, process, selection)(["rev-parse", "--absolute-git-dir"])).trim()
   try {
-    writeEnvOpenRecord(gitDir, envOpenRecordFromFlags({ ...options, ...recorded }))
+    writeEnvOpenRecord(gitDir, {
+      ...envOpenRecordFromFlags(options),
+      ...(expiresAt === undefined ? {} : { expiresAt }),
+    })
   } catch (error) {
     throw new Error(
       `yrd env open created ${path} but could not record opening lifetime in ${gitDir}: ${error instanceof Error ? error.message : String(error)}; the environment remains open, so inspect git worktree list before retrying`,
@@ -701,7 +705,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   }
   const { path, baseSha } = provisioned
   await pinDeclaredIdentity(path, gitIn(path, process, selection), declaredIdentity, io)
-  await recordOpenedLifetime(path, process, selection, options, expiresAt === undefined ? {} : { expiresAt })
+  await recordOpenedLifetime(path, process, selection, options, expiresAt)
   if (options.hold !== undefined) {
     try {
       await createLocalGitWorktreeStore({ repo: root }).lock(path, options.hold)
@@ -778,13 +782,6 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
         { cause: error },
       )
     }
-  }
-  if (expiresAt !== undefined) {
-    // Record the commit the environment actually settled at: an --issue binding writes a Refs commit after the
-    // opening record above, so an expired close that required that earlier head would refuse a bay that never
-    // gained work. Rewritten only on the --expires path; every existing open writes exactly what it did before.
-    const settled = (await gitIn(path, process, selection)(["rev-parse", "HEAD"])).trim()
-    await recordOpenedLifetime(path, process, selection, options, { expiresAt, openedCommit: settled })
   }
   // A base the environment shares no history with cannot be judged: no check could tell a diff from it
   // and no ancestry can be established for it. The guard runs on EVERY path, not only where the target
@@ -1742,14 +1739,13 @@ export async function closeEnvironment(
     )
   }
   const treeGit = gitIn(path, process, selection)
-  const adminDir = (await treeGit(["rev-parse", "--absolute-git-dir"])).trim()
-  const commit = (await treeGit(["rev-parse", "HEAD"])).trim()
   if (registered.locked !== undefined) {
     const lockPath = join((await treeGit(["rev-parse", "--absolute-git-dir"])).trim(), "locked")
     throw new Error(
       `environment ${path} is locked${registered.locked === "" ? "" : `: ${registered.locked}`}; lock file ${lockPath}; release the hold with git worktree unlock ${shellQuote(path)} before closing it`,
     )
   }
+  const commit = (await treeGit(["rev-parse", "HEAD"])).trim()
   // #27120 AC1/AC3 (ruling ii): R1 refuses while ANY private byte the close could destroy is still
   // there — the checkout is initialized, OR it was emptied and the private store still sits in this
   // environment's own admin dir. R1 is therefore the guard at EVERY stage, and the close never reaches
@@ -1763,6 +1759,7 @@ export async function closeEnvironment(
   // differ, so a path-keyed probe missed the real store and let the close reach a removal that COPIED the
   // private store into retention. The guard hands back the refused stores structured, so the route below
   // names the exact bytes without parsing its message (27120, @cto).
+  const adminDir = (await treeGit(["rev-parse", "--absolute-git-dir"])).trim()
   let storeRefusals: readonly PrivateStoreRefusal[] = []
   try {
     await assertNoPrivateStore(createLocalGitProcess(), { adminDir, repository: path, head: commit })
