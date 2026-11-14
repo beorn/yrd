@@ -109,7 +109,9 @@ it.each(["middle", "header", "garbage"] as const)(
     const headerEnd = bytes.indexOf(10) + 1
     const stepEnd = bytes.indexOf(10, headerEnd) + 1
     if (damage === "garbage") {
-      bytes = Buffer.concat([bytes.subarray(0, headerEnd), Buffer.from("not-json\n"), bytes.subarray(stepEnd)])
+      // The valid JSON inside this junk must not be recovered by scanning for
+      // a brace: only leading NULs may expose the next intact record.
+      bytes = Buffer.concat([bytes.subarray(0, headerEnd), Buffer.from("not-json"), bytes.subarray(headerEnd)])
     } else bytes.fill(0, damage === "header" ? 0 : headerEnd, damage === "header" ? headerEnd : stepEnd)
     await writeFile(log.path, bytes)
 
