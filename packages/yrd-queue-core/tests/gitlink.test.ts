@@ -769,6 +769,7 @@ it.each(["compose", "capture"] as const)("sends one failed notice for a gitlink 
   expect(status).toMatchObject({ status: "failed", commit: head })
   // A pre-check failure still ran inside a queue round. Without its Run link,
   // the history reader cannot attribute the real journal (34258).
+  if (status.tip === undefined) throw new Error("failed fixture has no event-chain tip")
   const events = await readChangeEvents(eventStore(w), "main", "task/diverged-pin", status.tip)
   const failure = events.find((event) => event.type === "failed")
   expect(failure?.props).toContainEqual(["Run", expect.stringMatching(/^q-\S+$/u)])

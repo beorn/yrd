@@ -869,7 +869,9 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     })
     const listed = await yrd(work, { color: false }, "list", "--json", "task/one")
     expect(listed.exitCode, listed.report).toBe(0)
-    const document = JSON.parse(listed.stdout)
+    const document = JSON.parse(listed.stdout) as {
+      journal: { absent?: string; coverage: { missingRunTrailers: readonly unknown[] } }
+    }
     expect(document.journal.coverage.missingRunTrailers).toContainEqual(
       expect.objectContaining({
         branch: "task/one",
