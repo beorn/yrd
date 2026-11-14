@@ -1,16 +1,14 @@
 /**
  * THE ONE WORD TABLE (@i/10-yrd/24196): what every human surface calls a
  * state, the duration cell's lead words, and the colour each word wears. The
- * operator's nine change words (v3, 2026-09-16) in legend order, then `direct`
+ * event change statuses in legend order, then `direct`
  * apart — a commit that went around the queue is not a change — then the
  * RUNNER's own, which share the change words' column and so must share their
  * table.
  *
- * The queue core's internal names are not words anyone reads: a change the
- * core calls `queued` reads submitted and `checked` reads pending (operator
- * v3 nine; both `$fg-warning`). `withdrawn` reads cancelled, and a change
- * under a check RIGHT NOW reads checking. `--json`, `CHANGE_STATES` and the
- * record kinds keep the core's names; the full vocabulary cut is 24908.
+ * Change rows and their legend use the event core's status words. A deferred
+ * check is an outcome, not another change status. Runner words retain their
+ * own entries in this shared table.
  *
  * The COLOUR is here for the same reason the word is: the flow page draws the
  * runner as a row in the table's own STATUS column, and a second colour table
@@ -22,7 +20,7 @@
  * the queue core's claim vocabulary, which also validates the published wire.
  */
 
-import { RUNNER_STATES } from "@yrd/queue-core"
+import { CHANGE_STATUSES, RUNNER_STATES } from "@yrd/queue-core"
 export { RUNNER_STATES }
 
 export type WordEntry = {
@@ -33,19 +31,8 @@ export type WordEntry = {
   next?: string
 }
 
-/** The nine change states in legend order. */
-export const LEGEND_STATES = [
-  "draft",
-  "submitted",
-  "checking",
-  "pending",
-  "merging",
-  "merged",
-  "deferred",
-  "stuck",
-  "failed",
-  "cancelled",
-] as const
+/** The event core owns the change states and their legend order. */
+export const LEGEND_STATES = CHANGE_STATUSES
 
 /**
  * THE RUNNER'S SEVEN STATES, in legend order (@cto, relayed by @chief).
@@ -90,6 +77,9 @@ export const RUNNER_STATES_SAID = [...RUNNER_STATES, ...RUNNER_SIGNALS] as const
 /** A word a change's row can show: one of the nine, or `direct`, which is no change. */
 export type DisplayState =
   | (typeof LEGEND_STATES)[number]
+  | "submitted"
+  | "pending"
+  | "deferred"
   | "direct"
   | "queued"
   | "verifying"
@@ -122,7 +112,7 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
   checking: {
     color: "$fg-info",
     means: "the runner is testing it now",
-    next: "pending, stuck or failed",
+    next: "merging, stuck or failed",
     word: "checking",
   },
   pending: {
@@ -235,8 +225,8 @@ const WORD_COLUMN = 16
 
 /**
  * The legend: the change's words (`word  what it means → what happens next`),
- * then `direct` apart under "not a change", then the runner's own under "the
- * runner". An entry longer than `width` wraps at a space and hangs under its
+ * then `direct` apart under "not a change", check outcomes, and the runner's
+ * own under "the runner". An entry longer than `width` wraps at a space and hangs under its
  * meaning.
  *
  * The runner's section says which of its words a reading can reach today. A
@@ -267,19 +257,14 @@ export function legendLines(width: number = Number.POSITIVE_INFINITY): readonly 
   // with the changes: `merging` is in the change legend and on no row either,
   // and a legend that quietly dropped it from this line would promise it.
   const waiting = [...RUNNER_STATES, ...RUNNER_SIGNALS].filter((key) => !said.has(key))
-  // One on-screen word once: submitted and pending are distinct (operator v3).
-  const seen = new Set<string>()
-  const legendKeys = LEGEND_STATES.filter((key) => {
-    const word = STATE_WORDS[key].word
-    if (seen.has(word)) return false
-    seen.add(word)
-    return true
-  })
   return [
-    ...legendKeys.flatMap(entry),
+    ...LEGEND_STATES.flatMap(entry),
     "",
     "not a change",
     ...entry("direct"),
+    "",
+    "outcomes",
+    ...entry("deferred"),
     "",
     "the runner, which says checking, merging and stuck as a change does",
     ...runnerOnly.flatMap(entry),

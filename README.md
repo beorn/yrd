@@ -57,22 +57,23 @@ To run it as `yrd`, add the clone's `bin/` directory to your `PATH`. The Git rem
 
 ## States
 
-A change normally goes `draft` → `submitted` → `checking` → `pending` → `merging` → `merged`. It can also end `failed` or `cancelled`, or stop the line as `stuck`.
+A change normally goes `draft` → `queued` → `verifying` → `checking` → `merging` → `merged`. It can also end `failed` or `cancelled`, or stop the line as `stuck`.
 
 | State       | Meaning                                                    | What happens next                   |
 | ----------- | ---------------------------------------------------------- | ----------------------------------- |
 | `draft`     | pushed to the remote, not submitted                        | `yrd submit`                        |
-| `submitted` | in the queue, waiting for its first check                  | the queue checks it                 |
-| `checking`  | the queue is testing it now                                | `pending`, `stuck` or `failed`      |
-| `pending`   | checks passed; waiting in line to merge                    | merges when the line reaches it     |
+| `queued`    | in the queue, waiting for the runner                      | `verifying`                         |
+| `verifying` | composing the candidate against the current queue branch  | `checking` or `stuck`                |
+| `checking`  | the queue is testing it now                                | `merging`, `stuck` or `failed`      |
 | `merging`   | the queue is writing the queue branch for it now           | `merged` or `failed`                |
 | `merged`    | on the queue branch; ended                                 | nothing; a revert is a new change   |
-| `deferred`  | checks exceeded the normal bound; waits for the long check | runs in the long tier               |
 | `stuck`     | the queue could not judge it and stopped the line          | repair and resume, merge, or cancel |
 | `failed`    | a check exited non-zero; ended                             | the author fixes it and resubmits   |
 | `cancelled` | withdrawn with `yrd queue withdraw`; ended                 | resubmitting re-opens it            |
 
 `yrd list --help` and the `?` key in `yrd watch` show the same table.
+
+`deferred` is a check outcome: checks exceeded the normal bound and wait for the long tier. The change stays `checking`; it is not another change state.
 
 ## Commands
 

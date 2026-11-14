@@ -21,7 +21,7 @@ import { describe, expect, it, vi } from "vitest"
 import { bufferToStyledText, bufferToText, render } from "silvery/test"
 import { Box, DISCLOSURE_MARKERS, Text } from "silvery"
 import type { Event, GitObservation, JournalCommand, JournalRun, Row } from "@yrd/queue-core"
-import { checksOf, journalKey, watchRows as perRunRows } from "@yrd/queue-core"
+import { CHANGE_STATUSES, checksOf, journalKey, watchRows as perRunRows } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { DETAIL_BG, WatchPane, watchTier, type WatchSnapshot, type WatchSource } from "../src/watch-pane.tsx"
@@ -1122,16 +1122,15 @@ describe("the pane's keys and the detail's identity", () => {
         row: row({ branch: "task/other", run: "first", state: "failed" }),
         run: { ...rows[1]!.run!, branch: "task/other" },
       })
-      const open = vi.fn(
-        async (item: WatchRow): Promise<ChangeDetail> =>
-          detailOf(item, [
-            {
-              name: "verify",
-              state: "failed",
-              output: `${item.row.branch} ${item.run?.id} RUN OUTPUT`,
-              log: `/w/${item.run?.id}.log`,
-            },
-          ]),
+      const open = vi.fn(async (item: WatchRow): Promise<ChangeDetail> =>
+        detailOf(item, [
+          {
+            name: "verify",
+            state: "failed",
+            output: `${item.row.branch} ${item.run?.id} RUN OUTPUT`,
+            log: `/w/${item.run?.id}.log`,
+          },
+        ]),
       )
       // Tall enough that the padded stage tabs (25557) leave the check's output above the fold:
       // this test is about which run opens, not about the fold.
@@ -1769,22 +1768,12 @@ describe("the RUNNER marker is wired to the ROWS, not to the process (items 1, 5
  */
 describe("the watch says what waits, what runs and what happens next (24196)", () => {
   /**
-   * The ONE word table: the operator's nine state words (v3, 2026-09-16) in legend order, `direct` (a
+   * The ONE word table: the event change statuses in legend order, `direct` (a
    * commit that went around the queue, which is not a change), the duration cell's lead words (decision
    * 5) and the phrase that names the table's order (decision 4). Every surface reads its word from here,
    * so apart from the legend test below no assertion spells a word: each reads the table.
    */
-  const STATES = [
-    "draft",
-    "submitted",
-    "checking",
-    "pending",
-    "merging",
-    "merged",
-    "stuck",
-    "failed",
-    "cancelled",
-  ] as const
+  const STATES = CHANGE_STATUSES
   const KEYS = [...STATES, "queued", "direct", "waiting", "took", "runner", "verifying"] as const
   type Entry = { word: string; color: string; means?: string; next?: string }
   type WordTable = Record<(typeof KEYS)[number], Entry>
@@ -2012,56 +2001,23 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     return header < 0 ? "" : (painted.slice(header + 1).find((line) => line.includes(needle)) ?? "")
   }
 
-  it("the legend is the operator's nine words, each with what it means and what happens next, and the clock words decision 5 named", async () => {
-    const W = await words()
-
-    // The colour joined the table in S1 — one word, one colour, one entry, so a
-    // column that draws both cannot take them from two places — and is asserted
-    // by the colour arms in watch-boxes.test.tsx rather than spelled here.
-    // Operator v3: queued paints submitted, checked paints pending, both warning yellow; verifying paints verifying.
-    expect(W.submitted).toMatchObject({ word: "submitted", color: "$fg-warning" })
-    expect(W.pending).toMatchObject({ word: "pending", color: "$fg-warning" })
-    expect(W.verifying).toMatchObject({ word: "verifying", color: "$fg-info" })
-    const said = ({ color: _color, ...entry }: Entry) => entry
-    const { STATE_WORDS } = await import("../src/watch-format.ts")
+  it("the help legend agrees with every event change status and keeps deferred outside the status list", async () => {
+    const { legendLines, STATE_WORDS } = await import("../src/watch-words.ts")
+    const { stateWord } = await import("../src/watch-format.ts")
+    const lines = legendLines()
+    const changes = lines.slice(0, lines.indexOf(""))
+    expect(changes.map((line) => line.trim().split(/\s+/)[0])).toEqual([...CHANGE_STATUSES])
+    const help = await listHelp()
+    for (const state of CHANGE_STATUSES) {
+      expect(stateWord({ state, format: "event" })).toBe(state)
+      expect(help).toMatch(new RegExp(`^\\s*${state}\\s`, "m"))
+    }
+    expect(lines.indexOf("outcomes")).toBeGreaterThan(changes.length)
+    expect(help).toContain("outcomes")
+    expect(help).toMatch(/^\s*deferred\s/m)
     expect({ stopped: STATE_WORDS.stopped.next, paused: STATE_WORDS.paused.next }).toEqual({
       stopped: "start the runner for this queue",
       paused: "resume this queue after resolving the pause",
-    })
-    expect({
-      ...Object.fromEntries(STATES.map((key) => [key, said(W[key])])),
-      direct: W.direct.word,
-      took: W.took.word,
-      waiting: W.waiting.word,
-    }).toEqual({
-      cancelled: {
-        means: "taken back, or given up without a verdict; ended (yrd queue withdraw produces it)",
-        next: "nothing",
-        word: "cancelled",
-      },
-      checking: { means: "the runner is testing it now", next: "pending, stuck or failed", word: "checking" },
-      direct: "direct",
-      draft: { means: "pushed to the remote, not submitted", next: "submit this branch to the queue", word: "draft" },
-      failed: { means: "a check failed; ended", next: "a new head is a new change", word: "failed" },
-      merged: { means: "on the queue branch; ended", next: "nothing; a revert is a new change", word: "merged" },
-      merging: { means: "the runner is writing main for it now", next: "merged or failed", word: "merging" },
-      pending: {
-        means: "checks passed; waiting in line to merge",
-        next: "it merges when the line reaches it",
-        word: "pending",
-      },
-      stuck: {
-        means: "the queue could not judge it and stopped the line (ADR-0015)",
-        next: "repair and resume, merge, or cancel",
-        word: "stuck",
-      },
-      submitted: {
-        means: "in the queue, waiting for its first check",
-        next: "the runner checks it",
-        word: "submitted",
-      },
-      took: "took",
-      waiting: "waiting",
     })
   })
 
@@ -4465,9 +4421,9 @@ describe("one tab per stage of the round, from its journal (25441 slice 2)", () 
   })
 
   it("reads a stage's output only when its tab opens, and only that stage's commands", async () => {
-    const loadCommandOutput = vi.fn(
-      async (asked: JournalCommand): Promise<DiffText> => ({ text: `printed by ${asked.args[0] ?? ""}` }),
-    )
+    const loadCommandOutput = vi.fn(async (asked: JournalCommand): Promise<DiffText> => ({
+      text: `printed by ${asked.args[0] ?? ""}`,
+    }))
     const open = vi.fn(async (item: WatchRow) => detailOf(item, [typecheck], { journal: journalOf() }))
     const app = render(
       <WatchPane
