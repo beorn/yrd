@@ -833,7 +833,10 @@ describe("yrd queue up, the service", () => {
       await w.git(["checkout", "--quiet", "main"])
       const opened = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "restart-job", "--json", "--expires", "1d"], opened.io),
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", "--bay", "restart-job", "--json", "--expires", "1d"],
+          opened.io,
+        ),
         opened.stderr(),
       ).toBe(0)
       const environment = (JSON.parse(opened.stdout()) as { path: string }).path
@@ -1098,7 +1101,10 @@ describe("yrd queue up, the service", () => {
     const opened = capture(w.work)
     const head = (await w.git(["rev-parse", "HEAD"])).trim()
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", head, "--bay", "declared-use", "--json", "--expires", "1d"], opened.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", head, "--bay", "declared-use", "--json", "--expires", "1d"],
+        opened.io,
+      ),
       opened.stderr(),
     ).toBe(0)
     const { path } = JSON.parse(opened.stdout()) as { path: string }
@@ -1196,7 +1202,10 @@ describe("yrd queue up, the service", () => {
     const opened = capture(w.work)
     const head = (await w.git(["rev-parse", "HEAD"])).trim()
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", head, "--bay", "fresh-work", "--json", "--expires", "1d"], opened.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", head, "--bay", "fresh-work", "--json", "--expires", "1d"],
+        opened.io,
+      ),
       opened.stderr(),
     ).toBe(0)
     const { path } = JSON.parse(opened.stdout()) as { path: string }
@@ -1254,7 +1263,10 @@ describe("yrd queue up, the service", () => {
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
     const opened = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "cached-retained", "--json", "--expires", "1d"], opened.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", selected, "--bay", "cached-retained", "--json", "--expires", "1d"],
+        opened.io,
+      ),
       opened.stderr(),
     ).toBe(0)
     const environment = JSON.parse(opened.stdout()) as { path: string }
@@ -1329,7 +1341,10 @@ describe("yrd queue up, the service", () => {
       const selected = (await w.git(["rev-parse", "HEAD"])).trim()
       const opened = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "unnamed-retained", "--json", "--expires", "1d"], opened.io),
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", selected, "--bay", "unnamed-retained", "--json", "--expires", "1d"],
+          opened.io,
+        ),
         opened.stderr(),
       ).toBe(0)
       const environment = JSON.parse(opened.stdout()) as { path: string }
@@ -1463,7 +1478,10 @@ describe("yrd queue up, the service", () => {
       const selected = (await w.git(["rev-parse", "HEAD"])).trim()
       const opened = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "delegated-close", "--json", "--expires", "1d"], opened.io),
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", selected, "--bay", "delegated-close", "--json", "--expires", "1d"],
+          opened.io,
+        ),
         opened.stderr(),
       ).toBe(0)
       const environment = JSON.parse(opened.stdout()) as { path: string }
@@ -1538,7 +1556,10 @@ describe("yrd queue up, the service", () => {
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
     const opened = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "delegated-retry", "--json", "--expires", "1d"], opened.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", selected, "--bay", "delegated-retry", "--json", "--expires", "1d"],
+        opened.io,
+      ),
       opened.stderr(),
     ).toBe(0)
     const environment = JSON.parse(opened.stdout()) as { path: string }
@@ -1628,7 +1649,10 @@ describe("yrd queue up, the service", () => {
       const selected = (await w.git(["rev-parse", "HEAD"])).trim()
       const opened = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", name, "--json", "--expires", "1d"], opened.io),
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", selected, "--bay", name, "--json", "--expires", "1d"],
+          opened.io,
+        ),
         opened.stderr(),
       ).toBe(0)
       const environment = (JSON.parse(opened.stdout()) as { path: string }).path
@@ -1842,7 +1866,10 @@ describe("yrd queue up, the service", () => {
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
     const opened = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "unnamed-retained", "--json", "--expires", "1d"], opened.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", selected, "--bay", "unnamed-retained", "--json", "--expires", "1d"],
+        opened.io,
+      ),
       opened.stderr(),
     ).toBe(0)
     const environment = JSON.parse(opened.stdout()) as { path: string }
@@ -2012,7 +2039,10 @@ describe("yrd queue up, the service", () => {
     const open = async (bay: string, extra: readonly string[] = []): Promise<string> => {
       const run = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", bay, "--json", ...extra, "--expires", "1d"], run.io),
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", selected, "--bay", bay, "--json", ...extra, "--expires", "1d"],
+          run.io,
+        ),
         run.stderr(),
       ).toBe(0)
       const environment = JSON.parse(run.stdout()) as { path: string }
@@ -2308,7 +2338,10 @@ describe("yrd queue up, the service", () => {
       await w.git(["commit", "--quiet", "-m", "bound change whose env must close on merge"])
       await w.git(["checkout", "--quiet", "main"])
       const opened = capture(w.work)
-      expect(await runYrdProcess(["bun", "yrd", "env", "open", ...open, "--json", "--expires", "1d"], opened.io), opened.stderr()).toBe(0)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", ...open, "--json", "--expires", "1d"], opened.io),
+        opened.stderr(),
+      ).toBe(0)
       const openedEnvironment = JSON.parse(opened.stdout()) as { path: string }
       const environment = { path: realpathSync(openedEnvironment.path) }
       await ageOpening(environment.path)
@@ -2491,7 +2524,10 @@ describe("yrd queue up, the service", () => {
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
     const opened = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "21123-dropped", "--json", "--expires", "1d"], opened.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", selected, "--bay", "21123-dropped", "--json", "--expires", "1d"],
+        opened.io,
+      ),
       opened.stderr(),
     ).toBe(0)
     const environment = JSON.parse(opened.stdout()) as { path: string }
@@ -2551,7 +2587,10 @@ describe("yrd queue up, the service", () => {
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
     const openedLender = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "27601-lender", "--json", "--expires", "1d"], openedLender.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", selected, "--bay", "27601-lender", "--json", "--expires", "1d"],
+        openedLender.io,
+      ),
       openedLender.stderr(),
     ).toBe(0)
     const lender = (JSON.parse(openedLender.stdout()) as { path: string }).path
@@ -2559,7 +2598,20 @@ describe("yrd queue up, the service", () => {
     const openedBorrower = capture(w.work)
     expect(
       await runYrdProcess(
-        ["bun", "yrd", "env", "open", selected, "--bay", "borrower-held", "--hold", "parked sibling", "--json", "--expires", "1d"],
+        [
+          "bun",
+          "yrd",
+          "env",
+          "open",
+          selected,
+          "--bay",
+          "borrower-held",
+          "--hold",
+          "parked sibling",
+          "--json",
+          "--expires",
+          "1d",
+        ],
         openedBorrower.io,
       ),
       openedBorrower.stderr(),
@@ -2675,7 +2727,10 @@ describe("yrd queue up, the service", () => {
       const selected = (await w.git(["rev-parse", "HEAD"])).trim()
       const opened = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "component-only", "--json", "--expires", "1d"], opened.io),
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", selected, "--bay", "component-only", "--json", "--expires", "1d"],
+          opened.io,
+        ),
         opened.stderr(),
       ).toBe(0)
       const environment = (JSON.parse(opened.stdout()) as { path: string }).path
@@ -2917,7 +2972,10 @@ describe("yrd queue up, the service", () => {
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
     const opened = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "truncated-retained", "--json", "--expires", "1d"], opened.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", selected, "--bay", "truncated-retained", "--json", "--expires", "1d"],
+        opened.io,
+      ),
       opened.stderr(),
     ).toBe(0)
     const environment = JSON.parse(opened.stdout()) as { path: string }
@@ -2977,7 +3035,10 @@ describe("yrd queue up, the service", () => {
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
     const opened = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "branchthen-retained", "--json", "--expires", "1d"], opened.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", selected, "--bay", "branchthen-retained", "--json", "--expires", "1d"],
+        opened.io,
+      ),
       opened.stderr(),
     ).toBe(0)
     const environment = JSON.parse(opened.stdout()) as { path: string }
@@ -5494,7 +5555,10 @@ describe("yrd queue up, the service", () => {
         if (withRow) {
           const opened = capture(w.work)
           expect(
-            await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "stop-mixed-row", "--json", "--expires", "1d"], opened.io),
+            await runYrdProcess(
+              ["bun", "yrd", "env", "open", "--bay", "stop-mixed-row", "--json", "--expires", "1d"],
+              opened.io,
+            ),
             opened.stderr(),
           ).toBe(0)
           const { path } = JSON.parse(opened.stdout()) as { path: string }
@@ -9418,7 +9482,10 @@ describe("yrd queue run --tier long", () => {
     const selected = (await siblingGit(["rev-parse", "HEAD"])).trim()
     const opened = capture(sibling)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "27601-closed", "--json", "--expires", "1d"], opened.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", selected, "--bay", "27601-closed", "--json", "--expires", "1d"],
+        opened.io,
+      ),
       opened.stderr(),
     ).toBe(0)
     const environment = (JSON.parse(opened.stdout()) as { path: string }).path
@@ -9483,7 +9550,10 @@ describe("yrd queue run --tier long", () => {
       const path = join(environments, `27600-open-${String(index)}`)
       const opened = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", head, "--bay", basename(path), "--json", "--expires", "1d"], opened.io),
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", head, "--bay", basename(path), "--json", "--expires", "1d"],
+          opened.io,
+        ),
         opened.stderr(),
       ).toBe(0)
       expect((JSON.parse(opened.stdout()) as { path: string }).path).toBe(path)
@@ -9675,7 +9745,10 @@ describe("yrd queue run --tier long", () => {
     const open = async (bay: string): Promise<string> => {
       const opened = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", bay, "--json", "--expires", "1d"], opened.io),
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", selected, "--bay", bay, "--json", "--expires", "1d"],
+          opened.io,
+        ),
         opened.stderr(),
       ).toBe(0)
       const path = (JSON.parse(opened.stdout()) as { path: string }).path
@@ -9736,7 +9809,10 @@ describe("yrd queue run --tier long", () => {
     const open = async (bay: string): Promise<string> => {
       const opened = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", bay, "--json", "--expires", "1d"], opened.io),
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", selected, "--bay", bay, "--json", "--expires", "1d"],
+          opened.io,
+        ),
         opened.stderr(),
       ).toBe(0)
       const path = (JSON.parse(opened.stdout()) as { path: string }).path
