@@ -75,6 +75,7 @@ import { readEnvIssueState } from "./env-issue-state.ts"
 import {
   admitEnvironmentClose,
   assertNoLiveEnvironmentUse,
+  censusReaderLine,
   type CloseAdmission,
   type CloseCensusReceipt,
 } from "./env-close-holders.ts"
@@ -2314,7 +2315,7 @@ function uncertified(
   return new IncompleteCensusError(
     admission.refusal,
     admission.census,
-    `${admission.refusal}${when === "" ? "" : ` ${when}`}; environment ${path} was preserved`,
+    `${admission.refusal}${when === "" ? "" : ` ${when}`} (${censusReaderLine(admission.census)}); environment ${path} was preserved`,
   )
 }
 

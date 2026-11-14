@@ -54,7 +54,7 @@ import type { LocalBranchProtectionResult, YrdCliIO } from "./types.ts"
 import { patchEquivalentOffTarget } from "./retirement-content-proof.ts"
 import { originHead, retainedComponentStoreHere } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
-import { admitEnvironmentClose, validateLiveEnvironmentUses } from "./env-close-holders.ts"
+import { admitEnvironmentClose, censusReaderLine, validateLiveEnvironmentUses } from "./env-close-holders.ts"
 import { formatYrdCommand } from "./command-format.ts"
 import { ENV_CLOSE_PREDICATE, requesterOf, writeReleaseRequest } from "./env-close-requests.ts"
 
@@ -1456,7 +1456,7 @@ export async function releaseRetainedCheckouts(
       // What became of the hold is appended once the delegation is decided.
       const census = admission.census
       const detail =
-        `needs-delegation: ${admission.refusal}; census ${census.mechanism}: ${census.rows} readable, ${census.unreadable} unreadable, ${census.uncleared} uncleared. ` +
+        `needs-delegation: ${admission.refusal}; census ${census.mechanism}: ${census.rows} readable, ${census.unreadable} unreadable, ${census.uncleared} uncleared (${censusReaderLine(census)}). ` +
         `This caller cannot certify the release (this reader: ${readerPrivilegeFacts()})`
       if (!needsDelegation.some((held) => held.repo === row.repo && held.path === row.path)) {
         needsDelegation.push({ ...row, reason: "needs-delegation", detail: publicText(detail) })
