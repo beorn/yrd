@@ -20,15 +20,17 @@ export async function patchEquivalentOffTarget(git: Git, target: string, tip: st
   // bump — is invisible to its patch list. A tip whose off-target range holds a merge is not proven this
   // way and keeps, even when its linear commits all match (@cto review, 34265).
   if ((await git(["rev-list", "--merges", `${target}..${tip}`])).trim() !== "") return false
-  const commits = (await git(["rev-list", "--no-merges", `${target}..${tip}`]))
+  const commits = (await git(["rev-list", "--no-merges", "--parents", `${target}..${tip}`]))
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line !== "")
+    .map((line) => line.split(" "))
   // No off-target commits means the tip is reachable from the target; ancestry is the proof there.
   if (commits.length === 0) return false
   // `git cherry` compares patch-ids, and every commit with no patch shares git's empty patch-id, so a graph-only
   // branch commit is reported `- ` against an UNRELATED empty commit in the target and the branch would be
-  // deleted with its own history (@dev/4, 34265). A range holding a commit with no paths is not proven.
+  // deleted with its own history (@dev/4, 34265). A range holding a commit whose tree equals its parent's is
+  // not proven, whatever its paths are called.
   if (await holdsEmptyCommit(git, commits)) return false
   const listed = (await git(["cherry", target, tip]))
     .split("\n")
@@ -39,15 +41,20 @@ export async function patchEquivalentOffTarget(git: Git, target: string, tip: st
 }
 
 /**
- * Whether any of these commits changes no path. `git diff-tree --stdin` prints a commit id and its paths only
- * when the commit changes something — an empty, graph-only commit prints nothing at all — so a short listing
- * means at least one of the asked commits is empty.
+ * Whether any of these commits changes nothing: its tree equals its first parent's tree. Reading trees rather
+ * than a path listing keeps the answer out of reach of a file named like a commit id (@dev/4, 34265), and a
+ * commit whose parent or tree cannot be read is kept rather than assumed empty or assumed non-empty.
  */
-async function holdsEmptyCommit(git: Git, commits: readonly string[]): Promise<boolean> {
-  const listing = await git(["diff-tree", "--stdin", "-r", "--name-only"], `${commits.join("\n")}\n`)
-  const listed = listing
+async function holdsEmptyCommit(git: Git, commits: readonly (readonly string[])[]): Promise<boolean> {
+  const query = commits.flatMap(([commit, parent]) => [`${commit}^{tree}`, `${parent ?? ""}^{tree}`])
+  const trees = (await git(["cat-file", "--batch-check"], `${query.join("\n")}\n`))
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(line))
-  return listed.length !== commits.length
+    .filter((line) => line !== "")
+  return commits.some((_, index) => {
+    const own = trees[index * 2]?.split(" ")[0]
+    const parent = trees[index * 2 + 1]?.split(" ")[0]
+    if (own === undefined || parent === undefined || own === "missing" || parent === "missing") return true
+    return own === parent
+  })
 }

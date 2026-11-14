@@ -130,6 +130,26 @@ describe("patch equivalence off the target", () => {
     expect(listed.every((line) => line.startsWith("- "))).toBe(true)
     await expect(patchEquivalentOffTarget(git, "main", tip)).resolves.toBe(false)
   })
+
+  // @failure The emptiness check parses a path listing, and a file named like a commit id passes for a commit
+  // line, so the branch's graph-only commit goes undetected and the branch is deleted with its history
+  // (@dev/4 second counterexample, 34265).
+  // @level l2; @consumer branch retirement; @testonly none
+  it("keeps a graph-only commit beside a file named like a commit id", async () => {
+    const { root, git } = await equivalenceFixture("patch-equivalent-hash-name")
+    const hashName = "0123456789abcdef0123456789abcdef01234567"
+    const base = await commitFiles(root, git, { "r.txt": "r\n" }, "root")
+    await commitFiles(root, git, { [hashName]: "target\n" }, "main hash-named")
+    await git(["commit", "--quiet", "--allow-empty", "-m", "target graph only"])
+    await git(["checkout", "--quiet", base])
+    await commitFiles(root, git, { [hashName]: "target\n" }, "branch hash-named")
+    await git(["commit", "--quiet", "--allow-empty", "-m", "branch graph only"])
+    const tip = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    const listed = (await git(["cherry", "main", tip])).trim().split("\n")
+    expect(listed.every((line) => line.startsWith("- "))).toBe(true)
+    await expect(patchEquivalentOffTarget(git, "main", tip)).resolves.toBe(false)
+  })
 })
 
 async function equivalenceFixture(name: string): Promise<{ root: string; git: ReturnType<typeof gitIn> }> {
