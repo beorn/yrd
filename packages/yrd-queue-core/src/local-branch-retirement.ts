@@ -172,8 +172,9 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       }
     } else if (
       disposition.kind !== "closed" &&
-      // A landed tip proven by patch-id (a rebuilt or squashed landing) carries no ancestry by construction;
-      // its caller already proved the target holds every patch, and tree equality alone never reaches here (34265).
+      // A landed tip proven by patch-id (a rebuilt landing: every commit the target lacks has a patch-equivalent
+      // commit in its history) carries no ancestry by construction; its caller already proved that, and tree
+      // equality alone never reaches here (34265).
       !(disposition.kind === "landed" && disposition.proof.kind === "content") &&
       !(await isAncestor(git, tip, disposition.target))
     ) {

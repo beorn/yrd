@@ -17,7 +17,6 @@ import {
   createLocalEventStore,
   gitIn,
   isAncestor,
-  patchEquivalentOffTarget,
   issueBindingsOf,
   keptLinkAdmits,
   listRefs,
@@ -52,6 +51,7 @@ import {
 } from "@yrd/queue-core"
 import { samenessDetail } from "./issue-sameness.ts"
 import type { LocalBranchProtectionResult, YrdCliIO } from "./types.ts"
+import { patchEquivalentOffTarget } from "./retirement-content-proof.ts"
 import { originHead, retainedComponentStoreHere } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
 import { admitEnvironmentClose, validateLiveEnvironmentUses } from "./env-close-holders.ts"
@@ -2065,9 +2065,9 @@ export async function retireMergedRootAuthor(
     throw new Error(`${branch}: root retirement requires an exact merged or withdrawn submission and event tip`)
   }
   const ancestry = await isAncestor(git, tip, input.target)
-  // A rebuilt landing (re-landed as its own commits) carries no ancestry link but also no unmerged content
-  // (34265). An empty or graph-only commit has no patch to match and a multi-commit squash is not proved by
-  // per-commit matches, so both still keep here.
+  // A rebuilt landing (re-landed as its own commits) carries no ancestry link, but every commit the target
+  // lacks from the tip has a patch-equivalent commit in its history (34265). A commit with no patch — an empty
+  // or graph-only one — and a multi-commit squash are not proved by per-commit matches, so both still keep here.
   const rebuilt = !ancestry && !withdrawn && (await patchEquivalentOffTarget(git, input.target, tip))
   if (!withdrawn && !ancestry && !rebuilt) {
     const result = {
@@ -2723,10 +2723,10 @@ export function createLandedBranchRetirement(
       if (reasons.length > 0) return { outcome: "kept", reason: "held", detail: reasons.join("; ") }
     }
     const ancestry = await isAncestor(git, candidate.tip, target)
-    // A rebuilt landing (re-landed as its own commits) carries no ancestry link but also no unmerged content:
-    // every commit the target lacks from the tip has a patch-equivalent commit there (34265). An empty or
-    // graph-only commit has no patch to match and a multi-commit squash is not proved by per-commit matches,
-    // so both stay unique; tree equality alone never licenses a retirement (29450).
+    // A rebuilt landing (re-landed as its own commits) carries no ancestry link, but every commit the target
+    // lacks from the tip has a patch-equivalent commit in its history (34265). A commit with no patch — an empty
+    // or graph-only one — and a multi-commit squash are not proved by per-commit matches, so both stay unique;
+    // tree equality alone never licenses a retirement (29450).
     const rebuilt = ancestry ? false : await patchEquivalentOffTarget(git, target, candidate.tip)
     const custody = ancestry || rebuilt ? target : undefined
     const proof = ancestry ? { kind: "ancestry" as const } : { kind: "content" as const, via: "patch-id" as const }
