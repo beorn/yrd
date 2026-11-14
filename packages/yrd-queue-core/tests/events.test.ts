@@ -4651,6 +4651,78 @@ describe("the queue-format boundary", () => {
     expect((await readStatus(location, "lab", "task/42")).status).toBe("queued")
   })
 
+  /** @failure A bounded Markdown producer reads unbounded history or presents a clipped chain as complete.
+   * @level l1 @consumer readBranchHistory's explicit maxEvents option
+   * Existing status/history fixtures require complete reads and do not exercise an explicit event ceiling.
+   */
+  it.each([
+    ["hot", 50, 50],
+    ["hot", 51, 50],
+    ["hot", 600, 50],
+    ["cold", 50, 50],
+    ["cold", 51, 50],
+    ["cold", 600, 50],
+    ["hot", 1, 1023],
+    ["hot", 1, 1024],
+  ] as const)("reads a %s chain containing %i events with maxEvents=%i", async (custody, count, maxEvents) => {
+    const { store, location } = remoteMemStore(`yrd-bounded-${custody}-${count}`)
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const head = (await target.transact(async (map) => map.set("work.txt", "bounded history"), "work")).oid
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const queueTip = await seedEventQueue(location, "lab", head, at)
+    const branch = "task/bounded"
+    const hotRef = changesRef("lab", branch)
+    const selectedRef = custody === "hot" ? hotRef : `refs/yrd-archive/lab/${branch}`
+    const chain = await openEvents({ ...store, ref: hotRef })
+    await chain.append(
+      [
+        changeInput("opened", { queueTip, at, commit: head, by: "@dev/10" }),
+        ...Array.from({ length: count - 1 }, (_, index) =>
+          changeInput(index % 2 === 0 ? "ignored" : "unignored", {
+            queueTip,
+            at,
+            by: "@dev/10",
+            ...(index % 2 === 0 ? { reason: "bounded fixture" } : {}),
+          }),
+        ),
+      ],
+      { expect: null },
+    )
+    if (custody === "cold") {
+      const tip = await chain.head()
+      await store.backend.publish!(
+        store.repo,
+        [
+          { ref: selectedRef, expect: "0".repeat(40), oid: tip! },
+          { ref: hotRef, expect: tip!, oid: null },
+        ],
+        "origin",
+      )
+    }
+    const reads = vi.spyOn(location.backend, "readHistory")
+    const fetches = vi.spyOn(location.backend, "fetchRefs")
+    const complete = await readBranchHistory(location, "lab", branch)
+    expect(complete.ref).toBe(selectedRef)
+    expect(complete.history?.events).toHaveLength(count)
+    expect(reads).toHaveBeenCalledTimes(1)
+    expect(fetches).toHaveBeenCalledTimes(1)
+    expect(reads.mock.calls[0]?.[2]).toEqual({ limit: 1025 })
+    reads.mockClear()
+    fetches.mockClear()
+    const bounded = readBranchHistory(location, "lab", branch, { maxEvents })
+    if (maxEvents === 1024) {
+      await expect(bounded).rejects.toThrow("maxEvents must be a positive safe integer no greater than 1023; got 1024")
+      expect(reads).not.toHaveBeenCalled()
+      expect(fetches).not.toHaveBeenCalled()
+      return
+    }
+    if (count <= maxEvents) await expect(bounded).resolves.toEqual(complete)
+    else await expect(bounded).rejects.toThrow(`event history exceeds maxEvents=${maxEvents}`)
+    expect(reads).toHaveBeenCalledTimes(1)
+    expect(fetches).toHaveBeenCalledTimes(1)
+    expect(reads.mock.calls[0]?.[2]).toEqual({ limit: maxEvents + 2 })
+  })
+
   /** @failure A retained tip makes hot/cold history unreadable or loses the extra commit parent.
    * @level l1 @consumer selected change history, list and detail readers
    * Existing custody fixtures have no retained event and cannot expose an old-reader diagnostic.
@@ -5027,11 +5099,13 @@ describe("the queue-format boundary", () => {
   //          multi-prefix reader failed a round on a race it could have re-read in place.
   // @level l1 @consumer queue list acquisition and the queue run (listChangeHistories)
   it("re-inventories a moved multi-prefix selection in the reader itself, bounded and typed", async () => {
-    for (const [moves, outcome] of [
-      [3, "recovers"],
-      [8, "exhausts"],
+    for (const [moves, outcome, mode] of [
+      [3, "recovers", "listing"],
+      [8, "exhausts", "listing"],
+      [3, "recovers", "bounded"],
+      [8, "exhausts", "bounded"],
     ] as const) {
-      const { store, location } = remoteMemStore(`yrd-bounded-reinventory-${outcome}`)
+      const { store, location } = remoteMemStore(`yrd-bounded-reinventory-${outcome}-${mode}`)
       const target = await open({ ...store, ref: "refs/heads/lab" })
       const head = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
       const queueTip = await seedEventQueue(location, "lab", head, new Date("2026-09-22T14:00:00.000Z"))
@@ -5063,6 +5137,7 @@ describe("the queue-format boundary", () => {
               ],
               { expect: tip },
             )
+            if (mode === "bounded") throw new Conflict("selected ref moved during acquisition", { refs: [ref] })
           }
           return original(...args)
         },
@@ -5070,7 +5145,12 @@ describe("the queue-format boundary", () => {
       let readError: unknown
       let histories: readonly string[] = []
       try {
-        histories = [...(await readEventQueueWithChanges(location, "lab")).histories.keys()]
+        if (mode === "bounded") {
+          const selected = await readBranchHistory(location, "lab", branch, { maxEvents: 50 })
+          histories = selected.history === undefined ? [] : [branch]
+        } else {
+          histories = [...(await readEventQueueWithChanges(location, "lab")).histories.keys()]
+        }
       } catch (error) {
         readError = error
       }

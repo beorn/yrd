@@ -8,11 +8,12 @@
  * @consumer an agent checking where its submitted change stands in the queue
  * @testonly none
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { submit } from "@yrd/queue-core"
+import { changeInput, changesRef, createEventStore, readEventQueue, submit } from "@yrd/queue-core"
+import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
@@ -99,6 +100,155 @@ function positions(reading: Ran): Record<string, number> {
 }
 
 describe("`yrd queue show` and the merge-line position (#29342)", () => {
+  /** @failure The Markdown pipe walks every branch, loses event-row values, or emits partial output on overflow.
+   * @level l2 @consumer yrd queue show --markdown
+   * The position journey never requests Markdown or bounds a selected chain.
+   */
+  it("emits a complete fixed 50-event document and names overflow without product output", async () => {
+    const work = await queueWithTwoChanges()
+    const git = gitIn(work)
+    const store = createEventStore(work, "origin", git.selection)
+    const queueTip = (await readEventQueue(store, "main")).tip!
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const branch = "task/markdown"
+    const ref = changesRef("main", branch)
+    const chain = await openEvents({ ...store, ref })
+    const times = [0, 1, 2, 3].map((hour) => new Date(`2026-09-22T0${hour}:00:00.000Z`))
+    const reason = "pipe | `code` <tag> ```"
+    const written = await chain.append(
+      [
+        changeInput("opened", { queueTip, at: times[0]!, commit: head, by: "@dev/10" }),
+        ...Array.from({ length: 46 }, (_, index) =>
+          changeInput(index % 2 === 0 ? "ignored" : "unignored", {
+            queueTip,
+            at: times[0]!,
+            by: "@dev/10",
+            ...(index % 2 === 0 ? { reason: "fixture" } : {}),
+          }),
+        ),
+        changeInput("failed", { queueTip, at: times[1]!, reason }),
+        changeInput("opened", { queueTip, at: times[2]!, commit: head, by: "@dev/10" }),
+        changeInput("cancelled", { queueTip, at: times[3]!, reason: "withdrawn" }),
+      ],
+      { expect: null },
+    )
+    const tip = await chain.head()
+    if (tip === null) throw new Error("the 50-event fixture has no tip")
+    const eventIds = new Set(written.events.map((event) => event.id))
+    // Optional named-ref transport may fetch a same-prefix neighbor into its
+    // private cache. That must not select or walk the neighbor's malformed chain.
+    await (
+      await openEvents({ ...store, ref: ref + "-lookalike" })
+    ).append([changeInput("ignored", { queueTip, at: times[0]!, by: "@dev/10", reason: "not the selected chain" })], {
+      expect: null,
+    })
+    const tracePath = join(work, "markdown-git-trace.jsonl")
+    const previousTrace = process.env.GIT_TRACE2_EVENT
+    let read: Ran
+    try {
+      process.env.GIT_TRACE2_EVENT = tracePath
+      read = await yrd(work, "queue", "show", branch, "--markdown")
+    } finally {
+      if (previousTrace === undefined) delete process.env.GIT_TRACE2_EVENT
+      else process.env.GIT_TRACE2_EVENT = previousTrace
+    }
+    const commands = readFileSync(tracePath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { event: string; argv?: string[] })
+      .filter((entry) => entry.event === "start" && entry.argv !== undefined)
+      .map((entry) => entry.argv ?? [])
+    const fetches = commands.filter((args) => args.includes("fetch"))
+    expect(fetches, JSON.stringify(commands)).toHaveLength(1)
+    expect(fetches[0]?.join(" ")).toContain(ref)
+    expect(fetches[0]?.join(" ")).toContain(`refs/yrd-archive/main/${branch}`)
+    expect(fetches[0]?.join(" ")).not.toContain("+refs/yrd/main/changes/*")
+    expect(fetches[0]?.join(" ")).not.toContain("+refs/yrd-archive/main/*")
+    const historyReads = commands.filter((args) => args.includes("--first-parent") && args.includes("--max-count=52"))
+    expect(historyReads, JSON.stringify(commands)).toHaveLength(1)
+    expect(
+      commands.filter((args) => args.some((arg) => eventIds.has(arg))),
+      JSON.stringify(commands),
+    ).toHaveLength(0)
+    expect(read.exitCode, read.report).toBe(0)
+    expect(read.stderr, read.report).toBe("")
+    const expectedMarkdown = readFileSync(new URL("./fixtures/queue-show-markdown.md", import.meta.url), "utf8")
+      .replaceAll("{{HEAD}}", head)
+      .replaceAll("{{TIP}}", tip)
+    expect(read.stdout).toBe(expectedMarkdown)
+    const blocks = [...read.stdout.matchAll(/```json\n([\s\S]*?)\n```/gu)].map((match) => JSON.parse(match[1]!))
+    expect(blocks).toEqual([
+      { branch, ref, tip, complete: true, events: 50, maxEvents: 50 },
+      [
+        {
+          branch,
+          head,
+          state: "cancelled",
+          format: "event",
+          submitter: "@dev/10",
+          since: times[2]!.toISOString(),
+          at: times[3]!.toISOString(),
+          endedAt: times[3]!.toISOString(),
+          reason: "withdrawn",
+        },
+        {
+          branch,
+          head,
+          state: "failed",
+          format: "event",
+          submitter: "@dev/10",
+          since: times[0]!.toISOString(),
+          at: times[1]!.toISOString(),
+          endedAt: times[1]!.toISOString(),
+          reason,
+        },
+      ],
+    ])
+    expect(read.stdout.startsWith("# Yrd change history\n\n")).toBe(true)
+    expect(read.stdout).not.toContain("Source:")
+    expect(read.stdout).not.toContain("lookalike")
+    expect(await chain.head()).toBe(tip)
+    for (const args of [
+      ["--markdown"],
+      [branch, "--markdown", "--json"],
+      [branch, "--markdown", "--all"],
+      [branch, "--markdown", "--project-root", work],
+    ]) {
+      const incompatible = await yrd(work, "queue", "show", ...args)
+      expect(incompatible.exitCode, incompatible.report).toBe(2)
+      expect(incompatible.stdout).toBe("")
+      expect(incompatible.stderr).toContain("queue show --markdown requires one branch")
+    }
+    const missing = await yrd(work, "queue", "show", "task/missing", "--markdown")
+    expect(missing.exitCode, missing.report).not.toBe(0)
+    expect(missing.stdout).toBe("")
+    expect(missing.stderr).toContain("no event history for task/missing")
+    const active = await yrd(work, "queue", "show", "task/two", "--markdown")
+    expect(active.exitCode, active.report).toBe(0)
+    const activeBlocks = [...active.stdout.matchAll(/```json\n([\s\S]*?)\n```/gu)].map((match) => JSON.parse(match[1]!))
+    expect(activeBlocks[1]).toEqual([expect.objectContaining({ state: "queued" })])
+    expect(activeBlocks[1]).toEqual([expect.not.objectContaining({ position: expect.anything() })])
+    const invalidRef = changesRef("main", "task/invalid")
+    await (
+      await openEvents({ ...store, ref: invalidRef })
+    ).append([changeInput("ignored", { queueTip, at: times[0]!, by: "@dev/10", reason: "invalid root fixture" })], {
+      expect: null,
+    })
+    const invalid = await yrd(work, "queue", "show", "task/invalid", "--markdown")
+    expect(invalid.exitCode, invalid.report).not.toBe(0)
+    expect(invalid.stdout).toBe("")
+    expect(invalid.stderr).toContain(invalidRef)
+    expect(invalid.stderr).toContain("yrd-ignore-change-ended:")
+    await chain.append(
+      [changeInput("retained", { queueTip, at: times[3]!, commit: head, by: "@dev/10", reason: "overflow fixture" })],
+      { expect: tip },
+    )
+    const overflow = await yrd(work, "queue", "show", branch, "--markdown")
+    expect(overflow.exitCode, overflow.report).not.toBe(0)
+    expect(overflow.stdout).toBe("")
+    expect(overflow.stderr).toContain("event history exceeds maxEvents=50")
+  })
+
   it("reports list's line position where it reads the line, and none where it reads one branch", async () => {
     const work = await queueWithTwoChanges()
 

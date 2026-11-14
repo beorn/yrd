@@ -3490,12 +3490,18 @@ type ChangeHistories = Readonly<{
  *  `ref@tip`, unless the listing opts into returning its existing invalid entry.
  *  `history` is undefined when the branch has no valid chain.
  *  Environment cleanup uses this so a round does not materialize every change
- *  chain under the queue prefixes (28011). */
+ *  chain under the queue prefixes (28011).
+ *  With maxEvents, returns the complete chain only when it contains at most that
+ *  many events; otherwise throws RangeError naming the ref and maxEvents. The
+ *  reader uses one overflow event, never a clipped history. Omission retains
+ *  the existing unbounded complete read and its acquisition call counts.
+ *  The supported maxEvents range is 1 through 1023 (EVENT_READ_LIMIT - 1),
+ *  leaving the overflow event within the existing Gitomic read ceiling. */
 export async function readBranchHistory(
   store: QueueReadStore,
   queue: string,
   branch: string,
-  options: Readonly<{ invalid?: "return"; branchTip?: boolean }> = {},
+  options: Readonly<{ invalid?: "return"; branchTip?: boolean; maxEvents?: number }> = {},
 ): Promise<
   Readonly<{ ref: string; history: ChangeHistory | undefined; invalid?: InvalidChangeHistory; branchTip?: Oid | null }>
 > {
@@ -3505,7 +3511,7 @@ export async function readBranchHistory(
   // 28867 B3 (@cto 0d28de34): a submit leases its branch at the remote tip; that tip rides this exact fetch.
   const branchRef = `refs/heads/${branch}`
   const also = options.branchTip === true ? { refs: [branchRef], seen: new Map<string, Oid | null>() } : undefined
-  const chains = await readEventChains([hot, cold], store, undefined, also)
+  const chains = await readEventChains([hot, cold], store, undefined, also, undefined, options.maxEvents)
   const tip = also === undefined ? {} : { branchTip: also.seen.get(branchRef) ?? null }
   const { histories, invalid } = projectChangeHistories(chains, prefixes, store.repo)
   const defect = invalid.get(branch)
