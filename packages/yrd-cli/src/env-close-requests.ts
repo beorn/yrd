@@ -177,7 +177,11 @@ export function writeCloseRequest(
         file,
         standing,
         `a close request for ${standing.path} already stands at ${file} from ${standing.requester} (${standing.at}) ` +
-          `with options ${JSON.stringify(standing.options)} and ending ${JSON.stringify(standing.ending)}; this request asks for ${JSON.stringify(request.options)} and ending ${JSON.stringify(request.ending)}; ` +
+          `with options ${JSON.stringify(standing.options)} and ending ${
+            standing.ending === undefined ? "(none)" : JSON.stringify(standing.ending)
+          }; this request asks for ${JSON.stringify(request.options)} and ending ${
+            request.ending === undefined ? "(none)" : JSON.stringify(request.ending)
+          }; ` +
           `resolve the standing request before filing another`,
       )
     }
