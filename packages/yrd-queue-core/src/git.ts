@@ -1225,11 +1225,16 @@ export async function mergeChangesNothing(git: Git, main: string, tip: string): 
 
 /**
  * Whether every commit the target lacks from `tip` already has a patch-equivalent commit in the target
- * (`git cherry`): the branch was rebuilt or squashed before landing, so it carries no unmerged content
- * without sharing ancestry (34265). Deliberately narrower than {@link mergeChangesNothing}: an empty or
- * graph-only commit has no patch to match, so it stays unique to the branch and the call answers false.
+ * (`git cherry`): the branch was rebuilt (re-landed as its own commits) before landing, so it carries no
+ * unmerged content without sharing ancestry (34265). Deliberately narrower than {@link mergeChangesNothing}:
+ * an empty or graph-only commit has no patch to match, and a multi-commit squash is not proven by per-commit
+ * matches, so both stay unique to the branch and the call answers false.
  */
 export async function patchEquivalentOffTarget(git: Git, target: string, tip: string): Promise<boolean> {
+  // `git cherry` never lists a merge, so anything a merge introduced — a conflict resolution, a submodule
+  // bump — is invisible to its patch list. A tip whose off-target range holds a merge is not proven this
+  // way and keeps, even when its linear commits all match (@cto review, 34265).
+  if ((await git(["rev-list", "--merges", `${target}..${tip}`])).trim() !== "") return false
   const listed = (await git(["cherry", target, tip]))
     .split("\n")
     .map((line) => line.trim())
