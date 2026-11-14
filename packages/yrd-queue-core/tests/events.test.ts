@@ -4656,13 +4656,15 @@ describe("the queue-format boundary", () => {
    * Existing status/history fixtures require complete reads and do not exercise an explicit event ceiling.
    */
   it.each([
-    ["hot", 50],
-    ["hot", 51],
-    ["hot", 600],
-    ["cold", 50],
-    ["cold", 51],
-    ["cold", 600],
-  ] as const)("reads at most 50 complete events from a %s chain containing %i events", async (custody, count) => {
+    ["hot", 50, 50],
+    ["hot", 51, 50],
+    ["hot", 600, 50],
+    ["cold", 50, 50],
+    ["cold", 51, 50],
+    ["cold", 600, 50],
+    ["hot", 1, 1023],
+    ["hot", 1, 1024],
+  ] as const)("reads a %s chain containing %i events with maxEvents=%i", async (custody, count, maxEvents) => {
     const { store, location } = remoteMemStore(`yrd-bounded-${custody}-${count}`)
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const head = (await target.transact(async (map) => map.set("work.txt", "bounded history"), "work")).oid
@@ -4707,12 +4709,18 @@ describe("the queue-format boundary", () => {
     expect(reads.mock.calls[0]?.[2]).toEqual({ limit: 1025 })
     reads.mockClear()
     fetches.mockClear()
-    const bounded = readBranchHistory(location, "lab", branch, { maxEvents: 50 })
-    if (count === 50) await expect(bounded).resolves.toEqual(complete)
-    else await expect(bounded).rejects.toThrow(/event history exceeds maxEvents=50/)
+    const bounded = readBranchHistory(location, "lab", branch, { maxEvents })
+    if (maxEvents === 1024) {
+      await expect(bounded).rejects.toThrow("maxEvents must be a positive safe integer no greater than 1023; got 1024")
+      expect(reads).not.toHaveBeenCalled()
+      expect(fetches).not.toHaveBeenCalled()
+      return
+    }
+    if (count <= maxEvents) await expect(bounded).resolves.toEqual(complete)
+    else await expect(bounded).rejects.toThrow(`event history exceeds maxEvents=${maxEvents}`)
     expect(reads).toHaveBeenCalledTimes(1)
     expect(fetches).toHaveBeenCalledTimes(1)
-    expect(reads.mock.calls[0]?.[2]).toEqual({ limit: 52 })
+    expect(reads.mock.calls[0]?.[2]).toEqual({ limit: maxEvents + 2 })
   })
 
   /** @failure A retained tip makes hot/cold history unreadable or loses the extra commit parent.

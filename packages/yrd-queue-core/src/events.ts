@@ -3494,7 +3494,9 @@ type ChangeHistories = Readonly<{
  *  With maxEvents, returns the complete chain only when it contains at most that
  *  many events; otherwise throws RangeError naming the ref and maxEvents. The
  *  reader uses one overflow event, never a clipped history. Omission retains
- *  the existing unbounded complete read and its acquisition call counts. */
+ *  the existing unbounded complete read and its acquisition call counts.
+ *  The supported maxEvents range is 1 through 1023 (EVENT_READ_LIMIT - 1),
+ *  leaving the overflow event within the existing Gitomic read ceiling. */
 export async function readBranchHistory(
   store: QueueReadStore,
   queue: string,

@@ -202,11 +202,10 @@ export async function readEventChains(
   listed?: ReadonlyMap<string, Oid>,
   maxEvents?: number,
 ): Promise<ReadonlyMap<string, Event[]>> {
-  if (
-    maxEvents !== undefined &&
-    (!Number.isSafeInteger(maxEvents) || maxEvents < 1 || maxEvents >= Number.MAX_SAFE_INTEGER)
-  ) {
-    throw new RangeError("maxEvents must be a positive safe integer with room for one overflow event")
+  if (maxEvents !== undefined && (!Number.isSafeInteger(maxEvents) || maxEvents < 1 || maxEvents >= EVENT_READ_LIMIT)) {
+    throw new RangeError(
+      `maxEvents must be a positive safe integer no greater than ${EVENT_READ_LIMIT - 1}; got ${maxEvents}`,
+    )
   }
   // One lookahead event distinguishes a complete short chain from a clipped long one.
   // Omission preserves the existing complete walk, including its page size and calls.
