@@ -17,6 +17,7 @@ import {
   createLocalEventStore,
   gitIn,
   isAncestor,
+  patchEquivalentOffTarget,
   issueBindingsOf,
   keptLinkAdmits,
   listRefs,
@@ -2063,11 +2064,15 @@ export async function retireMergedRootAuthor(
   if ((!withdrawn && change.status !== "merged") || tip === undefined || change.tip === undefined) {
     throw new Error(`${branch}: root retirement requires an exact merged or withdrawn submission and event tip`)
   }
-  if (!withdrawn && !(await isAncestor(git, tip, input.target))) {
+  const ancestry = await isAncestor(git, tip, input.target)
+  // A rebuilt or squashed landing carries no ancestry link but also no unmerged content (34265); an empty or
+  // graph-only commit has no patch to match, so the same test still keeps it here.
+  const rebuilt = !ancestry && !withdrawn && (await patchEquivalentOffTarget(git, input.target, tip))
+  if (!withdrawn && !ancestry && !rebuilt) {
     const result = {
       outcome: "kept",
       reason: "unreached",
-      detail: `exact author head ${tip} is not an ancestor of ${input.target}; kept for owner review; branch kept`,
+      detail: `exact author head ${tip} is not an ancestor of ${input.target} and no target commit carries its patches; kept for owner review; branch kept`,
     } as const
     log.write({
       kind: "local-branch-retirement",
@@ -2085,9 +2090,13 @@ export async function retireMergedRootAuthor(
     return result
   }
   let disposition: LocalBranchRetirement["disposition"] =
-    change.componentAuthors === undefined
+    change.componentAuthors === undefined && ancestry
       ? { kind: "merged", base: input.base, target: input.target }
-      : { kind: "landed", target: input.target, proof: { kind: "ancestry" } }
+      : {
+          kind: "landed",
+          target: input.target,
+          proof: ancestry ? { kind: "ancestry" } : { kind: "content", via: "patch-id" },
+        }
   if (withdrawn) {
     disposition = (await isAncestor(git, tip, input.target))
       ? { kind: "landed", target: input.target, proof: { kind: "ancestry" } }
@@ -2102,7 +2111,7 @@ export async function retireMergedRootAuthor(
     actor: input.actor,
     owner: change.submitter,
     issue: change.issue,
-    reason: withdrawn ? "withdrawn" : "merged",
+    reason: withdrawn ? "withdrawn" : ancestry ? "merged" : "merged by content (patch-id)",
     log,
     protections: async () => {
       const current = await readStatus(input.store, input.queue, branch)
@@ -2712,26 +2721,32 @@ export function createLandedBranchRetirement(
       const reasons = await candidate.protections()
       if (reasons.length > 0) return { outcome: "kept", reason: "held", detail: reasons.join("; ") }
     }
-    const custody = (await isAncestor(git, candidate.tip, target)) ? target : undefined
-    const proof = { kind: "ancestry" as const }
+    const ancestry = await isAncestor(git, candidate.tip, target)
+    // A rebuilt or squashed landing carries no ancestry link but also no unmerged content: every commit the
+    // target lacks from the tip has a patch-equivalent commit there (34265). An empty/graph-only commit has
+    // no patch to match and stays unique, so tree equality alone never licenses a retirement (29450).
+    const rebuilt = ancestry ? false : await patchEquivalentOffTarget(git, target, candidate.tip)
+    const custody = ancestry || rebuilt ? target : undefined
+    const proof = ancestry ? { kind: "ancestry" as const } : { kind: "content" as const, via: "patch-id" as const }
     if (custody === undefined) {
       return {
         outcome: "kept",
         reason: "unreached",
-        detail: `exact branch head ${candidate.tip} is not an ancestor of target ${target}; kept for owner review`,
+        detail: `exact branch head ${candidate.tip} is not an ancestor of target ${target} and no target commit carries its patches; kept for owner review`,
       }
     }
+    const landedNote = ancestry ? "landed by ancestry" : "landed by content (patch-id)"
     const landed = local
       ? await retireLocalBranch({
           ...retirement,
           repo,
           git,
-          reason: reason ?? `landed by ${proof.kind}`,
+          reason: reason ?? landedNote,
           disposition: { kind: "landed", target: custody, proof },
         })
       : {
           outcome: candidate.dryRun ? ("eligible" as const) : ("removed" as const),
-          reason: reason ?? "merged by ancestry",
+          reason: reason ?? landedNote,
         }
     let ending: Awaited<ReturnType<typeof drop>> | undefined
     if (origin && !candidate.dryRun && landed.outcome === "removed" && remoteTip !== undefined) {
@@ -2742,7 +2757,7 @@ export function createLandedBranchRetirement(
           branch: candidate.branch,
           by: candidate.actor,
           retire: { tip: candidate.tip },
-          note: reason ?? "merged by ancestry",
+          note: reason ?? landedNote,
           protections: () => candidate.protections(),
         })
       } else {

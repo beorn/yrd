@@ -147,6 +147,7 @@ export {
   readRemoteCommits,
   isAncestor,
   mergeChangesNothing,
+  patchEquivalentOffTarget,
   seamProcess,
   refAt,
   resolveGitSelection,

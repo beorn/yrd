@@ -1224,6 +1224,22 @@ export async function mergeChangesNothing(git: Git, main: string, tip: string): 
 }
 
 /**
+ * Whether every commit the target lacks from `tip` already has a patch-equivalent commit in the target
+ * (`git cherry`): the branch was rebuilt or squashed before landing, so it carries no unmerged content
+ * without sharing ancestry (34265). Deliberately narrower than {@link mergeChangesNothing}: an empty or
+ * graph-only commit has no patch to match, so it stays unique to the branch and the call answers false.
+ */
+export async function patchEquivalentOffTarget(git: Git, target: string, tip: string): Promise<boolean> {
+  const listed = (await git(["cherry", target, tip]))
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+  // No off-target commits means the tip is reachable from the target; ancestry is the proof there.
+  if (listed.length === 0) return false
+  return listed.every((line) => line.startsWith("- "))
+}
+
+/**
  * The heads among these the target does not contain, from ONE `rev-list` of
  * them not reachable from it. Empty heads: no git. Exit 1 is not an answer
  * here (ordinary off-target is an empty listing, exit 0); missing or corrupt

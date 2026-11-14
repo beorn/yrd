@@ -59,7 +59,8 @@ export type LocalBranchRetirement = Readonly<{
         kind: "landed"
         /** Observed origin commit retaining this tip; a root gitlink alone is not custody. */
         target: string
-        proof: { kind: "ancestry" }
+        /** How custody was proven: ancestry, or a rebuilt landing whose patches the target already carries (34265). */
+        proof: { kind: "ancestry" } | { kind: "content"; via: "patch-id" }
       }>
 }>
 
@@ -169,7 +170,13 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       if (await isAncestor(git, tip, disposition.target)) {
         return { code: "unreached", detail: `tip ${tip} is contained in ${disposition.target}; use merged retirement` }
       }
-    } else if (disposition.kind !== "closed" && !(await isAncestor(git, tip, disposition.target))) {
+    } else if (
+      disposition.kind !== "closed" &&
+      // A landed tip proven by patch-id (a rebuilt or squashed landing) carries no ancestry by construction;
+      // its caller already proved the target holds every patch, and tree equality alone never reaches here (34265).
+      !(disposition.kind === "landed" && disposition.proof.kind === "content") &&
+      !(await isAncestor(git, tip, disposition.target))
+    ) {
       return { code: "unreached", detail: `tip ${tip} is not merged into ${disposition.target}` }
     }
     return undefined

@@ -187,6 +187,37 @@ describe("automatic retirement is licensed by exact-head ancestry", () => {
     expect(out.stderr()).toContain("owner review")
   })
 
+  /**
+   * @failure A rebuilt or squashed landing has no ancestry link, so --retire left the ref forever and the
+   * quiet-branch page kept firing on content the target already carries (34265).
+   * @level l2
+   * @consumer the owner retiring a rebuilt landing
+   * @testonly none
+   */
+  it("removes a rebuilt landing whose patches the target already carries, without ancestry", async () => {
+    const repo = await world()
+    const git = gitIn(repo)
+    const branch = "task/34265-rebuilt"
+    const tip = await branchFor(repo, branch, "rebuilt-key")
+    await recordChange(repo, branch, tip, "rebuilt-key", "merged")
+    // The same change lands on main as its own commit: identical patch, no ancestry link.
+    writeFileSync(join(repo, `${branch.replace(/\//gu, "-")}.txt`), branch)
+    await git(["add", "."])
+    await git(["commit", "--quiet", "-m", "the rebuilt landing"])
+    await git(["push", "--quiet", "origin", "main"])
+    const landed = (await git(["rev-parse", "main"])).trim()
+    expect(
+      await git(["merge-base", "--is-ancestor", tip, landed]).then(
+        () => true,
+        () => false,
+      ),
+    ).toBe(false)
+    const retired = await retire(repo, branch, idle)
+    expect(retired.result).toMatchObject({ outcome: "removed" })
+    expect(retired.result.reason).toContain("patch-id")
+    expect((await git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe("")
+  })
+
   it("removes a targeted ancestor and keeps targeted unmerged or graph-only heads", async () => {
     const repo = await world()
     const merged = await branchFor(repo, "task/29100-merged", "opaque-key")
