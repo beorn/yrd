@@ -629,7 +629,7 @@ export type CoreQueueCommand =
       /** Include unsubmitted branch heads on event queues. */
       drafts?: boolean
     }>
-  | Readonly<{ command: "show"; branch?: string; all?: boolean }>
+  | Readonly<{ command: "show"; branch?: string; all?: boolean; markdown?: boolean }>
   | Readonly<{
       command: "stats"
       /** `3h`, an instant, or a commit: rows decided before it and refs whose tip is older are outside the window. */
@@ -840,6 +840,14 @@ export async function coreQueueCommand(
   // its environment. A dry run pushes nothing and is not counted.
   using traced = submitCalls(request, options.env, io)
   const env = { ...(traced.env ?? process.env) }
+  if (
+    request.command === "show" &&
+    request.markdown === true &&
+    (request.branch === undefined || request.all === true || options.json === true || options.projectRoot !== undefined)
+  ) {
+    io.stderr("yrd: queue show --markdown requires one branch and excludes --all, --json and --project-root\n")
+    return 2
+  }
   if (options.localStatusStore !== undefined) {
     if (request.command !== "list" && request.command !== "show" && request.command !== "ls") {
       throw new Error("the local queue status store is only for list/show/ls")
@@ -856,6 +864,37 @@ export async function coreQueueCommand(
   const queue = options.queue ?? (await withRemoteSeam("originHead", () => originHead(git)))
   const target = { branch: queue, remote }
   const targetLabel = `${remote}/${queue}`
+  // This document reads one exact event chain, before mirror refresh, declaration,
+  // drafts, issue display or the whole-queue listing. Only Markdown reaches stdout.
+  if (request.command === "show" && request.markdown === true && request.branch !== undefined) {
+    const branch = request.branch
+    const store = createEventStore(repo, remote, selection)
+    const selected = await readBranchHistory(store, queue, branch, { maxEvents: 50 })
+    const history = selected.history
+    if (history === undefined) throw new Error(`${selected.ref} in ${repo}: no event history for ${branch}`)
+    const now = history.state.at
+    if (now === undefined) throw new Error(`${selected.ref} in ${repo}: event history has no recorded time`)
+    const segments = enumerateChangeSegments(history.events, selected.ref, repo)
+    const rows = eventListRows(new Map([[branch, segments.map((segment) => segment.state)]]), [], {
+      all: true,
+      now,
+    }).document.map(({ position: _position, ...row }) => row)
+    // As in ordinary single-branch show, a one-branch fold knows no merge-line
+    // position. JSON fences preserve every other row value without Markdown
+    // interpolation; authored backticks, pipes and HTML stay literal data.
+    const scope = {
+      branch,
+      ref: selected.ref,
+      tip: history.state.tip,
+      complete: true,
+      events: history.events.length,
+      maxEvents: 50,
+    }
+    io.stdout(
+      `# Yrd change history\n\n\`\`\`json\n${JSON.stringify(scope, null, 2)}\n\`\`\`\n\n## Changes\n\n\`\`\`json\n${JSON.stringify(rows, null, 2)}\n\`\`\`\n`,
+    )
+    return 0
+  }
   const localStatus = options.localStatusStore
   let statusAsOf: string | undefined
   if (localStatus !== undefined) {

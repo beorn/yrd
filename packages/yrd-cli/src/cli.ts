@@ -1353,6 +1353,7 @@ function buildProgram(
   queue
     .command("show [branch]")
     .description("the branch's changes, each check's result and log")
+    .option("--markdown", "emit one complete event history of at most 50 events as Markdown")
     .option("--all", "all branches and their change segments as JSON")
     .option("--json", "emit stable JSON")
     .option("--fresh", "ask the remote instead of the queue-owned local status store")
@@ -1363,12 +1364,13 @@ function buildProgram(
         "(yrd issues view, killed at 10 s); --all and an absent root make no issue reads",
     )
     .action(async (branch, options) => {
-      const { all, json, queue, fresh, projectRoot } = options as {
+      const { all, json, queue, fresh, projectRoot, markdown } = options as {
         all?: boolean
         json?: boolean
         queue?: string
         fresh?: boolean
         projectRoot?: string
+        markdown?: boolean
       }
       const location = await resolveQueueLocation(cwd(), queue, env, "reader")
       const taken = await coreQueueCommand(
@@ -1376,6 +1378,7 @@ function buildProgram(
         io,
         {
           command: "show",
+          ...(markdown === true ? { markdown } : {}),
           ...(branch === undefined ? {} : { branch: branch as string }),
           ...(all === true ? { all } : {}),
         },
@@ -1387,7 +1390,7 @@ function buildProgram(
           populateReference: location.owned,
           queue: location.queue,
           workdir: location.workdir,
-          ...(fresh === true ? {} : { localStatusStore: localStatusStore(location) }),
+          ...(fresh === true || markdown === true ? {} : { localStatusStore: localStatusStore(location) }),
           ...(projectRoot === undefined ? {} : { projectRoot }),
         },
       )
