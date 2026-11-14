@@ -75,12 +75,7 @@ export const RUNNER_SIGNALS = ["silent", "stopped", "unpublished"] as const
 export const RUNNER_STATES_SAID = [...RUNNER_STATES, ...RUNNER_SIGNALS] as const
 
 /** A word a change's row can show: one of the nine, or `direct`, which is no change. */
-export type DisplayState =
-  | (typeof LEGEND_STATES)[number]
-  | "deferred"
-  | "direct"
-  | "event-verifying"
-  | "invalid"
+export type DisplayState = (typeof LEGEND_STATES)[number] | "deferred" | "direct" | "event-verifying" | "invalid"
 
 /** A word the runner's row can show: one of the eight, a signal, or the unpublished `?`. */
 export type RunnerState = (typeof RUNNER_STATES)[number] | (typeof RUNNER_SIGNALS)[number]
