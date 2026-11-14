@@ -274,22 +274,6 @@ function blockedCustodyRefusalRecord(
 }
 
 /**
- * Consume the durable close requests a caller filed because its own same-UID CWD
- * census could not certify the close (22894). This round IS the capable context:
- * it runs the SAME `closeEnvironment` lifecycle the direct verb runs, under the
- * direct admission predicate (clean, unlocked, no holder, ancestry not required),
- * up to CLOSE_ATTEMPTS_PER_ROUTE locked close attempts per invocation.
- *
- * Retirement is loud and bounded. Existence is checked FIRST, so a path already
- * gone is an `already-removed` row and never a close attempt (23162: freshness at
- * destruction). The registry row is re-read, and a gone registration, a hold or a
- * moved HEAD retires the request as `stale`; stale and gone rows do not count as
- * an attempt. Only an incomplete census is
- * retryable — at most MAX_COVERAGE_ATTEMPTS rounds — after which the file is
- * DELETED with the whole request and the last refusal in its final journal row
- * (no archive directory). Every other refusal retires at once with its reason.
- */
-/**
  * The remedy for a retired RELEASE request: the direct verb's own invocation, carrying the recorded branch,
  * tip, issue, reason and flags, so re-filing cannot silently become a different operation (@cto 13:21 PST,
  * ruling correction 2). Nothing here claims a capable reader exists.
@@ -317,6 +301,22 @@ function closeRemedy(options: EnvCloseRequestOptions): string {
   return `re-file the same close ${withOptions} from a context that can read every same-UID pid's cwd`
 }
 
+/**
+ * Consume the durable close requests a caller filed because its own same-UID CWD
+ * census could not certify the close (22894). This round IS the capable context:
+ * it runs the SAME `closeEnvironment` lifecycle the direct verb runs, under the
+ * direct admission predicate (clean, unlocked, no holder, ancestry not required),
+ * up to CLOSE_ATTEMPTS_PER_ROUTE locked close attempts per invocation.
+ *
+ * Retirement is loud and bounded. Existence is checked FIRST, so a path already
+ * gone is an `already-removed` row and never a close attempt (23162: freshness at
+ * destruction). The registry row is re-read, and a gone registration, a hold or a
+ * moved HEAD retires the request as `stale`; stale and gone rows do not count as
+ * an attempt. Only an incomplete census is
+ * retryable — at most MAX_COVERAGE_ATTEMPTS rounds — after which the file is
+ * DELETED with the whole request and the last refusal in its final journal row
+ * (no archive directory). Every other refusal retires at once with its reason.
+ */
 async function consumeCloseRequests(
   input: Readonly<{
     workdir: string
