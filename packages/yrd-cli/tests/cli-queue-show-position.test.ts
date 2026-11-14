@@ -173,7 +173,8 @@ describe("`yrd queue show` and the merge-line position (#29342)", () => {
     expect(read.exitCode, read.report).toBe(0)
     expect(read.stderr, read.report).toBe("")
     const expectedMarkdown = readFileSync(new URL("./fixtures/queue-show-markdown.md", import.meta.url), "utf8")
-      .replaceAll("{{HEAD}}", head).replaceAll("{{TIP}}", tip)
+      .replaceAll("{{HEAD}}", head)
+      .replaceAll("{{TIP}}", tip)
     expect(read.stdout).toBe(expectedMarkdown)
     const blocks = [...read.stdout.matchAll(/```json\n([\s\S]*?)\n```/gu)].map((match) => JSON.parse(match[1]!))
     expect(blocks).toEqual([
