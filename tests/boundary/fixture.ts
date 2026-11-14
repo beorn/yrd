@@ -125,7 +125,7 @@ export type Change = Readonly<{
 /** The fixture, not Yrd, attaches an authoring branch to the detached tree. */
 async function openAuthorEnvironment(repo: string, branch: string, commit: string): Promise<string> {
   const opened = capture(repo)
-  expectZero(await yrd(repo, opened.io, "env", "open", commit), "env open", opened)
+  expectZero(await yrd(repo, opened.io, "env", "open", commit, "--expires", "1h"), "env open", opened)
   const path = opened.stdout().trim()
   await git(path, "checkout", "--quiet", "-b", branch)
   return path
