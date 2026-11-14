@@ -20,6 +20,7 @@ import { createGitWorkspace } from "@yrd/bay"
 import { createProcess } from "@yrd/process"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { readEnvOpenRecord } from "../src/env-open-record.ts"
 import { formatYrdRuntimeVersion } from "../src/version.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { sharedIdentityMoved } from "../src/env-commands.ts"
@@ -1588,5 +1589,17 @@ describe("yrd env open keep-rule (33758): an issue or an expiry, never neither",
     // The expiry binds the automatic pass, not a person: a deliberate close of a clean bay is still allowed.
     const early = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "close", path], early.io), early.stderr()).toBe(0)
+  })
+
+  it("reads a present-but-malformed expiresAt as unreadable instead of silently lifting the hold", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-open-record-"))
+    roots.push(dir)
+    writeFileSync(
+      join(dir, "yrd-open.json"),
+      JSON.stringify({ version: 1, lifetime: "job", at: new Date().toISOString(), expiresAt: 42 }),
+    )
+    const read = readEnvOpenRecord(dir)
+    expect(read.status).toBe("unreadable")
+    if (read.status === "unreadable") expect(read.why).toContain("expiresAt must be an ISO instant string")
   })
 })

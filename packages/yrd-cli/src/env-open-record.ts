@@ -147,6 +147,15 @@ export function readEnvOpenRecord(gitDir: string): EnvOpenRecordRead {
       `expected version 1 and lifetime "job" or "standing" (got version=${JSON.stringify(row.version)}, lifetime=${JSON.stringify(row.lifetime)})`,
     )
   }
+  // An absent expiry is a legitimate legacy record and takes the ancestry path unchanged. A PRESENT expiry
+  // that is not a string is malformed, and reading it as absent would silently lift the time hold it records,
+  // so it is reported unreadable and keeps the bay loudly instead.
+  if (row.expiresAt !== undefined && typeof row.expiresAt !== "string") {
+    return unreadableOpenRecord(
+      path,
+      `expiresAt must be an ISO instant string (got ${JSON.stringify(row.expiresAt)})`,
+    )
+  }
   return {
     status: "recorded",
     record: {

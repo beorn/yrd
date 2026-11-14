@@ -1482,9 +1482,9 @@ async function cleanupEnvironments(
       const instant = Date.parse(opening.record.expiresAt)
       if (!Number.isFinite(instant)) return `expiry unproven: ${JSON.stringify(opening.record.expiresAt)}`
       if (Date.now() < instant) return `expiring: stays until ${new Date(instant).toISOString()}`
-      // An expired bay that gained commits is NOT caught here: the sweep's own native protections run after
-      // this reason and refuse an advanced head precisely ("is not on target"/content ahead), and a reason
-      // returned here would preempt them with a weaker sentence.
+      // An advanced head is NOT decided here: the sweep's own protections run after this reason and decide it
+      // by content, not by age — an unshipped off-target head is kept loudly, a head already on the target is
+      // removed exactly as it was before this rule existed.
     }
     return undefined
   }
