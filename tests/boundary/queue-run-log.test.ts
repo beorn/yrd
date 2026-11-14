@@ -61,7 +61,7 @@
 import { readdir, readFile, stat, writeFile } from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { openLog, readJournals, readRunLog } from "@yrd/queue-core"
+import { openLog, readJournalProjection, readJournals, readRunLog } from "@yrd/queue-core"
 import { readRunnerFacts, runnerLine } from "../../packages/yrd-cli/src/watch-runner.ts"
 import {
   boundaryRepository,
@@ -80,7 +80,7 @@ afterEach(removeTemporaryRoots)
 // erased. Projection parity and malformed-prefix tests miss the intact next
 // row being consumed with that record. Exercise both public readers, without
 // a queue round: this is a reader contract, not a claim about service startup.
-it.each(["middle", "header", "garbage", "many", "no-change"] as const)(
+it.each(["middle", "header", "garbage", "many", "no-change", "matching-projection"] as const)(
   "reads a writer journal after %s record overwrite",
   async (damage) => {
     const workdir = dirname(await temporaryLog("damaged-journal"))
@@ -106,7 +106,7 @@ it.each(["middle", "header", "garbage", "many", "no-change"] as const)(
     ).toEqual(controlSteps)
     let bytes = await readFile(log.path)
     const projectionPath = log.path.replace(/\.jsonl$/u, ".projection.json")
-    const projection = await readFile(projectionPath)
+    let projection = await readFile(projectionPath)
     const headerEnd = bytes.indexOf(10) + 1
     const stepEnd = bytes.indexOf(10, headerEnd) + 1
     if (damage === "many") {
@@ -137,7 +137,9 @@ it.each(["middle", "header", "garbage", "many", "no-change"] as const)(
     expect(runner.latest?.malformed).toHaveLength(malformedCount)
     expect(runner.latest?.malformed?.[0]).toContain("record 2")
     expect(runner.latest?.malformed?.[0]).toContain(
-      damage === "middle" || damage === "no-change" ? `${stepEnd - headerEnd} leading NUL bytes` : "not JSON",
+      damage === "middle" || damage === "no-change" || damage === "matching-projection"
+        ? `${stepEnd - headerEnd} leading NUL bytes`
+        : "not JSON",
     )
     const summary = runnerLine(runner, new Date()).detail
     expect(summary).toContain(`${malformedCount} malformed journal record`)
@@ -148,16 +150,37 @@ it.each(["middle", "header", "garbage", "many", "no-change"] as const)(
       expect(summary).not.toContain(runner.latest?.malformed?.[1])
       expect(summary).not.toContain(runner.latest?.malformed?.[2])
     }
+    if (damage === "matching-projection") {
+      // Force this reader branch with the real writer's artifact. This does
+      // not claim that an ordinary filesystem write preserves ctime: the
+      // recorded identity is deliberately made to match the damaged source.
+      const artifact = JSON.parse(projection.toString()) as { source: Record<string, string> }
+      const source = await stat(log.path, { bigint: true })
+      for (const key of ["dev", "ino", "size", "mtimeNs", "ctimeNs"] as const)
+        artifact.source[key] = String(source[key])
+      projection = Buffer.from(JSON.stringify(artifact))
+      await writeFile(projectionPath, projection)
+      expect(readJournalProjection(dir, log.id, { detail: "include" })).toMatchObject({
+        kind: "raw",
+        fallback: {
+          reason: "unreadable",
+          detail: expect.stringContaining("1 malformed record(s) under a matching projection identity"),
+        },
+      })
+    }
     const detail = readJournals(dir, { runIds: [log.id] })
     if (damage === "no-change") expect(detail.runs.size).toBe(0)
     else expect(detail.runs.get(`${branch}@${head}`)?.[0]?.steps.map((step) => step.name)).toEqual(["survivor"])
     expect(detail.malformed).toHaveLength(malformedCount)
     expect(detail.malformed[0]?.message).toContain("record 2")
     expect(detail.malformed[0]?.message).toContain(
-      damage === "middle" || damage === "no-change" ? `${stepEnd - headerEnd} leading NUL bytes` : "not JSON",
+      damage === "middle" || damage === "no-change" || damage === "matching-projection"
+        ? `${stepEnd - headerEnd} leading NUL bytes`
+        : "not JSON",
     )
     expect(detail.malformed[0]).not.toHaveProperty("key")
     expect(readJournals(dir, { runIds: [log.id] }).malformed).toEqual(detail.malformed)
+    if (damage === "matching-projection") expect(detail.fallbacks?.persistFailures).toBeUndefined()
     expect(await readFile(log.path)).toEqual(bytes)
     expect(await readFile(projectionPath)).toEqual(projection)
   },

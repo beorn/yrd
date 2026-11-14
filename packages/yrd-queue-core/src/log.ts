@@ -1046,6 +1046,12 @@ export function readJournalProjection(
         // The compact artifact owns summary facts; complete command and step
         // detail stays in the canonical raw fold. Never fabricate empty arrays.
         const read = readRunLogWithMalformed(dir, id)
+        if (read.malformed.length > 0) {
+          return raw(
+            "unreadable",
+            `${path}: raw journal has ${read.malformed.length} malformed record(s) under a matching projection identity`,
+          )
+        }
         runs = runsIn(read.records, id, startedAt, "include")
       } catch (error) {
         return raw("unreadable", `${path}: full journal detail could not be read: ${String(error)}`)
