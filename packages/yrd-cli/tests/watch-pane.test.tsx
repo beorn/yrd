@@ -2015,6 +2015,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(lines.indexOf("outcomes")).toBeGreaterThan(changes.length)
     expect(help).toContain("outcomes")
     expect(help).toMatch(/^\s*deferred\s/m)
+    expect(help).toMatch(/^\s*invalid\s.*this event chain cannot be folded/m)
     expect({ stopped: STATE_WORDS.stopped.next, paused: STATE_WORDS.paused.next }).toEqual({
       stopped: "start the runner for this queue",
       paused: "resume this queue after resolving the pause",

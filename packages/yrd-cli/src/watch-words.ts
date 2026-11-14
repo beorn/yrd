@@ -77,12 +77,8 @@ export const RUNNER_STATES_SAID = [...RUNNER_STATES, ...RUNNER_SIGNALS] as const
 /** A word a change's row can show: one of the nine, or `direct`, which is no change. */
 export type DisplayState =
   | (typeof LEGEND_STATES)[number]
-  | "submitted"
-  | "pending"
   | "deferred"
   | "direct"
-  | "queued"
-  | "verifying"
   | "event-verifying"
   | "invalid"
 
@@ -103,23 +99,11 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
     word: "draft",
   },
   queued: { color: "$fg-warning", means: "submitted and waiting for the runner", next: "verifying", word: "queued" },
-  submitted: {
-    color: "$fg-warning",
-    means: "in the queue, waiting for its first check",
-    next: "the runner checks it",
-    word: "submitted",
-  },
   checking: {
     color: "$fg-info",
     means: "the runner is testing it now",
     next: "merging, stuck or failed",
     word: "checking",
-  },
-  pending: {
-    color: "$fg-warning",
-    means: "checks passed; waiting in line to merge",
-    next: "it merges when the line reaches it",
-    word: "pending",
   },
   merging: {
     color: "$fg-info",
@@ -265,6 +249,7 @@ export function legendLines(width: number = Number.POSITIVE_INFINITY): readonly 
     "",
     "outcomes",
     ...entry("deferred"),
+    ...entry("invalid"),
     "",
     "the runner, which says checking, merging and stuck as a change does",
     ...runnerOnly.flatMap(entry),
