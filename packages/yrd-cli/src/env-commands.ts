@@ -70,7 +70,7 @@ import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 import { censusRetainedStores, retainedCloseLine } from "./retained-census.ts"
 import { formatYrdCommand } from "./command-format.ts"
-import { envOpenRecordFromFlags, readEnvOpenRecord, writeEnvOpenRecord } from "./env-open-record.ts"
+import { envOpenRecordFromFlags, parseEnvExpires, readEnvOpenRecord, writeEnvOpenRecord } from "./env-open-record.ts"
 import { readEnvIssueState } from "./env-issue-state.ts"
 import {
   admitEnvironmentClose,
@@ -96,6 +96,8 @@ export type EnvOpenOptions = Readonly<{
   commit?: string
   hold?: string
   keep?: boolean
+  /** `<duration|instant>`; the only legitimate open with no `--issue`, because a detached commit cannot be bound. */
+  expires?: string
 }>
 export type EnvCloseOptions = Readonly<{
   json?: boolean
@@ -448,10 +450,11 @@ async function recordOpenedLifetime(
   process: Parameters<typeof gitIn>[1],
   selection: Awaited<ReturnType<typeof resolveGitSelection>>,
   options: EnvOpenOptions,
+  recorded: Readonly<{ expiresAt?: string; openedCommit?: string }> = {},
 ): Promise<void> {
   const gitDir = (await gitIn(path, process, selection)(["rev-parse", "--absolute-git-dir"])).trim()
   try {
-    writeEnvOpenRecord(gitDir, envOpenRecordFromFlags(options))
+    writeEnvOpenRecord(gitDir, envOpenRecordFromFlags({ ...options, ...recorded }))
   } catch (error) {
     throw new Error(
       `yrd env open created ${path} but could not record opening lifetime in ${gitDir}: ${error instanceof Error ? error.message : String(error)}; the environment remains open, so inspect git worktree list before retrying`,
@@ -535,6 +538,17 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   if (options.hold !== undefined && options.hold.trim() === "") {
     throw new Error("yrd env open --hold needs a non-empty reason")
   }
+  // 33758 keep-rule: an environment with neither an issue nor an expiry is unowned — no retirement path can
+  // name it and the census only sees it by ancestry. Refused before a bay, branch or worktree exists, naming
+  // both cures in one line.
+  if (options.issue === undefined && options.expires === undefined) {
+    throw new Error(
+      "yrd env open refuses to open an environment with neither an issue nor an expiry: nothing would name it " +
+        "for retirement or review later. Pass --issue <ref> to bind the branch with a Refs commit, or " +
+        "--expires <duration|instant> (at most 7d) for a bay retained at an exact commit.",
+    )
+  }
+  const expiresAt = options.expires === undefined ? undefined : parseEnvExpires(options.expires)
   // The caller's declared identity is read BEFORE any environment exists
   // (#28285): a half-declared identity is refused here, leaving no bay, branch
   // or worktree registration behind. Reading it only at the pin — after
@@ -654,6 +668,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
           ...(options.issue === undefined ? [] : ["--issue", options.issue]),
           ...(options.hold === undefined ? [] : ["--hold", options.hold]),
           ...(options.keep === true ? ["--keep"] : []),
+          ...(options.expires === undefined ? [] : ["--expires", options.expires]),
           ...(options.json === true ? ["--json"] : []),
         ],
         root,
@@ -686,7 +701,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   }
   const { path, baseSha } = provisioned
   await pinDeclaredIdentity(path, gitIn(path, process, selection), declaredIdentity, io)
-  await recordOpenedLifetime(path, process, selection, options)
+  await recordOpenedLifetime(path, process, selection, options, expiresAt === undefined ? {} : { expiresAt })
   if (options.hold !== undefined) {
     try {
       await createLocalGitWorktreeStore({ repo: root }).lock(path, options.hold)
@@ -764,6 +779,13 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       )
     }
   }
+  if (expiresAt !== undefined) {
+    // Record the commit the environment actually settled at: an --issue binding writes a Refs commit after the
+    // opening record above, so an expired close that required that earlier head would refuse a bay that never
+    // gained work. Rewritten only on the --expires path; every existing open writes exactly what it did before.
+    const settled = (await gitIn(path, process, selection)(["rev-parse", "HEAD"])).trim()
+    await recordOpenedLifetime(path, process, selection, options, { expiresAt, openedCommit: settled })
+  }
   // A base the environment shares no history with cannot be judged: no check could tell a diff from it
   // and no ancestry can be established for it. The guard runs on EVERY path, not only where the target
   // declares `setup:` — a repository without setup used to accept a foreign head silently (27165).
@@ -795,7 +817,8 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   // stderr, so `--json` stdout and every scripted caller stay byte-identical; the exit code is unchanged.
   if (branch !== undefined && options.issue === undefined) {
     io.stderr(
-      `${branch} carries no bead id; open bead work with --issue <ref> — it names the branch task/<issue> and binds it with a Refs commit\n`,
+      `${branch} carries no bead id; open bead work with --issue <ref> — it names the branch task/<issue> and binds it with a Refs commit. ` +
+        `This bay expires at ${expiresAt}\n`,
     )
   }
   // `base` is the base the caller REQUESTED, resolved in the owning root repository — never the head the
@@ -1719,13 +1742,14 @@ export async function closeEnvironment(
     )
   }
   const treeGit = gitIn(path, process, selection)
+  const adminDir = (await treeGit(["rev-parse", "--absolute-git-dir"])).trim()
+  const commit = (await treeGit(["rev-parse", "HEAD"])).trim()
   if (registered.locked !== undefined) {
     const lockPath = join((await treeGit(["rev-parse", "--absolute-git-dir"])).trim(), "locked")
     throw new Error(
       `environment ${path} is locked${registered.locked === "" ? "" : `: ${registered.locked}`}; lock file ${lockPath}; release the hold with git worktree unlock ${shellQuote(path)} before closing it`,
     )
   }
-  const commit = (await treeGit(["rev-parse", "HEAD"])).trim()
   // #27120 AC1/AC3 (ruling ii): R1 refuses while ANY private byte the close could destroy is still
   // there — the checkout is initialized, OR it was emptied and the private store still sits in this
   // environment's own admin dir. R1 is therefore the guard at EVERY stage, and the close never reaches
@@ -1739,7 +1763,6 @@ export async function closeEnvironment(
   // differ, so a path-keyed probe missed the real store and let the close reach a removal that COPIED the
   // private store into retention. The guard hands back the refused stores structured, so the route below
   // names the exact bytes without parsing its message (27120, @cto).
-  const adminDir = (await treeGit(["rev-parse", "--absolute-git-dir"])).trim()
   let storeRefusals: readonly PrivateStoreRefusal[] = []
   try {
     await assertNoPrivateStore(createLocalGitProcess(), { adminDir, repository: path, head: commit })

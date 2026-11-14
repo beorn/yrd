@@ -1704,6 +1704,10 @@ function buildProgram(
       ).preset("manual"),
     )
     .option("--keep", "record this environment as standing so a merge of its branch does not close it")
+    .option(
+      "--expires <duration|instant>",
+      "keep a bay with no issue until this expiry (duration such as 12h or 7d, at most 7 days, or an ISO instant)",
+    )
     .option("--json", "emit stable JSON")
     .action(async (commit, options) =>
       setExit(

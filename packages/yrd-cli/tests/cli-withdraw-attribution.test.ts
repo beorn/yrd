@@ -245,7 +245,7 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     const work = await queueWithChanges([branch])
     const git = gitIn(work)
     const head = (await git(["rev-parse", `refs/heads/${branch}`])).trim()
-    const opened = await yrd(work, "env", "open", "--bay", "reopened", "--json")
+    const opened = await yrd(work, "env", "open", "--bay", "reopened", "--expires", "1d", "--json")
     expect(opened.exitCode, opened.report).toBe(0)
     const environment = JSON.parse(opened.stdout) as { path: string }
     const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue(emptyCwds)
@@ -284,7 +284,7 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     const git = gitIn(work)
     const head = (await git(["rev-parse", `refs/heads/${branch}`])).trim()
     // AC2: the public ending must release its exact job, not only its remote ref.
-    const opened = await yrd(work, "env", "open", "--bay", "one'quoted", "--json")
+    const opened = await yrd(work, "env", "open", "--bay", "one'quoted", "--expires", "1d", "--json")
     expect(opened.exitCode, opened.report).toBe(0)
     const environment = JSON.parse(opened.stdout) as { path: string }
     expect(existsSync(environment.path)).toBe(true)

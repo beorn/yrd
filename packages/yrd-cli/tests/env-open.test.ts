@@ -162,7 +162,7 @@ describe("yrd env open prepares the retained environment", () => {
       isolateHome(reference)
       const run = capture(reference)
 
-      expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "future-module"], run.io)).not.toBe(0)
+      expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "future-module", "--expires", "1d"], run.io)).not.toBe(0)
 
       expect(run.stderr()).toMatch(/reference.*predates.*add/isu)
       expect(run.stderr()).toContain("vendor/dependency")
@@ -192,7 +192,7 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["push", "--quiet", "origin", "main"])
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "newer-key"], run.io)).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "newer-key", "--expires", "1d"], run.io)).toBe(0)
 
     expect(run.stderr()).toContain("futurekey:")
     expect(run.stderr()).toMatch(/this environment's Yrd does not know/iu)
@@ -223,7 +223,7 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["push", "--quiet", "origin", "main"])
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "newer-notify"], run.io)).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "newer-notify", "--expires", "1d"], run.io)).toBe(0)
 
     expect(run.stderr()).toContain("submitter: future-ending")
     expect(run.stderr()).toMatch(/this environment's Yrd does not know/iu)
@@ -256,7 +256,7 @@ describe("yrd env open prepares the retained environment", () => {
     // The counter-row: a path that writes no key announces nothing, so the line cannot be read as
     // boilerplate. `--bay` never binds, so this bay carries the 28113 line instead.
     const plain = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "29738-plain"], plain.io)).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "29738-plain", "--expires", "1d"], plain.io)).toBe(0)
     expect(plain.stderr()).toContain("carries no bead id")
     expect(plain.stderr()).not.toContain("is bound to")
     expect(plain.stderr()).not.toContain("spell it exactly that way")
@@ -284,7 +284,7 @@ describe("yrd env open prepares the retained environment", () => {
     expect((await w.git(["rev-parse", "refs/remotes/origin/main"])).trim()).toBe(fetched)
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "fresh-base"], run.io)).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "fresh-base", "--expires", "1d"], run.io)).toBe(0)
 
     const bay = join(w.work, ".bays", "fresh-base")
     expect((await gitIn(bay)(["rev-parse", "HEAD"])).trim()).toBe(landed)
@@ -308,7 +308,7 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["remote", "set-url", "origin", join(w.work, "..", "absent-remote.git")])
     const run = capture(w.work)
 
-    const code = await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "origin-down", "--json"], run.io)
+    const code = await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "origin-down", "--json", "--expires", "1d"], run.io)
     expect(code, run.stderr()).toBe(0)
 
     const result = JSON.parse(run.stdout()) as { base: string; baseSource: string; path: string }
@@ -353,7 +353,7 @@ describe("yrd env open prepares the retained environment", () => {
     const run = capture(w.work)
 
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "remote-only", "--json"], run.io),
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "remote-only", "--json", "--expires", "1d"], run.io),
       run.stderr(),
     ).toBe(0)
 
@@ -398,7 +398,7 @@ describe("yrd env open prepares the retained environment", () => {
     const run = capture(w.work)
 
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "remote-only", "--json"], run.io),
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "remote-only", "--json", "--expires", "1d"], run.io),
       run.stderr(),
     ).toBe(0)
 
@@ -423,7 +423,7 @@ describe("yrd env open prepares the retained environment", () => {
     const w = await world("true")
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "fixer-guards-tools"], run.io)).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "fixer-guards-tools", "--expires", "1d"], run.io)).toBe(0)
 
     expect(run.stderr()).toContain("task/fixer-guards-tools carries no bead id")
     expect(run.stderr()).toContain("--issue <ref>")
@@ -446,7 +446,7 @@ describe("yrd env open prepares the retained environment", () => {
 
     const probe = await world("true")
     const json = capture(probe.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "probe", "--json"], json.io)).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "probe", "--json", "--expires", "1d"], json.io)).toBe(0)
     expect(JSON.parse(json.stdout())).toMatchObject({ branch: "task/probe", name: "probe" })
     // stdout stays a single JSON object; the announce rides stderr only.
     expect(json.stdout()).not.toContain("carries no bead id")
@@ -464,7 +464,7 @@ describe("yrd env open prepares the retained environment", () => {
     const jobWorld = await world("true")
     const job = capture(jobWorld.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "job-life", "--json"], job.io),
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "job-life", "--json", "--expires", "1d"], job.io),
       job.stderr(),
     ).toBe(0)
     const jobOpened = JSON.parse(job.stdout()) as { path: string; branch: string; name: string }
@@ -479,7 +479,7 @@ describe("yrd env open prepares the retained environment", () => {
     const keepWorld = await world("true")
     const keep = capture(keepWorld.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "keep-life", "--keep", "--json"], keep.io),
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "keep-life", "--keep", "--json", "--expires", "1d"], keep.io),
       keep.stderr(),
     ).toBe(0)
     const keepOpened = JSON.parse(keep.stdout()) as { path: string }
@@ -595,7 +595,7 @@ describe("yrd env open prepares the retained environment", () => {
     await addMaterializedDependency(w)
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "ready"], run.io), run.stderr()).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "ready", "--expires", "1d"], run.io), run.stderr()).toBe(0)
 
     const bay = join(w.work, ".bays", "ready")
     expect(run.stdout().trim()).toBe(bay)
@@ -633,7 +633,7 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["push", "--quiet", "origin", "main"])
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "typecheck-ready"], run.io), run.stderr()).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "typecheck-ready", "--expires", "1d"], run.io), run.stderr()).toBe(0)
 
     const bay = join(w.work, ".bays", "typecheck-ready")
     const typecheck = await command(bay, ["bun", "run", "typecheck"])
@@ -674,7 +674,7 @@ describe("yrd env open prepares the retained environment", () => {
       const run = capture(w.work)
 
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", selector, "reopened", "--json"], run.io),
+        await runYrdProcess(["bun", "yrd", "env", "open", selector, "reopened", "--json", "--expires", "1d"], run.io),
         run.stderr(),
       ).toBe(0)
 
@@ -699,7 +699,7 @@ describe("yrd env open prepares the retained environment", () => {
       await w.git(["worktree", "remove", "--force", bay])
       const reopened = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", selector, "reopened"], reopened.io),
+        await runYrdProcess(["bun", "yrd", "env", "open", selector, "reopened", "--expires", "1d"], reopened.io),
         reopened.stderr(),
       ).toBe(0)
       expect.soft(reopened.stderr()).toContain("reused local")
@@ -844,7 +844,7 @@ describe("yrd env open prepares the retained environment", () => {
     await gitIn(resumer)(["config", "user.name", "yrd"])
     const run = capture(resumer)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", selector, "resume", "--json"], run.io), run.stderr()).toBe(
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", selector, "resume", "--json", "--expires", "1d"], run.io), run.stderr()).toBe(
       0,
     )
 
@@ -894,7 +894,7 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["push", "--quiet", "origin", "main"])
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "half-made"], run.io)).not.toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "half-made", "--expires", "1d"], run.io)).not.toBe(0)
 
     const bay = join(w.work, ".bays", "half-made")
     expect(existsSync(bay), `the half-made bay is removed:\n${run.stderr()}`).toBe(false)
@@ -919,7 +919,7 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["checkout", "--quiet", "main"])
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "kept"], run.io)).not.toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "kept", "--expires", "1d"], run.io)).not.toBe(0)
 
     const bay = join(w.work, ".bays", "kept")
     expect(existsSync(bay), `the half-made bay is removed:\n${run.stderr()}`).toBe(false)
@@ -933,7 +933,7 @@ describe("yrd env open prepares the retained environment", () => {
       const w = await world("true")
       const name = "reopened's-work"
       const first = capture(w.work)
-      expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", name], first.io), first.stderr()).toBe(0)
+      expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", name, "--expires", "1d"], first.io), first.stderr()).toBe(0)
       const bay = join(w.work, ".bays", name)
       const tree = gitIn(bay)
       writeFileSync(join(bay, "preserved.txt"), "existing work\n")
@@ -1007,12 +1007,12 @@ describe("yrd env open prepares the retained environment", () => {
   it("a second open of a live bay is refused and leaves the environment and its uncommitted file (hh 25976)", async () => {
     const w = await world("true")
     const first = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "live"], first.io), first.stderr()).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "live", "--expires", "1d"], first.io), first.stderr()).toBe(0)
     const bay = join(w.work, ".bays", "live")
     writeFileSync(join(bay, "uncommitted.txt"), "work in progress\n")
     const second = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "live"], second.io)).not.toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "live", "--expires", "1d"], second.io)).not.toBe(0)
 
     expect(existsSync(join(bay, "uncommitted.txt")), second.stderr()).toBe(true)
     expect(await w.git(["worktree", "list", "--porcelain"])).toContain(bay)
@@ -1026,7 +1026,7 @@ describe("yrd env open prepares the retained environment", () => {
     const w = await world(command)
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "broken"], run.io)).toBe(2)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "broken", "--expires", "1d"], run.io)).toBe(2)
 
     const bay = join(w.work, ".bays", "broken")
     expect(run.stdout()).toBe("")
@@ -1057,7 +1057,7 @@ describe("yrd env open prepares the retained environment", () => {
     const w = await world(":")
     const opened = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "hold-options", ...args], opened.io),
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "hold-options", ...args, "--expires", "1d"], opened.io),
       opened.stderr(),
     ).toBe(0)
 
@@ -1077,7 +1077,7 @@ describe("yrd env open prepares the retained environment", () => {
     const reason = "@dev/5 25957 until review"
     const opened = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "held", "--hold", reason], opened.io)).toBe(2)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "held", "--hold", reason, "--expires", "1d"], opened.io)).toBe(2)
 
     const path = join(w.work, ".bays", "held")
     expect(existsSync(path)).toBe(true)
@@ -1104,7 +1104,7 @@ describe("yrd env open prepares the retained environment", () => {
   it("leaves a plain open unlocked and lists its hold as null", async () => {
     const w = await world(":")
     const opened = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "scratch"], opened.io)).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "scratch", "--expires", "1d"], opened.io)).toBe(0)
 
     const path = join(w.work, ".bays", "scratch")
     const listed = capture(w.work)
@@ -1129,7 +1129,7 @@ describe("yrd env open says which input selects which path", () => {
     const w = await world("true")
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--help"], run.io), run.stderr()).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--help", "--expires", "1d"], run.io), run.stderr()).toBe(0)
 
     const help = run.stdout()
     // The argument's contract and the branch route are stated as SEPARATE
@@ -1147,7 +1147,7 @@ describe("yrd env open says which input selects which path", () => {
     await w.git(["branch", "task/wanted-branch"])
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "task/wanted-branch"], run.io)).toBe(2)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "task/wanted-branch", "--expires", "1d"], run.io)).toBe(2)
 
     const refusal = run.stderr()
     expect(refusal).toContain("task/wanted-branch")
@@ -1162,7 +1162,7 @@ describe("yrd env open says which input selects which path", () => {
     const w = await world("true")
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "not-a-ref-at-all"], run.io)).toBe(2)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "not-a-ref-at-all", "--expires", "1d"], run.io)).toBe(2)
 
     // The negative control: widening the message must not cost the original
     // cure for the case it was written for.
@@ -1185,7 +1185,7 @@ describe("yrd env open says which input selects which path", () => {
     expect((await w.git(["cat-file", "-t", id])).trim()).toBe("blob")
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", id], run.io)).toBe(2)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", id, "--expires", "1d"], run.io)).toBe(2)
 
     const refusal = run.stderr()
     // The defect: the "is a ref here" probe read the id as an object prefix and its git error replaced the guidance.
@@ -1198,7 +1198,7 @@ describe("yrd env open says which input selects which path", () => {
     const w = await world("true")
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "main"], run.io)).toBe(2)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "main", "--expires", "1d"], run.io)).toBe(2)
 
     expect(run.stderr()).toContain("'main' is a ref here")
     expect(run.stderr()).not.toContain("--issue main")
@@ -1210,7 +1210,7 @@ describe("yrd env open says which input selects which path", () => {
     const blob = (await w.git(["hash-object", "-w", "BLOB"])).trim()
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", blob], run.io)).toBe(2)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", blob, "--expires", "1d"], run.io)).toBe(2)
 
     // The second site of the same defect: the ^{commit} peel's error replaced the not-a-commit refusal.
     expect(run.stderr()).not.toMatch(/rev-parse|dereferences to/u)
@@ -1223,7 +1223,7 @@ describe("yrd env open says which input selects which path", () => {
     const missing = "1".repeat(40)
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", missing], run.io)).toBe(2)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", missing, "--expires", "1d"], run.io)).toBe(2)
 
     expect(run.stderr()).toContain(`commit ${missing} is not a commit object`)
     expect(run.stderr()).toContain("fetch that commit before opening it")
@@ -1257,7 +1257,7 @@ describe("yrd env open refuses a base foreign to the root (27165)", () => {
     const run = capture(w.work)
 
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "root-base", "--json"], run.io),
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "root-base", "--json", "--expires", "1d"], run.io),
       run.stderr(),
     ).toBe(0)
 
@@ -1279,7 +1279,7 @@ describe("yrd env open refuses a base foreign to the root (27165)", () => {
       // The guard must not depend on the repository declaring `setup:`: a base
       // no check can tell a diff from is refused on every path (27165 row 4).
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "foreign-head"], run.io),
+        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "foreign-head", "--expires", "1d"], run.io),
         run.stderr(),
       ).not.toBe(0)
 
@@ -1326,7 +1326,7 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
     await withDeclaredIdentity("@dev/luna6-fixture", "dev-luna6-fixture@main.hh.invalid", async () => {
       const run = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "pinned", "--json"], run.io),
+        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "pinned", "--json", "--expires", "1d"], run.io),
         run.stderr(),
       ).toBe(0)
 
@@ -1354,7 +1354,7 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
     await withDeclaredIdentity("@dev/luna6-fixture", "dev-luna6-fixture@main.hh.invalid", async () => {
       const run = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "unscoped", "--json"], run.io),
+        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "unscoped", "--json", "--expires", "1d"], run.io),
         run.stderr(),
       ).toBe(0)
 
@@ -1374,7 +1374,7 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
     const w = await world(":")
     await withDeclaredIdentity("@dev/luna6-fixture", undefined, async () => {
       const run = capture(w.work)
-      expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "half"], run.io), run.stderr()).not.toBe(0)
+      expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "half", "--expires", "1d"], run.io), run.stderr()).not.toBe(0)
       expect(run.stderr()).toMatch(/GIT_AUTHOR_EMAIL/u)
       expect(run.stderr()).toMatch(/needs both/u)
       // The identity is read BEFORE the environment exists: the refusal leaves no
@@ -1402,7 +1402,7 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
     await withDeclaredIdentity("@dev/luna6-fixture", "dev-luna6-fixture@main.hh.invalid", async () => {
       const run = capture(w.work)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "pinned-modules", "--json"], run.io),
+        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "pinned-modules", "--json", "--expires", "1d"], run.io),
         run.stderr(),
       ).toBe(0)
 
@@ -1535,5 +1535,59 @@ describe("yrd env open --issue asks the project's issues interface before it wri
     expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "30516-view-only"], partial.io)).toBe(0)
     expect(partial.stderr()).toContain("--issue 30516-view-only was not checked against an issues store")
     expect(partial.stderr()).toContain("yrd-issues-verb-unsupported")
+  })
+})
+
+/**
+ * @failure An environment opened with neither `--issue` nor an expiry is unowned: nothing names it for
+ *          retirement or review, and the clock could only ever guess. Expiry must also be permission for
+ *          the clock and never a substitute for the clean/commit gates.
+ * @level   l2 (real bare remote, real retained worktree, real close refusal)
+ * @consumer every seat and every rig script that opens a bay without an issue
+ * @testonly none
+ */
+describe("yrd env open keep-rule (33758): an issue or an expiry, never neither", () => {
+  it("refuses a bay with neither flag and names both cures", async () => {
+    const w = await world(":")
+    const run = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "unowned"], run.io)).not.toBe(0)
+    expect(run.stderr()).toContain("neither an issue nor an expiry")
+    expect(run.stderr()).toContain("--issue <ref>")
+    expect(run.stderr()).toContain("--expires <duration|instant>")
+  })
+
+  it("refuses a past instant by name instead of opening a bay that is born expired", async () => {
+    const w = await world(":")
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "stale", "--expires", "2020-01-01T00:00:00Z"], run.io),
+    ).not.toBe(0)
+    expect(run.stderr()).toContain("born expired")
+  })
+
+  it("refuses an expiry past the 7-day cap and names the cap", async () => {
+    const w = await world(":")
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "forever", "--expires", "8d"], run.io),
+    ).not.toBe(0)
+    expect(run.stderr()).toContain("7-day maximum")
+  })
+
+  it("records the expiry beside the opened commit, and a deliberate close is still allowed before it", async () => {
+    const w = await world(":")
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "measured", "--expires", "12h", "--json"], opened.io),
+    ).toBe(0)
+    const { path } = JSON.parse(opened.stdout()) as { path: string }
+    const gitDir = (await gitIn(path)(["rev-parse", "--absolute-git-dir"])).trim()
+    const recordPath = join(gitDir, "yrd-open.json")
+    const record = JSON.parse(readFileSync(recordPath, "utf8")) as Record<string, unknown>
+    expect(record.expiresAt).toBeTypeOf("string")
+    expect(record.openedCommit).toMatch(/^[0-9a-f]{40}$/u)
+    // The expiry binds the automatic pass, not a person: a deliberate close of a clean bay is still allowed.
+    const early = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path], early.io), early.stderr()).toBe(0)
   })
 })

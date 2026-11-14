@@ -4877,7 +4877,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     if (kind === "bay") {
       const opened = capture(repo)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "merge-retirement", "--json"], opened.io),
+        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "merge-retirement", "--json", "--expires", "1d"], opened.io),
         opened.stderr(),
       ).toBe(0)
       author = (JSON.parse(opened.stdout()) as { path: string }).path

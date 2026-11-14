@@ -19,8 +19,60 @@ export type EnvOpenRecord = Readonly<{
   lifetime: EnvLifetime
   bay?: string
   issue?: string
+  /** ISO instant after which a close may proceed; recorded at open, never inferred from age. */
+  expiresAt?: string
+  /** The commit the environment stood at when it opened; an expired close also requires HEAD to still be this. */
+  openedCommit?: string
   at: string
 }>
+
+/** The longest expiry `env open --expires` accepts; named in the refusal so the cap is never a surprise. */
+export const MAX_ENV_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000
+
+const EXPIRY_DURATION = /^(\d+)([smhd])$/u
+
+/**
+ * `--expires <duration|instant>` — a duration from now (`90s`, `30m`, `12h`, `7d`) or an ISO instant.
+ * A past instant and anything beyond the 7-day cap are refused by name: an expiry is permission for the
+ * clock to remove a bay, and an unbounded one is the unowned bay under another name.
+ */
+export function parseEnvExpires(value: string, now: Date = new Date()): string {
+  const raw = value.trim()
+  if (raw === "") {
+    throw new Error(
+      "yrd env open --expires needs a duration such as 12h or 7d, or an ISO 8601 instant; got an empty value",
+    )
+  }
+  const duration = EXPIRY_DURATION.exec(raw)
+  let instant: number
+  if (duration !== null) {
+    const amount = Number(duration[1])
+    const unit = duration[2] as "s" | "m" | "h" | "d"
+    const unitMs = unit === "s" ? 1000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000
+    instant = now.getTime() + amount * unitMs
+  } else {
+    instant = Date.parse(raw)
+    if (!Number.isFinite(instant)) {
+      throw new Error(
+        `yrd env open --expires ${JSON.stringify(value)} is neither a duration such as 12h or 7d nor an ISO 8601 instant`,
+      )
+    }
+  }
+  if (instant <= now.getTime()) {
+    throw new Error(
+      `yrd env open --expires ${JSON.stringify(value)} is at or before the current instant ${now.toISOString()}, ` +
+        "so the environment would be born expired; give a future duration or instant",
+    )
+  }
+  const cap = now.getTime() + MAX_ENV_EXPIRY_MS
+  if (instant > cap) {
+    throw new Error(
+      `yrd env open --expires ${JSON.stringify(value)} is later than the 7-day maximum (cap ${new Date(cap).toISOString()}); ` +
+        "open it again with a shorter expiry, or bind it to an issue with --issue <ref>",
+    )
+  }
+  return new Date(instant).toISOString()
+}
 
 export type EnvOpenRecordRead =
   | Readonly<{ status: "recorded"; record: EnvOpenRecord }>
@@ -62,7 +114,7 @@ export function throwIfStandingLifetime(opening: EnvOpenRecordRead): void {
 }
 
 export function envOpenRecordFromFlags(
-  options: Readonly<{ keep?: boolean; bay?: string; issue?: string }>,
+  options: Readonly<{ keep?: boolean; bay?: string; issue?: string; expiresAt?: string; openedCommit?: string }>,
 ): EnvOpenRecord {
   return {
     version: 1,
@@ -70,6 +122,8 @@ export function envOpenRecordFromFlags(
     at: new Date().toISOString(),
     ...(options.bay === undefined ? {} : { bay: options.bay }),
     ...(options.issue === undefined ? {} : { issue: options.issue }),
+    ...(options.expiresAt === undefined ? {} : { expiresAt: options.expiresAt }),
+    ...(options.openedCommit === undefined ? {} : { openedCommit: options.openedCommit }),
   }
 }
 
@@ -105,6 +159,8 @@ export function readEnvOpenRecord(gitDir: string): EnvOpenRecordRead {
       at: typeof row.at === "string" ? row.at : "",
       ...(typeof row.bay === "string" ? { bay: row.bay } : {}),
       ...(typeof row.issue === "string" ? { issue: row.issue } : {}),
+      ...(typeof row.expiresAt === "string" ? { expiresAt: row.expiresAt } : {}),
+      ...(typeof row.openedCommit === "string" ? { openedCommit: row.openedCommit } : {}),
     },
   }
 }

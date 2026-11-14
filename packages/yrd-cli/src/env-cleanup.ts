@@ -1466,6 +1466,21 @@ async function cleanupEnvironments(
       if (!Number.isFinite(openedAt)) return `opening timestamp unproven: ${JSON.stringify(opening.record.at)}`
       if (Date.now() - openedAt < FRESH_ENVIRONMENT_GRACE_MS) return `fresh: opened ${opening.record.at}`
     }
+    // 33758 keep-rule: an expiry is recorded permission for the CLOCK, never an inference from age. Before the
+    // instant the bay keeps and names the time it stays until; at or after it the bay must STILL be the commit it
+    // was opened at, so work added after open is never removed by time alone. A bay with no expiry is unowned and
+    // takes the ancestry path exactly as before — a missing field is never permission to delete.
+    // A terminal row is a bay whose branch has already landed or was withdrawn: its work is kept elsewhere,
+    // so the expiry's job — stop the clock removing a bay that is still in use — does not apply to it.
+    if (!terminal && opening.status === "recorded" && opening.record.expiresAt !== undefined) {
+      const instant = Date.parse(opening.record.expiresAt)
+      if (!Number.isFinite(instant)) return `expiry unproven: ${JSON.stringify(opening.record.expiresAt)}`
+      if (Date.now() < instant) return `expiring: stays until ${new Date(instant).toISOString()}`
+      // An expired bay that gained commits is NOT caught here: the sweep's own native protections run after
+      // this reason and refuse an advanced head precisely ("is not on target"/content ahead), and a reason
+      // returned here would preempt them with a weaker sentence. `openedCommit` stays in the record as the
+      // discriminator evidence for that check and for readers of yrd-open.json.
+    }
     return undefined
   }
   const store = { repo, remote: config.target.remote, selection: git.selection, backend: git.backend }
