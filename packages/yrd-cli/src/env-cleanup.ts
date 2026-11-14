@@ -1430,7 +1430,12 @@ async function cleanupEnvironments(
     ) {
       throw new Error(`ancestry ${head} -> ${target} in ${root} failed: ${JSON.stringify(result)}`)
     }
-    if (result.code === 1) throw new Error(`commit ${head} in ${root} is not on target ${target}`)
+    if (result.code === 1) {
+      throw new Error(
+        `commit ${head} in ${root} is not on target ${target}; this environment's work is not on the target, ` +
+          "so every round keeps it until it is removed deliberately with `yrd env close <environment path>`",
+      )
+    }
   }
   let liveUses: readonly Readonly<{ path: string; reason: string }>[] = []
   let liveUseFailure: string | undefined
