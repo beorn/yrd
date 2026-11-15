@@ -1374,8 +1374,10 @@ export async function coreQueueCommand(
         })
       }
     }
-    // Once environment cleanup begins, finish it and its component retirement.
-    // A handoff before it begins leaves the native rows for startup catch-up.
+    // Environment cleanup runs to a between-environment stop boundary and retires
+    // component authors from the proofs it obtained. A handoff before or during
+    // cleanup leaves unvisited rows, pending close requests and open consumer work
+    // for the next round via the persisted cursor and startup catch-up.
     if (!postMergeSignal?.aborted) {
       // The teller only collects while cleanup closes; the flush after it
       // returns sends every collected tell in one dispatch — still inside
@@ -1449,8 +1451,9 @@ export async function coreQueueCommand(
       })
     }
     if (outcome.merged.length > 0) {
-      // Environment cleanup has finished. Native registration alone already requires KEEP; rediscover it once
-      // per cleanup, before repeating each branch's terminal history and host protection reads (#29662).
+      // Environment cleanup has returned (possibly stopped early at a between-environment boundary). Native
+      // registration alone already requires KEEP; rediscover it once per cleanup, before repeating each
+      // branch's terminal history and host protection reads (#29662).
       // This snapshot can only keep a ref. Every other root still takes the full fresh retirement path below.
       let rowHoldingBranches: Map<string, { path: string; head: string }> | undefined
       try {
