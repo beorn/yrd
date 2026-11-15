@@ -882,10 +882,11 @@ describe("remote calls are counted from git's trace2 event log", () => {
    * @consumer the round's remote-calls row: beyond_refresh_unknown_ssh_children and its verdict
    */
   it("reports a child with no capture chain as unproven rather than as zero queue cost", async () => {
-    const { root, ssh, url } = await roundFixture()
+    const { root, seed, ssh, url } = await roundFixture()
     const traced = traceRemoteCalls(join(root, "unknown-trace2"), { refresh: true, seams: true })
     const { [REMOTE_CAPTURE_VARIABLE]: _dropped, ...withoutCapture } = process.env
-    await gitIn(root, undefined, undefined, {
+    // Keep repository identity available so only capture ownership is unknown.
+    await gitIn(seed, undefined, undefined, {
       env: {
         ...withoutCapture,
         GIT_TRACE2_EVENT: String(traced.env.GIT_TRACE2_EVENT),
