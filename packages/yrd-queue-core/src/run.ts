@@ -16,6 +16,7 @@ import {
 } from "./git.ts"
 import { queueFormat, queueRef } from "./events.ts"
 import { eventQueueRun } from "./event-run.ts"
+import { EventRefsAcquireExhausted } from "./event-read.ts"
 import { removeEmptyWorktreeRunDirectory } from "./worktree.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { overrideLine, type OverrideEntry, type OverrideTable } from "./override.ts"
@@ -207,6 +208,11 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
       throw new QueueRunAfterRunFailed(outcome, cause)
     }
     return outcome
+  } catch (error) {
+    if (error instanceof EventRefsAcquireExhausted) {
+      log.write({ kind: "warning", subject: "round-read-failed", refs: error.refs, reason: error.message })
+    }
+    throw error
   } finally {
     // Both the core disposal scope and caller cleanup have finished, even on throw.
     log.finish()

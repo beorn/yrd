@@ -7234,6 +7234,8 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
    *          bound is re-read INSIDE the round — no read-failed round at all — and only a race that
    *          outlasts the bound still fails: a foreground run refuses, a service takes a read-failed
    *          round and retries at its next interval. The genuine-stop semantics are unchanged.
+   *          33710: each exhausted round must retain its cause and moving refs in its own journal;
+   *          stderr and current health alone lose the historical count when service output rotates.
    * @level l2 @consumer Hab supervisor and the submitter waiting for a fresh queue judgment */
   it.each([
     { command: "up", fault: "ref-race", moves: 4, mode: "recover" },
@@ -7386,6 +7388,23 @@ esac
         stop.abort()
       }
       const diagnostic = `${run.stdout()}\n${run.stderr()}`
+      if (mode === "exhaust-run" || mode === "exhaust-up") {
+        const logs = join(w.workdir, "logs")
+        const journals = readdirSync(logs)
+          .filter((name) => name.startsWith("q-") && name.endsWith(".jsonl"))
+          .map((name) => readRunLog(logs, name.slice(0, -".jsonl".length)))
+        expect(journals).toHaveLength(mode === "exhaust-up" ? 2 : 1)
+        for (const journal of journals) {
+          const failures = journal.filter((row) => row.subject === "round-read-failed")
+          expect(failures).toHaveLength(1)
+          expect(failures[0]).toMatchObject({
+            kind: "warning",
+            refs: [tips[fault === "fetch-ref-race" ? 0 : 1]!.ref],
+            reason: expect.stringContaining("event refs moved after the selected inventory 8 times in a row"),
+          })
+          expect(String(failures[0]!.reason)).not.toContain("publication failed")
+        }
+      }
       if (mode === "refuse") {
         expect(diagnostic).toContain("unrelated inventory read failure")
         expect(exit, diagnostic).toBe(2)
