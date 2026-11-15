@@ -15,7 +15,9 @@ import { createLegacyBackend, invokeGit, readRemoteCommit } from "../src/git.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { readComponentMain } from "../src/reference.ts"
 import {
+  BEYOND_REFRESH_LIMIT,
   DERIVE_COMPONENT_MAIN_SEAM,
+  REMOTE_CAPTURE_VARIABLE,
   readRemoteCalls,
   roundRemoteCallsRow,
   traceRemoteCalls,
@@ -136,6 +138,15 @@ describe("remote calls are counted from git's trace2 event log", () => {
       })
       expect(row.refresh_calls).toEqual([`1 fetch @ ${repository}`])
       expect(row.beyond_refresh_calls).toEqual([`1 ls-remote @ ${repository}`])
+      // 34390: both children are this capture's, counted where the repository is not the boundary.
+      expect(row).toMatchObject({
+        capture_boundary: `${REMOTE_CAPTURE_VARIABLE} chain on the trace2 capture`,
+        capture_owned_ssh_children: 2,
+        capture_foreign_ssh_children: 0,
+        capture_unknown_ssh_children: 0,
+        beyond_refresh_owned_ssh_children: 1,
+        excluded_calls: [],
+      })
       expect(existsSync(join(root, "trace2"))).toBe(false)
 
       // An older git-super still makes the same refresh fetch but cannot mark it. The split is unproven, and
@@ -154,6 +165,14 @@ describe("remote calls are counted from git's trace2 event log", () => {
       // The whole key set (@cto 1ce8f965, fold 4): an unproven row carries its counts and its reason, and NO
       // split field at all - asserting three absences let every other split field slip through unasserted.
       expect(Object.keys(oldRow).sort()).toEqual([
+        "beyond_refresh_excluded_ssh_children",
+        "beyond_refresh_owned_ssh_children",
+        "beyond_refresh_unknown_ssh_children",
+        "capture_boundary",
+        "capture_foreign_ssh_children",
+        "capture_owned_ssh_children",
+        "capture_unknown_ssh_children",
+        "excluded_calls",
         "fetch",
         "processes",
         "remote_ms",
@@ -229,6 +248,14 @@ describe("remote calls are counted from git's trace2 event log", () => {
     const untaggedRow = roundRemoteCallsRow(untagged.end())
     // The whole key set, so an unproven split can never carry a split field that reads as a measured zero.
     expect(Object.keys(untaggedRow).sort()).toEqual([
+      "beyond_refresh_excluded_ssh_children",
+      "beyond_refresh_owned_ssh_children",
+      "beyond_refresh_unknown_ssh_children",
+      "capture_boundary",
+      "capture_foreign_ssh_children",
+      "capture_owned_ssh_children",
+      "capture_unknown_ssh_children",
+      "excluded_calls",
       "fetch",
       "processes",
       "remote_ms",
@@ -265,6 +292,14 @@ describe("remote calls are counted from git's trace2 event log", () => {
     // The whole key set (@cto 1ce8f965, fold 4), not a sample: a mistagged call keeps its counts, its seam row
     // and its reason, and gains none of the split fields it did not earn.
     expect(Object.keys(mistaggedRow).sort()).toEqual([
+      "beyond_refresh_excluded_ssh_children",
+      "beyond_refresh_owned_ssh_children",
+      "beyond_refresh_unknown_ssh_children",
+      "capture_boundary",
+      "capture_foreign_ssh_children",
+      "capture_owned_ssh_children",
+      "capture_unknown_ssh_children",
+      "excluded_calls",
       "ls-remote",
       "processes",
       "remote_ms",
@@ -440,6 +475,10 @@ describe("remote calls are counted from git's trace2 event log", () => {
     })
     expect(calls.seams.unattributed).toMatchObject({ "ls-remote": 1 })
     expect(calls.unreadable).toBe(0)
+    // 34390: the child the production spawn adapter made is this capture's own, so the capture chain survives
+    // yrd's own environment boundary and not only a test-built environment.
+    expect(calls.sshCalls).toMatchObject([{ command: "ls-remote", ownership: "queue" }])
+    expect(calls.sshCalls[0]?.capture).toBe(String(traced.env[REMOTE_CAPTURE_VARIABLE]))
   })
 
   it("labels a child at the spawn, never at runner or store creation (29697, @cto R1)", async () => {
@@ -574,6 +613,14 @@ describe("remote calls are counted from git's trace2 event log", () => {
     )
     const row = roundRemoteCallsRow(readRemoteCalls(directory, { requireRefreshTag: true }))
     expect(Object.keys(row).sort()).toEqual([
+      "beyond_refresh_excluded_ssh_children",
+      "beyond_refresh_owned_ssh_children",
+      "beyond_refresh_unknown_ssh_children",
+      "capture_boundary",
+      "capture_foreign_ssh_children",
+      "capture_owned_ssh_children",
+      "capture_unknown_ssh_children",
+      "excluded_calls",
       "fetch",
       "processes",
       "remote_ms",
@@ -613,6 +660,14 @@ describe("remote calls are counted from git's trace2 event log", () => {
     )
     const row = roundRemoteCallsRow(readRemoteCalls(directory, { requireRefreshTag: true }))
     expect(Object.keys(row).sort()).toEqual([
+      "beyond_refresh_excluded_ssh_children",
+      "beyond_refresh_owned_ssh_children",
+      "beyond_refresh_unknown_ssh_children",
+      "capture_boundary",
+      "capture_foreign_ssh_children",
+      "capture_owned_ssh_children",
+      "capture_unknown_ssh_children",
+      "excluded_calls",
       "ls-remote",
       "processes",
       "remote_ms",
@@ -656,6 +711,14 @@ describe("remote calls are counted from git's trace2 event log", () => {
     )
     const row = roundRemoteCallsRow(readRemoteCalls(directory, { requireRefreshTag: true }))
     expect(Object.keys(row).sort()).toEqual([
+      "beyond_refresh_excluded_ssh_children",
+      "beyond_refresh_owned_ssh_children",
+      "beyond_refresh_unknown_ssh_children",
+      "capture_boundary",
+      "capture_foreign_ssh_children",
+      "capture_owned_ssh_children",
+      "capture_unknown_ssh_children",
+      "excluded_calls",
       "fetch",
       "processes",
       "remote_ms",
@@ -718,5 +781,187 @@ describe("remote calls are counted from git's trace2 event log", () => {
     const reason = String(row.ssh_split_reason)
     expect(reason.match(/untagged component-main refresh fetch/gu)?.length).toBe(1)
     expect(reason).toMatch(/tagged a non-component-main SSH call as refresh/u)
+  })
+  /**
+   * @failure 34390: a round's beyond-refresh count was whatever wrote into its trace2 directory, so a reader could
+   *          not tell the round's own work from another process's, and a repository path or a clock reading was
+   *          offered as an owner. The count is now by causal capture, and unrelated concurrent work is not captured
+   *          at all.
+   * @level   l2 (real git processes writing git's own trace2 event log; a stand-in ssh that runs upload-pack locally)
+   * @consumer the round's remote-calls row and its beyond_refresh_verdict
+   */
+  it("counts an owned child outside the queue's own repository and ignores unrelated work running beside it", async () => {
+    const { root, ssh, url } = await roundFixture()
+    const elsewhere = join(root, "elsewhere")
+    mkdirSync(elsewhere)
+    await gitIn(elsewhere)(["init", "--quiet", "--initial-branch=main"])
+    const traced = traceRemoteCalls(join(root, "owned-trace2"), { refresh: true, seams: true })
+    // CONCURRENT, UNRELATED: its own environment, no trace2 and no capture chain. Nothing may make it the round's.
+    const { GIT_TRACE2_EVENT: _noDirectory, ...untraced } = process.env
+    await Promise.all([
+      gitIn(root, undefined, undefined, { env: { ...untraced, GIT_SSH_COMMAND: ssh } })([
+        "ls-remote",
+        url,
+        "refs/heads/main",
+      ]),
+      gitIn(elsewhere, undefined, undefined, { env: { ...process.env, ...traced.env, GIT_SSH_COMMAND: ssh } })([
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        url,
+        "refs/heads/main",
+      ]),
+    ])
+    const row = roundRemoteCallsRow(traced.end(), { beyondRefreshLimit: BEYOND_REFRESH_LIMIT })
+    // The owned child reached a repository that is not the queue's checkout; the repository is not the boundary.
+    expect(row.ssh_children).toBe(1)
+    expect(row.capture_owned_ssh_children).toBe(1)
+    expect(row.capture_foreign_ssh_children).toBe(0)
+    expect(row.capture_unknown_ssh_children).toBe(0)
+    expect(row.beyond_refresh_owned_ssh_children).toBe(1)
+    expect(row.excluded_calls).toEqual([])
+    expect(row.beyond_refresh_verdict).toBe("within-limit")
+    expect(row.beyond_refresh_calls).toEqual([`1 fetch @ ${elsewhere}`])
+  }, 60_000)
+
+  /**
+   * @failure 34390: the historical round's surviving trace held children that started AFTER its receipt, and nothing
+   *          in the row separated them from the round's own work. A child carrying another capture's chain is now
+   *          disclosed by that chain and excluded from the limit, so late foreign work can neither inflate nor vanish.
+   * @level   l2 (real git processes writing git's own trace2 event log; a stand-in ssh that runs upload-pack locally)
+   * @consumer the round's remote-calls row: excluded_calls and beyond_refresh_verdict
+   */
+  it("discloses a later child from another capture and keeps it out of the round's limit", async () => {
+    const { root, ssh, url } = await roundFixture()
+    const reading = join(root, "reading")
+    mkdirSync(reading)
+    await gitIn(reading)(["init", "--quiet", "--initial-branch=main"])
+    const traced = traceRemoteCalls(join(root, "late-trace2"), { refresh: true, seams: true })
+    await gitIn(reading, undefined, undefined, { env: { ...process.env, ...traced.env, GIT_SSH_COMMAND: ssh } })([
+      "ls-remote",
+      url,
+      "refs/heads/main",
+    ])
+    // LATER: another capture wrote into this directory - the child is real, the owner is not the round.
+    await gitIn(reading, undefined, undefined, {
+      env: {
+        ...process.env,
+        GIT_TRACE2_EVENT: String(traced.env.GIT_TRACE2_EVENT),
+        GIT_TRACE2_ENV_VARS: REMOTE_CAPTURE_VARIABLE,
+        [REMOTE_CAPTURE_VARIABLE]: "another-operation/capture",
+        GIT_SSH_COMMAND: ssh,
+      },
+    })(["ls-remote", url, "refs/heads/main"])
+    const row = roundRemoteCallsRow(traced.end(), { beyondRefreshLimit: BEYOND_REFRESH_LIMIT })
+    // The raw observed total keeps both children: evidence is never reduced to the attributed part.
+    expect(row.ssh_children).toBe(2)
+    expect(row.beyond_refresh_ssh_children).toBe(2)
+    expect(row.capture_owned_ssh_children).toBe(1)
+    expect(row.capture_foreign_ssh_children).toBe(1)
+    expect(row.beyond_refresh_owned_ssh_children).toBe(1)
+    expect(row.beyond_refresh_excluded_ssh_children).toBe(1)
+    expect(row.excluded_calls).toEqual([`1 ls-remote @ ${reading} (capture another-operation/capture)`])
+    expect(row.beyond_refresh_verdict).toBe("within-limit")
+  }, 60_000)
+
+  /**
+   * @failure 34390 (@cto A-scope ruling): "unknown owner or incomplete capture is unproven, never zero queue cost or
+   *          a pass". A child that recorded no capture chain is counted, reported, and makes the verdict unproven.
+   * @level   l2 (real git processes writing git's own trace2 event log; a stand-in ssh that runs upload-pack locally)
+   * @consumer the round's remote-calls row: beyond_refresh_unknown_ssh_children and its verdict
+   */
+  it("reports a child with no capture chain as unproven rather than as zero queue cost", async () => {
+    const { root, ssh, url } = await roundFixture()
+    const traced = traceRemoteCalls(join(root, "unknown-trace2"), { refresh: true, seams: true })
+    const { [REMOTE_CAPTURE_VARIABLE]: _dropped, ...withoutCapture } = process.env
+    await gitIn(root, undefined, undefined, {
+      env: {
+        ...withoutCapture,
+        GIT_TRACE2_EVENT: String(traced.env.GIT_TRACE2_EVENT),
+        GIT_TRACE2_ENV_VARS: REMOTE_CAPTURE_VARIABLE,
+        GIT_SSH_COMMAND: ssh,
+      },
+    })(["ls-remote", url, "refs/heads/main"])
+    const row = roundRemoteCallsRow(traced.end(), { beyondRefreshLimit: BEYOND_REFRESH_LIMIT })
+    expect(row.ssh_children).toBe(1)
+    expect(row.capture_owned_ssh_children).toBe(0)
+    expect(row.capture_unknown_ssh_children).toBe(1)
+    expect(row.beyond_refresh_unknown_ssh_children).toBe(1)
+    expect(row.beyond_refresh_verdict).toBe("unproven")
+    expect(row.excluded_calls).toEqual([])
+  }, 60_000)
+
+  /**
+   * @failure 34390 (@cto A-scope ruling): the fifteen is the merging operation's limit, so it is applied to the
+   *          round's own children only; a foreign capture's children are disclosed and excluded, and an unproven
+   *          child can never turn a breach into a pass or a pass into silence.
+   * @level   l0 (synthetic trace2 events at the count consumer)
+   * @consumer roundRemoteCallsRow's limit application
+   */
+  it.each([
+    [BEYOND_REFRESH_LIMIT, "round-capture", "within-limit"],
+    [BEYOND_REFRESH_LIMIT + 1, "round-capture", "over-limit"],
+    [BEYOND_REFRESH_LIMIT + 1, "other-capture", "within-limit"],
+    [BEYOND_REFRESH_LIMIT + 1, undefined, "unproven"],
+  ] as const)(
+    "applies the limit to a round's own children: %i children from %s reads %s",
+    (children, capture, verdict) => {
+      const directory = mkdtempSync(join(tmpdir(), "yrd-round-limit-"))
+      roots.push(directory)
+      for (let index = 0; index < children; index++) {
+        writeFileSync(
+          join(directory, `process-${String(index)}`),
+          [
+            { event: "start", argv: ["git", "ls-remote", "origin", "refs/heads/main"] },
+            { event: "def_repo", worktree: "/repo" },
+            ...(capture === undefined ? [] : [{ event: "def_param", param: REMOTE_CAPTURE_VARIABLE, value: capture }]),
+            { event: "cmd_name", name: "ls-remote" },
+            { event: "child_start", child_class: "transport/ssh" },
+          ]
+            .map((event) => JSON.stringify(event))
+            .join("\n"),
+        )
+      }
+      const row = roundRemoteCallsRow(readRemoteCalls(directory, { capture: "round-capture" }), {
+        beyondRefreshLimit: BEYOND_REFRESH_LIMIT,
+      })
+      expect(row.beyond_refresh_limit).toBe(BEYOND_REFRESH_LIMIT)
+      expect(row.beyond_refresh_ssh_children).toBe(children)
+      expect(row.beyond_refresh_verdict).toBe(verdict)
+      if (capture === "other-capture") {
+        // Excluded work is still named, in one line for the group, with the chain that proves the exclusion.
+        expect(row.excluded_calls).toEqual([`${String(children)} ls-remote @ /repo (capture other-capture)`])
+        expect(row.beyond_refresh_owned_ssh_children).toBe(0)
+      }
+    },
+  )
+
+  /**
+   * @failure 34390 (@cto A-scope ruling): a capture started inside another names both, so work a round causes
+   *          through a nested runner stays the round's instead of reading foreign.
+   * @level   l0 (synthetic trace2 events at the count consumer)
+   * @consumer roundRemoteCallsRow's ownership classification
+   */
+  it("reads a nested capture chain as the outer round's work", () => {
+    const directory = mkdtempSync(join(tmpdir(), "yrd-round-nested-"))
+    roots.push(directory)
+    writeFileSync(
+      join(directory, "process"),
+      [
+        { event: "start", argv: ["git", "ls-remote", "origin", "refs/heads/main"] },
+        { event: "def_repo", worktree: "/repo" },
+        { event: "def_param", param: REMOTE_CAPTURE_VARIABLE, value: "outer-round/inner-submit" },
+        { event: "cmd_name", name: "ls-remote" },
+        { event: "child_start", child_class: "transport/ssh" },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n"),
+    )
+    const row = roundRemoteCallsRow(readRemoteCalls(directory, { capture: "outer-round" }), {
+      beyondRefreshLimit: BEYOND_REFRESH_LIMIT,
+    })
+    expect(row.capture_owned_ssh_children).toBe(1)
+    expect(row.capture_foreign_ssh_children).toBe(0)
+    expect(row.beyond_refresh_verdict).toBe("within-limit")
   })
 })

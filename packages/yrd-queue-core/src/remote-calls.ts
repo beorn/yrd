@@ -6,10 +6,15 @@
  * naming a directory, every git process any of them starts writes its own event file there, because both
  * environment scrubbers keep GIT_TRACE2_* (yrd's ROUTING_VARIABLES, git-super's repository-pointer clean). So one
  * mechanism counts all three, and the count is git's, not a wrapper's opinion of what it ran.
+ *
+ * The directory says WHERE a process wrote, never WHO started it (34390): a repository path identifies a repository,
+ * a clock reading orders two events, and neither names an owner. The capture token below is the ownership evidence,
+ * and it travels beside GIT_TRACE2_EVENT through exactly the scrubbers that keep it; see REMOTE_CAPTURE_VARIABLE.
  */
 import { mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
 import { AsyncLocalStorage } from "node:async_hooks"
+import { randomUUID } from "node:crypto"
 
 /** A git process's own verb when it talks to a remote. */
 const REMOTE_VERBS = new Set(["clone", "fetch", "ls-remote", "pull", "push"])
@@ -44,12 +49,37 @@ export function withRemoteSeamGap<T>(name: string, action: () => T): T {
   return seamScope.getStore() === undefined ? withRemoteSeam(name, action) : action()
 }
 
-/** One SSH child: its Git command, its repository, and which part of the round it belongs to. */
+/**
+ * The capture's own name, recorded by git beside the event log (34390, @cto A-scope ruling). GIT_TRACE2_EVENT tells
+ * a child where to write; this tells a reader which capture scope that child inherited, and inheritance is the only
+ * causal link the log carries. It nests: a capture started inside another appends its own id to the chain, so work
+ * a round causes through a nested submit or runner still names the round. yrd's ROUTING_VARIABLES and git-super's
+ * repository-pointer clean keep every non-routing variable, so a child that keeps GIT_TRACE2_EVENT keeps this too.
+ */
+export const REMOTE_CAPTURE_VARIABLE = "YRD_REMOTE_CAPTURE"
+
+/**
+ * Who started the process that made one SSH call (34390). Decided from the capture chain alone: no repository path,
+ * no clock reading and no phase label is ownership evidence.
+ */
+export type SshOwnership =
+  /** The chain names this capture: a descendant of the scope that counted it, whatever repository it reached. */
+  | "queue"
+  /** A different capture's chain: positively not this scope's work, so disclosed and excluded, never silently dropped. */
+  | "foreign"
+  /** No chain at all: the capture reached the process but its owner cannot be proven, which is never a zero. */
+  | "unknown"
+
+/** One SSH child: its Git command, its repository, which part of the round it belongs to, and whose work it is. */
 export type SshCall = Readonly<{
   command: string
   repository: string
   /** `refresh` is git-super's own refresh, `derive` the round's own component-main read, `beyond` anything else. */
   bucket: "refresh" | "derive" | "beyond"
+  /** The capture chain this call's process carried, verbatim, or undefined when it carried none. */
+  capture?: string
+  /** Whose work this call is; `unknown` is reported as unproven and never read as zero queue cost. */
+  ownership: SshOwnership
   /** Set when this call's split cannot be proven; the round's row reports it instead of a plausible zero. */
   unproven?: string
   sshChildren: number
@@ -75,6 +105,17 @@ export type RemoteCalls = Readonly<{
   sshCalls: readonly SshCall[]
 }>
 
+/**
+ * Whose work an SSH call is, from the capture chain its process recorded: `queue` when the chain names this
+ * capture, `foreign` when it names another one, `unknown` when it names none. A foreign chain is positive evidence
+ * that the process inherited someone else's capture, which is why it is the only arm that may be excluded.
+ */
+function describeOwnership(capture: string | undefined, ownCapture: string | undefined): SshOwnership {
+  if (capture === undefined) return "unknown"
+  if (ownCapture === undefined) return "unknown"
+  return capture.split("/").includes(ownCapture) ? "queue" : "foreign"
+}
+
 function describeSshCall(
   command: string | undefined,
   repository: string | undefined,
@@ -83,7 +124,10 @@ function describeSshCall(
   sshChildren: number,
   requireRefreshTag: boolean,
   seam: string | undefined,
+  capture: string | undefined,
+  ownCapture: string | undefined,
 ): SshCall {
+  const ownership = describeOwnership(capture, ownCapture)
   // Git clone starts its SSH transport before it has a repository to report in def_repo.
   // Its exact SSH source is still present in the process's start argv.
   const cloneSources =
@@ -104,12 +148,26 @@ function describeSshCall(
     // marker buckets as `beyond` here. That is safe only because roundRemoteCallsRow refuses a split carrying
     // any "unknown" command or repository BEFORE it groups a bucket, so such a call can never make a round's
     // refresh/derive/beyond counts read as measured; readers that only count verbs have no bucket to mislead.
-    return { command: "unknown", repository: namedRepository ?? "unknown", bucket: "beyond", sshChildren }
+    return {
+      command: "unknown",
+      repository: namedRepository ?? "unknown",
+      bucket: "beyond",
+      ownership,
+      ...(capture === undefined ? {} : { capture }),
+      sshChildren,
+    }
   }
   const dryRun = argv.includes("--dry-run") ? " --dry-run" : ""
   const mainRef = argv.some((arg) => /^\+refs\/heads\/[^:]+:refs\/remotes\/origin\/[^:]+$/u.test(arg))
   const mainFetch = command === "fetch" && argv.includes("--no-tags") && mainRef
-  const shaped: SshCall = { command: `${command}${dryRun}`, repository: namedRepository, bucket: "beyond", sshChildren }
+  const shaped: SshCall = {
+    command: `${command}${dryRun}`,
+    repository: namedRepository,
+    bucket: "beyond",
+    ownership,
+    ...(capture === undefined ? {} : { capture }),
+    sshChildren,
+  }
   // 29730: each trip below used to throw out of `traced.end()` inside the row write, so the round lost its
   // whole attribution row AND its counts. The counts are evidence about the round; the row now carries them
   // and says in its own text that the split is unproven (@cto 316f70ff R1). The split is proven by a positive
@@ -150,10 +208,14 @@ function describeSshCall(
   return shaped
 }
 
-/** Count the remote calls recorded under one trace2 directory. A directory that is not there is refused. */
+/**
+ * Count the remote calls recorded under one trace2 directory, and say which of them this capture owns. A directory
+ * that is not there is refused. `capture` is this scope's own id: without it no call can be proven owned, so every
+ * child reads `unknown` rather than being credited to the queue by default.
+ */
 export function readRemoteCalls(
   directory: string,
-  options: Readonly<{ requireRefreshTag?: boolean }> = {},
+  options: Readonly<{ requireRefreshTag?: boolean; capture?: string }> = {},
 ): RemoteCalls {
   let names: string[]
   try {
@@ -182,6 +244,7 @@ export function readRemoteCalls(
     let command: string | undefined
     let repository: string | undefined
     let refresh = false
+    let capture: string | undefined
     let argv: readonly string[] | undefined
     for (const line of readFileSync(join(directory, name), "utf8").split("\n")) {
       if (line === "") continue
@@ -222,6 +285,14 @@ export function readRemoteCalls(
       if (event.event === "def_param" && event.param === "YRD_SEAM" && typeof event.value === "string") {
         seam = event.value
       }
+      if (
+        event.event === "def_param" &&
+        event.param === REMOTE_CAPTURE_VARIABLE &&
+        typeof event.value === "string" &&
+        event.value !== ""
+      ) {
+        capture = event.value
+      }
       if (event.event === "cmd_name" && typeof event.name === "string" && REMOTE_VERBS.has(event.name)) {
         command = event.name
         verbs[event.name] = (verbs[event.name] ?? 0) + 1
@@ -239,7 +310,17 @@ export function readRemoteCalls(
     }
     if (fileSshChildren > 0) {
       sshCalls.push(
-        describeSshCall(command, repository, argv, refresh, fileSshChildren, options.requireRefreshTag === true, seam),
+        describeSshCall(
+          command,
+          repository,
+          argv,
+          refresh,
+          fileSshChildren,
+          options.requireRefreshTag === true,
+          seam,
+          capture,
+          options.capture,
+        ),
       )
     }
     if (remote) {
@@ -266,30 +347,39 @@ export function traceRemoteCalls(
   mkdirSync(directory, { recursive: true })
   const previous = process.env.GIT_TRACE2_EVENT
   const previousVars = process.env.GIT_TRACE2_ENV_VARS
+  const previousCapture = process.env[REMOTE_CAPTURE_VARIABLE]
+  // The capture's own id, appended to whatever chain this process already carried (34390): a capture started
+  // inside another names both, so a nested submit or runner stays this round's work instead of reading foreign.
+  const capture = randomUUID()
+  const chain = previousCapture === undefined || previousCapture === "" ? capture : `${previousCapture}/${capture}`
   process.env.GIT_TRACE2_EVENT = directory
-  if (options.seams || options.refresh) {
-    process.env.GIT_TRACE2_ENV_VARS = [
-      ...new Set([
-        ...(previousVars?.split(",") ?? []),
-        ...(options.seams ? ["YRD_SEAM"] : []),
-        ...(options.refresh ? ["GIT_SUPER_PHASE"] : []),
-      ]),
-    ].join(",")
-  }
+  process.env[REMOTE_CAPTURE_VARIABLE] = chain
+  // Always named, whatever the seam and refresh options: ownership is not an option of the capture, and a run
+  // that did not record it could only ever report `unknown`.
+  const recordedVars = [
+    ...new Set([
+      ...(previousVars?.split(",") ?? []),
+      REMOTE_CAPTURE_VARIABLE,
+      ...(options.seams ? ["YRD_SEAM"] : []),
+      ...(options.refresh ? ["GIT_SUPER_PHASE"] : []),
+    ]),
+  ].join(",")
+  process.env.GIT_TRACE2_ENV_VARS = recordedVars
   return {
     env: {
       GIT_TRACE2_EVENT: directory,
-      ...(options.seams || options.refresh ? { GIT_TRACE2_ENV_VARS: process.env.GIT_TRACE2_ENV_VARS } : {}),
+      GIT_TRACE2_ENV_VARS: recordedVars,
+      [REMOTE_CAPTURE_VARIABLE]: chain,
     },
     end() {
       if (previous === undefined) delete process.env.GIT_TRACE2_EVENT
       else process.env.GIT_TRACE2_EVENT = previous
-      if (options.seams || options.refresh) {
-        if (previousVars === undefined) delete process.env.GIT_TRACE2_ENV_VARS
-        else process.env.GIT_TRACE2_ENV_VARS = previousVars
-      }
+      if (previousVars === undefined) delete process.env.GIT_TRACE2_ENV_VARS
+      else process.env.GIT_TRACE2_ENV_VARS = previousVars
+      if (previousCapture === undefined) delete process.env[REMOTE_CAPTURE_VARIABLE]
+      else process.env[REMOTE_CAPTURE_VARIABLE] = previousCapture
       try {
-        return readRemoteCalls(directory, { requireRefreshTag: options.refresh })
+        return readRemoteCalls(directory, { requireRefreshTag: options.refresh, capture })
       } finally {
         rmSync(directory, { recursive: true, force: true })
       }
@@ -320,8 +410,78 @@ export function remoteCallsRow(calls: RemoteCalls): Readonly<Record<string, numb
   }
 }
 
+/**
+ * The limit a merging round is measured against (ADR-0022, Receipt and target: "a merging round at most fifteen
+ * beyond its refresh"). It is a journal measurement, never a refusal: no round fails on this number here.
+ */
+export const BEYOND_REFRESH_LIMIT = 15
+
+/**
+ * The round's ownership reconciliation (34390, @cto A-scope ruling). Every captured child is this capture's work,
+ * another capture's, or unproven. `beyond_refresh_ssh_children` stays the RAW observed total; the limit is applied
+ * to the owned beyond-refresh children only, a foreign child is excluded and named with the chain that proves it,
+ * and an unproven one makes the verdict `unproven` rather than a pass - an incomplete capture is never zero queue
+ * cost. A repository path and a clock reading are evidence about neither, so nothing here reads them.
+ */
+/** The excluded children, one line per (command, repository, capture): the chain is the evidence, so it is named. */
+function excludedLines(calls: readonly SshCall[]): readonly string[] {
+  const grouped = new Map<string, { command: string; repository: string; capture: string; sshChildren: number }>()
+  for (const call of calls) {
+    const row = {
+      command: call.command,
+      repository: call.repository,
+      capture: call.capture ?? "unknown",
+      sshChildren: 0,
+    }
+    const key = JSON.stringify([row.command, row.repository, row.capture])
+    const seen = grouped.get(key) ?? row
+    seen.sshChildren += call.sshChildren
+    grouped.set(key, seen)
+  }
+  return [...grouped.values()]
+    .sort(
+      (a, b) =>
+        a.capture.localeCompare(b.capture) ||
+        a.repository.localeCompare(b.repository) ||
+        a.command.localeCompare(b.command),
+    )
+    .map((row) => `${row.sshChildren} ${row.command} @ ${row.repository} (capture ${row.capture})`)
+}
+
+function ownershipRow(
+  calls: RemoteCalls,
+  limit: number | undefined,
+): Record<string, number | string | readonly string[]> {
+  const children = (test: (call: SshCall) => boolean) =>
+    calls.sshCalls.filter(test).reduce((sum, call) => sum + call.sshChildren, 0)
+  const owned = children((call) => call.ownership === "queue")
+  const unknown = children((call) => call.ownership === "unknown")
+  const foreign = calls.sshCalls.filter((call) => call.ownership === "foreign")
+  const beyondOwned = children((call) => call.ownership === "queue" && call.bucket === "beyond")
+  const row: Record<string, number | string | readonly string[]> = {
+    capture_boundary: `${REMOTE_CAPTURE_VARIABLE} chain on the trace2 capture`,
+    capture_owned_ssh_children: owned,
+    capture_foreign_ssh_children: foreign.reduce((sum, call) => sum + call.sshChildren, 0),
+    capture_unknown_ssh_children: unknown,
+    beyond_refresh_owned_ssh_children: beyondOwned,
+    beyond_refresh_excluded_ssh_children: children((call) => call.ownership === "foreign" && call.bucket === "beyond"),
+    beyond_refresh_unknown_ssh_children: children((call) => call.ownership === "unknown" && call.bucket === "beyond"),
+    // Always present, so "nothing was excluded" is a statement the row makes rather than a field a reader misses.
+    // Grouped like the split rows: one line per (command, repository, capture), never one line per child.
+    excluded_calls: excludedLines(foreign),
+  }
+  if (limit !== undefined) {
+    row.beyond_refresh_limit = limit
+    row.beyond_refresh_verdict = unknown > 0 ? "unproven" : beyondOwned > limit ? "over-limit" : "within-limit"
+  }
+  return row
+}
+
 /** A round's durable, exact split. A torn or unnamed SSH call cannot become a plausible zero. */
-export function roundRemoteCallsRow(calls: RemoteCalls): Readonly<Record<string, number | string | readonly string[]>> {
+export function roundRemoteCallsRow(
+  calls: RemoteCalls,
+  options: Readonly<{ beyondRefreshLimit?: number }> = {},
+): Readonly<Record<string, number | string | readonly string[]>> {
   if (calls.unreadable !== 0) {
     throw new Error(`round SSH split cannot be proven: ${calls.unreadable} unreadable Trace2 event(s)`)
   }
@@ -344,6 +504,7 @@ export function roundRemoteCallsRow(calls: RemoteCalls): Readonly<Record<string,
     const reasons = [...new Set(unproven.map((call) => call.unproven))]
     return {
       ...remoteCallsRow(calls),
+      ...ownershipRow(calls, options.beyondRefreshLimit),
       ssh_split: "unproven",
       ssh_split_reason: reasons.join("; "),
     }
@@ -367,6 +528,7 @@ export function roundRemoteCallsRow(calls: RemoteCalls): Readonly<Record<string,
   const deriveChildren = children("derive")
   return {
     ...remoteCallsRow(calls),
+    ...ownershipRow(calls, options.beyondRefreshLimit),
     refresh_boundary: "GIT_SUPER_PHASE=refresh on component-main fetch",
     // The round's own component-main read, which names itself with a seam (@cto 316f70ff R2): its own bucket
     // beside the refresh, so a derivation round's split is provable instead of permanently unproven.

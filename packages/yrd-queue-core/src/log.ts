@@ -200,8 +200,11 @@ export const LOG_KINDS = [
   // clears the ending's notices, so its `notified` cannot be recorded. Names the delivery and the `opened` event.
   "notice-unrecorded",
   // The round's remote calls, counted from git's trace2 log when the round ends (25570 row 3): processes,
-  // ssh_children (an upper bound on logins), remote_ms, unreadable lines and one field per remote verb. Readers match kinds by equality, so this
-  // closing row breaks none of them.
+  // ssh_children (an upper bound on logins), remote_ms, unreadable lines and one field per remote verb. The
+  // capture_* / beyond_refresh_* fields reconcile those raw totals by ownership (34390): owned children count
+  // against the ADR-0022 limit, a foreign capture's children are named in excluded_calls, an unproven one makes
+  // beyond_refresh_verdict `unproven`, and the raw beyond_refresh_ssh_children stays as observed. Readers match
+  // kinds by equality, so this closing row breaks none of them.
   "remote-calls",
 ] as const
 

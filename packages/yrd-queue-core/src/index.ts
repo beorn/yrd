@@ -352,13 +352,15 @@ export {
 export { programRootCheck } from "./program-root.ts"
 
 export {
+  BEYOND_REFRESH_LIMIT,
+  REMOTE_CAPTURE_VARIABLE,
   readRemoteCalls,
   remoteCallsLine,
   roundRemoteCallsRow,
   traceRemoteCalls,
   withRemoteSeam,
 } from "./remote-calls.ts"
-export type { RemoteCalls } from "./remote-calls.ts"
+export type { RemoteCalls, SshCall, SshOwnership } from "./remote-calls.ts"
 export {
   MIRROR_LOCK_WAIT_MS,
   MIRROR_REFRESHED_AT,

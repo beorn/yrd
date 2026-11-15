@@ -19,7 +19,7 @@ import { eventQueueRun } from "./event-run.ts"
 import { removeEmptyWorktreeRunDirectory } from "./worktree.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { overrideLine, type OverrideEntry, type OverrideTable } from "./override.ts"
-import { roundRemoteCallsRow, traceRemoteCalls } from "./remote-calls.ts"
+import { BEYOND_REFRESH_LIMIT, roundRemoteCallsRow, traceRemoteCalls } from "./remote-calls.ts"
 import { remoteUrl } from "./remote.ts"
 import type { Change } from "./refs.ts"
 import type { PlumbingLog } from "./worktree.ts"
@@ -272,7 +272,10 @@ async function queueRunWithLog(options: QueueRunOptions, log: QueueRunLog): Prom
   if (options.env !== undefined) options = { ...options, env: { ...options.env, ...traced.env } }
   resources.defer(() => {
     try {
-      log.write({ kind: "remote-calls", ...roundRemoteCallsRow(traced.end()) })
+      log.write({
+        kind: "remote-calls",
+        ...roundRemoteCallsRow(traced.end(), { beyondRefreshLimit: BEYOND_REFRESH_LIMIT }),
+      })
     } catch (error) {
       // The count is evidence about the round, never its outcome: an unreadable trace is a named warning row.
       log.write({

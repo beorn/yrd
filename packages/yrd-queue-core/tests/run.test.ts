@@ -1283,7 +1283,19 @@ it("closes the round's journal with every remote call it made, counted from git'
     refresh_boundary: "GIT_SUPER_PHASE=refresh on component-main fetch",
     refresh_calls: expect.any(Array),
     beyond_refresh_calls: expect.any(Array),
+    // 34390: a real round's own children carry the capture chain, so its limit is decided, never left unproven
+    // by a marker that only the tests set. The verdict is a measurement: within-limit and over-limit both pass.
+    capture_boundary: "YRD_REMOTE_CAPTURE chain on the trace2 capture",
+    capture_unknown_ssh_children: 0,
+    excluded_calls: [],
   })
+  expect(["within-limit", "over-limit"]).toContain(counted?.beyond_refresh_verdict)
+  // Reconciled: the ownership arms add up to the raw total this round observed, whatever that total is.
+  expect(
+    Number(counted?.capture_owned_ssh_children) +
+      Number(counted?.capture_foreign_ssh_children) +
+      Number(counted?.capture_unknown_ssh_children),
+  ).toBe(counted?.ssh_children)
   // The merge fetched and published: both are real remote calls, and every git process wrote its log.
   expect(counted?.fetch).toEqual(expect.any(Number))
   expect(counted?.push).toEqual(expect.any(Number))
@@ -4702,7 +4714,12 @@ it("bounds an observed upper stack after a rival records its lower merge", async
   expect(outcome.exitCode).toBe(0)
   expect(outcome.merged).toEqual(expect.arrayContaining([lowerBranch, upperBranch]))
   const events = await (await openEvents({ ...store, ref: changesRef("main", upperBranch) })).events()
-  expect(trailer(events.findLast((event) => event.type === "merged")!, "Base")).toBe(lower)
+  expect(
+    trailer(
+      events.findLast((event) => event.type === "merged")!,
+      "Base",
+    ),
+  ).toBe(lower)
 })
 
 /** @failure A prior observed merged event did not account for the direct commit it kept.
