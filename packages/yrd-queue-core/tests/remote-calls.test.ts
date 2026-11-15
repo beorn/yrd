@@ -165,9 +165,6 @@ describe("remote calls are counted from git's trace2 event log", () => {
       // The whole key set (@cto 1ce8f965, fold 4): an unproven row carries its counts and its reason, and NO
       // split field at all - asserting three absences let every other split field slip through unasserted.
       expect(Object.keys(oldRow).sort()).toEqual([
-        "beyond_refresh_excluded_ssh_children",
-        "beyond_refresh_owned_ssh_children",
-        "beyond_refresh_unknown_ssh_children",
         "capture_boundary",
         "capture_foreign_ssh_children",
         "capture_owned_ssh_children",
@@ -245,12 +242,14 @@ describe("remote calls are counted from git's trace2 event log", () => {
       "origin",
       "+refs/heads/main:refs/remotes/origin/main",
     ])
-    const untaggedRow = roundRemoteCallsRow(untagged.end())
+    // 34390 (@dev/10 34390-51cc7384-peer): the round supplies its limit even when the phase split is unproven,
+    // so this control carries BOTH the owned capture and the limit. A row that cannot say which bucket failed a
+    // limit cannot say the limit was met, so the verdict is `unproven` and no beyond count is published at all.
+    const untaggedRow = roundRemoteCallsRow(untagged.end(), { beyondRefreshLimit: BEYOND_REFRESH_LIMIT })
     // The whole key set, so an unproven split can never carry a split field that reads as a measured zero.
     expect(Object.keys(untaggedRow).sort()).toEqual([
-      "beyond_refresh_excluded_ssh_children",
-      "beyond_refresh_owned_ssh_children",
-      "beyond_refresh_unknown_ssh_children",
+      "beyond_refresh_limit",
+      "beyond_refresh_verdict",
       "capture_boundary",
       "capture_foreign_ssh_children",
       "capture_owned_ssh_children",
@@ -267,7 +266,21 @@ describe("remote calls are counted from git's trace2 event log", () => {
       "ssh_split_reason",
       "unreadable",
     ])
-    expect(untaggedRow).toMatchObject({ ssh_split: "unproven", ssh_children: 1, fetch: 1, unreadable: 0 })
+    expect(untaggedRow).toMatchObject({
+      ssh_split: "unproven",
+      ssh_children: 1,
+      fetch: 1,
+      unreadable: 0,
+      // Ownership is capture evidence and survives; the beyond numbers do not exist in this arm.
+      capture_boundary: "YRD_REMOTE_CAPTURE chain on the trace2 capture",
+      capture_owned_ssh_children: 1,
+      capture_unknown_ssh_children: 0,
+      excluded_calls: [],
+      beyond_refresh_limit: BEYOND_REFRESH_LIMIT,
+      beyond_refresh_verdict: "unproven",
+    })
+    expect(untaggedRow.beyond_refresh_owned_ssh_children).toBeUndefined()
+    expect(untaggedRow.beyond_refresh_ssh_children).toBeUndefined()
     expect(String(untaggedRow.ssh_split_reason)).toMatch(/untagged component-main refresh fetch/u)
   }, 60_000)
 
@@ -286,15 +299,22 @@ describe("remote calls are counted from git's trace2 event log", () => {
       url,
       "refs/heads/main",
     ])
-    const mistaggedRow = roundRemoteCallsRow(mistagged.end())
-    expect(mistaggedRow).toMatchObject({ ssh_split: "unproven", ssh_children: 1, "ls-remote": 1 })
+    const mistaggedRow = roundRemoteCallsRow(mistagged.end(), { beyondRefreshLimit: BEYOND_REFRESH_LIMIT })
+    expect(mistaggedRow).toMatchObject({
+      ssh_split: "unproven",
+      ssh_children: 1,
+      "ls-remote": 1,
+      capture_owned_ssh_children: 1,
+      beyond_refresh_limit: BEYOND_REFRESH_LIMIT,
+      beyond_refresh_verdict: "unproven",
+    })
+    expect(mistaggedRow.beyond_refresh_owned_ssh_children).toBeUndefined()
     expect(String(mistaggedRow.ssh_split_reason)).toMatch(/tagged a non-component-main SSH call as refresh/u)
     // The whole key set (@cto 1ce8f965, fold 4), not a sample: a mistagged call keeps its counts, its seam row
     // and its reason, and gains none of the split fields it did not earn.
     expect(Object.keys(mistaggedRow).sort()).toEqual([
-      "beyond_refresh_excluded_ssh_children",
-      "beyond_refresh_owned_ssh_children",
-      "beyond_refresh_unknown_ssh_children",
+      "beyond_refresh_limit",
+      "beyond_refresh_verdict",
       "capture_boundary",
       "capture_foreign_ssh_children",
       "capture_owned_ssh_children",
@@ -613,9 +633,6 @@ describe("remote calls are counted from git's trace2 event log", () => {
     )
     const row = roundRemoteCallsRow(readRemoteCalls(directory, { requireRefreshTag: true }))
     expect(Object.keys(row).sort()).toEqual([
-      "beyond_refresh_excluded_ssh_children",
-      "beyond_refresh_owned_ssh_children",
-      "beyond_refresh_unknown_ssh_children",
       "capture_boundary",
       "capture_foreign_ssh_children",
       "capture_owned_ssh_children",
@@ -660,9 +677,6 @@ describe("remote calls are counted from git's trace2 event log", () => {
     )
     const row = roundRemoteCallsRow(readRemoteCalls(directory, { requireRefreshTag: true }))
     expect(Object.keys(row).sort()).toEqual([
-      "beyond_refresh_excluded_ssh_children",
-      "beyond_refresh_owned_ssh_children",
-      "beyond_refresh_unknown_ssh_children",
       "capture_boundary",
       "capture_foreign_ssh_children",
       "capture_owned_ssh_children",
@@ -711,9 +725,6 @@ describe("remote calls are counted from git's trace2 event log", () => {
     )
     const row = roundRemoteCallsRow(readRemoteCalls(directory, { requireRefreshTag: true }))
     expect(Object.keys(row).sort()).toEqual([
-      "beyond_refresh_excluded_ssh_children",
-      "beyond_refresh_owned_ssh_children",
-      "beyond_refresh_unknown_ssh_children",
       "capture_boundary",
       "capture_foreign_ssh_children",
       "capture_owned_ssh_children",

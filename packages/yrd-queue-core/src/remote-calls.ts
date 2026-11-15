@@ -416,13 +416,6 @@ export function remoteCallsRow(calls: RemoteCalls): Readonly<Record<string, numb
  */
 export const BEYOND_REFRESH_LIMIT = 15
 
-/**
- * The round's ownership reconciliation (34390, @cto A-scope ruling). Every captured child is this capture's work,
- * another capture's, or unproven. `beyond_refresh_ssh_children` stays the RAW observed total; the limit is applied
- * to the owned beyond-refresh children only, a foreign child is excluded and named with the chain that proves it,
- * and an unproven one makes the verdict `unproven` rather than a pass - an incomplete capture is never zero queue
- * cost. A repository path and a clock reading are evidence about neither, so nothing here reads them.
- */
 /** The excluded children, one line per (command, repository, capture): the chain is the evidence, so it is named. */
 function excludedLines(calls: readonly SshCall[]): readonly string[] {
   const grouped = new Map<string, { command: string; repository: string; capture: string; sshChildren: number }>()
@@ -448,30 +441,48 @@ function excludedLines(calls: readonly SshCall[]): readonly string[] {
     .map((row) => `${row.sshChildren} ${row.command} @ ${row.repository} (capture ${row.capture})`)
 }
 
-function ownershipRow(
+/**
+ * The round's causal ownership reconciliation (34390, @cto A-scope ruling). Every captured child is this capture's
+ * work, another capture's, or unproven. These fields read the CAPTURE and nothing else, so a row whose phase split
+ * is not proven may still carry them: a repository path and a clock reading are evidence about ownership neither.
+ */
+function captureRow(calls: RemoteCalls): Record<string, number | string | readonly string[]> {
+  const children = (test: (call: SshCall) => boolean) =>
+    calls.sshCalls.filter(test).reduce((sum, call) => sum + call.sshChildren, 0)
+  const foreign = calls.sshCalls.filter((call) => call.ownership === "foreign")
+  return {
+    capture_boundary: `${REMOTE_CAPTURE_VARIABLE} chain on the trace2 capture`,
+    capture_owned_ssh_children: children((call) => call.ownership === "queue"),
+    capture_foreign_ssh_children: foreign.reduce((sum, call) => sum + call.sshChildren, 0),
+    capture_unknown_ssh_children: children((call) => call.ownership === "unknown"),
+    // Always present, so "nothing was excluded" is a statement the row makes rather than a field a reader misses.
+    // Grouped like the split rows: one line per (command, repository, capture), never one line per child.
+    excluded_calls: excludedLines(foreign),
+  }
+}
+
+/**
+ * The limit, applied to the round's OWN beyond-refresh children (34390). Only a row whose phase split is PROVEN may
+ * call this: `beyond` is the placeholder bucket an unproven call wears, so a count taken here would publish a phase
+ * the row has just refused to claim (@dev/10, 34390-51cc7384-peer). `unknown` ownership anywhere makes the verdict
+ * `unproven` rather than a pass - an incomplete capture is never zero queue cost - and a foreign child is excluded
+ * from the count while `excluded_calls` names it with the chain that proves the exclusion.
+ */
+function beyondRefreshRow(
   calls: RemoteCalls,
   limit: number | undefined,
 ): Record<string, number | string | readonly string[]> {
   const children = (test: (call: SshCall) => boolean) =>
     calls.sshCalls.filter(test).reduce((sum, call) => sum + call.sshChildren, 0)
-  const owned = children((call) => call.ownership === "queue")
-  const unknown = children((call) => call.ownership === "unknown")
-  const foreign = calls.sshCalls.filter((call) => call.ownership === "foreign")
   const beyondOwned = children((call) => call.ownership === "queue" && call.bucket === "beyond")
   const row: Record<string, number | string | readonly string[]> = {
-    capture_boundary: `${REMOTE_CAPTURE_VARIABLE} chain on the trace2 capture`,
-    capture_owned_ssh_children: owned,
-    capture_foreign_ssh_children: foreign.reduce((sum, call) => sum + call.sshChildren, 0),
-    capture_unknown_ssh_children: unknown,
     beyond_refresh_owned_ssh_children: beyondOwned,
     beyond_refresh_excluded_ssh_children: children((call) => call.ownership === "foreign" && call.bucket === "beyond"),
     beyond_refresh_unknown_ssh_children: children((call) => call.ownership === "unknown" && call.bucket === "beyond"),
-    // Always present, so "nothing was excluded" is a statement the row makes rather than a field a reader misses.
-    // Grouped like the split rows: one line per (command, repository, capture), never one line per child.
-    excluded_calls: excludedLines(foreign),
   }
   if (limit !== undefined) {
     row.beyond_refresh_limit = limit
+    const unknown = children((call) => call.ownership === "unknown")
     row.beyond_refresh_verdict = unknown > 0 ? "unproven" : beyondOwned > limit ? "over-limit" : "within-limit"
   }
   return row
@@ -504,7 +515,14 @@ export function roundRemoteCallsRow(
     const reasons = [...new Set(unproven.map((call) => call.unproven))]
     return {
       ...remoteCallsRow(calls),
-      ...ownershipRow(calls, options.beyondRefreshLimit),
+      // Ownership is evidence about the capture, so it survives an unproven phase split. The BEYOND numbers do
+      // not: `beyond` is the placeholder an unproven call wears, so a count or a verdict taken there would promote
+      // a phase this row has just refused to claim. A supplied limit still reports itself, and it reports
+      // `unproven`, because a row that cannot say which bucket failed a limit cannot say the limit was met either.
+      ...captureRow(calls),
+      ...(options.beyondRefreshLimit === undefined
+        ? {}
+        : { beyond_refresh_limit: options.beyondRefreshLimit, beyond_refresh_verdict: "unproven" }),
       ssh_split: "unproven",
       ssh_split_reason: reasons.join("; "),
     }
@@ -528,7 +546,8 @@ export function roundRemoteCallsRow(
   const deriveChildren = children("derive")
   return {
     ...remoteCallsRow(calls),
-    ...ownershipRow(calls, options.beyondRefreshLimit),
+    ...captureRow(calls),
+    ...beyondRefreshRow(calls, options.beyondRefreshLimit),
     refresh_boundary: "GIT_SUPER_PHASE=refresh on component-main fetch",
     // The round's own component-main read, which names itself with a seam (@cto 316f70ff R2): its own bucket
     // beside the refresh, so a derivation round's split is provable instead of permanently unproven.
