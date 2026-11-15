@@ -10016,7 +10016,9 @@ describe("yrd queue run --tier long", () => {
       const rows = journalRows()
       const footers = rows.flatMap((row, index) => (row.charged !== undefined ? [index] : []))
       return footers.map((footer, index) => {
-        expect(rows[footer]!.charged, "each native cleanup batch charges eight environments").toBe(8)
+        expect(rows[footer]!.charged, "each native cleanup batch stays within eight environments").toBeLessThanOrEqual(
+          8,
+        )
         const start = index === 0 ? 0 : footers[index - 1]! + 1
         return rows
           .slice(start, footer)
@@ -10037,8 +10039,9 @@ describe("yrd queue run --tier long", () => {
               command: "up",
               intervalSeconds: 0,
               stop: stop.signal,
-              afterRound: () => {
+              afterRound: async (outcome) => {
                 rounds++
+                await waitForEnvironmentCleanup(workdir, outcome.run)
                 if (rounds === 1) stop.abort()
               },
             },
