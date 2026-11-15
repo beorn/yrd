@@ -1712,7 +1712,13 @@ export async function closeEnvironment(
       `--retain ${options.retain} is not an absolute directory, so it would resolve against the caller's cwd and write a retention tree there; pass an absolute path (e.g. ${join(workdir, "retained-modules")})`,
     )
   }
+  // 34404: every operand refusal names the operand as the caller typed it, and shows the cwd resolution only
+  // when the two differ. `env close 34056-peer` (2026-11-14) otherwise reported /hh/dev/34056-peer — a path
+  // nobody typed, in the shared projection — because the bay name resolved against the caller's cwd. The
+  // accepted form is already documented on the command as `<path>`, so the message states it instead of
+  // implying the caller asked for the directory the resolution happened to produce.
   const requested = resolve(io.cwd, operand)
+  const atOperand = requested === operand ? operand : `${operand} (resolved ${requested})`
   let path: string
   try {
     path = realpathSync(requested)
@@ -1721,13 +1727,15 @@ export async function closeEnvironment(
       throw error
     }
     throw new Error(
-      `environment ${requested} is not registered at an existing path; inspect git worktree list before retrying`,
+      `environment ${atOperand} is not registered at an existing path; env close takes the environment path, as \`yrd env open\` prints it — inspect git worktree list before retrying`,
       { cause: error },
     )
   }
   const registered = (await registeredWorktrees(git)).find((entry) => resolve(entry.path) === path)
   if (registered === undefined) {
-    throw new Error(`environment ${requested} is not registered in ${root}; inspect git worktree list`)
+    throw new Error(
+      `environment ${atOperand} is not registered in ${root}; pass the environment path \`yrd env open\` printed, or inspect git worktree list`,
+    )
   }
   const contained = roots.some((directory) => {
     if (!existsSync(directory)) return false

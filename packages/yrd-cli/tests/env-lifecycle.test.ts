@@ -3506,6 +3506,21 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
   })
 
   /**
+   * @failure 34404: `env close <bay name>` echoed the cwd-resolved path instead of the operand the caller
+   *          typed, so 2026-11-14's `env close 34056-peer` reported /hh/dev/34056-peer — a directory nobody
+   *          chose, in the shared projection — while the same operand spelled as a path closed at once.
+   * @level   l1 (operand→path resolution at the existing close admission; no new resolver)
+   * @consumer every seat that closes an environment by the bay name `yrd env open --bay` accepted
+   */
+  it("names the operand as typed, its resolution only when they differ, and the accepted form", async () => {
+    const w = await world(":")
+    const output = capture(w.work)
+    await expect(closeEnvironment("34404-not-a-bay", { json: true }, output.io)).rejects.toThrow(
+      `environment 34404-not-a-bay (resolved ${join(w.work, "34404-not-a-bay")}) is not registered at an existing path; env close takes the environment path, as \`yrd env open\` prints it — inspect git worktree list before retrying`,
+    )
+  })
+
+  /**
    * @failure 22894: a caller whose own same-UID CWD census cannot read every pid
    *          may neither certify the close nor state an intent: it refuses, and
    *          the environment waits for a human. The intent belongs to a context
