@@ -1296,6 +1296,7 @@ async function cleanupEnvironments(
     io: YrdCliIO
     env?: NodeJS.ProcessEnv
     selection: GitSelection
+    stop?: AbortSignal
     /** Told about each environment this run closed; telling never gates the close. */
     onEnvironmentClosed?: (closed: ClosedEnvironment) => Promise<void>
     /** Runs a delegated `drop --release-checkout` in this round (29772); absent, release requests stay standing. */
@@ -1685,7 +1686,8 @@ async function cleanupEnvironments(
   })
   // Withdrawal records only its exact terminal intent. The queue service is
   // the sole consumer; an interactive withdrawal must not sweep other jobs.
-  if (input.withdrawn !== undefined) {
+  const stopped = (): boolean => input.stop?.aborted === true
+  if (input.withdrawn !== undefined || stopped()) {
     persistState()
     return proofs
   }
@@ -1708,6 +1710,10 @@ async function cleanupEnvironments(
     )
     // A refusal preserves the WHOLE registry with one reason: the map must remember it here, or the next
     // round writes the same ~50 rows again (@dev/review2, 2026-10-17).
+    persistState()
+    return proofs
+  }
+  if (stopped()) {
     persistState()
     return proofs
   }
@@ -1766,6 +1772,10 @@ async function cleanupEnvironments(
   let sweepAttempted = 0
   let stoppedAt = -1
   for (const [index, row] of ordered.entries()) {
+    if (stopped()) {
+      stoppedAt = index
+      break
+    }
     let closeTiming: Readonly<{ started_at: string; elapsed_ms: number }> | undefined
     try {
       if (requests.handled.has(row.path) || startupSuppressed.has(row.path)) {

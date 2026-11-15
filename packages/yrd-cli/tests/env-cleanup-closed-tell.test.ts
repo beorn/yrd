@@ -19,7 +19,7 @@ import type { QueueConfig } from "@yrd/queue-core"
 import { remoteUrl } from "@yrd/queue-core"
 import { createEnvironmentCleanup, type ClosedEnvironment } from "../src/env-cleanup.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
-import { writeCloseRequest } from "../src/env-close-requests.ts"
+import { closeRequestFile, writeCloseRequest } from "../src/env-close-requests.ts"
 import { writeEnvOpenRecord } from "../src/env-open-record.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 
@@ -328,4 +328,204 @@ it("journals elapsed close time for independent request and sweep attempts", asy
       return 0
     })
   }
+})
+
+it("stops before consumer and between sweep evaluations while preserving proofs, tells, cursor and pending requests", async () => {
+  const w = await world(OLD)
+  const sweepA = join(w.repo, ".bays", "sweep-a")
+  const sweepB = join(w.repo, ".bays", "sweep-b")
+  await w.git(["worktree", "add", "--quiet", "-b", "task/sweep-a", sweepA, "HEAD"])
+  await w.git(["worktree", "add", "--quiet", "-b", "task/sweep-b", sweepB, "HEAD"])
+  writeEnvOpenRecord((await w.git(["-C", sweepA, "rev-parse", "--absolute-git-dir"])).trim(), {
+    version: 1,
+    lifetime: "job",
+    at: OLD,
+  })
+  writeEnvOpenRecord((await w.git(["-C", sweepB, "rev-parse", "--absolute-git-dir"])).trim(), {
+    version: 1,
+    lifetime: "job",
+    at: OLD,
+  })
+  readBranchHistory.mockImplementation(async (_store: unknown, _target: string, branch: string) => ({
+    ref: `refs/yrd/changes/${branch}`,
+    history:
+      branch === w.branch || branch === "task/sweep-a"
+        ? { state: { status: "merged", commit: w.head, tip: "b".repeat(40) }, events: [] }
+        : undefined,
+  }))
+  const requestFile = closeRequestFile(w.workdir, w.env)
+  const hintPath = join(w.workdir, "state", "yrd", "environment-cleanup.json")
+
+  // 1. Pre-consumer stop: aborts after durable terminal close-request filing before consumeCloseRequests.
+  vi.mocked(closeEnvironment).mockClear()
+  const preConsumerStop = new AbortController()
+  const preTells: ClosedEnvironment[] = []
+  const preProofs = await createEnvironmentCleanup()({
+    repo: w.repo,
+    git: w.git,
+    config: configFor(w.head),
+    workdir: w.workdir,
+    io: {
+      cwd: w.repo,
+      stdout: () => {},
+      stderr: () => {},
+      localBranchProtections: null,
+      liveEnvironmentUse: async () => {
+        preConsumerStop.abort()
+        return []
+      },
+    },
+    selection: w.git.selection,
+    stop: preConsumerStop.signal,
+    outcome: {
+      run: "stop-pre-consumer",
+      log: join(w.workdir, "journal.jsonl"),
+      merged: [w.branch],
+      target: w.head,
+    } as never,
+    onEnvironmentClosed: async (entry) => {
+      preTells.push(entry)
+    },
+  })
+  expect(preProofs, "early stop before consumer returns empty proofs").toEqual([])
+  expect(preTells, "early stop before consumer emits no close tell").toEqual([])
+  expect(vi.mocked(closeEnvironment)).not.toHaveBeenCalled()
+  expect(existsSync(requestFile), "filed close request stays pending on disk across pre-consumer stop").toBe(true)
+  expect(existsSync(hintPath), "early stop persists existing cursor state").toBe(true)
+  expect((JSON.parse(readFileSync(hintPath, "utf8")) as { cursorEnv: string }).cursorEnv).toBe("env-fresh")
+  const preRows = cleanupRows(w.workdir).filter((row) => row.run === "stop-pre-consumer")
+  expect(preRows.some((row) => row.result === "filed" && row.path === w.env)).toBe(true)
+  expect(
+    preRows.some((row) => row.charged !== undefined),
+    "pre-consumer stop claims no sweep batch",
+  ).toBe(false)
+
+  // 2. Stop during consumer evaluation: finishes the started consumer close, retains proof/tell, and skips the sweep.
+  const midConsumerStop = new AbortController()
+  const consumerTells: ClosedEnvironment[] = []
+  vi.mocked(closeEnvironment).mockImplementationOnce(
+    async (path, _options, callIo, _a, _b, beforeRemove, removedProof) => {
+      await beforeRemove?.()
+      midConsumerStop.abort()
+      removedProof?.(PROOF as never)
+      callIo.stdout(JSON.stringify({ closed: path }))
+      return 0
+    },
+  )
+  const consumerProofs = await createEnvironmentCleanup()({
+    repo: w.repo,
+    git: w.git,
+    config: configFor(w.head),
+    workdir: w.workdir,
+    io: { cwd: w.repo, stdout: () => {}, stderr: () => {}, localBranchProtections: null },
+    selection: w.git.selection,
+    stop: midConsumerStop.signal,
+    outcome: { run: "stop-mid-consumer", log: join(w.workdir, "journal.jsonl"), merged: [], target: w.head } as never,
+    onEnvironmentClosed: async (entry) => {
+      consumerTells.push(entry)
+    },
+  })
+  expect(consumerProofs, "in-flight consumer close retains its removal proof").toEqual([PROOF])
+  expect(consumerTells).toEqual([{ path: w.env, branch: w.branch, head: w.head, proof: PROOF }])
+  expect(existsSync(requestFile), "completed consumer close retires its request file").toBe(false)
+  expect(vi.mocked(closeEnvironment)).toHaveBeenCalledTimes(1)
+  const midConsumerSummary = cleanupRows(w.workdir).find(
+    (row) => row.run === "stop-mid-consumer" && row.charged !== undefined,
+  )
+  expect(midConsumerSummary).toMatchObject({
+    consumer: { attempted: 1, closed: 1 },
+    sweep: { attempted: 0, closed: 0 },
+    charged: 0,
+  })
+  expect((JSON.parse(readFileSync(hintPath, "utf8")) as { cursorEnv: string }).cursorEnv).toBe("env-fresh")
+
+  // Remove the mocked-closed w.env registration so the remaining registry is [sweepA, sweepB].
+  await w.git(["worktree", "remove", "--force", w.env])
+
+  // 3. Stop during one sweep row evaluation: completes sweepA, does not evaluate sweepB, persists cursorEnv = "sweep-b".
+  vi.mocked(closeEnvironment).mockClear()
+  const midSweepStop = new AbortController()
+  const sweepTells: ClosedEnvironment[] = []
+  vi.mocked(closeEnvironment).mockImplementationOnce(
+    async (path, _options, callIo, _a, _b, beforeRemove, removedProof) => {
+      await beforeRemove?.()
+      midSweepStop.abort()
+      removedProof?.(PROOF as never)
+      callIo.stdout(JSON.stringify({ closed: path }))
+      return 0
+    },
+  )
+  const sweepProofs = await createEnvironmentCleanup()({
+    repo: w.repo,
+    git: w.git,
+    config: configFor(w.head),
+    workdir: w.workdir,
+    io: { cwd: w.repo, stdout: () => {}, stderr: () => {}, localBranchProtections: null },
+    selection: w.git.selection,
+    stop: midSweepStop.signal,
+    outcome: { run: "stop-mid-sweep", log: join(w.workdir, "journal.jsonl"), merged: [], target: w.head } as never,
+    onEnvironmentClosed: async (entry) => {
+      sweepTells.push(entry)
+    },
+  })
+  expect(sweepProofs).toEqual([PROOF])
+  expect(sweepTells).toEqual([{ path: sweepA, branch: "task/sweep-a", head: w.head, proof: PROOF }])
+  expect(vi.mocked(closeEnvironment), "stop during sweepA prevents evaluating sweepB").toHaveBeenCalledTimes(1)
+  const midSweepSummary = cleanupRows(w.workdir).find(
+    (row) => row.run === "stop-mid-sweep" && row.charged !== undefined,
+  )
+  expect(midSweepSummary).toMatchObject({
+    sweep: { attempted: 1, closed: 1 },
+    charged: 1,
+    deferred: 1,
+  })
+  expect((JSON.parse(readFileSync(hintPath, "utf8")) as { cursorEnv: string }).cursorEnv).toBe("sweep-b")
+
+  // 4. A pre-consumer stop while cursor is at "sweep-b" files a close request and preserves cursorEnv = "sweep-b",
+  // and the successor resumes at the exact persisted cursor ("sweep-b") with the close request intact.
+  const sweepARequestFile = closeRequestFile(w.workdir, sweepA)
+  const preConsumerAtCursorStop = new AbortController()
+  await createEnvironmentCleanup()({
+    repo: w.repo,
+    git: w.git,
+    config: configFor(w.head),
+    workdir: w.workdir,
+    io: {
+      cwd: w.repo,
+      stdout: () => {},
+      stderr: () => {},
+      localBranchProtections: null,
+      liveEnvironmentUse: async () => {
+        preConsumerAtCursorStop.abort()
+        return []
+      },
+    },
+    selection: w.git.selection,
+    stop: preConsumerAtCursorStop.signal,
+    outcome: {
+      run: "stop-pre-consumer-at-cursor",
+      log: join(w.workdir, "journal.jsonl"),
+      merged: ["task/sweep-a"],
+      target: w.head,
+    } as never,
+  })
+  expect(existsSync(sweepARequestFile), "close request remains intact before successor resume").toBe(true)
+  expect((JSON.parse(readFileSync(hintPath, "utf8")) as { cursorEnv: string }).cursorEnv).toBe("sweep-b")
+
+  vi.mocked(closeEnvironment).mockClear()
+  const resumeTells: ClosedEnvironment[] = []
+  await createEnvironmentCleanup()({
+    repo: w.repo,
+    git: w.git,
+    config: configFor(w.head),
+    workdir: w.workdir,
+    io: { cwd: w.repo, stdout: () => {}, stderr: () => {}, localBranchProtections: null },
+    selection: w.git.selection,
+    outcome: { run: "resume-after-stop", log: join(w.workdir, "journal.jsonl"), merged: [], target: w.head } as never,
+    onEnvironmentClosed: async (entry) => {
+      resumeTells.push(entry)
+    },
+  })
+  expect(existsSync(sweepARequestFile), "successor consumes intact close request").toBe(false)
+  expect(resumeTells.map((entry) => entry.path)).toEqual([sweepA, sweepB])
 })

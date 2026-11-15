@@ -1404,6 +1404,7 @@ export async function coreQueueCommand(
         io,
         env,
         selection,
+        ...(postMergeSignal === undefined ? {} : { stop: postMergeSignal }),
         onEnvironmentClosed: teller,
         // 29772: the round reruns a delegated release itself, --apply, under the same admission.
         releaseCheckout: async (filed) => {
