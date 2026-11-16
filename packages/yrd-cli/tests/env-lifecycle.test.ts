@@ -2747,6 +2747,89 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     expect(existsSync(path)).toBe(false)
   })
 
+  // Public close execution is a production seam: old reporting and private census-injection tests cannot prove it.
+  it("public close starts no process with an already-aborted execution budget", async () => {
+    const w = await world(":")
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openAttachedEnvironment(w.work, head, "preaborted")
+    const abort = new AbortController()
+    abort.abort(new Error("close work cutoff reached"))
+    const run = capture(w.work)
+    using spawn = vi.spyOn(Bun, "spawn")
+    const error = await publicCli
+      .closeEnvironment(path, { json: true }, run.io, {
+        budget: { signal: abort.signal, remainingMs: () => 0 },
+      })
+      .then(
+        () => undefined,
+        (cause: unknown) => cause,
+      )
+    expect(spawn).not.toHaveBeenCalled()
+    expect(error).toBe(abort.signal.reason)
+    expect(existsSync(path)).toBe(true)
+  })
+
+  it("public refuse mode keeps an uncertifiable environment without filing a durable close request", async () => {
+    const w = await world(":")
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openAttachedEnvironment(w.work, head, "refuse-incomplete")
+    const incomplete = await incompleteCensus()
+    processCensus.mockResolvedValue(incomplete)
+    const run = capture(w.work)
+    const error = await publicCli
+      .closeEnvironment(path, { json: true }, run.io, {
+        onIncompleteCensus: "refuse",
+        budget: { signal: new AbortController().signal, remainingMs: () => 30_000 },
+      })
+      .then(
+        () => undefined,
+        (cause: unknown) => cause,
+      )
+    expect(error).toBeInstanceOf(Error)
+    expect(existsSync(path)).toBe(true)
+    expect(listCloseRequests(await workdirOf(w.git))).toEqual([])
+    expect(JSON.parse(run.stdout())).toMatchObject({ kept: true, queued: false, path })
+  })
+
+  it("public close rechecks caller policy in the native remover and preserves a refused target", async () => {
+    const w = await world(":")
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openAttachedEnvironment(w.work, head, "conditional-close")
+    const run = capture(w.work)
+    const budget = { signal: new AbortController().signal, remainingMs: () => 30_000 }
+    let calls = 0
+    await expect(
+      publicCli.closeEnvironment(path, { json: true }, run.io, {
+        budget,
+        beforeRemove: async (target: { name: string; path: string; head?: string }, sameBudget: unknown) => {
+          calls++
+          expect(target).toMatchObject({ name: "conditional-close", path, head })
+          expect(sameBudget).toBe(budget)
+          throw new Error("fresh caller policy holds this target")
+        },
+      }),
+    ).rejects.toThrow("fresh caller policy holds this target")
+    expect(calls).toBe(1)
+    expect(existsSync(path)).toBe(true)
+    expect(await w.git(["worktree", "list", "--porcelain"])).toContain(path)
+    const allowed = capture(w.work)
+    calls = 0
+    expect(
+      await publicCli.closeEnvironment(path, { json: true }, allowed.io, {
+        budget,
+        beforeRemove: async (target, sameBudget) => {
+          calls++
+          expect(target).toMatchObject({ name: "conditional-close", path, head })
+          expect(sameBudget).toBe(budget)
+        },
+      }),
+      allowed.stderr(),
+    ).toBe(0)
+    expect(calls).toBe(2)
+    expect(existsSync(path)).toBe(false)
+    expect(JSON.parse(allowed.stdout())).toMatchObject({ closed: path })
+  })
+
   // Rule 3 needs the recorded association, not a number guessed from the environment name.
   // Existing list assertions cover paths/heads but cannot distinguish missing or unreadable bindings.
   it("lists recorded, absent and unreadable issue bindings in JSON and human output", async () => {

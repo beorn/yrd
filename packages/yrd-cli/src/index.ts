@@ -2,11 +2,35 @@ export { runYrdExecutable, runYrdProcess, resolveSubmitter } from "./cli.ts"
 export { coreQueueCommand, type CoreQueueCommand } from "./queue-core-commands.ts"
 export { listEnvironments, openEnvironment, type EnvRow, type EnvIssueBinding } from "./env-commands.ts"
 export type { EnvLifetime } from "./env-open-record.ts"
-import { closeEnvironment as closeEnvironmentInternal, type EnvCloseOptions } from "./env-commands.ts"
+import {
+  closeEnvironment as closeEnvironmentInternal,
+  type EnvCloseOptions,
+  type CloseExecutionContext,
+} from "./env-commands.ts"
+export type {
+  CloseExecutionContext,
+  CloseExecutionBudget,
+  EnvironmentRemovalTarget,
+  CloseAdmissionMode,
+} from "./env-commands.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 // The package entry never forwards the internal test dependency, including from JavaScript callers.
-export function closeEnvironment(operand: string, options: EnvCloseOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
-  return closeEnvironmentInternal(operand, options, io)
+export function closeEnvironment(
+  operand: string,
+  options: EnvCloseOptions,
+  io: YrdCliIO,
+  context?: CloseExecutionContext,
+): Promise<YrdCliExitCode> {
+  return closeEnvironmentInternal(
+    operand,
+    options,
+    io,
+    undefined,
+    context?.onIncompleteCensus,
+    undefined,
+    undefined,
+    context,
+  )
 }
 export { YRD_VERSION, formatYrdRuntimeVersion } from "./version.ts"
 export type { YrdCliExitCode, YrdCliIO } from "./types.ts"

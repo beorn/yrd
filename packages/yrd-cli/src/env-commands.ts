@@ -46,7 +46,7 @@ import {
   type Git,
   type GitRunner,
 } from "@yrd/queue-core"
-import { createProcess, type Process } from "@yrd/process"
+import { adaptProcessGit, createProcess, type Process } from "@yrd/process"
 // 29073: `env close --preserve` reaches the ONE worktree preserve (bearly's preserveSlotState, the
 // choke point remove/reset flow through) across the CLI boundary — a subprocess, exactly as yrd
 // reaches git super — never a workspace dependency on bearly. A workspace dependency here stopped
@@ -57,6 +57,7 @@ import type { WorktreeRemovalProof } from "./branch-retirement.ts"
 import {
   assertNoPrivateStore,
   createLocalGitWorktreeStore,
+  createGitWorktreeStore,
   PrivateStoreRefusalError,
   type PrivateStoreRefusal,
 } from "git-super/worktree"
@@ -161,6 +162,22 @@ export class IncompleteCensusError extends Error {
 
 /** Who runs the close decides what an uncertifiable census means. */
 export type CloseAdmissionMode = "delegate" | "refuse"
+export type CloseExecutionBudget = Readonly<{ signal: AbortSignal; remainingMs(): number }>
+export type EnvironmentRemovalTarget = Readonly<{ name: string; path: string; branch?: string; head?: string }>
+export type CloseExecutionContext = Readonly<{
+  onIncompleteCensus?: CloseAdmissionMode
+  budget: CloseExecutionBudget
+  beforeRemove?: (target: EnvironmentRemovalTarget, budget: CloseExecutionBudget) => Promise<void>
+}>
+
+function closeWorkRemaining(budget: CloseExecutionBudget): number {
+  budget.signal.throwIfAborted()
+  const remaining = budget.remainingMs()
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    throw new Error("environment close work budget exhausted or invalid; no further operation started")
+  }
+  return remaining
+}
 export type EnvListOptions = Readonly<{ json?: boolean }>
 
 /** Association from the existing opening record; absence and read failure are not an unbound record. */
@@ -1750,10 +1767,31 @@ export async function closeEnvironment(
   beforeRemove?: () => Promise<void>,
   /** Internal typed proof transport to the queue cleanup caller. */
   removedProof?: (proof: WorktreeRemovalProof) => void,
+  /** Public execution context; internal census and proof transport remain private. */
+  context?: CloseExecutionContext,
 ): Promise<YrdCliExitCode> {
+  if (context !== undefined) closeWorkRemaining(context.budget)
   const root = requireRepository(io)
-  const selection = await resolveGitSelection(root)
-  await using process = createProcess({ cwd: root })
+  await using owner = createProcess({ cwd: root })
+  // One owner, with its existing run capability forwarding the shared lifetime to every child.
+  const process: Process =
+    context === undefined
+      ? owner
+      : {
+          ...owner,
+          run: (request) => {
+            const remaining = closeWorkRemaining(context.budget)
+            return owner.run({
+              ...request,
+              signal:
+                request.signal === undefined
+                  ? context.budget.signal
+                  : AbortSignal.any([request.signal, context.budget.signal]),
+              timeoutMs: Math.max(1, Math.floor(Math.min(request.timeoutMs ?? remaining, remaining))),
+            })
+          },
+        }
+  const selection = await resolveGitSelection(root, { process })
   const git = gitIn(root, process, selection)
   const workdir = resolve(root, await workdirOf(git))
   const roots = [baysRootOf(root), legacyBaysRoot(root), join(workdir, "environments")]
@@ -1826,7 +1864,11 @@ export async function closeEnvironment(
   const adminDir = (await treeGit(["rev-parse", "--absolute-git-dir"])).trim()
   let storeRefusals: readonly PrivateStoreRefusal[] = []
   try {
-    await assertNoPrivateStore(createLocalGitProcess(), { adminDir, repository: path, head: commit })
+    await assertNoPrivateStore(context === undefined ? createLocalGitProcess() : adaptProcessGit(process), {
+      adminDir,
+      repository: path,
+      head: commit,
+    })
   } catch (reason) {
     if (!(reason instanceof PrivateStoreRefusalError)) throw reason
     // 27120 / @cto 0516210a: a typed refusal whose store list is EMPTY is still a REFUSAL, not the answer "this
@@ -1880,7 +1922,15 @@ export async function closeEnvironment(
     if (options.dryRun === true) {
       throw uncertified(path, admission, "in preview; a real close would file a queue close request instead")
     }
-    if (onIncompleteCensus === "refuse") throw uncertified(path, admission)
+    if (onIncompleteCensus === "refuse") {
+      if (context !== undefined)
+        io.stdout(
+          options.json === true
+            ? `${JSON.stringify({ kept: true, queued: false, path, reason: admission.refusal })}\n`
+            : `kept environment ${path}: ${admission.refusal}; not queued\n`,
+        )
+      throw uncertified(path, admission)
+    }
     return queueDelegatedClose(path, options, io, workdir, commit, admission)
   }
   const detached = registered.branch === undefined
@@ -2197,7 +2247,8 @@ export async function closeEnvironment(
     options.retain !== undefined ||
     options.noRehome === true ||
     options.preserve === true ||
-    options.componentCustody !== undefined
+    options.componentCustody !== undefined ||
+    context !== undefined
   ) {
     const retain = options.retain === undefined ? join(workdir, "retained-modules") : resolve(io.cwd, options.retain)
     let removed: unknown
@@ -2224,25 +2275,66 @@ export async function closeEnvironment(
       }
     }
     try {
-      const removalOutput = await git([
-        "super",
-        "--json",
-        "worktree",
-        "remove",
-        path,
-        "--retain",
-        retain,
-        ...(options.noRehome === true ? ["--no-rehome"] : []),
-        ...(options.componentCustody === undefined
-          ? []
-          : ["--component-custody", JSON.stringify(options.componentCustody)]),
-        ...preservedRefs.flatMap((ref) => ["--preserved", ref]),
-      ])
-      // A successful git() records its result before resolving; failure throws before reaching here.
-      // oxlint-disable-next-line typescript/no-non-null-assertion
-      const removalStderr = git.lastInvocation!.result!.stderr
-      if (removalStderr !== "") io.stderr(removalStderr)
-      removed = JSON.parse(removalOutput)
+      if (context !== undefined) {
+        closeWorkRemaining(context.budget)
+        let nativeProof: WorktreeRemovalProof | undefined
+        const native = createGitWorktreeStore({
+          repo: root,
+          gitProcess: adaptProcessGit(process),
+          signal: context.budget.signal,
+          report: (line) => io.stderr(line),
+        })
+        const outcome = await native.remove(path, {
+          retention: {
+            root: retain,
+            report: (proof) => {
+              nativeProof = proof
+            },
+          },
+          ...(options.noRehome === undefined ? {} : { noRehome: options.noRehome }),
+          ...(options.componentCustody === undefined ? {} : { componentCustody: options.componentCustody }),
+          preserved: preservedRefs,
+          beforeRemove: async (target) => {
+            closeWorkRemaining(context.budget)
+            await context.beforeRemove?.(
+              {
+                name: basename(target.path),
+                path: target.path,
+                ...(target.head === undefined ? {} : { head: target.head }),
+                ...(target.branch === undefined ? {} : { branch: target.branch.replace(/^refs\/heads\//u, "") }),
+              },
+              context.budget,
+            )
+            closeWorkRemaining(context.budget)
+          },
+        })
+        removed =
+          outcome !== undefined && "custodyRefusal" in outcome
+            ? { state: "unchanged", path, reason: "component-custody", custody: outcome.custodyRefusal }
+            : outcome !== undefined && "borrowers" in outcome
+              ? { state: "unchanged", path, reason: "borrowed", borrowers: outcome.borrowers }
+              : { state: "updated", path, proof: nativeProof }
+      } else {
+        const removalOutput = await git([
+          "super",
+          "--json",
+          "worktree",
+          "remove",
+          path,
+          "--retain",
+          retain,
+          ...(options.noRehome === true ? ["--no-rehome"] : []),
+          ...(options.componentCustody === undefined
+            ? []
+            : ["--component-custody", JSON.stringify(options.componentCustody)]),
+          ...preservedRefs.flatMap((ref) => ["--preserved", ref]),
+        ])
+        // A successful git() records its result before resolving; failure throws before reaching here.
+        // oxlint-disable-next-line typescript/no-non-null-assertion
+        const removalStderr = git.lastInvocation!.result!.stderr
+        if (removalStderr !== "") io.stderr(removalStderr)
+        removed = JSON.parse(removalOutput)
+      }
     } catch (error) {
       if (await concurrentClose(error)) return 0
       await restoreAlignedGitlinks()
