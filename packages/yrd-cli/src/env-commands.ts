@@ -70,7 +70,13 @@ import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 import { censusRetainedStores, retainedCloseLine } from "./retained-census.ts"
 import { formatYrdCommand } from "./command-format.ts"
-import { envOpenRecordFromFlags, parseEnvExpires, readEnvOpenRecord, writeEnvOpenRecord } from "./env-open-record.ts"
+import {
+  envOpenRecordFromFlags,
+  parseEnvExpires,
+  readEnvOpenRecord,
+  writeEnvOpenRecord,
+  type EnvLifetime,
+} from "./env-open-record.ts"
 import { readEnvIssueState } from "./env-issue-state.ts"
 import {
   admitEnvironmentClose,
@@ -157,8 +163,21 @@ export class IncompleteCensusError extends Error {
 export type CloseAdmissionMode = "delegate" | "refuse"
 export type EnvListOptions = Readonly<{ json?: boolean }>
 
+/** Association from the existing opening record; absence and read failure are not an unbound record. */
+export type EnvIssueBinding =
+  | Readonly<{ state: "recorded"; issue?: string; lifetime: EnvLifetime; expiresAt?: string }>
+  | Readonly<{ state: "unrecorded"; why: string }>
+  | Readonly<{ state: "unreadable"; why: string }>
+
 /** One environment as git holds it: a worktree under the bays root. */
-export type EnvRow = Readonly<{ name: string; path: string; branch?: string; head?: string; hold: string | null }>
+export type EnvRow = Readonly<{
+  name: string
+  path: string
+  branch?: string
+  head?: string
+  hold: string | null
+  issueBinding: EnvIssueBinding
+}>
 
 /**
  * The repository a command stands in, and the target its declaration names.
@@ -883,15 +902,40 @@ export async function environmentInventory(
 ): Promise<Readonly<{ roots: readonly string[]; rows: readonly EnvRow[] }>> {
   const roots = [baysRootOf(root), legacyBaysRoot(root), join(resolve(root, workdir), "environments")]
   const prefixes = roots.map((path) => `${existsSync(path) ? realpathSync(path) : resolve(path)}/`)
-  const rows: EnvRow[] = (await registeredWorktrees(git))
-    .filter(({ path }) => prefixes.some((prefix) => path.startsWith(prefix)))
-    .map(({ path, head, branch, locked }) => ({
+  const rows: EnvRow[] = []
+  for (const { path, head, branch, locked } of await registeredWorktrees(git)) {
+    if (!prefixes.some((prefix) => path.startsWith(prefix))) continue
+    let issueBinding: EnvIssueBinding
+    try {
+      const gitDir = (await git(["-C", path, "rev-parse", "--absolute-git-dir"])).trim()
+      if (gitDir === "") throw new Error("Git returned an empty opening record directory")
+      const opening = readEnvOpenRecord(gitDir)
+      if (opening.status === "recorded") {
+        const { issue, lifetime, expiresAt } = opening.record
+        issueBinding = {
+          state: "recorded",
+          lifetime,
+          ...(issue === undefined ? {} : { issue }),
+          ...(expiresAt === undefined ? {} : { expiresAt }),
+        }
+      } else {
+        issueBinding = { state: opening.status, why: opening.why }
+      }
+    } catch (cause) {
+      issueBinding = {
+        state: "unreadable",
+        why: `opening record unreadable for ${path}: ${cause instanceof Error ? cause.message : String(cause)}`,
+      }
+    }
+    rows.push({
       name: basename(path),
       path,
       hold: locked ?? null,
+      issueBinding,
       ...(head === undefined ? {} : { head }),
       ...(branch === undefined ? {} : { branch }),
-    }))
+    })
+  }
   return { roots, rows }
 }
 
@@ -1049,7 +1093,18 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
     return 0
   }
   io.stdout(
-    `${rows.map((row) => `${row.name}  ${row.branch ?? "(detached)"}  ${row.path}${row.hold === null ? "" : row.hold === "" ? "  held" : `  hold: ${row.hold}`}`).join("\n")}\n`,
+    `${rows
+      .map((row) => {
+        const binding = row.issueBinding
+        const issue =
+          binding.state === "recorded"
+            ? (binding.issue ?? "recorded-none")
+            : binding.state === "unrecorded"
+              ? "unrecorded"
+              : `unreadable:${binding.why}`
+        return `${row.name}  ${row.branch ?? "(detached)"}  ${row.path}${row.hold === null ? "" : row.hold === "" ? "  held" : `  hold: ${row.hold}`}  issue:${issue}`
+      })
+      .join("\n")}\n`,
   )
   return 0
 }

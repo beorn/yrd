@@ -1,6 +1,7 @@
 export { runYrdExecutable, runYrdProcess, resolveSubmitter } from "./cli.ts"
 export { coreQueueCommand, type CoreQueueCommand } from "./queue-core-commands.ts"
-export { listEnvironments, openEnvironment, type EnvRow } from "./env-commands.ts"
+export { listEnvironments, openEnvironment, type EnvRow, type EnvIssueBinding } from "./env-commands.ts"
+export type { EnvLifetime } from "./env-open-record.ts"
 import { closeEnvironment as closeEnvironmentInternal, type EnvCloseOptions } from "./env-commands.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 // The package entry never forwards the internal test dependency, including from JavaScript callers.

@@ -2747,6 +2747,49 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     expect(existsSync(path)).toBe(false)
   })
 
+  // Rule 3 needs the recorded association, not a number guessed from the environment name.
+  // Existing list assertions cover paths/heads but cannot distinguish missing or unreadable bindings.
+  it("lists recorded, absent and unreadable issue bindings in JSON and human output", async () => {
+    const w = await world(":")
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openAttachedEnvironment(w.work, selected, "34127-binding-decoy")
+    const gitDir = (await gitIn(path)(["rev-parse", "--absolute-git-dir"])).trim()
+    const recordPath = join(gitDir, "yrd-open.json")
+    const expiresAt = "2099-01-01T00:00:00.000Z"
+    const cases = [
+      {
+        record: JSON.stringify({ version: 1, lifetime: "job", issue: "@test/98765-real-issue", expiresAt }),
+        binding: { state: "recorded", lifetime: "job", issue: "@test/98765-real-issue", expiresAt },
+        human: "issue:@test/98765-real-issue",
+      },
+      {
+        record: JSON.stringify({ version: 1, lifetime: "standing" }),
+        binding: { state: "recorded", lifetime: "standing" },
+        human: "issue:recorded-none",
+      },
+      { record: undefined, binding: { state: "unrecorded" }, human: "issue:unrecorded" },
+      { record: "{broken", binding: { state: "unreadable" }, human: "issue:unreadable:" },
+    ] as const
+    for (const row of cases) {
+      if (row.record === undefined) rmSync(recordPath)
+      else writeFileSync(recordPath, row.record)
+      const json = capture(w.work)
+      expect(await publicCli.listEnvironments({ json: true }, json.io), json.stderr()).toBe(0)
+      const inventory = JSON.parse(json.stdout()) as { environments: publicCli.EnvRow[] }
+      expect(inventory.environments).toHaveLength(1)
+      const actual = inventory.environments[0]!
+      expect(actual).toMatchObject({ path, issueBinding: row.binding })
+      if (actual.issueBinding.state !== "recorded") {
+        expect(actual.issueBinding.why.length).toBeGreaterThan(0)
+      } else {
+        expect(actual.issueBinding).toEqual(row.binding)
+      }
+      const human = capture(w.work)
+      expect(await publicCli.listEnvironments({}, human.io), human.stderr()).toBe(0)
+      expect(human.stdout()).toContain(row.human)
+    }
+  })
+
   it("opens, lists and closes a workdir configured through a symlink", async () => {
     const w = await world(":")
     const actual = join(w.work, "state-actual")
