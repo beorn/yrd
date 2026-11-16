@@ -2281,6 +2281,7 @@ export async function closeEnvironment(
           repo: root,
           gitProcess: adaptProcessGit(process),
           signal: context.budget.signal,
+          remainingMs: () => context.budget.remainingMs(),
           report: (line) => io.stderr(line),
         })
         const outcome = await native.remove(path, {
