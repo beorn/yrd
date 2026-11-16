@@ -23,6 +23,7 @@ import {
   openLog,
   readRunLog,
   readBranchHistory,
+  readEventQueue,
   readEventQueueWithChanges,
   initial,
   evolve,
@@ -2027,17 +2028,15 @@ export async function releaseRetainedCheckouts(
 }
 
 /** Post-merge notification appends `notified` receipts after the terminal event without changing or reopening it (30717). */
-async function notifiedOnlySince(
-  store: QueueLocation,
-  queue: string,
-  branch: string,
+function notifiedOnlySince(
+  history: NonNullable<Awaited<ReturnType<typeof readBranchHistory>>["history"]>,
   sinceTip: string | undefined,
   currentTip: string | undefined,
-): Promise<boolean> {
+): boolean {
   if (sinceTip === undefined || currentTip === undefined) return false
   if (currentTip === sinceTip) return true
-  const events = (await readBranchHistory(store, queue, branch)).history?.events
-  if (events === undefined || events.at(-1)?.id !== currentTip) return false
+  const events = history.events
+  if (events.at(-1)?.id !== currentTip) return false
   const index = events.findIndex((event) => event.id === sinceTip)
   return index !== -1 && events.slice(index + 1).every((event) => event.type === "notified")
 }
@@ -2115,12 +2114,16 @@ export async function retireMergedRootAuthor(
     reason: withdrawn ? "withdrawn" : ancestry ? "merged" : "merged by content (patch-id)",
     log,
     protections: async () => {
-      const current = await readStatus(input.store, input.queue, branch)
+      await readEventQueue(input.store, input.queue)
+      const ref = changesRef(input.queue, branch)
+      const { history } = await readBranchHistory(input.store, input.queue, branch)
+      if (history === undefined) throw new Error(`missing event chain ${ref} in ${input.store.repo}`)
+      const current = history.state
       if (
         current.status !== change.status ||
         current.reason !== change.reason ||
         current.commit !== tip ||
-        !(await notifiedOnlySince(input.store, input.queue, branch, change.tip, current.tip))
+        !notifiedOnlySince(history, change.tip, current.tip)
       ) {
         throw new Error(`${branch}: terminal history changed or reopened before root retirement`)
       }
