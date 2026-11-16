@@ -2125,7 +2125,7 @@ export async function closeEnvironment(
             details.push(`${manifest}: identity, admission time or repository coverage does not match`)
             continue
           }
-          const verified = verifyRetainedCopy(rebuilt, common)
+          const verified = await verifyRetainedCopy(rebuilt, common)
           if (verified.status !== "ok") {
             details.push(`${manifest}: ${JSON.stringify(verified)}`)
             continue

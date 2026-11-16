@@ -2550,7 +2550,7 @@ export async function retireMergedComponentAuthors(
             `root-owned component store kept: removal proof identity does not match ${author.rootCheckout}@${author.rootTip}`,
           )
         }
-        const sealed = verifyRetainedCopy(proof, author.rootCommonDirectory)
+        const sealed = await verifyRetainedCopy(proof, author.rootCommonDirectory)
         if (sealed.status !== "ok") {
           throw new Error(
             `root-owned component store kept: sealed proof ${proof.manifest} failed: ${JSON.stringify(sealed)}`,
@@ -2572,7 +2572,7 @@ export async function retireMergedComponentAuthors(
         const finalTip = (
           await git(["--bare", "for-each-ref", "--format=%(objectname)", `refs/heads/${author.branch}`])
         ).trim()
-        const unchanged = verifyRetainedCopy(proof, author.rootCommonDirectory)
+        const unchanged = await verifyRetainedCopy(proof, author.rootCommonDirectory)
         if (unchanged.status !== "ok") {
           throw new Error(
             `root-owned component store kept: sealed proof changed while reading ${proof.manifest}: ${JSON.stringify(unchanged)}`,
