@@ -80,7 +80,7 @@ import { eventHistoryEntries } from "../src/watch-change.ts"
 import type { LocalBranchProtectionResult, YrdCliIO } from "../src/types.ts"
 import type { WatchSource } from "../src/watch-pane.tsx"
 import { workdirOf } from "../src/workdir.ts"
-import type { QueueConfig } from "@yrd/queue-core"
+import type { CheckView, QueueConfig } from "@yrd/queue-core"
 
 vi.mock("node:fs", async (original) => {
   const actual = await original<typeof import("node:fs")>()
@@ -90,6 +90,9 @@ vi.mock("node:fs", async (original) => {
 vi.mock("removely", async (original) => ({ ...(await original<typeof import("removely")>()) }))
 
 const roots: string[] = []
+type ShownCheckHistory = {
+  changes: { head: string; checksNote?: string; checks?: readonly CheckView[] }[]
+}
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
@@ -1505,8 +1508,9 @@ describe("a queue is the selected origin branch carrying config", () => {
       await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" }),
       shown.stderr(),
     ).toBe(0)
-    expect(JSON.parse(shown.stdout()).changes).toEqual([expect.objectContaining({ checksNote: detail.note })])
-    expect(JSON.parse(shown.stdout()).changes[0]).not.toHaveProperty("checks")
+    const shownHistory = JSON.parse(shown.stdout()) as ShownCheckHistory
+    expect(shownHistory.changes).toEqual([expect.objectContaining({ checksNote: detail.note })])
+    expect(shownHistory.changes[0]).not.toHaveProperty("checks")
   }, 15_000)
 
   // @failure Historical Check evidence is mislabeled with today's declaration or its absence is hidden.
@@ -1568,15 +1572,15 @@ describe("a queue is the selected origin branch carrying config", () => {
         await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" }),
         shown.stderr(),
       ).toBe(0)
-      const change = JSON.parse(shown.stdout()).changes[0]
-      expect(change.checksNote).toContain(
+      const change = (JSON.parse(shown.stdout()) as ShownCheckHistory).changes[0]
+      expect(change?.checksNote).toContain(
         mode === "absent"
           ? "record names no base"
           : mode === "unreadable"
             ? "could not be read"
             : "carries no .yrd.yml",
       )
-      expect(change.checks).toEqual([
+      expect(change?.checks).toEqual([
         expect.objectContaining({ name: "current", state: "not-run" }),
         ...(mode === "absent" ? [] : [expect.objectContaining({ name: "historical", state: "passed", log })]),
       ])
@@ -1651,11 +1655,11 @@ describe("a queue is the selected origin branch carrying config", () => {
         await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" }),
         shown.stderr(),
       ).toBe(0)
-      const adopted = JSON.parse(shown.stdout()).changes.find((row: { head: string }) => row.head === base)
+      const adopted = (JSON.parse(shown.stdout()) as ShownCheckHistory).changes.find((row) => row.head === base)
       expect(adopted).toBeDefined()
       if (measured) {
-        expect(adopted.checksNote).toBeUndefined()
-        expect(adopted.checks).toEqual([
+        expect(adopted?.checksNote).toBeUndefined()
+        expect(adopted?.checks).toEqual([
           expect.objectContaining({
             name: "historical",
             state: "passed",
@@ -1663,7 +1667,7 @@ describe("a queue is the selected origin branch carrying config", () => {
           }),
         ])
       } else {
-        expect(adopted.checksNote).toContain(source)
+        expect(adopted?.checksNote).toContain(source)
         expect(adopted).not.toHaveProperty("checks")
       }
     },
