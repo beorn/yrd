@@ -18,6 +18,49 @@ function bytes(value: string): ReadableStream<Uint8Array> {
 }
 
 describe("Process", () => {
+  // A shared close cutoff forbids new children. Existing cancellation tests only stop children after spawn.
+  it.each(["before run", "during preparation"])(
+    "refuses a request aborted %s before native spawn and permits a later live request",
+    async (when) => {
+      using spawn = vi.spyOn(Bun, "spawn")
+      const abort = new AbortController()
+      const cutoff = () => abort.abort(new Error("close work cutoff reached"))
+      await using runner = createProcess({
+        inject: {
+          log: silentLog,
+          ...(when === "during preparation"
+            ? {
+                now: () => {
+                  cutoff()
+                  return performance.now()
+                },
+              }
+            : {}),
+        },
+      })
+      if (when === "before run") cutoff()
+      const error = await runner
+        .run({
+          argv: [process.execPath, "-e", 'process.stdout.write("must not start")'],
+          signal: abort.signal,
+          timeoutMs: 1_000,
+        })
+        .then(
+          () => undefined,
+          (cause: unknown) => cause,
+        )
+      expect(spawn).not.toHaveBeenCalled()
+      expect(failureEvent(error)).toMatchObject({ kind: "refusal", code: "process-aborted" })
+      await expect(
+        runner.run({
+          argv: [process.execPath, "-e", 'process.stdout.write("next")'],
+          timeoutMs: 1_000,
+        }),
+      ).resolves.toMatchObject({ exitCode: 0, stdout: "next" })
+      expect(spawn).toHaveBeenCalledTimes(1)
+    },
+  )
+
   // An invalid control frame aborts the same Process signal. Its descriptor
   // cleanup must never reach a reused descriptor in the next actual child.
   it("settles an aborted extra descriptor before later real commands reuse its resources", async () => {

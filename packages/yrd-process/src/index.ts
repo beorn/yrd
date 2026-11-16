@@ -313,6 +313,18 @@ function trackProcessGroup(pgid: number): () => void {
   return () => liveProcessGroups.delete(pgid)
 }
 
+function requireUnabortedProcessRequest(signal?: AbortSignal): void {
+  if (!signal?.aborted) return
+  throw createFailure(
+    {
+      kind: "refusal",
+      code: "process-aborted",
+      message: "yrd: Process request is already aborted; no child was started",
+    },
+    signal.reason,
+  )
+}
+
 export function createProcess(
   options: Readonly<{
     cwd?: string
@@ -370,6 +382,8 @@ export function createProcess(
       if (closing || scope.disposed) {
         throw createFailure({ kind: "infrastructure", code: "process-closed", message: "yrd: Process is closed" })
       }
+      // A shared work cutoff closes admission before a native child can acquire resources.
+      requireUnabortedProcessRequest(request.signal)
       const settled = Promise.withResolvers<void>()
       active.add(settled.promise)
       using _activeRun = {
@@ -431,6 +445,7 @@ export function createProcess(
       const chatter = isGitInvocation(argv)
       using span = chatter && log.trace === undefined ? undefined : log.span?.("run", { argv, cwd: request.cwd ?? cwd })
       try {
+        requireUnabortedProcessRequest(signal)
         const child = spawn(argv, {
           cwd: request.cwd ?? cwd,
           env: request.env === undefined ? env : definedEnv(request.env),
