@@ -97,7 +97,8 @@ vi.mock("@yrd/queue-core", async (importOriginal) => {
           ...store.backend,
           ...(fetchRefs && {
             fetchRefs: async (...fetchArgs: Parameters<typeof fetchRefs>) => {
-              const refs = fetchArgs[1]
+              const rawRefs = fetchArgs[1]
+              const refs = typeof rawRefs === "string" ? [rawRefs] : rawRefs
               if (refs.some((ref) => ref.includes("/changes/"))) branchHistoryAcquisitions++
               return fetchRefs(...fetchArgs)
             },
