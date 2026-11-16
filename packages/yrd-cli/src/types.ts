@@ -9,6 +9,9 @@
  * not run on.
  */
 
+/** A containing operation's shared work allowance, independent of the close command's policy. */
+export type CloseExecutionBudget = Readonly<{ signal: AbortSignal; remainingMs(): number }>
+
 /**
  * Every code a Yrd command may exit with (plan § Commands): 0 pass, 1 fail,
  * 2 stuck. A gitlink that moved under `queue up` is a 0 like any other intended

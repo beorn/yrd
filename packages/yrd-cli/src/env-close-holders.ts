@@ -10,7 +10,7 @@ import {
   type ProcessCensus,
   type UnreadableProcess,
 } from "removely"
-import type { YrdCliIO } from "./types.ts"
+import type { YrdCliIO, CloseExecutionBudget } from "./types.ts"
 
 export function validateLiveEnvironmentUses(uses: unknown): readonly Readonly<{ path: string; reason: string }>[] {
   if (!Array.isArray(uses)) throw new Error("live environment-use reader did not return an array")
@@ -145,7 +145,17 @@ export async function admitEnvironmentClose(
   path: string,
   io: YrdCliIO,
   censusSource?: () => Promise<ProcessCensus<"same-uid">>,
+  budget?: CloseExecutionBudget,
 ): Promise<CloseAdmission> {
+  const scanAllowance = () => {
+    if (budget === undefined) return 2_000
+    budget.signal.throwIfAborted()
+    const remaining = budget.remainingMs()
+    if (!Number.isFinite(remaining) || remaining <= 0)
+      throw new Error("environment close scan budget exhausted or invalid")
+    return Math.min(2_000, remaining)
+  }
+  const deadlineMs = scanAllowance()
   const censusStartedAt = Date.now()
   const observedAt = new Date(censusStartedAt).toISOString()
   let snapshot: ProcessCwdProjection
@@ -156,7 +166,12 @@ export async function admitEnvironmentClose(
     // The existing cwd projection derives these exact facts from this same collector.
     // Keep the ppid evidence alongside them so exemptions never come from another scan.
     const census = await (censusSource === undefined
-      ? inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+      ? inspectProcessCensus({
+          scope: "same-uid",
+          sources: ["cwd"],
+          deadlineMs,
+          ...(budget === undefined ? {} : { signal: budget.signal }),
+        })
       : censusSource())
     snapshot = {
       rows: census.rows.flatMap((row) => {
@@ -181,8 +196,9 @@ export async function admitEnvironmentClose(
       parent = row.ppid
     }
   } else {
-    snapshot = await inspectProcessCwds({ deadlineMs: 2_000 })
+    snapshot = await inspectProcessCwds({ deadlineMs, ...(budget === undefined ? {} : { signal: budget.signal }) })
   }
+  scanAllowance()
   // The walk and the projection built from it are this admission's census phase. One close request is
   // one walk here — @cto declined reusing the round's snapshot across requests (40ms is not worth a
   // wider window on a seat-requested close) — so this number is the whole cost of the census.

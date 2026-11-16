@@ -2747,6 +2747,27 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     expect(existsSync(path)).toBe(false)
   })
 
+  it("close admission forwards the remaining scan allowance and shared cancellation", async () => {
+    const w = await world(":")
+    const abort = new AbortController()
+    const budget = { signal: abort.signal, remainingMs: () => 37 }
+    const run = capture(w.work)
+    processCensus.mockClear()
+    await Reflect.apply(admitEnvironmentClose, undefined, [w.work, run.io, undefined, budget])
+    expect(processCensus).toHaveBeenLastCalledWith({
+      scope: "same-uid",
+      sources: ["cwd"],
+      deadlineMs: 37,
+      signal: abort.signal,
+    })
+    abort.abort(new Error("scan work cutoff reached"))
+    processCensus.mockClear()
+    await expect(Reflect.apply(admitEnvironmentClose, undefined, [w.work, run.io, undefined, budget])).rejects.toBe(
+      abort.signal.reason,
+    )
+    expect(processCensus).not.toHaveBeenCalled()
+  })
+
   // Public close execution is a production seam: old reporting and private census-injection tests cannot prove it.
   it("public close starts no process with an already-aborted execution budget", async () => {
     const w = await world(":")
@@ -2769,27 +2790,40 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     expect(existsSync(path)).toBe(true)
   })
 
-  it("public refuse mode keeps an uncertifiable environment without filing a durable close request", async () => {
-    const w = await world(":")
-    const head = (await w.git(["rev-parse", "HEAD"])).trim()
-    const { path } = await openAttachedEnvironment(w.work, head, "refuse-incomplete")
-    const incomplete = await incompleteCensus()
-    processCensus.mockResolvedValue(incomplete)
-    const run = capture(w.work)
-    const error = await publicCli
-      .closeEnvironment(path, { json: true }, run.io, {
-        onIncompleteCensus: "refuse",
-        budget: { signal: new AbortController().signal, remainingMs: () => 30_000 },
-      })
-      .then(
-        () => undefined,
-        (cause: unknown) => cause,
-      )
-    expect(error).toBeInstanceOf(Error)
-    expect(existsSync(path)).toBe(true)
-    expect(listCloseRequests(await workdirOf(w.git))).toEqual([])
-    expect(JSON.parse(run.stdout())).toMatchObject({ kept: true, queued: false, path })
-  })
+  it.each(["initial", "after teardown"])(
+    "public refuse mode reports a kept environment at the %s census without queueing",
+    async (phase) => {
+      const w = await world(":", "true")
+      const head = (await w.git(["rev-parse", "HEAD"])).trim()
+      const { path } = await openAttachedEnvironment(w.work, head, `refuse-${phase.replaceAll(" ", "-")}`)
+      const complete = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+      const incomplete = await incompleteCensus()
+      for (const json of [true, false]) {
+        processCensus.mockReset()
+        processCensus.mockResolvedValue(incomplete)
+        if (phase === "after teardown") processCensus.mockResolvedValueOnce(complete)
+        const run = capture(w.work)
+        const error = await publicCli
+          .closeEnvironment(path, { json }, run.io, {
+            onIncompleteCensus: "refuse",
+            budget: { signal: new AbortController().signal, remainingMs: () => 30_000 },
+          })
+          .then(
+            () => undefined,
+            (cause: unknown) => cause,
+          )
+        expect(error).toBeInstanceOf(Error)
+        expect(processCensus).toHaveBeenCalledTimes(phase === "initial" ? 1 : 2)
+        expect(existsSync(path)).toBe(true)
+        expect(listCloseRequests(await workdirOf(w.git))).toEqual([])
+        if (json) expect(JSON.parse(run.stdout())).toMatchObject({ kept: true, queued: false, path })
+        else {
+          expect(run.stdout()).toContain(`kept environment ${path}:`)
+          expect(run.stdout()).toContain("not queued")
+        }
+      }
+    },
+  )
 
   it("public close rechecks caller policy in the native remover and preserves a refused target", async () => {
     const w = await world(":")

@@ -67,7 +67,8 @@ import { issueComparer } from "./issue-sameness.ts"
 import { ISSUES_CODES } from "./issues/declaration.ts"
 import { runIssuesVerb } from "./issues/run.ts"
 import { originHead } from "./queue-location.ts"
-import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
+import type { YrdCliExitCode, YrdCliIO, CloseExecutionBudget } from "./types.ts"
+export type { CloseExecutionBudget } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 import { censusRetainedStores, retainedCloseLine } from "./retained-census.ts"
 import { formatYrdCommand } from "./command-format.ts"
@@ -162,7 +163,6 @@ export class IncompleteCensusError extends Error {
 
 /** Who runs the close decides what an uncertifiable census means. */
 export type CloseAdmissionMode = "delegate" | "refuse"
-export type CloseExecutionBudget = Readonly<{ signal: AbortSignal; remainingMs(): number }>
 export type EnvironmentRemovalTarget = Readonly<{ name: string; path: string; branch?: string; head?: string }>
 export type CloseExecutionContext = Readonly<{
   onIncompleteCensus?: CloseAdmissionMode
@@ -1917,19 +1917,13 @@ export async function closeEnvironment(
     io.stderr("yrd: owner leases were not checked because no host reader is wired.\n")
   }
   await assertNoLiveEnvironmentUse(path, io)
-  const admission = await admitEnvironmentClose(path, io, censusSource)
+  const admission = await admitEnvironmentClose(path, io, censusSource, context?.budget)
   if (admission.kind === "needs-delegation") {
     if (options.dryRun === true) {
       throw uncertified(path, admission, "in preview; a real close would file a queue close request instead")
     }
     if (onIncompleteCensus === "refuse") {
-      if (context !== undefined)
-        io.stdout(
-          options.json === true
-            ? `${JSON.stringify({ kept: true, queued: false, path, reason: admission.refusal })}\n`
-            : `kept environment ${path}: ${admission.refusal}; not queued\n`,
-        )
-      throw uncertified(path, admission)
+      throw uncertified(path, admission, "", context === undefined ? undefined : { json: options.json === true, io })
     }
     return queueDelegatedClose(path, options, io, workdir, commit, admission)
   }
@@ -2208,11 +2202,16 @@ export async function closeEnvironment(
     if (await concurrentClose(error)) return 0
     throw error
   }
-  const recheck = await admitEnvironmentClose(path, io, censusSource)
+  const recheck = await admitEnvironmentClose(path, io, censusSource, context?.budget)
   if (recheck.kind === "needs-delegation") {
     // Teardown already ran, so delegating now would run it twice in a context
     // that cannot tell what this one did. Refuse loudly and preserve instead.
-    throw uncertified(path, recheck, "after teardown")
+    throw uncertified(
+      path,
+      recheck,
+      "after teardown",
+      context === undefined ? undefined : { json: options.json === true, io },
+    )
   }
   await beforeRemove?.()
   // The root composition binds every selected owning destination to its
@@ -2466,7 +2465,14 @@ function uncertified(
   path: string,
   admission: Extract<CloseAdmission, { kind: "needs-delegation" }>,
   when = "",
+  output?: Readonly<{ json: boolean; io: YrdCliIO }>,
 ): IncompleteCensusError {
+  if (output !== undefined)
+    output.io.stdout(
+      output.json
+        ? `${JSON.stringify({ kept: true, queued: false, path, reason: admission.refusal, ...(when === "" ? {} : { when }) })}\n`
+        : `kept environment ${path}: ${admission.refusal}${when === "" ? "" : ` ${when}`}; not queued\n`,
+    )
   return new IncompleteCensusError(
     admission.refusal,
     admission.census,
