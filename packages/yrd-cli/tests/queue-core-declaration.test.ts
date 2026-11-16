@@ -1500,7 +1500,175 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(detail.note).toContain(source)
     // The old logs sit under the queue's workdir, whose resolution workdir.test.ts owns (25716 row 9).
     expect(detail.note).toContain(join(await workdirOf(git), "checks", `${branch}@${head}`))
+    const shown = capture(repo)
+    expect(
+      await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" }),
+      shown.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(shown.stdout()).changes).toEqual([expect.objectContaining({ checksNote: detail.note })])
+    expect(JSON.parse(shown.stdout()).changes[0]).not.toHaveProperty("checks")
   }, 15_000)
+
+  // @failure Historical Check evidence is mislabeled with today's declaration or its absence is hidden.
+  // @level l2 @consumer queue show JSON, through the existing real event-chain command seam.
+  it.each(["absent", "unreadable", "missing-config"] as const)(
+    "keeps measured checks and explains a %s judgment declaration",
+    async (mode) => {
+      const repo = await world('checks:\n  - current: {run: "bun run current"}\n')
+      const git = gitIn(repo)
+      const head = (await git(["rev-parse", "HEAD"])).trim()
+      const queueTip = await createQueue(repo, "main", head, new Date())
+      const config = await readConfig(git, head, { branch: "main", remote: "origin" })
+      if (config === undefined) throw new Error("fixture target lost its declaration")
+      let base: string | undefined
+      if (mode !== "absent") {
+        if (mode === "missing-config") unlinkSync(join(repo, ".yrd.yml"))
+        else writeFileSync(join(repo, ".yrd.yml"), "checks: [\n")
+        await git(["add", ".yrd.yml"])
+        await git(["commit", "--quiet", "-m", "historical unavailable declaration"])
+        base = (await git(["rev-parse", "HEAD"])).trim()
+      }
+      const branch = "task/unavailable-declaration"
+      const log = join(repo, "historical.log")
+      await (
+        await openEvents({
+          ...createEventStore(repo, "origin", git.selection),
+          ref: changesRef("main", branch),
+          writer: "yrd",
+        })
+      ).append(
+        [
+          changeInput("opened", { queueTip, at: new Date(), commit: head, base: head, by: "yrd" }),
+          changeInput("verifying", { queueTip, at: new Date(), commit: head }),
+          changeInput("checking", { queueTip, at: new Date() }),
+          changeInput("merging", {
+            queueTip,
+            at: new Date(),
+            commit: head,
+            ...(base === undefined
+              ? {}
+              : {
+                  base,
+                  config: config.blob,
+                  checks: [
+                    {
+                      run: { name: "historical", result: "pass", exit: 0, durationMs: 12, log },
+                      attempt: 1,
+                      phase: "merge",
+                    },
+                  ],
+                }),
+          }),
+          changeInput("merged", { queueTip, at: new Date(), commit: head, base: head }),
+        ],
+        { expect: null },
+      )
+      const shown = capture(repo)
+      expect(
+        await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" }),
+        shown.stderr(),
+      ).toBe(0)
+      const change = JSON.parse(shown.stdout()).changes[0]
+      expect(change.checksNote).toContain(
+        mode === "absent"
+          ? "record names no base"
+          : mode === "unreadable"
+            ? "could not be read"
+            : "carries no .yrd.yml",
+      )
+      expect(change.checks).toEqual([
+        expect.objectContaining({ name: "current", state: "not-run" }),
+        ...(mode === "absent" ? [] : [expect.objectContaining({ name: "historical", state: "passed", log })]),
+      ])
+    },
+    15_000,
+  )
+
+  it.each([true, false])(
+    "uses adopted judgment evidence without inventing checks (measured=%s)",
+    async (measured) => {
+      const repo = await world('checks:\n  - historical: {run: "bun run historical"}\n')
+      const git = gitIn(repo)
+      const base = (await git(["rev-parse", "HEAD"])).trim()
+      const queueTip = await createQueue(repo, "main", base, new Date())
+      const config = await readConfig(git, base, { branch: "main", remote: "origin" })
+      if (config === undefined) throw new Error("fixture target lost its declaration")
+      writeFileSync(join(repo, ".yrd.yml"), 'checks:\n  - current: {run: "bun run current"}\n')
+      await git(["add", ".yrd.yml"])
+      await git(["commit", "--quiet", "-m", "current declaration differs from adopted judgment"])
+      await git(["push", "--quiet", "origin", "main"])
+      const head = (await git(["rev-parse", "HEAD"])).trim()
+      const branch = "task/adopted-judgment"
+      const source = `refs/yrd/main/${branch}@${base}@${base}`
+      const packed =
+        changeInput("merging", {
+          queueTip,
+          at: new Date(),
+          commit: base,
+          base,
+          config: config.blob,
+          checks: [
+            {
+              run: { name: "historical", result: "pass", exit: 0, durationMs: 12, log: join(repo, "adopted.log") },
+              attempt: 1,
+              phase: "merge",
+            },
+          ],
+        }).props?.filter(([key]) => key === "Check") ?? []
+      await (
+        await openEvents({
+          ...createEventStore(repo, "origin", git.selection),
+          ref: changesRef("main", branch),
+          writer: "yrd",
+        })
+      ).append(
+        [
+          changeInput("opened", { queueTip, at: new Date(), commit: head, by: "yrd" }),
+          changeInput("cancelled", { queueTip, at: new Date(), reason: "withdrawn" }),
+          {
+            type: "adopted",
+            props: [
+              ["Queue", queueTip],
+              ["Time", new Date().toISOString()],
+              ["By", "yrd-adopter"],
+              ["Adopted-Opened", "2026-10-01T12:00:00.000Z"],
+              ["Adopted-Head", base],
+              ["Adopted-Status", "merged"],
+              ["Adopted-Ended", "2026-10-01T12:30:00.000Z"],
+              ["Adopted-Submitter", "fixture"],
+              ["Adopted-Merge", base],
+              ["Adopted-Base", base],
+              ["Migrated-From", source],
+              ...(measured ? packed : []),
+            ],
+            keeps: [head, base, queueTip],
+          },
+        ],
+        { expect: null },
+      )
+      const shown = capture(repo)
+      expect(
+        await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" }),
+        shown.stderr(),
+      ).toBe(0)
+      const adopted = JSON.parse(shown.stdout()).changes.find((row: { head: string }) => row.head === base)
+      expect(adopted).toBeDefined()
+      if (measured) {
+        expect(adopted.checksNote).toBeUndefined()
+        expect(adopted.checks).toEqual([
+          expect.objectContaining({
+            name: "historical",
+            state: "passed",
+            spec: expect.objectContaining({ run: "bun run historical" }),
+          }),
+        ])
+      } else {
+        expect(adopted.checksNote).toContain(source)
+        expect(adopted).not.toHaveProperty("checks")
+      }
+    },
+    15_000,
+  )
 
   // @failure a listing printed ~100 KB of gap prose per reverted-paths row, and one show printed the
   //          same stored report twice (28195).

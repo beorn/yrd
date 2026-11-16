@@ -5647,10 +5647,9 @@ export async function coreQueueCommand(
           request.all === true
             ? `Read all event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and ${archivedChangesPrefix(config.target.branch)}, and direct target commits at ${config.target.remote}; draft branches are outside this reading.`
             : `Read ${changesRef(config.target.branch, request.branch as string)} and ${archivedChangesPrefix(config.target.branch)}${request.branch as string} at ${config.target.remote}; draft branches are outside this reading.`
-        const views = new Map<string, Readonly<{ checks: readonly CheckView[]; note?: string }>>()
+        const views = new Map<Row, Readonly<{ checks: readonly CheckView[]; note?: string }>>()
         for (const history of histories) {
           const run = reading.journals.runs.get(journalKey(history.branch, history.head))?.[0]
-          const declared = await declarationFor(git, config, history.base)
           const live =
             run?.running === undefined
               ? undefined
@@ -5658,10 +5657,15 @@ export async function coreQueueCommand(
                   name: run.running.name,
                   ...(run.running.log === undefined ? {} : { log: run.running.log }),
                 }
-          views.set(`${history.branch}@${history.head}`, {
-            checks: checksOf([], endingOf(history), declared.checks, live, run?.checks),
-            ...(declared.note === undefined ? {} : { note: declared.note }),
-          })
+          if (history.format === "event") {
+            views.set(history, await eventCheckViews(git, config, history, history.events, live, run?.checks, workdir))
+          } else {
+            const declared = await declarationFor(git, config, history.base)
+            views.set(history, {
+              checks: checksOf([], endingOf(history), declared.checks, live, run?.checks),
+              ...(declared.note === undefined ? {} : { note: declared.note }),
+            })
+          }
         }
         const selectedBranches = new Set(branches)
         const historicalDiagnostics = new Set(
@@ -5692,7 +5696,7 @@ export async function coreQueueCommand(
             ...statusFact(),
             queue: name,
             changes: histories.map((history) => {
-              const view = views.get(`${history.branch}@${history.head}`)
+              const view = views.get(history)
               return {
                 ...history,
                 ...(view?.checks === undefined || view.checks.length === 0 ? {} : { checks: view.checks }),
@@ -5707,8 +5711,9 @@ export async function coreQueueCommand(
             ? `no change for ${request.branch} on ${name}. ${scope}`
             : [
                 histories
-                  .map(({ events, ...row }, index) => {
-                    const view = views.get(`${row.branch}@${row.head}`)
+                  .map((history, index) => {
+                    const { events, ...row } = history
+                    const view = views.get(history)
                     // #28195: the row’s stored diagnostic is its reverted-paths reason, and `show` renders
                     // that reason in FULL exactly once, from the event that carries it. The raw event line
                     // below states the same finding as the one-line summary, so the report is neither
@@ -6718,6 +6723,41 @@ function missedSelector(terms: readonly string[], queue: string, matched: number
 
 /** One reading of the queue as the pane consumes it. */
 
+/** Select check evidence from one opened segment, shared by history and watch detail. */
+async function eventCheckViews(
+  git: Git,
+  config: QueueConfig,
+  row: Row,
+  events: EventHistoryRow["events"],
+  live?: Parameters<typeof checksOf>[3],
+  measured?: Parameters<typeof checksOf>[4],
+  workdir?: string,
+  adoptedBase?: string,
+): Promise<Readonly<{ checks: readonly CheckView[]; note?: string }>> {
+  const opened = events.findLastIndex((event) => event.type === "opened")
+  const selected = opened === -1 ? events : events.slice(opened)
+  const adopted = selected.length === 1 && selected[0]?.type === "adopted"
+  const segment = adopted ? selected : selected.filter((event) => event.type !== "adopted")
+  const values = (key: string): readonly string[] =>
+    segment.flatMap((event) => event.props.filter(([name]) => name === key).map(([, value]) => value))
+  const packed = values("Check")
+  const judgment = segment.findLast((event) => event.props.some(([name]) => name === "Check"))
+  const judgmentBase = judgment?.props.find(([name]) => name === (adopted ? "Adopted-Base" : "Base"))?.[1]
+  const source = values("Migrated-From").at(-1)
+  const noMigratedChecks = source !== undefined && packed.length === 0
+  const declared = noMigratedChecks
+    ? undefined
+    : await declarationFor(git, config, judgmentBase ?? (packed.length > 0 ? adoptedBase : undefined))
+  const decided = row.state === "merged" || row.state === "failed" || row.state === "stuck" || row.state === "cancelled"
+  const views =
+    declared === undefined ? [] : checksOf(packed, endingOf(row), declared.checks, live, decided ? undefined : measured)
+  const note =
+    noMigratedChecks && source !== undefined
+      ? `Migrated change has no check-step detail in its event history. Retained legacy record: ${source}. Old check logs: ${join(workdir ?? (await workdirOf(git)), "checks", changeName({ branch: row.branch, head: row.head }))} (if present on this machine).`
+      : declared?.note
+  return { checks: views, ...(note === undefined ? {} : { note }) }
+}
+
 /** Open exactly the event tip shown in the table, including every event in its history. */
 export async function openEventDetail(
   git: Git,
@@ -6744,35 +6784,18 @@ export async function openEventDetail(
     row.branch,
     selected.tip,
   )
-  const opened = events.findLastIndex((event) => event.type === "opened")
-  const segment = (opened === -1 ? events : events.slice(opened)).filter((event) => event.type !== "adopted")
-  const values = (key: string): readonly string[] =>
-    segment.flatMap((event) => event.props.filter(([name]) => name === key).map(([, value]) => value))
-  const packed = values("Check")
-  const judgment = segment.findLast((event) => event.props.some(([name]) => name === "Check"))
-  const judgmentBase = judgment?.props.find(([name]) => name === "Base")?.[1]
-  const source = values("Migrated-From").at(-1)
-  const noMigratedChecks = source !== undefined && packed.length === 0
-  const declared = noMigratedChecks
-    ? undefined
-    : await declarationFor(git, config, judgmentBase ?? (packed.length > 0 ? selected.adoptedBase : undefined))
-  const decided = row.state === "merged" || row.state === "failed" || row.state === "stuck" || row.state === "cancelled"
-  const views =
-    declared === undefined
-      ? []
-      : checksOf(
-          packed,
-          endingOf(row),
-          declared.checks,
-          row.live === undefined
-            ? undefined
-            : { name: row.live.check, ...(row.live.log === undefined ? {} : { log: row.live.log }) },
-          decided ? undefined : item.run?.checks,
-        )
-  const note =
-    noMigratedChecks && source !== undefined
-      ? `Migrated change has no check-step detail in its event history. Retained legacy record: ${source}. Old check logs: ${join(workdir ?? (await workdirOf(git)), "checks", changeName({ branch: row.branch, head: row.head }))} (if present on this machine).`
-      : declared?.note
+  const { checks: views, note } = await eventCheckViews(
+    git,
+    config,
+    row,
+    events,
+    row.live === undefined
+      ? undefined
+      : { name: row.live.check, ...(row.live.log === undefined ? {} : { log: row.live.log }) },
+    item.run?.checks,
+    workdir,
+    selected.adoptedBase,
+  )
   return {
     row,
     run: runOf(row, label, views, item.run?.id ?? row.run, item.run?.number),
