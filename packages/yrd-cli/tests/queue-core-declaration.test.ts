@@ -1439,6 +1439,25 @@ describe("a queue is the selected origin branch carrying config", () => {
           expect.objectContaining({ name: "unit", state: "passed", log, output: "unit passed\n" }),
         ])
         expect(detail.note).toBeUndefined()
+
+        // Queue history has its own declaration projection. Distinct opening,
+        // judgment and current target declarations must not change measured checks.
+        await git(["push", "--quiet", "origin", "main"])
+        const shown = capture(repo)
+        expect(
+          await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" }),
+          shown.stderr(),
+        ).toBe(0)
+        const history = JSON.parse(shown.stdout()) as {
+          changes: { checksNote?: string; checks: { name: string; state: string; spec: { run: string } }[] }[]
+        }
+        expect(history.changes).toHaveLength(2)
+        for (const change of history.changes) {
+          expect(change.checksNote).toBeUndefined()
+          expect(change.checks.map((check) => check.name)).toEqual(["unit"])
+          expect(change.checks[0]?.spec.run).toBe("bun run unit")
+        }
+        expect(history.changes.map((change) => change.checks[0]?.state)).toEqual(["passed", "failed"])
       } else {
         expect(detail.checks.map((check) => check.name)).toEqual(["unit"])
         expect(detail.note).toContain("record names no base")
