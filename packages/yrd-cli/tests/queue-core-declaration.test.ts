@@ -1364,7 +1364,10 @@ describe("a queue is the selected origin branch carrying config", () => {
   it.each([true, false])(
     "projects stored event Check results into watch detail (judgment base=%s)",
     async (measured) => {
-      const repo = await world('checks:\n  - unit: {run: "bun run unit"}\n')
+      const repo = await world(
+        'checks:\n  - unit: {run: "bun run unit"}\n' +
+          (measured ? '  - integration: {run: "bun run integration"}\n' : ""),
+      )
       const git = gitIn(repo)
       const store = createEventStore(repo, "origin", git.selection)
       const head = (await git(["rev-parse", "HEAD"])).trim()
@@ -1374,7 +1377,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       await git(["add", ".yrd.yml"])
       await git(["commit", "-m", "opened custody declaration"])
       const openedBase = (await git(["rev-parse", "HEAD"])).trim()
-      writeFileSync(join(repo, ".yrd.yml"), 'checks:\n  - merged-only: {run: "true"}\n')
+      writeFileSync(
+        join(repo, ".yrd.yml"),
+        'checks:\n  - merged-only: {run: "true"}\n  - integration: {run: "bun run integration"}\n',
+      )
       await git(["add", ".yrd.yml"])
       await git(["commit", "-m", "merged custody declaration"])
       const mergedBase = (await git(["rev-parse", "HEAD"])).trim()
@@ -1384,6 +1390,20 @@ describe("a queue is the selected origin branch carrying config", () => {
       const oldLog = join(repo, "old-unit.log")
       writeFileSync(log, "unit passed\n")
       writeFileSync(oldLog, "old attempt failed\n")
+      // R1: the newest journal for this same branch/head describes another
+      // attempt. Neither ended segment may inherit its live check marker.
+      const workdir = await workdirOf(git)
+      const journal = openLog(join(workdir, "logs"))
+      journal.write({ kind: "run", base: head })
+      journal.write({
+        kind: "check",
+        branch,
+        head,
+        name: "integration",
+        phase: "merge",
+        start: new Date().toISOString(),
+        log: join(repo, "integration.log"),
+      })
       await (
         await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
       ).append(
@@ -1428,7 +1448,13 @@ describe("a queue is the selected origin branch carrying config", () => {
                 }
               : {}),
           }),
-          changeInput("merged", { queueTip, at: new Date("2026-09-22T14:05:00.000Z"), commit: head, base: mergedBase }),
+          changeInput("merged", {
+            queueTip,
+            at: new Date("2026-09-22T14:05:00.000Z"),
+            commit: head,
+            base: mergedBase,
+            run: journal.id,
+          }),
         ],
         { expect: null },
       )
@@ -1440,6 +1466,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       if (measured) {
         expect(detail.checks).toEqual([
           expect.objectContaining({ name: "unit", state: "passed", log, output: "unit passed\n" }),
+          expect.objectContaining({ name: "integration", state: "not-run" }),
         ])
         expect(detail.note).toBeUndefined()
 
@@ -1448,7 +1475,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         await git(["push", "--quiet", "origin", "main"])
         const shown = capture(repo)
         expect(
-          await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" }),
+          await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main", workdir }),
           shown.stderr(),
         ).toBe(0)
         const history = JSON.parse(shown.stdout()) as {
@@ -1457,10 +1484,37 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect(history.changes).toHaveLength(2)
         for (const change of history.changes) {
           expect(change.checksNote).toBeUndefined()
-          expect(change.checks.map((check) => check.name)).toEqual(["unit"])
+          expect(change.checks.map((check) => check.name)).toEqual(["unit", "integration"])
           expect(change.checks[0]?.spec.run).toBe("bun run unit")
+          expect(change.checks[1]?.state).toBe("not-run")
         }
         expect(history.changes.map((change) => change.checks[0]?.state)).toEqual(["passed", "failed"])
+
+        // An active attempt still consumes its journal; only ended segments
+        // with this same branch/head must reject the later live observation.
+        if (selected.tip === undefined) throw new Error("fixture selected event lost its tip")
+        await (
+          await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+        ).append(
+          [
+            changeInput("opened", { queueTip, at: new Date(), commit: head, by: "yrd" }),
+            changeInput("verifying", { queueTip, at: new Date(), commit: head }),
+            changeInput("checking", { queueTip, at: new Date(), run: journal.id }),
+          ],
+          { expect: selected.tip },
+        )
+        const active = capture(repo)
+        expect(
+          await coreQueueCommand(repo, active.io, { command: "show", branch }, { json: true, queue: "main", workdir }),
+          active.stderr(),
+        ).toBe(0)
+        const activeHistory = JSON.parse(active.stdout()) as ShownCheckHistory
+        expect(activeHistory.changes[0]?.checks?.find((check) => check.name === "integration")?.state).toBe("running")
+        expect(
+          activeHistory.changes
+            .slice(1)
+            .map((change) => change.checks?.find((check) => check.name === "integration")?.state),
+        ).toEqual(["not-run", "not-run"])
       } else {
         expect(detail.checks.map((check) => check.name)).toEqual(["unit"])
         expect(detail.note).toContain("record names no base")

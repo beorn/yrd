@@ -6750,7 +6750,9 @@ async function eventCheckViews(
     : await declarationFor(git, config, judgmentBase ?? (packed.length > 0 ? adoptedBase : undefined))
   const decided = row.state === "merged" || row.state === "failed" || row.state === "stuck" || row.state === "cancelled"
   const views =
-    declared === undefined ? [] : checksOf(packed, endingOf(row), declared.checks, live, decided ? undefined : measured)
+    declared === undefined
+      ? []
+      : checksOf(packed, endingOf(row), declared.checks, decided ? undefined : live, decided ? undefined : measured)
   const note =
     noMigratedChecks && source !== undefined
       ? `Migrated change has no check-step detail in its event history. Retained legacy record: ${source}. Old check logs: ${join(workdir ?? (await workdirOf(git)), "checks", changeName({ branch: row.branch, head: row.head }))} (if present on this machine).`
