@@ -31,7 +31,6 @@ import {
   readConfig,
   resolveGitSelection,
   readRemoteCommit,
-  readStatus,
   refAt,
   registeredWorktrees,
   retireLocalBranch,
@@ -2027,6 +2026,18 @@ export async function releaseRetainedCheckouts(
   return report
 }
 
+async function readValidatedChangeHistory(
+  store: QueueLocation,
+  queue: string,
+  branch: string,
+): Promise<NonNullable<Awaited<ReturnType<typeof readBranchHistory>>["history"]>> {
+  await readEventQueue(store, queue)
+  const ref = changesRef(queue, branch)
+  const { history } = await readBranchHistory(store, queue, branch)
+  if (history === undefined) throw new Error(`missing event chain ${ref} in ${store.repo}`)
+  return history
+}
+
 /** Post-merge notification appends `notified` receipts after the terminal event without changing or reopening it (30717). */
 function notifiedOnlySince(
   history: NonNullable<Awaited<ReturnType<typeof readBranchHistory>>["history"]>,
@@ -2114,10 +2125,7 @@ export async function retireMergedRootAuthor(
     reason: withdrawn ? "withdrawn" : ancestry ? "merged" : "merged by content (patch-id)",
     log,
     protections: async () => {
-      await readEventQueue(input.store, input.queue)
-      const ref = changesRef(input.queue, branch)
-      const { history } = await readBranchHistory(input.store, input.queue, branch)
-      if (history === undefined) throw new Error(`missing event chain ${ref} in ${input.store.repo}`)
+      const history = await readValidatedChangeHistory(input.store, input.queue, branch)
       const current = history.state
       if (
         current.status !== change.status ||
@@ -2614,11 +2622,12 @@ export async function retireMergedComponentAuthors(
             return [`protected component target/default branch ${author.branch} in ${repo} from ${author.remote}`]
           }
           await activeAuthorCheckout(author, input.selection, input.env)
-          const state = await readStatus(input.store, input.queue, author.rootBranch)
+          const history = await readValidatedChangeHistory(input.store, input.queue, author.rootBranch)
+          const state = history.state
           if (
             state.status !== "merged" ||
             state.commit !== author.rootTip ||
-            !(await notifiedOnlySince(input.store, input.queue, author.rootBranch, author.rootEventTip, state.tip))
+            !notifiedOnlySince(history, author.rootEventTip, state.tip)
           ) {
             throw new Error(`root change ${author.rootBranch} changed or reopened since author capture`)
           }
