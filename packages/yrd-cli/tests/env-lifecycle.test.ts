@@ -78,6 +78,36 @@ vi.mock("removely", async (importOriginal) => {
   }
 })
 
+let branchHistoryAcquisitions = 0
+let queueValidations = 0
+vi.mock("@yrd/queue-core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@yrd/queue-core")>()
+  return {
+    ...actual,
+    readEventQueue: async (...args: Parameters<typeof actual.readEventQueue>) => {
+      queueValidations++
+      return actual.readEventQueue(...args)
+    },
+    createEventStore: (...args: Parameters<typeof actual.createEventStore>) => {
+      const store = actual.createEventStore(...args)
+      const fetchRefs = store.backend.fetchRefs
+      return {
+        ...store,
+        backend: {
+          ...store.backend,
+          ...(fetchRefs && {
+            fetchRefs: async (...fetchArgs: Parameters<typeof fetchRefs>) => {
+              const refs = fetchArgs[1]
+              if (refs.some((ref) => ref.includes("/changes/"))) branchHistoryAcquisitions++
+              return fetchRefs(...fetchArgs)
+            },
+          }),
+        },
+      }
+    },
+  }
+})
+
 const roots: string[] = []
 const realProcessCensus = (await vi.importActual<typeof import("removely")>("removely")).inspectProcessCensus
 const processCensus = vi.mocked(removely.inspectProcessCensus)
@@ -133,7 +163,10 @@ function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout
 
 async function openEnvironment(cwd: string, commit: string): Promise<Readonly<{ path: string; head: string }>> {
   const run = capture(cwd)
-  expect(await runYrdProcess(["bun", "yrd", "env", "open", commit, "--json", "--expires", "1d"], run.io), run.stderr()).toBe(0)
+  expect(
+    await runYrdProcess(["bun", "yrd", "env", "open", commit, "--json", "--expires", "1d"], run.io),
+    run.stderr(),
+  ).toBe(0)
   expect(JSON.parse(run.stdout())).toMatchObject({ base: commit, head: commit })
   expect(run.stderr()).not.toMatch(/reus/iu)
   return JSON.parse(run.stdout()) as { path: string; head: string }
@@ -150,7 +183,10 @@ async function openAttachedEnvironment(
   bay: string,
 ): Promise<Readonly<{ path: string; branch: string }>> {
   const run = capture(cwd)
-  expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", bay, "--json", "--expires", "1d"], run.io), run.stderr()).toBe(0)
+  expect(
+    await runYrdProcess(["bun", "yrd", "env", "open", "--bay", bay, "--json", "--expires", "1d"], run.io),
+    run.stderr(),
+  ).toBe(0)
   const opened = JSON.parse(run.stdout()) as { path: string; branch: string; head: string }
   expect(opened.head).toBe(commit)
   expect((await gitIn(opened.path)(["symbolic-ref", "HEAD"])).trim()).toBe(`refs/heads/${opened.branch}`)
@@ -505,7 +541,10 @@ it.each(["released", "notified", "reopened", "resubmitted", "held", "advanced", 
     await birthEventQueue(w.work, "main", { localStore: false })
     const opened = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "release-retirement", "--keep", "--json", "--expires", "1d"], opened.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", "--bay", "release-retirement", "--keep", "--json", "--expires", "1d"],
+        opened.io,
+      ),
       opened.stderr(),
     ).toBe(0)
     const author = (JSON.parse(opened.stdout()) as { path: string }).path
@@ -543,6 +582,8 @@ it.each(["released", "notified", "reopened", "resubmitted", "held", "advanced", 
         .mockResolvedValueOnce({ ...permitted, coverage: { ...permitted.coverage, complete: false } })
     }
     let releaseReads = 0
+    let acquisitionsBeforeRetirement = 0
+    let queueValidationsBeforeRetirement = 0
     const exit =
       mode === "notified" || mode === "reopened" || mode === "resubmitted"
         ? await closeEnvironment(author, { json: true }, closed.io, undefined, "delegate", async () => {
@@ -589,8 +630,14 @@ it.each(["released", "notified", "reopened", "resubmitted", "held", "advanced", 
                 { expect: merged.tip },
               )
             }
+            acquisitionsBeforeRetirement = branchHistoryAcquisitions
+            queueValidationsBeforeRetirement = queueValidations
           })
         : await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io)
+    if (mode === "notified" || mode === "reopened" || mode === "resubmitted") {
+      expect(queueValidations - queueValidationsBeforeRetirement).toBe(mode === "notified" ? 3 : 1)
+      expect(branchHistoryAcquisitions - acquisitionsBeforeRetirement).toBe(mode === "notified" ? 3 : 1)
+    }
     expect(exit, closed.stderr()).toBe(mode === "failed" ? 2 : mode === "reopened" || mode === "resubmitted" ? 1 : 0)
     expect(existsSync(author)).toBe(mode === "failed")
     expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe(
@@ -1037,7 +1084,9 @@ describe("yrd env open prepares the retained environment", () => {
     const run = capture(w.work)
 
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--expires", "1d"], run.io), run.stderr()).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--expires", "1d"], run.io), run.stderr()).toBe(
+      0,
+    )
 
     const bay = run.stdout().trim()
     expect(run.stderr()).toContain("detached")
@@ -1180,7 +1229,10 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["push", "--quiet", "origin", "main"])
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "frozen", "--expires", "1d"], run.io), run.stderr()).toBe(2)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "frozen", "--expires", "1d"], run.io),
+      run.stderr(),
+    ).toBe(2)
 
     const listed = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io), listed.stderr()).toBe(0)
@@ -1246,7 +1298,10 @@ describe("yrd env open prepares the retained environment", () => {
     const run = capture(w.work)
 
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "transitive-drift", "--json", "--expires", "1d"], run.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", "--bay", "transitive-drift", "--json", "--expires", "1d"],
+        run.io,
+      ),
       run.stderr(),
     ).toBe(0)
 
@@ -1945,7 +2000,10 @@ process.exit(exitOverride === "" ? 0 : Number(exitOverride))
     await birthEventQueue(w.work, "main", { localStore: false })
     const opened = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "moved-tip", "--keep", "--json", "--expires", "1d"], opened.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", "--bay", "moved-tip", "--keep", "--json", "--expires", "1d"],
+        opened.io,
+      ),
       opened.stderr(),
     ).toBe(0)
     const author = (JSON.parse(opened.stdout()) as { path: string }).path
@@ -3403,7 +3461,10 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
 
       const openBorrower = capture(lender)
       expect(
-        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "borrower", "--json", "--expires", "1d"], openBorrower.io),
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", selected, "--bay", "borrower", "--json", "--expires", "1d"],
+          openBorrower.io,
+        ),
         openBorrower.stderr(),
       ).toBe(0)
       const { path: borrower } = JSON.parse(openBorrower.stdout()) as { path: string }
@@ -3450,7 +3511,10 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
 
     const openBorrower = capture(lender)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "borrower", "--json", "--expires", "1d"], openBorrower.io),
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", selected, "--bay", "borrower", "--json", "--expires", "1d"],
+        openBorrower.io,
+      ),
       openBorrower.stderr(),
     ).toBe(0)
     const { path: borrower } = JSON.parse(openBorrower.stdout()) as { path: string }

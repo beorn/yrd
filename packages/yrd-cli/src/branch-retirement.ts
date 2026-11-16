@@ -23,6 +23,7 @@ import {
   openLog,
   readRunLog,
   readBranchHistory,
+  readEventQueue,
   readEventQueueWithChanges,
   initial,
   evolve,
@@ -30,7 +31,6 @@ import {
   readConfig,
   resolveGitSelection,
   readRemoteCommit,
-  readStatus,
   refAt,
   registeredWorktrees,
   retireLocalBranch,
@@ -2026,18 +2026,28 @@ export async function releaseRetainedCheckouts(
   return report
 }
 
-/** Post-merge notification appends `notified` receipts after the terminal event without changing or reopening it (30717). */
-async function notifiedOnlySince(
+async function readValidatedChangeHistory(
   store: QueueLocation,
   queue: string,
   branch: string,
+): Promise<NonNullable<Awaited<ReturnType<typeof readBranchHistory>>["history"]>> {
+  await readEventQueue(store, queue)
+  const ref = changesRef(queue, branch)
+  const { history } = await readBranchHistory(store, queue, branch)
+  if (history === undefined) throw new Error(`missing event chain ${ref} in ${store.repo}`)
+  return history
+}
+
+/** Post-merge notification appends `notified` receipts after the terminal event without changing or reopening it (30717). */
+function notifiedOnlySince(
+  history: NonNullable<Awaited<ReturnType<typeof readBranchHistory>>["history"]>,
   sinceTip: string | undefined,
   currentTip: string | undefined,
-): Promise<boolean> {
+): boolean {
   if (sinceTip === undefined || currentTip === undefined) return false
   if (currentTip === sinceTip) return true
-  const events = (await readBranchHistory(store, queue, branch)).history?.events
-  if (events === undefined || events.at(-1)?.id !== currentTip) return false
+  const events = history.events
+  if (events.at(-1)?.id !== currentTip) return false
   const index = events.findIndex((event) => event.id === sinceTip)
   return index !== -1 && events.slice(index + 1).every((event) => event.type === "notified")
 }
@@ -2115,12 +2125,13 @@ export async function retireMergedRootAuthor(
     reason: withdrawn ? "withdrawn" : ancestry ? "merged" : "merged by content (patch-id)",
     log,
     protections: async () => {
-      const current = await readStatus(input.store, input.queue, branch)
+      const history = await readValidatedChangeHistory(input.store, input.queue, branch)
+      const current = history.state
       if (
         current.status !== change.status ||
         current.reason !== change.reason ||
         current.commit !== tip ||
-        !(await notifiedOnlySince(input.store, input.queue, branch, change.tip, current.tip))
+        !notifiedOnlySince(history, change.tip, current.tip)
       ) {
         throw new Error(`${branch}: terminal history changed or reopened before root retirement`)
       }
@@ -2611,11 +2622,12 @@ export async function retireMergedComponentAuthors(
             return [`protected component target/default branch ${author.branch} in ${repo} from ${author.remote}`]
           }
           await activeAuthorCheckout(author, input.selection, input.env)
-          const state = await readStatus(input.store, input.queue, author.rootBranch)
+          const history = await readValidatedChangeHistory(input.store, input.queue, author.rootBranch)
+          const state = history.state
           if (
             state.status !== "merged" ||
             state.commit !== author.rootTip ||
-            !(await notifiedOnlySince(input.store, input.queue, author.rootBranch, author.rootEventTip, state.tip))
+            !notifiedOnlySince(history, author.rootEventTip, state.tip)
           ) {
             throw new Error(`root change ${author.rootBranch} changed or reopened since author capture`)
           }
