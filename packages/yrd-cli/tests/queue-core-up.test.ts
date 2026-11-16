@@ -9759,8 +9759,11 @@ describe("yrd queue run --tier long", () => {
     const unrelatedHead = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["branch", unrelated, unrelatedHead])
     const submittedHeads = new Map<string, string>()
-    for (let index = 0; index < 8; index++) {
-      const branch = `task/noise-${String(index).padStart(2, "0")}`
+    // The merged source needs its history for post-merge recording and safe
+    // retirement. Keep it distinct from all eight unrelated queued histories.
+    const sourceBranch = "task/cleanup-target"
+    const noiseBranches = Array.from({ length: 8 }, (_, index) => `task/noise-${String(index).padStart(2, "0")}`)
+    for (const branch of [sourceBranch, ...noiseBranches]) {
       await w.git(["checkout", "--quiet", "-b", branch, "main"])
       writeFileSync(join(w.work, `${branch.replace("/", "-")}.txt`), "work\n")
       await w.git(["add", "-A"])
@@ -9817,6 +9820,9 @@ describe("yrd queue run --tier long", () => {
         run.stderr(),
       ).toBe(0)
       expect(merged.length, "the real queue merges a submitted source").toBeGreaterThan(0)
+      expect(merged, "the first round merges the distinct source, leaving every noise history unrelated").toEqual([
+        sourceBranch,
+      ])
       for (const branch of merged) {
         const head = submittedHeads.get(branch)
         expect(head, "the merged source has its recorded native submitted tip").toBeDefined()
