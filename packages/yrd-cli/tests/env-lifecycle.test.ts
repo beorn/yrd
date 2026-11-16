@@ -20,6 +20,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
+import * as fsPromises from "node:fs/promises"
 import { basename, dirname, join, relative, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -76,6 +77,10 @@ vi.mock("removely", async (importOriginal) => {
     inspectProcessCensus: vi.fn(actual.inspectProcessCensus),
     inspectProcessCwds: vi.fn(actual.inspectProcessCwds),
   }
+})
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>()
+  return { ...actual, unlink: vi.fn(actual.unlink) }
 })
 
 let branchHistoryAcquisitions = 0
@@ -2862,6 +2867,91 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     expect(calls).toBe(2)
     expect(existsSync(path)).toBe(false)
     expect(JSON.parse(allowed.stdout())).toMatchObject({ closed: path })
+  })
+
+  // Compaction and staging have distinct native receipts; one passing path cannot prove the other is forwarded.
+  it.each([true, false])("public close names a staged deletion remainder in json=%s", async (json) => {
+    const w = await world(":")
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openAttachedEnvironment(w.work, head, "staging-remainder")
+    const run = capture(w.work)
+    const originalUnlink = (await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises")).unlink
+    let failedPath: string | undefined
+    using unlink = vi.spyOn(fsPromises, "unlink").mockImplementation(async (entry) => {
+      if (String(entry).includes("/.trash/")) {
+        failedPath = String(entry)
+        throw Object.assign(new Error("fixture staged leaf denied"), { code: "EACCES" })
+      }
+      return originalUnlink(entry)
+    })
+    using warned = vi.spyOn(console, "warn").mockImplementation(() => {})
+    expect(
+      await publicCli.closeEnvironment(path, { json }, run.io, {
+        budget: { signal: new AbortController().signal, remainingMs: () => 30_000 },
+      }),
+      run.stderr(),
+    ).toBe(0)
+    expect(existsSync(path)).toBe(false)
+    expect(failedPath).toBeTypeOf("string")
+    const remainder = dirname(failedPath!)
+    expect(existsSync(remainder)).toBe(true)
+    expect(warned).toHaveBeenCalled()
+    if (json)
+      expect(JSON.parse(run.stdout())).toMatchObject({
+        closed: path,
+        cleanup: "removed-with-remainder",
+        remainder: [remainder],
+      })
+    else {
+      expect(run.stdout()).toContain(`closed environment ${path}`)
+      expect(run.stdout()).toContain(`removed-with-remainder: ${remainder}`)
+    }
+  })
+
+  // Existing successful native-close cases cannot detect dropping a compaction failure from the adapter result.
+  it.each([true, false])("public close names a retained compaction remainder in json=%s", async (json) => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openAttachedEnvironment(w.work, head, "compaction-remainder")
+    const retain = join(dirname(w.work), "compaction-remainder")
+    let calls = 0
+    let retained: string | undefined
+    const run = capture(w.work)
+    using warned = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const exit = await publicCli.closeEnvironment(path, { json, retain }, run.io, {
+      budget: { signal: new AbortController().signal, remainingMs: () => 30_000 },
+      beforeRemove: async () => {
+        if (++calls !== 2) return
+        const children = readdirSync(retain)
+        expect(children).toHaveLength(1)
+        const proof = JSON.parse(readFileSync(join(retain, children[0]!, "manifest.json"), "utf8")) as {
+          retained: string
+        }
+        retained = proof.retained
+        const config = join(retained, "vendor/dependency/config")
+        expect(existsSync(config)).toBe(true)
+        // Damage only this fixture's retained copy, after native retention verification and before compaction.
+        writeFileSync(config, "[core]\nrepositoryformatversion = 999\n")
+      },
+    })
+    expect(exit, run.stderr()).toBe(0)
+    expect(calls).toBe(2)
+    expect(existsSync(path)).toBe(false)
+    expect(retained).toBeTypeOf("string")
+    expect(existsSync(retained!)).toBe(true)
+    expect(warned).toHaveBeenCalled()
+    if (json)
+      expect(JSON.parse(run.stdout())).toMatchObject({
+        closed: path,
+        cleanup: "removed-with-remainder",
+        remainder: [expect.stringContaining(retained!)],
+      })
+    else {
+      expect(run.stdout()).toContain(`closed environment ${path}`)
+      expect(run.stdout()).toContain("removed-with-remainder")
+      expect(run.stdout()).toContain(retained!)
+    }
   })
 
   // Rule 3 needs the recorded association, not a number guessed from the environment name.

@@ -2241,6 +2241,7 @@ export async function closeEnvironment(
   // proof line for a tree that declares no .gitmodules. Explicit automatic custody also needs this
   // selected route even with no submodules; an ordinary manual close keeps the plain path.
   let removalProof: WorktreeRemovalProof | undefined
+  const cleanupRemainder: string[] = []
   if (
     modules.trim() !== "" ||
     options.retain !== undefined ||
@@ -2313,7 +2314,13 @@ export async function closeEnvironment(
             ? { state: "unchanged", path, reason: "component-custody", custody: outcome.custodyRefusal }
             : outcome !== undefined && "borrowers" in outcome
               ? { state: "unchanged", path, reason: "borrowed", borrowers: outcome.borrowers }
-              : { state: "updated", path, proof: nativeProof }
+              : {
+                  state: "updated",
+                  path,
+                  proof: nativeProof,
+                  ...(outcome !== undefined && "compaction" in outcome ? { compaction: outcome.compaction } : {}),
+                  ...(outcome !== undefined && "remainder" in outcome ? { remainder: outcome.remainder } : {}),
+                }
       } else {
         const removalOutput = await git([
           "super",
@@ -2429,6 +2436,51 @@ export async function closeEnvironment(
         `environment ${path} received malformed git-super removal proof; inspect git worktree list and retention directory ${retain} before retrying`,
       )
     }
+    if ("compaction" in removed) {
+      const compaction = removed.compaction
+      if (
+        typeof compaction !== "object" ||
+        compaction === null ||
+        !("status" in compaction) ||
+        typeof compaction.status !== "string" ||
+        !["ok", "skipped", "failed"].includes(compaction.status)
+      ) {
+        throw new Error(`environment ${path} was removed but returned a malformed compaction result; inspect ${retain}`)
+      }
+      if (compaction.status === "failed") {
+        if (
+          !("child" in compaction) ||
+          typeof compaction.child !== "string" ||
+          compaction.child === "" ||
+          !("step" in compaction) ||
+          typeof compaction.step !== "string" ||
+          compaction.step === ""
+        ) {
+          throw new Error(
+            `environment ${path} was removed but its failed compaction names no child/step; inspect ${retain}`,
+          )
+        }
+        cleanupRemainder.push(compaction.child)
+        io.stderr(
+          `yrd: removed-with-remainder; retained compaction remains at ${compaction.child}; failed step ${compaction.step}\n`,
+        )
+      }
+    }
+    if ("remainder" in removed) {
+      if (!Array.isArray(removed.remainder)) {
+        throw new Error(
+          `environment ${path} was removed but returned malformed staging remainder paths; inspect ${retain}`,
+        )
+      }
+      for (const entry of removed.remainder) {
+        if (typeof entry !== "string" || entry === "") {
+          throw new Error(
+            `environment ${path} was removed but returned a malformed staging remainder path; inspect ${retain}`,
+          )
+        }
+        cleanupRemainder.push(entry)
+      }
+    }
     removalProof = removed.proof as WorktreeRemovalProof
     io.stderr(`retained environment removal proof ${removalProof.manifest}\n`)
     io.stderr(`${retainedCloseLine(retain)}\n`)
@@ -2450,12 +2502,13 @@ export async function closeEnvironment(
     options.json === true
       ? `${JSON.stringify({
           closed: path,
+          ...(cleanupRemainder.length === 0 ? {} : { cleanup: "removed-with-remainder", remainder: cleanupRemainder }),
           ...(discarded.length === 0 ? {} : { discarded }),
           ...(skipped === undefined ? {} : { skipped }),
           ...(incomplete ? { retirement: "incomplete" } : {}),
           ...(failed.length > 0 ? { failed } : {}),
         })}\n`
-      : `closed environment ${path}${discarded.length === 0 ? "" : `; discarded ${discarded.map((entry) => `${entry.sha.slice(0, 12)} (${entry.subject})${entry.gitlinks === undefined || entry.gitlinks.length === 0 ? "" : ` [${entry.gitlinks.map((g) => `${g.path}@${g.pin.slice(0, 12)}`).join(", ")}]`}`).join(", ")}`}${failed.length > 0 ? `; branch retirement failed: ${failed.join("; ")}` : ""}\n`,
+      : `closed environment ${path}${cleanupRemainder.length === 0 ? "" : `; removed-with-remainder: ${cleanupRemainder.join(", ")}`}${discarded.length === 0 ? "" : `; discarded ${discarded.map((entry) => `${entry.sha.slice(0, 12)} (${entry.subject})${entry.gitlinks === undefined || entry.gitlinks.length === 0 ? "" : ` [${entry.gitlinks.map((g) => `${g.path}@${g.pin.slice(0, 12)}`).join(", ")}]`}`).join(", ")}`}${failed.length > 0 ? `; branch retirement failed: ${failed.join("; ")}` : ""}\n`,
   )
   // The environment is gone either way; a failed retirement left a branch behind, so the close is not a success (30642).
   return failed.length > 0 || (incomplete && removalProof === undefined) ? 1 : 0
