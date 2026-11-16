@@ -41,7 +41,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
 import * as publicCli from "../src/index.ts"
-import { admitEnvironmentClose, environmentCwdHolder } from "../src/env-close-holders.ts"
+import { admitEnvironmentClose, assertNoLiveEnvironmentUse, environmentCwdHolder } from "../src/env-close-holders.ts"
 import {
   CloseRequestAlreadyStandsError,
   closeRequestFile,
@@ -2774,6 +2774,33 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
   })
 
   // Public close execution is a production seam: old reporting and private census-injection tests cannot prove it.
+  it("public close forwards the same execution budget to every live-use provider read", async () => {
+    const w = await world(":")
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openAttachedEnvironment(w.work, head, "provider-budget")
+    const run = capture(w.work)
+    const budget = { signal: new AbortController().signal, remainingMs: () => 30_000 }
+    const read = vi.fn(async (..._args: unknown[]) => [])
+    run.io.liveEnvironmentUse = read
+    expect(await publicCli.closeEnvironment(path, { json: true }, run.io, { budget }), run.stderr()).toBe(0)
+    expect(read.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(read.mock.calls.every(([target, lifetime]) => target === path && lifetime === budget)).toBe(true)
+  })
+
+  // An already-expired allowance must never start the provider itself, even outside the close entry preflight.
+  it.each(["signal", "allowance"])("starts no live-use provider after exhausted %s", async (expired) => {
+    const run = capture("/fixture-provider")
+    const read = vi.fn(async () => [])
+    run.io.liveEnvironmentUse = read
+    const controller = new AbortController()
+    if (expired === "signal") controller.abort(new Error("provider work cutoff"))
+    const budget = { signal: controller.signal, remainingMs: () => (expired === "allowance" ? 0 : 30_000) }
+    await expect(
+      Reflect.apply(assertNoLiveEnvironmentUse, undefined, ["/fixture-target", run.io, budget]),
+    ).rejects.toThrow()
+    expect(read).not.toHaveBeenCalled()
+  })
+
   it("public close starts no process with an already-aborted execution budget", async () => {
     const w = await world(":")
     const head = (await w.git(["rev-parse", "HEAD"])).trim()

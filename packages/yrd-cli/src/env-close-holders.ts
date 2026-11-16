@@ -12,6 +12,16 @@ import {
 } from "removely"
 import type { YrdCliIO, CloseExecutionBudget } from "./types.ts"
 
+/** The caller's existing clock admits each operation; this helper owns no timer. */
+export function closeWorkRemaining(budget: CloseExecutionBudget): number {
+  budget.signal.throwIfAborted()
+  const remaining = budget.remainingMs()
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    throw new Error("environment close work budget exhausted or invalid; no further operation started")
+  }
+  return remaining
+}
+
 export function validateLiveEnvironmentUses(uses: unknown): readonly Readonly<{ path: string; reason: string }>[] {
   if (!Array.isArray(uses)) throw new Error("live environment-use reader did not return an array")
   return uses.map((use: unknown) => {
@@ -31,11 +41,18 @@ export function validateLiveEnvironmentUses(uses: unknown): readonly Readonly<{ 
   })
 }
 
-export async function assertNoLiveEnvironmentUse(path: string, io: YrdCliIO): Promise<void> {
+export async function assertNoLiveEnvironmentUse(
+  path: string,
+  io: YrdCliIO,
+  budget?: CloseExecutionBudget,
+): Promise<void> {
+  if (budget !== undefined) closeWorkRemaining(budget)
   if (io.liveEnvironmentUse === undefined) return
   let uses: ReturnType<typeof validateLiveEnvironmentUses>
   try {
-    uses = validateLiveEnvironmentUses(await io.liveEnvironmentUse(path)).map((use) => ({
+    const answer = await (budget === undefined ? io.liveEnvironmentUse(path) : io.liveEnvironmentUse(path, budget))
+    if (budget !== undefined) closeWorkRemaining(budget)
+    uses = validateLiveEnvironmentUses(answer).map((use) => ({
       path: resolveContainedPath(use.path, parse(use.path).root, { allowRoot: true }),
       reason: use.reason,
     }))
@@ -149,11 +166,7 @@ export async function admitEnvironmentClose(
 ): Promise<CloseAdmission> {
   const scanAllowance = () => {
     if (budget === undefined) return 2_000
-    budget.signal.throwIfAborted()
-    const remaining = budget.remainingMs()
-    if (!Number.isFinite(remaining) || remaining <= 0)
-      throw new Error("environment close scan budget exhausted or invalid")
-    return Math.min(2_000, remaining)
+    return Math.min(2_000, closeWorkRemaining(budget))
   }
   const deadlineMs = scanAllowance()
   const censusStartedAt = Date.now()

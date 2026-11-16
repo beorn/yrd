@@ -83,6 +83,7 @@ import { readEnvIssueState } from "./env-issue-state.ts"
 import {
   admitEnvironmentClose,
   assertNoLiveEnvironmentUse,
+  closeWorkRemaining,
   censusReaderLine,
   type CloseAdmission,
   type CloseCensusReceipt,
@@ -170,14 +171,6 @@ export type CloseExecutionContext = Readonly<{
   beforeRemove?: (target: EnvironmentRemovalTarget, budget: CloseExecutionBudget) => Promise<void>
 }>
 
-function closeWorkRemaining(budget: CloseExecutionBudget): number {
-  budget.signal.throwIfAborted()
-  const remaining = budget.remainingMs()
-  if (!Number.isFinite(remaining) || remaining <= 0) {
-    throw new Error("environment close work budget exhausted or invalid; no further operation started")
-  }
-  return remaining
-}
 export type EnvListOptions = Readonly<{ json?: boolean }>
 
 /** Association from the existing opening record; absence and read failure are not an unbound record. */
@@ -1916,7 +1909,7 @@ export async function closeEnvironment(
   if (io.liveEnvironmentUse === undefined) {
     io.stderr("yrd: owner leases were not checked because no host reader is wired.\n")
   }
-  await assertNoLiveEnvironmentUse(path, io)
+  await assertNoLiveEnvironmentUse(path, io, context?.budget)
   const admission = await admitEnvironmentClose(path, io, censusSource, context?.budget)
   if (admission.kind === "needs-delegation") {
     if (options.dryRun === true) {
@@ -2252,7 +2245,7 @@ export async function closeEnvironment(
   ) {
     const retain = options.retain === undefined ? join(workdir, "retained-modules") : resolve(io.cwd, options.retain)
     let removed: unknown
-    await assertNoLiveEnvironmentUse(path, io)
+    await assertNoLiveEnvironmentUse(path, io, context?.budget)
     const alignedGitlinks: AdmissibleGitlink[] = []
     const restoreAlignedGitlinks = async (): Promise<void> => {
       for (const entry of [...alignedGitlinks].reverse()) {

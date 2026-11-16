@@ -61,7 +61,10 @@ export type YrdCliIO = {
    * With a canonical absolute target, read every current host use overlapping it, including owner leases.
    * Paths are absolute and reasons are opaque text. An unavailable reader preserves automatic
    * candidates. Ordinary cleanup permits an absent reader; explicit retained-checkout release requires it. */
-  liveEnvironmentUse?: (targetPath?: string) => Promise<readonly Readonly<{ path: string; reason: string }>[]>
+  liveEnvironmentUse?: (
+    targetPath?: string,
+    budget?: CloseExecutionBudget,
+  ) => Promise<readonly Readonly<{ path: string; reason: string }>[]>
   /** Pure syntactic issue mapping for branch cleanup; never performs external lookups. */
   branchIssue?: (input: Readonly<{ branch: string; recordedIssue?: string }>) => string | undefined
   /** Fresh host holds, leases and live/dirty work associated with this exact local branch.
