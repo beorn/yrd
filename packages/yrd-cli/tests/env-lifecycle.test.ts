@@ -2877,7 +2877,7 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     const run = capture(w.work)
     const originalUnlink = (await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises")).unlink
     let failedPath: string | undefined
-    using unlink = vi.spyOn(fsPromises, "unlink").mockImplementation(async (entry) => {
+    using _unlink = vi.spyOn(fsPromises, "unlink").mockImplementation(async (entry) => {
       if (String(entry).includes("/.trash/")) {
         failedPath = String(entry)
         throw Object.assign(new Error("fixture staged leaf denied"), { code: "EACCES" })
