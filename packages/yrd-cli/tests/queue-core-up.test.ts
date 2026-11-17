@@ -39,7 +39,7 @@ import { hostname, tmpdir } from "node:os"
 import { monitorEventLoopDelay } from "node:perf_hooks"
 import { basename, dirname, join, relative, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { tryAcquireFlock } from "@bearly/flock"
 import * as gitomic from "gitomic"
 import * as removely from "removely"
@@ -132,10 +132,57 @@ beforeAll(async () => {
 beforeEach(() => {
   if (idleCensus !== undefined) vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue(idleCensus)
 })
-afterEach(() => {
+/** A service loop a test started, so cleanup can stop it even when the test timed out before it could (31335). */
+const live: { stop: AbortController; done: Promise<unknown> }[] = []
+
+/** Register a running `coreQueueCommand` with its stop, and return its promise unchanged. */
+function liveService<T>(stop: AbortController, done: Promise<T>): Promise<T> {
+  live.push({ stop, done })
+  return done
+}
+
+/** How long release waits for an aborted service to finish before leaving its root for the suite's end. */
+const SERVICE_STOP_GRACE_MS = 5_000
+/** Roots a service had not finished with when its test ended; nothing writes to them by the suite's end. */
+const deferredRoots: string[] = []
+
+/**
+ * Release each test's Git fixtures instead of accumulating one suite-sized cleanup hook. A test that timed out never
+ * stopped its service, so stop each one first and delete the roots only once every service has settled; a root a
+ * service still holds after the grace is deleted at the suite's end instead of under a live writer.
+ */
+async function releaseFixtures(): Promise<void> {
+  const services = live.splice(0)
+  const released = roots.splice(0)
+  let unsettled = 0
+  for (const { stop, done } of services) {
+    stop.abort()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const settled = await Promise.race([
+      done.then(
+        () => true,
+        () => true,
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), SERVICE_STOP_GRACE_MS)
+      }),
+    ])
+    clearTimeout(timer)
+    if (!settled) unsettled += 1
+  }
+  if (unsettled > 0) {
+    deferredRoots.push(...released)
+    return
+  }
+  for (const root of released) rmSync(root, { force: true, recursive: true })
+}
+
+afterEach(async () => {
+  await releaseFixtures()
   if (idleCensus !== undefined) vi.mocked(removely.inspectProcessCensus).mockRestore()
-  // Release each test's Git fixtures instead of accumulating one suite-sized cleanup hook.
-  for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true })
+})
+afterAll(() => {
+  for (const root of deferredRoots.splice(0)) rmSync(root, { force: true, recursive: true })
 })
 
 // A selected event change must keep the watch open through every working phase.
@@ -8443,6 +8490,45 @@ esac
     for (const { document } of stalled) expect(document.facts, JSON.stringify(document)).toHaveProperty("stopped", null)
   }, 30_000)
 
+  // 31335. A test that times out leaves its service running; vitest then runs afterEach, which used to delete the
+  // fixture root under it. The service journaled into the missing root and printed "could not journal warning", so
+  // the output guard reported the same test a second time. Cleanup must stop the service before the root goes.
+  /** @failure Fixture cleanup deleted a root a still-running service journals into. @level l2 */
+  it("fixture release stops a still-running service before deleting its root, so it writes nothing after", async () => {
+    const w = await world()
+    const run = capture(w.work)
+    const stop = new AbortController()
+    let firstHealth!: () => void
+    const healthy = new Promise<void>((resolve) => (firstHealth = resolve))
+    const service = liveService(
+      stop,
+      coreQueueCommand(
+        w.work,
+        run.io,
+        { command: "up", intervalSeconds: 0, stop: stop.signal, ...HEARTBEAT, afterHealth: () => firstHealth() },
+        { json: true, workdir: w.workdir },
+      ),
+    )
+    await healthy
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+    try {
+      // What afterEach runs when this test's own body has timed out: the service was never stopped.
+      await releaseFixtures()
+      const writtenDuringRelease = stderr.mock.calls.map(([chunk]) => String(chunk)).join("")
+      expect(existsSync(w.workdir), "the root is gone once release returns").toBe(false)
+      expect(stop.signal.aborted, "release stopped the service").toBe(true)
+      stop.abort()
+      await service.catch(() => undefined)
+      const written = stderr.mock.calls.map(([chunk]) => String(chunk)).join("")
+      expect(written, "the service wrote nothing after its fixture root was released").toBe(writtenDuringRelease)
+      expect(written).not.toContain("could not journal")
+    } finally {
+      stderr.mockRestore()
+      stop.abort()
+      await service.catch(() => undefined)
+    }
+  }, 30_000)
+
   // T5 (F1). Before round 1 opens the loop has already written. Without it,
   // hab's readiness (D5) waits out a long first round against an absence or a
   // predecessor's document.
@@ -8455,20 +8541,23 @@ esac
     const run = capture(w.work)
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
-    const service = coreQueueCommand(
-      w.work,
-      run.io,
-      {
-        command: "up",
-        intervalSeconds: 0,
-        stop: stop.signal,
-        ...HEARTBEAT,
-        afterHealth: (document) => {
-          seen.push(document)
-          stop.abort()
+    const service = liveService(
+      stop,
+      coreQueueCommand(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          ...HEARTBEAT,
+          afterHealth: (document) => {
+            seen.push(document)
+            stop.abort()
+          },
         },
-      },
-      { json: true, workdir: w.workdir },
+        { json: true, workdir: w.workdir },
+      ),
     )
     try {
       await vi.waitFor(() => expect(existsSync(held.started), run.stderr()).toBe(true), { timeout: 20_000 })
@@ -8508,33 +8597,36 @@ esac
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
     expect(
-      await coreQueueCommand(
-        w.work,
-        run.io,
-        {
-          command: "up",
-          intervalSeconds: 0,
-          startedAt: at,
-          stop: stop.signal,
-          ...HEARTBEAT,
-          terminate: {
-            on: (handler) => {
-              terminate = handler
-              return () => {
-                terminate = undefined
-              }
+      await liveService(
+        stop,
+        coreQueueCommand(
+          w.work,
+          run.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            startedAt: at,
+            stop: stop.signal,
+            ...HEARTBEAT,
+            terminate: {
+              on: (handler) => {
+                terminate = handler
+                return () => {
+                  terminate = undefined
+                }
+              },
+              reraise: () => {
+                reraised += 1
+              },
             },
-            reraise: () => {
-              reraised += 1
+            afterHealth: (document) => {
+              seen.push(document)
+              terminate?.()
+              stop.abort()
             },
           },
-          afterHealth: (document) => {
-            seen.push(document)
-            terminate?.()
-            stop.abort()
-          },
-        },
-        { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
+          { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
+        ),
       ),
       run.stderr(),
     ).toBe(0)
@@ -8569,31 +8661,34 @@ esac
     const env = { ...process.env }
     delete env.HAB_UNIT_INTENT_FILE
     expect(
-      await coreQueueCommand(
-        w.work,
-        run.io,
-        {
-          command: "up",
-          intervalSeconds: 0,
-          stop: stop.signal,
-          terminate: {
-            on: (handler) => {
-              terminate = handler
-              return () => {
-                terminate = undefined
-              }
+      await liveService(
+        stop,
+        coreQueueCommand(
+          w.work,
+          run.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            terminate: {
+              on: (handler) => {
+                terminate = handler
+                return () => {
+                  terminate = undefined
+                }
+              },
+              reraise: (signal) => {
+                reraised = signal
+              },
             },
-            reraise: (signal) => {
-              reraised = signal
+            afterHealth: () => {
+              terminate?.("SIGTERM")
+              subscribedAfterSignal = terminate !== undefined
+              stop.abort()
             },
           },
-          afterHealth: () => {
-            terminate?.("SIGTERM")
-            subscribedAfterSignal = terminate !== undefined
-            stop.abort()
-          },
-        },
-        { env, workdir: w.workdir },
+          { env, workdir: w.workdir },
+        ),
       ),
       run.stderr(),
     ).toBe(0)
@@ -8626,32 +8721,35 @@ esac
     const run = capture(w.work)
     const stop = new AbortController()
     expect(
-      await coreQueueCommand(
-        w.work,
-        run.io,
-        {
-          command: "up",
-          intervalSeconds: 0,
-          startedAt,
-          stop: stop.signal,
-          ...HEARTBEAT,
-          terminate: {
-            on: (handler) => {
-              terminate = handler
-              return () => {
-                terminate = undefined
-              }
+      await liveService(
+        stop,
+        coreQueueCommand(
+          w.work,
+          run.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            startedAt,
+            stop: stop.signal,
+            ...HEARTBEAT,
+            terminate: {
+              on: (handler) => {
+                terminate = handler
+                return () => {
+                  terminate = undefined
+                }
+              },
+              reraise: () => {
+                reraised += 1
+              },
             },
-            reraise: () => {
-              reraised += 1
+            afterHealth: () => {
+              terminate?.()
+              stop.abort()
             },
           },
-          afterHealth: () => {
-            terminate?.()
-            stop.abort()
-          },
-        },
-        { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
+          { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
+        ),
       ),
       run.stderr(),
     ).toBe(0)
@@ -8676,32 +8774,35 @@ esac
     const run2 = capture(w.work)
     writeFileSync(intentFile, `${JSON.stringify({ verb: "stop", by: "@chief", reason: "no timestamp" })}\n`)
     expect(
-      await coreQueueCommand(
-        w.work,
-        run2.io,
-        {
-          command: "up",
-          intervalSeconds: 0,
-          startedAt,
-          stop: stop2.signal,
-          ...HEARTBEAT,
-          terminate: {
-            on: (handler) => {
-              terminate = handler
-              return () => {
-                terminate = undefined
-              }
+      await liveService(
+        stop2,
+        coreQueueCommand(
+          w.work,
+          run2.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            startedAt,
+            stop: stop2.signal,
+            ...HEARTBEAT,
+            terminate: {
+              on: (handler) => {
+                terminate = handler
+                return () => {
+                  terminate = undefined
+                }
+              },
+              reraise: () => {
+                reraised += 1
+              },
             },
-            reraise: () => {
-              reraised += 1
+            afterHealth: () => {
+              terminate?.()
+              stop2.abort()
             },
           },
-          afterHealth: () => {
-            terminate?.()
-            stop2.abort()
-          },
-        },
-        { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
+          { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
+        ),
       ),
       run2.stderr(),
     ).toBe(0)
