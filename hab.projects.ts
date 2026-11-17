@@ -18,9 +18,7 @@ export type { YrdQueueRunnerDeclaration } from "./packages/yrd-queue-core/src/ru
 // cross-module coupling at the root), and the yrd fragment's own module already imports this by file.
 export { YRD_COMPONENTS as YRD_RUNTIME_COMPONENTS, YRD_RUNTIME_ENTRY }
 
-export default {
-  name: "yrd",
-  habitants: Object.fromEntries(
+export default Object.fromEntries(
     yrdQueueRunnerDeclarations.map(({ serviceName, owner }) => [
       serviceName,
       {
@@ -94,5 +92,4 @@ export default {
         owner,
       },
     ]),
-  ),
-}
+)
