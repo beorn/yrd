@@ -132,57 +132,74 @@ beforeAll(async () => {
 beforeEach(() => {
   if (idleCensus !== undefined) vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue(idleCensus)
 })
-/** A service loop a test started, so cleanup can stop it even when the test timed out before it could (31335). */
+/** Every queue command a test started, so cleanup can stop it even when the test timed out first (31335). */
 const live: { stop: AbortController; done: Promise<unknown> }[] = []
 
-/** Register a running `coreQueueCommand` with its stop, and return its promise unchanged. */
-function liveService<T>(stop: AbortController, done: Promise<T>): Promise<T> {
-  live.push({ stop, done })
-  return done
+/**
+ * A queue command for this file: every run is registered with a stop cleanup owns. A service run's own `stop` is
+ * joined with it, so cleanup can end a loop whose test timed out before the test could; a one-shot command just
+ * settles. Call sites use `queueCommand`, or `tracked` around a copy imported from another checkout, never a bare
+ * `coreQueueCommand`, so a new test cannot leave a loop unregistered.
+ */
+function tracked(command: typeof coreQueueCommand): typeof coreQueueCommand {
+  return (repo, io, request, options) => {
+    const own = new AbortController()
+    const joined =
+      "stop" in request && request.stop !== undefined
+        ? ({ ...request, stop: AbortSignal.any([request.stop, own.signal]) } as typeof request)
+        : request
+    const done = command(repo, io, joined, options)
+    live.push({ stop: own, done })
+    return done
+  }
 }
+const queueCommand = tracked(coreQueueCommand)
 
-/** How long release waits for an aborted service to finish before leaving its root for the suite's end. */
+/** How long cleanup waits for aborted runs to finish before leaving their roots for the suite's end. */
 const SERVICE_STOP_GRACE_MS = 5_000
-/** Roots a service had not finished with when its test ended; nothing writes to them by the suite's end. */
-const deferredRoots: string[] = []
+/** Roots, and the runs that still held them, left for the suite's end. */
+const deferred: { roots: string[]; runs: Promise<unknown>[] }[] = []
+
+/** Abort runs, then wait for all of them together, bounded by the grace; true when every run settled. */
+async function stopRuns(runs: readonly { stop: AbortController; done: Promise<unknown> }[]): Promise<boolean> {
+  if (runs.length === 0) return true
+  for (const { stop } of runs) stop.abort()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const settled = await Promise.race([
+    Promise.all(runs.map(({ done }) => done.catch(() => undefined))).then(() => true),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), SERVICE_STOP_GRACE_MS)
+    }),
+  ])
+  clearTimeout(timer)
+  return settled
+}
 
 /**
  * Release each test's Git fixtures instead of accumulating one suite-sized cleanup hook. A test that timed out never
- * stopped its service, so stop each one first and delete the roots only once every service has settled; a root a
- * service still holds after the grace is deleted at the suite's end instead of under a live writer.
+ * stopped its loop, so stop every run first and delete the roots only once all have settled; roots a run still holds
+ * after the grace are deleted at the suite's end instead of under a live writer.
  */
 async function releaseFixtures(): Promise<void> {
-  const services = live.splice(0)
+  const runs = live.splice(0)
   const released = roots.splice(0)
-  let unsettled = 0
-  for (const { stop, done } of services) {
-    stop.abort()
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const settled = await Promise.race([
-      done.then(
-        () => true,
-        () => true,
-      ),
-      new Promise<boolean>((resolve) => {
-        timer = setTimeout(() => resolve(false), SERVICE_STOP_GRACE_MS)
-      }),
-    ])
-    clearTimeout(timer)
-    if (!settled) unsettled += 1
-  }
-  if (unsettled > 0) {
-    deferredRoots.push(...released)
+  if (await stopRuns(runs)) {
+    for (const root of released) rmSync(root, { force: true, recursive: true })
     return
   }
-  for (const root of released) rmSync(root, { force: true, recursive: true })
+  deferred.push({ roots: released, runs: runs.map(({ done }) => done) })
 }
 
 afterEach(async () => {
   await releaseFixtures()
   if (idleCensus !== undefined) vi.mocked(removely.inspectProcessCensus).mockRestore()
 })
-afterAll(() => {
-  for (const root of deferredRoots.splice(0)) rmSync(root, { force: true, recursive: true })
+afterAll(async () => {
+  // These runs were aborted at their test's end; give them one more grace before their roots go.
+  for (const { roots: held, runs } of deferred.splice(0)) {
+    await stopRuns(runs.map((done) => ({ stop: new AbortController(), done })))
+    for (const root of held) rmSync(root, { force: true, recursive: true })
+  }
 })
 
 // A selected event change must keep the watch open through every working phase.
@@ -525,7 +542,7 @@ async function gitlinkWorld(
     await git(["push", "--quiet", "origin", "main"])
   } else if (launcher) process.argv[1] = join(work, "tools/yrd-runtime.mjs")
   try {
-    const { coreQueueCommand: command } = await import(join(cli, "src/queue-core-commands.ts"))
+    const command = tracked((await import(join(cli, "src/queue-core-commands.ts"))).coreQueueCommand)
     return { a, b, command, git, work, workdir }
   } finally {
     if (originalEntry === undefined) process.argv.splice(1, 1)
@@ -656,7 +673,7 @@ async function gitlinkVectorWorld(
   mkdirSync(workdir, { recursive: true })
   const cli = join(work, "submodule/packages/yrd-cli")
   symlinkSync(resolve(import.meta.dirname, "../node_modules"), join(cli, "node_modules"), "dir")
-  const { coreQueueCommand: command } = await import(join(cli, "src/queue-core-commands.ts"))
+  const command = tracked((await import(join(cli, "src/queue-core-commands.ts"))).coreQueueCommand)
   return {
     a: own.a,
     b: ownB,
@@ -779,7 +796,7 @@ describe("yrd queue up, the service", () => {
       }
       try {
         expect(
-          await coreQueueCommand(
+          await queueCommand(
             w.work,
             run.io,
             {
@@ -905,7 +922,7 @@ describe("yrd queue up, the service", () => {
         first.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
         first.io.liveEnvironmentUse = async () => []
         expect(
-          await coreQueueCommand(
+          await queueCommand(
             w.work,
             first.io,
             {
@@ -954,7 +971,7 @@ describe("yrd queue up, the service", () => {
           use === "held" && path === environment ? [{ path: environment, reason: holder }] : []
         const stopRestart = new AbortController()
         expect(
-          await coreQueueCommand(
+          await queueCommand(
             w.work,
             restarted.io,
             {
@@ -1059,7 +1076,7 @@ describe("yrd queue up, the service", () => {
       io.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
       io.io.liveEnvironmentUse = async () => []
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           io.io,
           {
@@ -1198,7 +1215,7 @@ describe("yrd queue up, the service", () => {
         const readsBefore = uses.mock.calls.filter(([targetPath]) => targetPath === undefined).length
         try {
           expect(
-            await coreQueueCommand(
+            await queueCommand(
               w.work,
               run.io,
               {
@@ -1267,7 +1284,7 @@ describe("yrd queue up, the service", () => {
       const run = capture(w.work)
       try {
         expect(
-          await coreQueueCommand(
+          await queueCommand(
             w.work,
             run.io,
             { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
@@ -1340,7 +1357,7 @@ describe("yrd queue up, the service", () => {
     let seenAtIdle = 0
     try {
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           {
@@ -1447,7 +1464,7 @@ describe("yrd queue up, the service", () => {
         const run = capture(w.work)
         let rounds = 0
         expect(
-          await coreQueueCommand(
+          await queueCommand(
             w.work,
             run.io,
             {
@@ -1557,7 +1574,7 @@ describe("yrd queue up, the service", () => {
         held && target === environment.path ? [{ path: target, reason: "active owner acquired after filing" }] : []
       try {
         expect(
-          await coreQueueCommand(
+          await queueCommand(
             w.work,
             run.io,
             { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
@@ -1654,7 +1671,7 @@ describe("yrd queue up, the service", () => {
     const run = capture(w.work)
     try {
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           {
@@ -1770,7 +1787,7 @@ describe("yrd queue up, the service", () => {
       run.io.liveEnvironmentUse = async () => []
       run.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
       try {
-        const exit = await coreQueueCommand(
+        const exit = await queueCommand(
           w.work,
           run.io,
           { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
@@ -1845,7 +1862,7 @@ describe("yrd queue up, the service", () => {
       run.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
       try {
         expect(
-          await coreQueueCommand(
+          await queueCommand(
             filed.w.work,
             run.io,
             {
@@ -2044,7 +2061,7 @@ describe("yrd queue up, the service", () => {
     const run = capture(w.work)
     try {
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
@@ -2126,7 +2143,7 @@ describe("yrd queue up, the service", () => {
     const run = capture(w.work)
     try {
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           {
@@ -2232,7 +2249,7 @@ describe("yrd queue up, the service", () => {
       })
       const withdrawn = capture(w.work)
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           withdrawn.io,
           { command: "withdraw", branch, by: "@dev/4" },
@@ -2242,7 +2259,7 @@ describe("yrd queue up, the service", () => {
       ).toBe(0)
       expect(existsSync(closedIssue), withdrawn.stderr()).toBe(true)
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           {
@@ -2377,7 +2394,7 @@ describe("yrd queue up, the service", () => {
       }
       try {
         expect(
-          await coreQueueCommand(
+          await queueCommand(
             w.work,
             run.io,
             {
@@ -2537,7 +2554,7 @@ describe("yrd queue up, the service", () => {
       let observedStanding: ReturnType<typeof readCloseRequest>
       try {
         expect(
-          await coreQueueCommand(
+          await queueCommand(
             w.work,
             run.io,
             {
@@ -2682,7 +2699,7 @@ describe("yrd queue up, the service", () => {
     const run = capture(w.work)
     try {
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           {
@@ -2792,7 +2809,7 @@ describe("yrd queue up, the service", () => {
     const run = capture(w.work)
     try {
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           {
@@ -2979,7 +2996,7 @@ describe("yrd queue up, the service", () => {
       let firstTarget: string | undefined
       try {
         expect(
-          await coreQueueCommand(
+          await queueCommand(
             w.work,
             run.io,
             {
@@ -3136,7 +3153,7 @@ describe("yrd queue up, the service", () => {
     const run = capture(w.work)
     try {
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           {
@@ -3199,7 +3216,7 @@ describe("yrd queue up, the service", () => {
     const run = capture(w.work)
     try {
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           {
@@ -3247,7 +3264,7 @@ describe("yrd queue up, the service", () => {
     await w.git(["push", "--quiet", "origin", `${prior}:${runnerRef("main")}`])
     const stop = new AbortController()
     const run = capture(w.work)
-    const service = coreQueueCommand(
+    const service = queueCommand(
       w.work,
       run.io,
       { command: "up", intervalSeconds: 0, stop: stop.signal },
@@ -3300,9 +3317,7 @@ describe("yrd queue up, the service", () => {
     ).trim()
     await w.git(["push", "--quiet", "origin", `${rival}:${runnerRef("main")}`])
     const run = capture(w.work)
-    expect(await coreQueueCommand(w.work, run.io, { command: "up", intervalSeconds: 0 }, { workdir: w.workdir })).toBe(
-      2,
-    )
+    expect(await queueCommand(w.work, run.io, { command: "up", intervalSeconds: 0 }, { workdir: w.workdir })).toBe(2)
     expect(await readQueueHealth(w.workdir, SERVICE)).toMatchObject({
       state: "unhealthy",
       error: { code: "runner-conflict" },
@@ -3340,7 +3355,7 @@ describe("yrd queue up, the service", () => {
     const stop = new AbortController()
     const run = capture(w.work)
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         run.io,
         {
@@ -3373,7 +3388,7 @@ describe("yrd queue up, the service", () => {
     })
     const stop = new AbortController()
     const run = capture(w.work)
-    const service = coreQueueCommand(
+    const service = queueCommand(
       w.work,
       run.io,
       { command: "up", intervalSeconds: 0, stop: stop.signal },
@@ -3438,7 +3453,7 @@ describe("yrd queue up, the service", () => {
     // reads hrtime, stays real.
     vi.useFakeTimers({ toFake: ["Date"] })
     const startedAt = Date.now()
-    const service = coreQueueCommand(
+    const service = queueCommand(
       w.work,
       run.io,
       {
@@ -3578,7 +3593,7 @@ describe("yrd queue up, the service", () => {
       const stop = new AbortController()
       let rounds = 0
       let settled = false
-      const service = coreQueueCommand(
+      const service = queueCommand(
         w.work,
         run.io,
         {
@@ -3705,7 +3720,7 @@ describe("yrd queue up, the service", () => {
     const stop = new AbortController()
     let rounds = 0
     let settled = false
-    const service = coreQueueCommand(
+    const service = queueCommand(
       w.work,
       run.io,
       {
@@ -3790,7 +3805,7 @@ describe("yrd queue up, the service", () => {
     const stop = new AbortController()
     const run = capture(w.work)
     let roundCount = 0
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       {
@@ -3832,7 +3847,7 @@ describe("yrd queue up, the service", () => {
     await w.git(["commit", "--quiet", "--allow-empty", "-m", "legacy work without a binding"])
     const run = capture(w.work)
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         run.io,
         { branch, command: "submit", dryRun, submitter: "@dev/2" },
@@ -3862,7 +3877,7 @@ describe("yrd queue up, the service", () => {
     await w.git(["commit", "--quiet", "--allow-empty", "-m", "feature without an issue link"])
     const run = capture(w.work)
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         run.io,
         { branch, command: "submit", dryRun, submitter: "@dev/2" },
@@ -3888,7 +3903,7 @@ describe("yrd queue up, the service", () => {
 
     const opened = capture(w.work)
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         opened.io,
         { by: "@chief", command: "pause", reason: "49 new failures on main" },
@@ -3911,7 +3926,7 @@ describe("yrd queue up, the service", () => {
       return "host-paused-refusal"
     }
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         duplicatePause.io,
         { by: "operator", command: "pause", reason: "replace the active pause" },
@@ -3946,7 +3961,7 @@ describe("yrd queue up, the service", () => {
         return "host-selected-resume"
       }
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           accepted.io,
           { branch: "task/one", command: "submit", dryRun, submitter: "@dev/2" },
@@ -3983,7 +3998,7 @@ describe("yrd queue up, the service", () => {
         return `viewer ${cwd} yrd ${argv.join(" ")}`
       },
     }
-    expect(await coreQueueCommand(w.work, listedIO, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    expect(await queueCommand(w.work, listedIO, { command: "list" }, { workdir: w.workdir })).toBe(0)
     // The pause is the loudest state on the page and it LEADS it, once; the
     // runner's row says the WORD paused and what lifts the stop, never the
     // record's own sentence a second time (watch-frame.tsx).
@@ -4006,7 +4021,7 @@ describe("yrd queue up, the service", () => {
     const selectedQueue = `${(await w.git(["remote", "get-url", "origin"])).trim()}#main`
     const liveSources: WatchSource[] = []
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         listedIO,
         { command: "list", watch: true },
@@ -4031,9 +4046,7 @@ describe("yrd queue up, the service", () => {
     )
     expect(runnerBox, listed.stdout()).not.toContain("refs/yrd/main/runner")
     const listedJson = capture(w.work)
-    expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
-      0,
-    )
+    expect(await queueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const pausedList = records(listedJson)[0]
     expect(pausedList).toMatchObject({
       changes: [{ branch: "task/one" }],
@@ -4042,7 +4055,7 @@ describe("yrd queue up, the service", () => {
 
     const closed = capture(w.work)
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         closed.io,
         { by: "@chief", command: "resume", reason: "repair merged" },
@@ -4050,9 +4063,9 @@ describe("yrd queue up, the service", () => {
       ),
     ).toBe(0)
     const listedResumed = capture(w.work)
-    expect(
-      await coreQueueCommand(w.work, listedResumed.io, { command: "list" }, { json: true, workdir: w.workdir }),
-    ).toBe(0)
+    expect(await queueCommand(w.work, listedResumed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
+      0,
+    )
     const resumedList = records(listedResumed)[0]
     expect(resumedList).toMatchObject({ changes: [{ branch: "task/one" }], pause: null })
     expect(resumedList?.changes).toEqual(pausedList?.changes)
@@ -4060,7 +4073,7 @@ describe("yrd queue up, the service", () => {
     // A retry on a paused line is accepted too, without changing the selected event.
     const beforeRetry = await w.git(["ls-remote", "--refs", "origin", ref])
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         capture(w.work).io,
         { by: "@chief", command: "pause", reason: "retry arrives while paused" },
@@ -4069,7 +4082,7 @@ describe("yrd queue up, the service", () => {
     ).toBe(0)
     const retried = capture(w.work)
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         retried.io,
         { branch: "task/one", command: "submit", submitter: "@dev/2" },
@@ -4171,7 +4184,7 @@ describe("yrd queue up, the service", () => {
           operation === "pause"
             ? { by: "fixture", command: "pause" as const, reason: "repair" }
             : { branch, command: "submit" as const, submitter: "fixture" }
-        const attempt = coreQueueCommand(w.work, run.io, request, {
+        const attempt = queueCommand(w.work, run.io, request, {
           queue,
           workdir: w.workdir,
         })
@@ -4220,7 +4233,7 @@ describe("yrd queue up, the service", () => {
         } else {
           expect(JSON.stringify(JSON.parse(inspected))).toContain(JSON.stringify(branch))
           const retried = capture(w.work)
-          expect(await coreQueueCommand(w.work, retried.io, request, { queue, json: true, workdir: w.workdir })).toBe(0)
+          expect(await queueCommand(w.work, retried.io, request, { queue, json: true, workdir: w.workdir })).toBe(0)
           expect(records(retried)[0]).toMatchObject({ retry: true })
         }
         expect(uploads).toBe(1)
@@ -4252,7 +4265,7 @@ describe("yrd queue up, the service", () => {
       const head = (await w.git(["rev-parse", "HEAD"])).trim()
       const run = capture(w.work)
       await expect(
-        coreQueueCommand(
+        queueCommand(
           w.work,
           run.io,
           { branch, command: "submit", submitter: "@dev/3" },
@@ -4270,7 +4283,7 @@ describe("yrd queue up, the service", () => {
       // The service's own read of the same declaration refuses it: it would run the key.
       const up = capture(w.work)
       await expect(
-        coreQueueCommand(w.work, up.io, { command: "up", intervalSeconds: 0 }, { workdir: w.workdir }),
+        queueCommand(w.work, up.io, { command: "up", intervalSeconds: 0 }, { workdir: w.workdir }),
       ).rejects.toThrow(/the declaration at origin\/main cannot be read: \.yrd\.yml: unknown key later/u)
     },
     30_000,
@@ -4295,7 +4308,7 @@ describe("yrd queue up, the service", () => {
       const head = (await w.git(["rev-parse", "HEAD"])).trim()
       const run = capture(w.work)
       await expect(
-        coreQueueCommand(
+        queueCommand(
           w.work,
           run.io,
           { branch, command: "submit", submitter: "@dev/3" },
@@ -4313,7 +4326,7 @@ describe("yrd queue up, the service", () => {
       // The service's own read of the same declaration refuses it: it would run the event.
       const up = capture(w.work)
       await expect(
-        coreQueueCommand(w.work, up.io, { command: "up", intervalSeconds: 0 }, { workdir: w.workdir }),
+        queueCommand(w.work, up.io, { command: "up", intervalSeconds: 0 }, { workdir: w.workdir }),
       ).rejects.toThrow(
         /the declaration at origin\/main cannot be read: \.yrd\.yml notify\[0\] submitter: on: must be/u,
       )
@@ -4334,7 +4347,7 @@ describe("yrd queue up, the service", () => {
     await w.git(["commit", "--quiet", "-m", "one fetch\n\nRefs: 28867"])
     const run = capture(w.work)
     await expect(
-      coreQueueCommand(
+      queueCommand(
         w.work,
         run.io,
         { branch, command: "submit", submitter: "@dev/8" },
@@ -4384,7 +4397,7 @@ describe("yrd queue up, the service", () => {
       const beforeRemote = await w.git(["ls-remote", "--refs", "origin"])
       const beforeLocal = await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/main/"])
       const run = capture(w.work)
-      const attempt = coreQueueCommand(
+      const attempt = queueCommand(
         w.work,
         run.io,
         { branch, command: "submit", submitter: "@dev/3" },
@@ -4493,7 +4506,7 @@ describe("yrd queue up, the service", () => {
     await w.git(["config", "remote.origin.uploadpack", wrapper])
 
     const run = capture(w.work)
-    const exit = await coreQueueCommand(w.work, run.io, { command: "run" }, { json: true, workdir: w.workdir })
+    const exit = await queueCommand(w.work, run.io, { command: "run" }, { json: true, workdir: w.workdir })
     expect(exit, run.stdout()).toBe(2)
     expect(
       readFileSync(calls, "utf8")
@@ -4506,7 +4519,7 @@ describe("yrd queue up, the service", () => {
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
     const retry = capture(w.work)
-    expect(await coreQueueCommand(w.work, retry.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(await queueCommand(w.work, retry.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
     expect(records(retry)[0]).toMatchObject({ base: b, config: configB, exitCode: 0, merged: ["task/one"] })
     expect(readFileSync(checkLog, "utf8")).toBe(`B:${b}\n`)
   })
@@ -4516,7 +4529,7 @@ describe("yrd queue up, the service", () => {
     const run = capture(w.work)
     let rounds = 0
 
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       {
@@ -5382,7 +5395,7 @@ describe("yrd queue up, the service", () => {
     const aCli = join(aLanding, "submodule/packages/yrd-cli")
     symlinkSync(resolve(import.meta.dirname, "../node_modules"), join(aCli, "node_modules"), "dir")
     symlinkSync(aLanding, join(home, "current"), "dir")
-    const { coreQueueCommand: fromLandingA } = await import(join(aCli, "src/queue-core-commands.ts"))
+    const fromLandingA = tracked((await import(join(aCli, "src/queue-core-commands.ts"))).coreQueueCommand)
     const primaryComponent = gitIn(join(w.work, "submodule"))
     await primaryComponent(["fetch", "--quiet", "origin", "main"])
     // This native root-queue fixture publishes B without advancing the primary
@@ -5431,7 +5444,7 @@ describe("yrd queue up, the service", () => {
     const prepareStop = new AbortController()
     const merged: string[] = []
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         prepared.io,
         {
@@ -5603,7 +5616,7 @@ describe("yrd queue up, the service", () => {
       }
       const bCli = join(bLanding, "submodule/packages/yrd-cli")
       symlinkSync(resolve(import.meta.dirname, "../node_modules"), join(bCli, "node_modules"), "dir")
-      const { coreQueueCommand: fromLandingB } = await import(join(bCli, "src/queue-core-commands.ts"))
+      const fromLandingB = tracked((await import(join(bCli, "src/queue-core-commands.ts"))).coreQueueCommand)
       const successor = capture(w.work)
       // Keep one prior catch-up row so the later startup-capture case still has a row to observe.
       successor.io.liveEnvironmentUse = async () => [{ path: authors[0]!.path, reason: "prior startup catch-up row" }]
@@ -6026,7 +6039,7 @@ describe("yrd queue up, the service", () => {
     const stop = new AbortController()
     const { log, rows } = logRows()
 
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       { afterRound: () => stop.abort(), command: "up", intervalSeconds: 0, stop: stop.signal },
@@ -6079,7 +6092,7 @@ describe("yrd queue list, the table", () => {
     const sentence = `main moved around the queue at ${direct.slice(0, 12)} (direct.txt around the queue)`
 
     const compact = capture(w.work)
-    expect(await coreQueueCommand(w.work, compact.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    expect(await queueCommand(w.work, compact.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
     expect(compact.stdout()).not.toContain("→ direct")
     // The printed scope sentence wraps at the table width, so any space in it may be a line break.
     expect(compact.stdout()).toMatch(
@@ -6088,7 +6101,7 @@ describe("yrd queue list, the table", () => {
 
     const asJson = capture(w.work)
     expect(
-      await coreQueueCommand(w.work, asJson.io, { command: "list", all: true }, { json: true, workdir: w.workdir }),
+      await queueCommand(w.work, asJson.io, { command: "list", all: true }, { json: true, workdir: w.workdir }),
     ).toBe(0)
     const listed = records(asJson)[0] as Readonly<{ changes: readonly Record<string, unknown>[] }>
     expect(listed.changes).toMatchObject([
@@ -6097,7 +6110,7 @@ describe("yrd queue list, the table", () => {
     ])
 
     const asText = capture(w.work)
-    expect(await coreQueueCommand(w.work, asText.io, { command: "list", all: true }, { workdir: w.workdir })).toBe(0)
+    expect(await queueCommand(w.work, asText.io, { command: "list", all: true }, { workdir: w.workdir })).toBe(0)
     // On the page: its own row — the direct glyph and word in STATUS, TASK
     // leading with the commit's subject then the target branch (ia.md);
     // the sentence is the JSON's `reason`, above.
@@ -6205,12 +6218,12 @@ describe("yrd queue show names the queue it read (@i/10-yrd/24050)", () => {
     })
 
     const page = capture(w.work)
-    expect(
-      await coreQueueCommand(w.work, page.io, { command: "show", branch: "task/ghost" }, { workdir: w.workdir }),
-    ).toBe(0)
+    expect(await queueCommand(w.work, page.io, { command: "show", branch: "task/ghost" }, { workdir: w.workdir })).toBe(
+      0,
+    )
     const json = capture(w.work)
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         json.io,
         { command: "show", branch: "task/ghost" },
@@ -6229,12 +6242,7 @@ describe("yrd queue show names the queue it read (@i/10-yrd/24050)", () => {
     // has to look inside a row to learn what was queried.
     const found = capture(w.work)
     expect(
-      await coreQueueCommand(
-        w.work,
-        found.io,
-        { command: "show", branch: "task/one" },
-        { json: true, workdir: w.workdir },
-      ),
+      await queueCommand(w.work, found.io, { command: "show", branch: "task/one" }, { json: true, workdir: w.workdir }),
     ).toBe(0)
     expect((records(found)[0] as { queue?: unknown }).queue).toBe(shown.queue)
   })
@@ -6268,7 +6276,7 @@ describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)",
     // AC1 + AC2: `run` takes the change, cannot get past it, ends 2, and
     // names the branch and the cure on stderr.
     const ranRun = capture(w.work)
-    expect(await coreQueueCommand(w.work, ranRun.io, { command: "run" }, { workdir: w.workdir })).toBe(2)
+    expect(await queueCommand(w.work, ranRun.io, { command: "run" }, { workdir: w.workdir })).toBe(2)
     // Pin the complete valid-incident line; normalize only fixture identities.
     expect(
       ranRun
@@ -6300,7 +6308,7 @@ describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)",
     const stop = new AbortController()
     const documents: QueueHealthDocument[] = []
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         ranUp.io,
         {
@@ -6329,7 +6337,7 @@ describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)",
     // `up` did (this file's "renders one stored lossless incident" case); the
     // same fixture must show the identical code and cure through `list` too.
     const listed = capture(w.work)
-    expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(await queueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const rows = (records(listed)[0] as { changes: readonly Record<string, unknown>[] }).changes
     const row = rows.find((entry) => entry.branch === "task/stuck")
     expect(row, JSON.stringify(rows)).toMatchObject({ state: "stuck", reason: "yrd-setup-unreachable" })
@@ -6382,7 +6390,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     const run = capture(w.work)
     try {
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           {
@@ -6445,7 +6453,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     }
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       {
@@ -6525,11 +6533,11 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     expect((await readEventOps(store, gitIn(w.work), "main", target)).stop).toBeUndefined()
 
     const first = capture(w.work)
-    expect(await coreQueueCommand(w.work, first.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(2)
+    expect(await queueCommand(w.work, first.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(2)
     const pause = (await readEventOps(store, gitIn(w.work), "main", target)).stop
     expect(pause).toMatchObject({ cause: "stuck", change: { branch, head }, reason: "repair needed" })
     const second = capture(w.work)
-    expect(await coreQueueCommand(w.work, second.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(2)
+    expect(await queueCommand(w.work, second.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(2)
     expect((await readEventOps(store, gitIn(w.work), "main", target)).stop?.sha).toBe(pause?.sha)
   })
 
@@ -6545,7 +6553,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     const run = capture(w.work)
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       {
@@ -6558,7 +6566,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
           if (seen.length === 3) {
             const resumed = capture(w.work)
             expect(
-              await coreQueueCommand(
+              await queueCommand(
                 w.work,
                 resumed.io,
                 { by: "@chief", command: "resume", reason: "setup repaired" },
@@ -6662,7 +6670,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         service.io,
         {
@@ -6682,7 +6690,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
 
     const resumed = capture(w.work)
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         resumed.io,
         { by: "@chief", command: "resume", reason: "repaired" },
@@ -6693,7 +6701,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     const releaseEvents = await (await openEvents({ ...store, ref: queueRef("main") })).events({ limit: 1024 })
     expect(releaseEvents.slice(-2).map((event) => event.type)).toEqual(["paused", "resumed"])
     const after = capture(w.work)
-    expect(await coreQueueCommand(w.work, after.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(await queueCommand(w.work, after.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
     expect(records(after)[0]).toMatchObject({ exitCode: 0, merged: [branch] })
   }, 60_000)
 
@@ -6724,7 +6732,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     ).append([changeInput("failed", { queueTip, at: new Date(), reason: "no opened event" })], { expect: null })
     const resumed = capture(w.work)
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         resumed.io,
         { by: "@chief", command: "resume", reason: "repaired" },
@@ -6745,7 +6753,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     const run = capture(w.work)
     const stop = new AbortController()
     let rounds = 0
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       {
@@ -6777,7 +6785,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     const w = await world()
     const run = capture(w.work)
     let rounds = 0
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       {
@@ -6805,7 +6813,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     const w = await world()
     const run = capture(w.work)
     let rounds = 0
-    await coreQueueCommand(
+    await queueCommand(
       w.work,
       run.io,
       {
@@ -6867,7 +6875,7 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
       roundCommands.push({ argv, cwd })
       return "host-stuck-round-action"
     }
-    expect(await coreQueueCommand(w.work, stuckRound.io, { command: "run" }, { workdir: w.workdir })).toBe(2)
+    expect(await queueCommand(w.work, stuckRound.io, { command: "run" }, { workdir: w.workdir })).toBe(2)
     // Pin the complete valid-incident line; normalize only fixture identities.
     expect(
       stuckRound
@@ -6903,7 +6911,7 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
         return "host-stuck-remedy"
       }
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           accepted.io,
           { branch: "task/late", command: "submit", dryRun, submitter: "@dev/3" },
@@ -6937,7 +6945,7 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
     // The stop lifts by an act — the stuck change withdrawn — and the late change is judged normally.
     fault.clear()
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         capture(w.work).io,
         { branch: "task/stuck", by: "@chief", command: "withdraw" },
@@ -6945,7 +6953,7 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
       ),
     ).toBe(0)
     const ran = capture(w.work)
-    expect(await coreQueueCommand(w.work, ran.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(await queueCommand(w.work, ran.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
     expect(records(ran)[0]).toMatchObject({ merged: ["task/late"], stuck: [] })
     const late = await readStatus(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", "task/late")
     expect(late.status).toBe("merged")
@@ -6957,7 +6965,7 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
     const fault = brokenSetup(w.workdir)
 
     const running = capture(w.work)
-    expect(await coreQueueCommand(w.work, running.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(await queueCommand(w.work, running.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     expect(records(running)[0]).toHaveProperty("stopped", null)
 
     await redeclare(w, `setup: ${fault.command}\n`)
@@ -6972,24 +6980,24 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
     })
-    expect(await coreQueueCommand(w.work, capture(w.work).io, { command: "run" }, { workdir: w.workdir })).toBe(2)
+    expect(await queueCommand(w.work, capture(w.work).io, { command: "run" }, { workdir: w.workdir })).toBe(2)
 
     const stuck = capture(w.work)
-    expect(await coreQueueCommand(w.work, stuck.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(await queueCommand(w.work, stuck.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const stopped = (records(stuck)[0] as { stopped: Record<string, unknown> }).stopped
     expect(stopped).toEqual({ by: "yrd", cause: "stuck", change: `task/stuck@${head}`, since: expect.any(String) })
     expect(Number.isNaN(Date.parse(String(stopped.since)))).toBe(false)
 
     // An operator's stop names nobody's change.
-    await coreQueueCommand(w.work, capture(w.work).io, { by: "@chief", command: "resume" }, { workdir: w.workdir })
-    await coreQueueCommand(
+    await queueCommand(w.work, capture(w.work).io, { by: "@chief", command: "resume" }, { workdir: w.workdir })
+    await queueCommand(
       w.work,
       capture(w.work).io,
       { by: "@chief", command: "pause", reason: "inspecting" },
       { workdir: w.workdir },
     )
     const paused = capture(w.work)
-    expect(await coreQueueCommand(w.work, paused.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(await queueCommand(w.work, paused.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     expect((records(paused)[0] as { stopped: unknown }).stopped).toEqual({
       by: "@chief",
       cause: "operator",
@@ -7154,7 +7162,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     const run = capture(w.work)
     const stop = new AbortController()
     const roundEnds: number[] = []
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       {
@@ -7188,7 +7196,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     using published = await publishedHealth(w.workdir)
     const run = capture(w.work)
     const stop = new AbortController()
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       {
@@ -7228,7 +7236,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     const run = capture(w.work)
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
-    const service = coreQueueCommand(
+    const service = queueCommand(
       w.work,
       run.io,
       {
@@ -7411,7 +7419,7 @@ esac
         seen.filter((document) => document.facts?.roundReadFailure !== undefined)
       let exit: YrdCliExitCode
       try {
-        exit = await coreQueueCommand(
+        exit = await queueCommand(
           w.work,
           run.io,
           {
@@ -7515,7 +7523,7 @@ esac
     let published: QueueHealthDocument | undefined
     try {
       try {
-        exit = await coreQueueCommand(
+        exit = await queueCommand(
           w.work,
           run.io,
           {
@@ -7578,7 +7586,7 @@ esac
       return originalRun(options)
     })
     const run = capture(w.work)
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       {
@@ -7659,7 +7667,7 @@ esac
     })
     try {
       try {
-        exit = await coreQueueCommand(
+        exit = await queueCommand(
           w.work,
           run.io,
           {
@@ -7683,7 +7691,7 @@ esac
                 expect(document.state).toBe("unhealthy")
                 const repair = capture(w.work)
                 expect(
-                  await coreQueueCommand(
+                  await queueCommand(
                     w.work,
                     repair.io,
                     {
@@ -7784,7 +7792,7 @@ esac
     const run = capture(w.work)
     const seen: QueueHealthDocument[] = []
     let listing = ""
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       {
@@ -7799,7 +7807,7 @@ esac
               readFailure: { ref, error: "injected remote reread outage", count: 3 },
             })
             const view = capture(w.work)
-            expect(await coreQueueCommand(w.work, view.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+            expect(await queueCommand(w.work, view.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
             listing = `${view.stdout()}\n${view.stderr()}`
           }
         },
@@ -7889,7 +7897,7 @@ esac
     const stop = new AbortController()
     const run = capture(w.work)
     const seen: QueueHealthDocument[] = []
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       {
@@ -7956,7 +7964,7 @@ esac
     mkdirSync(hooks, { recursive: true })
     writeFileSync(join(hooks, "unexpected-hook"), "fixture\n")
     const run = capture(w.work)
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       { command: "up", intervalSeconds: 0 },
@@ -7985,7 +7993,7 @@ esac
     const run = capture(w.work)
     try {
       await expect(
-        coreQueueCommand(w.work, run.io, { command: "up", intervalSeconds: 0 }, { json: true, workdir: w.workdir }),
+        queueCommand(w.work, run.io, { command: "up", intervalSeconds: 0 }, { json: true, workdir: w.workdir }),
       ).rejects.toBe(finalizer)
       expect(round).toHaveBeenCalledOnce()
       expect(invalidation).toHaveBeenCalledOnce()
@@ -8056,7 +8064,7 @@ esac
     })
     const stop = new AbortController()
     const run = capture(w.work)
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
@@ -8098,7 +8106,7 @@ esac
     const run = capture(w.work)
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
-    const service = coreQueueCommand(
+    const service = queueCommand(
       w.work,
       run.io,
       {
@@ -8163,7 +8171,7 @@ esac
     const run = capture(w.work)
     const stop = new AbortController()
     let completedRun: string | undefined
-    const service = coreQueueCommand(
+    const service = queueCommand(
       w.work,
       run.io,
       {
@@ -8226,7 +8234,7 @@ esac
       const damagedSince = Date.now()
       const listed = capture(w.work)
       expect(
-        await coreQueueCommand(w.work, listed.io, { command: "list", all: true }, { json: true, workdir: w.workdir }),
+        await queueCommand(w.work, listed.io, { command: "list", all: true }, { json: true, workdir: w.workdir }),
         listed.stderr(),
       ).toBe(0)
       const diagnostic = JSON.stringify(records(listed)[0]?.journal)
@@ -8254,7 +8262,7 @@ esac
       let freshHealth: QueueHealthDocument | undefined
       try {
         expect(
-          await coreQueueCommand(
+          await queueCommand(
             w.work,
             restarted.io,
             {
@@ -8326,7 +8334,7 @@ esac
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
     const roundEnds: number[] = []
-    const service = coreQueueCommand(
+    const service = queueCommand(
       w.work,
       run.io,
       {
@@ -8490,9 +8498,9 @@ esac
     for (const { document } of stalled) expect(document.facts, JSON.stringify(document)).toHaveProperty("stopped", null)
   }, 30_000)
 
-  // 31335. A test that times out leaves its service running; vitest then runs afterEach, which used to delete the
-  // fixture root under it. The service journaled into the missing root and printed "could not journal warning", so
-  // the output guard reported the same test a second time. Cleanup must stop the service before the root goes.
+  // 31335. A test that times out leaves its loop running; vitest then runs afterEach, which used to delete the
+  // fixture root under it. The loop journaled into the missing root and printed "could not journal warning", so the
+  // output guard reported the same test a second time. Cleanup must stop the loop before the root goes.
   /** @failure Fixture cleanup deleted a root a still-running service journals into. @level l2 */
   it("fixture release stops a still-running service before deleting its root, so it writes nothing after", async () => {
     const w = await world()
@@ -8500,27 +8508,26 @@ esac
     const stop = new AbortController()
     let firstHealth!: () => void
     const healthy = new Promise<void>((resolve) => (firstHealth = resolve))
-    const service = liveService(
-      stop,
-      coreQueueCommand(
-        w.work,
-        run.io,
-        { command: "up", intervalSeconds: 0, stop: stop.signal, ...HEARTBEAT, afterHealth: () => firstHealth() },
-        { json: true, workdir: w.workdir },
-      ),
-    )
+    let settled = false
+    const service = queueCommand(
+      w.work,
+      run.io,
+      { command: "up", intervalSeconds: 0, stop: stop.signal, ...HEARTBEAT, afterHealth: () => firstHealth() },
+      { json: true, workdir: w.workdir },
+    ).finally(() => {
+      settled = true
+    })
     await healthy
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
     try {
-      // What afterEach runs when this test's own body has timed out: the service was never stopped.
+      // What afterEach runs when this test's own body has timed out: the test never aborted its stop.
       await releaseFixtures()
       const writtenDuringRelease = stderr.mock.calls.map(([chunk]) => String(chunk)).join("")
+      expect(settled, "release ended the loop before it returned").toBe(true)
       expect(existsSync(w.workdir), "the root is gone once release returns").toBe(false)
-      expect(stop.signal.aborted, "release stopped the service").toBe(true)
-      stop.abort()
       await service.catch(() => undefined)
       const written = stderr.mock.calls.map(([chunk]) => String(chunk)).join("")
-      expect(written, "the service wrote nothing after its fixture root was released").toBe(writtenDuringRelease)
+      expect(written, "the loop wrote nothing after its fixture root was released").toBe(writtenDuringRelease)
       expect(written).not.toContain("could not journal")
     } finally {
       stderr.mockRestore()
@@ -8541,23 +8548,20 @@ esac
     const run = capture(w.work)
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
-    const service = liveService(
-      stop,
-      coreQueueCommand(
-        w.work,
-        run.io,
-        {
-          command: "up",
-          intervalSeconds: 0,
-          stop: stop.signal,
-          ...HEARTBEAT,
-          afterHealth: (document) => {
-            seen.push(document)
-            stop.abort()
-          },
+    const service = queueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        ...HEARTBEAT,
+        afterHealth: (document) => {
+          seen.push(document)
+          stop.abort()
         },
-        { json: true, workdir: w.workdir },
-      ),
+      },
+      { json: true, workdir: w.workdir },
     )
     try {
       await vi.waitFor(() => expect(existsSync(held.started), run.stderr()).toBe(true), { timeout: 20_000 })
@@ -8597,36 +8601,33 @@ esac
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
     expect(
-      await liveService(
-        stop,
-        coreQueueCommand(
-          w.work,
-          run.io,
-          {
-            command: "up",
-            intervalSeconds: 0,
-            startedAt: at,
-            stop: stop.signal,
-            ...HEARTBEAT,
-            terminate: {
-              on: (handler) => {
-                terminate = handler
-                return () => {
-                  terminate = undefined
-                }
-              },
-              reraise: () => {
-                reraised += 1
-              },
+      await queueCommand(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          startedAt: at,
+          stop: stop.signal,
+          ...HEARTBEAT,
+          terminate: {
+            on: (handler) => {
+              terminate = handler
+              return () => {
+                terminate = undefined
+              }
             },
-            afterHealth: (document) => {
-              seen.push(document)
-              terminate?.()
-              stop.abort()
+            reraise: () => {
+              reraised += 1
             },
           },
-          { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
-        ),
+          afterHealth: (document) => {
+            seen.push(document)
+            terminate?.()
+            stop.abort()
+          },
+        },
+        { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
       ),
       run.stderr(),
     ).toBe(0)
@@ -8661,34 +8662,31 @@ esac
     const env = { ...process.env }
     delete env.HAB_UNIT_INTENT_FILE
     expect(
-      await liveService(
-        stop,
-        coreQueueCommand(
-          w.work,
-          run.io,
-          {
-            command: "up",
-            intervalSeconds: 0,
-            stop: stop.signal,
-            terminate: {
-              on: (handler) => {
-                terminate = handler
-                return () => {
-                  terminate = undefined
-                }
-              },
-              reraise: (signal) => {
-                reraised = signal
-              },
+      await queueCommand(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          terminate: {
+            on: (handler) => {
+              terminate = handler
+              return () => {
+                terminate = undefined
+              }
             },
-            afterHealth: () => {
-              terminate?.("SIGTERM")
-              subscribedAfterSignal = terminate !== undefined
-              stop.abort()
+            reraise: (signal) => {
+              reraised = signal
             },
           },
-          { env, workdir: w.workdir },
-        ),
+          afterHealth: () => {
+            terminate?.("SIGTERM")
+            subscribedAfterSignal = terminate !== undefined
+            stop.abort()
+          },
+        },
+        { env, workdir: w.workdir },
       ),
       run.stderr(),
     ).toBe(0)
@@ -8721,35 +8719,32 @@ esac
     const run = capture(w.work)
     const stop = new AbortController()
     expect(
-      await liveService(
-        stop,
-        coreQueueCommand(
-          w.work,
-          run.io,
-          {
-            command: "up",
-            intervalSeconds: 0,
-            startedAt,
-            stop: stop.signal,
-            ...HEARTBEAT,
-            terminate: {
-              on: (handler) => {
-                terminate = handler
-                return () => {
-                  terminate = undefined
-                }
-              },
-              reraise: () => {
-                reraised += 1
-              },
+      await queueCommand(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          startedAt,
+          stop: stop.signal,
+          ...HEARTBEAT,
+          terminate: {
+            on: (handler) => {
+              terminate = handler
+              return () => {
+                terminate = undefined
+              }
             },
-            afterHealth: () => {
-              terminate?.()
-              stop.abort()
+            reraise: () => {
+              reraised += 1
             },
           },
-          { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
-        ),
+          afterHealth: () => {
+            terminate?.()
+            stop.abort()
+          },
+        },
+        { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
       ),
       run.stderr(),
     ).toBe(0)
@@ -8774,35 +8769,32 @@ esac
     const run2 = capture(w.work)
     writeFileSync(intentFile, `${JSON.stringify({ verb: "stop", by: "@chief", reason: "no timestamp" })}\n`)
     expect(
-      await liveService(
-        stop2,
-        coreQueueCommand(
-          w.work,
-          run2.io,
-          {
-            command: "up",
-            intervalSeconds: 0,
-            startedAt,
-            stop: stop2.signal,
-            ...HEARTBEAT,
-            terminate: {
-              on: (handler) => {
-                terminate = handler
-                return () => {
-                  terminate = undefined
-                }
-              },
-              reraise: () => {
-                reraised += 1
-              },
+      await queueCommand(
+        w.work,
+        run2.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          startedAt,
+          stop: stop2.signal,
+          ...HEARTBEAT,
+          terminate: {
+            on: (handler) => {
+              terminate = handler
+              return () => {
+                terminate = undefined
+              }
             },
-            afterHealth: () => {
-              terminate?.()
-              stop2.abort()
+            reraise: () => {
+              reraised += 1
             },
           },
-          { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
-        ),
+          afterHealth: () => {
+            terminate?.()
+            stop2.abort()
+          },
+        },
+        { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
       ),
       run2.stderr(),
     ).toBe(0)
@@ -8831,7 +8823,7 @@ esac
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         run.io,
         {
@@ -8868,7 +8860,7 @@ esac
     const seen: QueueHealthDocument[] = []
     const respawnStartedAt = "2026-09-24T07:01:10.000Z" // 70s later > 60s bound
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         run.io,
         {
@@ -8897,7 +8889,7 @@ esac
   it("the first document names a stop that already stands at start", async () => {
     const w = await world()
     expect(
-      await coreQueueCommand(
+      await queueCommand(
         w.work,
         capture(w.work).io,
         { by: "@chief", command: "pause", reason: "inspecting" },
@@ -8909,7 +8901,7 @@ esac
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
     const roundEnds: number[] = []
-    const exit = await coreQueueCommand(
+    const exit = await queueCommand(
       w.work,
       run.io,
       {
@@ -8961,7 +8953,7 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
   /** The stored reason for the one change in the line, as `queue list` reports it. */
   async function reasonFor(w: World, branch: string): Promise<Readonly<{ reason?: string; result?: string }>> {
     const listed = capture(w.work)
-    expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(await queueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const rows = (records(listed)[0] as { changes: readonly Record<string, unknown>[] }).changes
     const row = rows.find((entry) => entry.branch === branch)
     expect(row, JSON.stringify(rows)).toBeDefined()
@@ -8977,7 +8969,7 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
     await w.git(["checkout", "--quiet", "main"])
     await submit(w.git, "origin", { branch, submitter: "@dev/4", target: { branch: "main", remote: "origin" } })
     const run = capture(w.work)
-    expect(await coreQueueCommand(w.work, run.io, { command: "run" }, { workdir: w.workdir })).toBe(2)
+    expect(await queueCommand(w.work, run.io, { command: "run" }, { workdir: w.workdir })).toBe(2)
   }
 
   // ROW 2. The measured specimen, reproduced: the record says the remote could
@@ -9195,7 +9187,7 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
         return "host-selected-merge-retry"
       }
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           retry.io,
           { command: "merge", branch: "task/judged", submitter: "test-submitter" },
@@ -9209,7 +9201,7 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
       })
       const unavailable = capture(w.work)
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           unavailable.io,
           { command: "merge", branch: "task/not-submitted", submitter: "test-submitter" },
@@ -9389,7 +9381,7 @@ describe("one round at a time in a queue workdir (andon phase 2, the queue lock)
 
     const runs = [capture(w.work), capture(w.work)]
     const exits = await Promise.all(
-      runs.map((run) => coreQueueCommand(w.work, run.io, { command: "run" }, { json: true, workdir: w.workdir })),
+      runs.map((run) => queueCommand(w.work, run.io, { command: "run" }, { json: true, workdir: w.workdir })),
     )
     const said = runs.map((run) => `${run.stdout()}${run.stderr()}`).join("\n---\n")
 
@@ -9418,7 +9410,7 @@ describe("one round at a time in a queue workdir (andon phase 2, the queue lock)
     const stop = new AbortController()
     const seen: QueueHealthDocument[] = []
     const stallMs = 50
-    const service = coreQueueCommand(
+    const service = queueCommand(
       w.work,
       run.io,
       {
@@ -9531,7 +9523,7 @@ describe("one round at a time in a queue workdir (andon phase 2, the queue lock)
     const rounds: QueueRunOutcome[] = []
     let merged: YrdCliExitCode | undefined
     let landedBeforeNextRound: boolean | undefined
-    const running = coreQueueCommand(
+    const running = queueCommand(
       location.repo,
       service.io,
       {
@@ -9647,11 +9639,11 @@ describe("yrd queue run --tier long", () => {
     })
 
     const normalRun = capture(w.work)
-    expect(await coreQueueCommand(w.work, normalRun.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(await queueCommand(w.work, normalRun.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
     expect((records(normalRun)[0] as { deferred: string[] }).deferred.sort()).toEqual(["task/older", "task/younger"])
 
     const listed = capture(w.work)
-    expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(await queueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const rows = (records(listed)[0] as { changes: readonly Record<string, unknown>[] }).changes.filter(
       (r) => r.branch !== "main",
     )
@@ -9664,7 +9656,7 @@ describe("yrd queue run --tier long", () => {
     ])
 
     const longRun = capture(w.work)
-    const exitCode = await coreQueueCommand(
+    const exitCode = await queueCommand(
       w.work,
       longRun.io,
       { command: "run", tier: "long" },
@@ -9673,9 +9665,7 @@ describe("yrd queue run --tier long", () => {
     expect(exitCode).toBe(1)
 
     const listedAfter = capture(w.work)
-    expect(
-      await coreQueueCommand(w.work, listedAfter.io, { command: "list" }, { json: true, workdir: w.workdir }),
-    ).toBe(0)
+    expect(await queueCommand(w.work, listedAfter.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const rowsAfter = (records(listedAfter)[0] as { changes: readonly Record<string, unknown>[] }).changes
     const olderRow = rowsAfter.find((r) => r.branch === "task/older")
     const youngerRow = rowsAfter.find((r) => r.branch === "task/younger")
@@ -9731,7 +9721,7 @@ describe("yrd queue run --tier long", () => {
     const run = capture(sibling)
     try {
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           {
@@ -9798,7 +9788,7 @@ describe("yrd queue run --tier long", () => {
     const run = capture(w.work)
     try {
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           {
@@ -9903,7 +9893,7 @@ describe("yrd queue run --tier long", () => {
     const merged: string[] = []
     try {
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           {
@@ -10002,7 +9992,7 @@ describe("yrd queue run --tier long", () => {
     const run = capture(w.work)
     try {
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           {
@@ -10066,7 +10056,7 @@ describe("yrd queue run --tier long", () => {
     const run = capture(w.work)
     try {
       expect(
-        await coreQueueCommand(
+        await queueCommand(
           w.work,
           run.io,
           {
@@ -10158,7 +10148,7 @@ describe("yrd queue run --tier long", () => {
       const run = capture(w.work)
       try {
         expect(
-          await coreQueueCommand(
+          await queueCommand(
             w.work,
             run.io,
             {
