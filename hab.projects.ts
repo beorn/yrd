@@ -19,77 +19,77 @@ export type { YrdQueueRunnerDeclaration } from "./packages/yrd-queue-core/src/ru
 export { YRD_COMPONENTS as YRD_RUNTIME_COMPONENTS, YRD_RUNTIME_ENTRY }
 
 export default Object.fromEntries(
-    yrdQueueRunnerDeclarations.map(({ serviceName, owner }) => [
-      serviceName,
-      {
-        // The service is `yrd queue up`: the same round `yrd queue run` does, on
-        // a loop (plan § Commands). `queue run` is one round and exits.
-        //
-        // NO REPOSITORY OPERAND. `yrd queue up <repository>` was a composition
-        // spelling resolved from a `YRD_REPOSITORY_ALIASES` env this registry
-        // also minted; both went with the old core at M6, and the new commands
-        // take no repository argument — the declaration where the command
-        // stands IS the repository, and the service stands in it
-        // (`repository.path`).
-        command: `bun ${YRD_RUNTIME_ENTRY} yrd queue up --interval 120`,
-        // The habitant stands down over this RSS (exit 12, memory-cap) instead of
-        // waiting for the kernel; @cto ruling 2026-08-30 on
-        // @i/10-yrd/runner-exits-and-respawns — one habitant per host. Raised
-        // 12 → 24 GiB on 2026-09-01 (@cto): the resident's measured working set
-        // while running admissions on a 527 MB journal is 6-10 GB (sampled every
-        // minute for 30 min, peak 9.96 GB), and it stood down at 16.5 GB at
-        // 12:58 PDT with restart:"never" — a cap below the working set is an
-        // outage generator, not a guard. The host has 121 GB; the growth itself
-        // is tracked as its own defect. This number is a ceiling for runaway.
-        // No TRIBE_NAME: hab scrubs every caller identity name at launch, a
-        // declared one included (SERVICE_LAUNCH_PROOF_SCRUB), so a declaration
-        // here never reaches the process. The queue's notices speak as this
-        // service's name, which the root's tools/yrd-notify.ts reads from
-        // HAB_SERVICE_NAME and registers as its own service launch. That name is
-        // `yrd`, never `@yrd`: that seat is retired (2026-08-31).
-        env: { YRD_HABITANT_RSS_CAP_MB: "24576" },
-        // The declared health probe (2026-09-11). M7 rejected a probe on
-        // 2026-09-03 as noise with a SECOND OPINION, and that objection is
-        // answered rather than overruled: `queue health` re-derives nothing.
-        // It reads the document the loop itself last wrote — as it started, at
-        // a round's end, or on the heartbeat that restates it between — so
-        // there is exactly one opinion and it is the loop's. No network, no
-        // declaration read, no process census, no judgement of the queue.
-        //
-        // This is where the stuck ALARM lives. A stuck change stops the line —
-        // the queue pauses itself naming it — and the service stays up holding
-        // the stop, so the supervisor pages on unhealthy-while-running WITHOUT
-        // restarting. The page clears when an act lifts the stop (the change
-        // withdrawn or merged, or `yrd queue resume`), never by itself.
-        health: { command: `bun ${YRD_RUNTIME_ENTRY} yrd queue health` },
-        // The loop relaunches only after an ending it chose: 0 for a clean
-        // round/gitlink recycle, or 1 for a candidate failure. Exit 2 is
-        // reserved for what the loop cannot hold a line on — a declaration that
-        // is absent or unreadable, a runtime gitlink that is absent, a round
-        // that could not read its queue at all — so it stays off the allowlist
-        // and still pages non-relaunchable.
-        // Signal decision: any signal observed by Hab is an unplanned host-level
-        // interruption, so it stays down and pages the declared owner with every
-        // unlisted code.
-        restart: "on-codes" as const,
-        relaunchExitCodes: [0, 1],
-        // The loop exits 0 by itself once the tree its next launch loads holds a new pin (26755), and the
-        // supervisor relaunches it from the current landing: a self-exit bounded at 45 minutes (26774, @cto
-        // 9e7a89d2). Past that bound hab pages the move as late.
-        //
-        // 27886 (@cto 2026-10-07): the pin vector is every root gitlink the runtime loads in process, not its
-        // own alone — a dependency-only promotion (say vendor/bearly) moved the loop never saw, and moved the
-        // source check never saw either, because the entrypoint file's history does not cover it. The same
-        // constant drives the loop's exit and wait and this declaration's source comparison.
-        // 30189: both comparisons also watch the launcher's last-touch revision. A launcher-only move
-        // uses the same wait and exit 0; unrelated root promotions do not recycle this service.
-        landingMigration: { mechanism: "self-exit" as const, bound: "45m", additionalComponents: YRD_COMPONENTS },
-        // `HabServiceDefinition.owner` is a recognized service key in
-        // ag/packages/hab-config. Spreading the registry row's owner here makes
-        // every page of this service — the stopped line's and a terminal
-        // ending's — reach the declared owner, named rather than left to the
-        // fleet-wide default.
-        owner,
-      },
-    ]),
+  yrdQueueRunnerDeclarations.map(({ serviceName, owner }) => [
+    serviceName,
+    {
+      // The service is `yrd queue up`: the same round `yrd queue run` does, on
+      // a loop (plan § Commands). `queue run` is one round and exits.
+      //
+      // NO REPOSITORY OPERAND. `yrd queue up <repository>` was a composition
+      // spelling resolved from a `YRD_REPOSITORY_ALIASES` env this registry
+      // also minted; both went with the old core at M6, and the new commands
+      // take no repository argument — the declaration where the command
+      // stands IS the repository, and the service stands in it
+      // (`repository.path`).
+      command: `bun ${YRD_RUNTIME_ENTRY} yrd queue up --interval 120`,
+      // The habitant stands down over this RSS (exit 12, memory-cap) instead of
+      // waiting for the kernel; @cto ruling 2026-08-30 on
+      // @i/10-yrd/runner-exits-and-respawns — one habitant per host. Raised
+      // 12 → 24 GiB on 2026-09-01 (@cto): the resident's measured working set
+      // while running admissions on a 527 MB journal is 6-10 GB (sampled every
+      // minute for 30 min, peak 9.96 GB), and it stood down at 16.5 GB at
+      // 12:58 PDT with restart:"never" — a cap below the working set is an
+      // outage generator, not a guard. The host has 121 GB; the growth itself
+      // is tracked as its own defect. This number is a ceiling for runaway.
+      // No TRIBE_NAME: hab scrubs every caller identity name at launch, a
+      // declared one included (SERVICE_LAUNCH_PROOF_SCRUB), so a declaration
+      // here never reaches the process. The queue's notices speak as this
+      // service's name, which the root's tools/yrd-notify.ts reads from
+      // HAB_SERVICE_NAME and registers as its own service launch. That name is
+      // `yrd`, never `@yrd`: that seat is retired (2026-08-31).
+      env: { YRD_HABITANT_RSS_CAP_MB: "24576" },
+      // The declared health probe (2026-09-11). M7 rejected a probe on
+      // 2026-09-03 as noise with a SECOND OPINION, and that objection is
+      // answered rather than overruled: `queue health` re-derives nothing.
+      // It reads the document the loop itself last wrote — as it started, at
+      // a round's end, or on the heartbeat that restates it between — so
+      // there is exactly one opinion and it is the loop's. No network, no
+      // declaration read, no process census, no judgement of the queue.
+      //
+      // This is where the stuck ALARM lives. A stuck change stops the line —
+      // the queue pauses itself naming it — and the service stays up holding
+      // the stop, so the supervisor pages on unhealthy-while-running WITHOUT
+      // restarting. The page clears when an act lifts the stop (the change
+      // withdrawn or merged, or `yrd queue resume`), never by itself.
+      health: { command: `bun ${YRD_RUNTIME_ENTRY} yrd queue health` },
+      // The loop relaunches only after an ending it chose: 0 for a clean
+      // round/gitlink recycle, or 1 for a candidate failure. Exit 2 is
+      // reserved for what the loop cannot hold a line on — a declaration that
+      // is absent or unreadable, a runtime gitlink that is absent, a round
+      // that could not read its queue at all — so it stays off the allowlist
+      // and still pages non-relaunchable.
+      // Signal decision: any signal observed by Hab is an unplanned host-level
+      // interruption, so it stays down and pages the declared owner with every
+      // unlisted code.
+      restart: "on-codes" as const,
+      relaunchExitCodes: [0, 1],
+      // The loop exits 0 by itself once the tree its next launch loads holds a new pin (26755), and the
+      // supervisor relaunches it from the current landing: a self-exit bounded at 45 minutes (26774, @cto
+      // 9e7a89d2). Past that bound hab pages the move as late.
+      //
+      // 27886 (@cto 2026-10-07): the pin vector is every root gitlink the runtime loads in process, not its
+      // own alone — a dependency-only promotion (say vendor/bearly) moved the loop never saw, and moved the
+      // source check never saw either, because the entrypoint file's history does not cover it. The same
+      // constant drives the loop's exit and wait and this declaration's source comparison.
+      // 30189: both comparisons also watch the launcher's last-touch revision. A launcher-only move
+      // uses the same wait and exit 0; unrelated root promotions do not recycle this service.
+      landingMigration: { mechanism: "self-exit" as const, bound: "45m", additionalComponents: YRD_COMPONENTS },
+      // `HabServiceDefinition.owner` is a recognized service key in
+      // ag/packages/hab-config. Spreading the registry row's owner here makes
+      // every page of this service — the stopped line's and a terminal
+      // ending's — reach the declared owner, named rather than left to the
+      // fleet-wide default.
+      owner,
+    },
+  ]),
 )
