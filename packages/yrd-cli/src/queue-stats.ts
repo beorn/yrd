@@ -120,6 +120,17 @@ export type StatsGroup = Readonly<{
   rePushedBranches: number
   rePushes: number
   latency: LatencyStats
+  /**
+   * 31834: the wait and merge (run) spans beside the total `latency`, in the
+   * same shape: per run decision carrying both instants of the span — wait is
+   * opened → the run started (`queuedMs`), run is the run started → ended
+   * (`runMs`). `count` says how many decisions carried the span; the median
+   * fields are absent, never a zero, when none did. Existing journal rows
+   * stay readable: the spans derive from the same row instants the STATS
+   * pane already reads, no new field is written.
+   */
+  wait: LatencyStats
+  run: LatencyStats
 }>
 
 /** What every age here is measured from: git records no push time, so the tip's committer date stands in. */
@@ -185,6 +196,18 @@ function latencyOf(rows: readonly WatchRow[]): LatencyStats {
   }
 }
 
+/** One span's stats over the decisions carrying it: the {@link LatencyStats} shape over `queuedMs` or `runMs` (31834). */
+function spanOf(decisions: readonly { queuedMs?: number; runMs?: number }[], key: "queuedMs" | "runMs"): LatencyStats {
+  const ms = decisions.flatMap((decision) => (decision[key] === undefined ? [] : [decision[key]])).sort((a, b) => a - b)
+  const median = percentile(ms, 50)
+  const p90 = percentile(ms, 90)
+  return {
+    count: ms.length,
+    ...(median === undefined ? {} : { medianMs: median }),
+    ...(p90 === undefined ? {} : { p90Ms: p90 }),
+  }
+}
+
 function groupOf(key: string, rows: readonly WatchRow[]): StatsGroup {
   const decisions = decisionsOfRows(rows)
   const heads = new Map<string, number>()
@@ -238,6 +261,8 @@ function groupOf(key: string, rows: readonly WatchRow[]): StatsGroup {
     inLine: inState("queued", "verifying", "checking", "merging"),
     key,
     latency: latencyOf(rows),
+    run: spanOf(decisions, "runMs"),
+    wait: spanOf(decisions, "queuedMs"),
     merged,
     rePushedBranches,
     rePushes,

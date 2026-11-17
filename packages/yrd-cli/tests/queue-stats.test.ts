@@ -205,6 +205,37 @@ describe("the compact witness: one queue day in seven rows", () => {
   })
 })
 
+describe("wait, merge and total spans (31834)", () => {
+  it("records the wait and run spans beside the total latency, per group", () => {
+    const rows: readonly WatchRow[] = [
+      row({
+        at: at("2026-09-05T04:00:00Z"),
+        branch: "task/w",
+        head: "7".repeat(40),
+        state: "merged",
+        result: "pass affected-tests",
+        merge: "8".repeat(40),
+        since: at("2026-09-05T01:00:00Z"),
+        startedAt: at("2026-09-05T02:00:00Z"),
+        endedAt: at("2026-09-05T03:30:00Z"),
+      }),
+    ]
+    const stats = queueStats(rows, [], { now: NOW })
+    // wait: opened 01:00 → run started 02:00 (1h). run: started → ended (1h30m).
+    // total stays latencyOf's measure: opened → merged (3h).
+    expect(stats.total.wait).toEqual({ count: 1, medianMs: 3_600_000, p90Ms: 3_600_000 })
+    expect(stats.total.run).toEqual({ count: 1, medianMs: 5_400_000, p90Ms: 5_400_000 })
+    expect(stats.total.latency).toEqual({ count: 1, medianMs: 10_800_000, p90Ms: 10_800_000 })
+    expect(stats.groups[0]?.wait).toEqual(stats.total.wait)
+  })
+
+  it("rows without phase instants carry no span — absent, never a zero", () => {
+    const stats = queueStats(COMPACT, [], { now: NOW })
+    expect(stats.total.wait).toEqual({ count: 0 })
+    expect(stats.total.run).toEqual({ count: 0 })
+  })
+})
+
 describe("the real witness: eighteen rows of the live queue", () => {
   it("reproduces the counts computed apart from the same file, in Python", () => {
     const rows = witnessRows()
