@@ -2172,7 +2172,10 @@ export async function closeEnvironment(
   // A captured retirement handle can delete an unchanged author tip after
   // removal. Any custody pass retains every author branch, so capture only for
   // the ordinary clean close with no preservation ref.
-  const retirement = preservedRefs.length === 0 ? await prepareAuthorRelease(path, io) : undefined
+  const retirement =
+    preservedRefs.length === 0
+      ? await prepareAuthorRelease(path, io, { process, ...(context === undefined ? {} : { budget: context.budget }) })
+      : undefined
   if (retirement?.kind === "unreadable") {
     io.stderr(`yrd: ${retirement.reason}; read ${retirement.reads.join("; ")}; close continues\n`)
   }
@@ -2514,12 +2517,13 @@ function uncertified(
   when = "",
   output?: Readonly<{ json: boolean; io: YrdCliIO }>,
 ): IncompleteCensusError {
-  if (output !== undefined)
+  if (output !== undefined) {
     output.io.stdout(
       output.json
         ? `${JSON.stringify({ kept: true, queued: false, path, reason: admission.refusal, ...(when === "" ? {} : { when }) })}\n`
         : `kept environment ${path}: ${admission.refusal}${when === "" ? "" : ` ${when}`}; not queued\n`,
     )
+  }
   return new IncompleteCensusError(
     admission.refusal,
     admission.census,

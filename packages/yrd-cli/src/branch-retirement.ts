@@ -50,11 +50,17 @@ import {
   type SameIssue,
 } from "@yrd/queue-core"
 import { samenessDetail } from "./issue-sameness.ts"
-import type { LocalBranchProtectionResult, YrdCliIO } from "./types.ts"
+import type { Process } from "@yrd/process"
+import type { CloseExecutionBudget, LocalBranchProtectionResult, YrdCliIO } from "./types.ts"
 import { patchEquivalentOffTarget } from "./retirement-content-proof.ts"
 import { originHead, retainedComponentStoreHere } from "./queue-location.ts"
 import { workdirOf } from "./workdir.ts"
-import { admitEnvironmentClose, censusReaderLine, validateLiveEnvironmentUses } from "./env-close-holders.ts"
+import {
+  admitEnvironmentClose,
+  censusReaderLine,
+  closeWorkRemaining,
+  validateLiveEnvironmentUses,
+} from "./env-close-holders.ts"
 import { formatYrdCommand } from "./command-format.ts"
 import { ENV_CLOSE_PREDICATE, requesterOf, writeReleaseRequest } from "./env-close-requests.ts"
 
@@ -62,14 +68,18 @@ import { ENV_CLOSE_PREDICATE, requesterOf, writeReleaseRequest } from "./env-clo
 export async function readBranchProtections(
   io: YrdCliIO,
   input: Parameters<NonNullable<YrdCliIO["localBranchProtections"]>>[0],
+  budget?: CloseExecutionBudget,
 ): Promise<LocalBranchProtectionResult> {
+  if (budget !== undefined) closeWorkRemaining(budget)
   if (io.localBranchProtections === null) return { protections: [], evidence: [] }
   if (io.localBranchProtections === undefined) {
     throw new Error("localBranchProtections authority reader is missing; standalone callers must explicitly pass null")
   }
   // A host launcher answers from the checkout it ships in while Yrd runs from the landed root, so a launcher from an
   // older checkout can return an older answer: before { protections, evidence } it was the bare array of holds (30693).
-  const result: unknown = await io.localBranchProtections(input)
+  const result: unknown = await (budget === undefined
+    ? io.localBranchProtections(input)
+    : io.localBranchProtections(input, budget))
   if (
     typeof result !== "object" ||
     result === null ||
@@ -2167,16 +2177,21 @@ export type AuthorReleaseResult =
   | Readonly<{ kind: "unreadable"; reason: string; reads: readonly string[] }>
 
 /** Public context adapter; no lifecycle mutation or host policy belongs here. */
-export async function prepareAuthorRelease(checkout: string, io: YrdCliIO): Promise<AuthorReleaseResult> {
+export async function prepareAuthorRelease(
+  checkout: string,
+  io: YrdCliIO,
+  options: Readonly<{ process?: Pick<Process, "run">; budget?: CloseExecutionBudget }> = {},
+): Promise<AuthorReleaseResult> {
   const reads: string[] = []
   try {
+    if (options.budget !== undefined) closeWorkRemaining(options.budget)
     reads.push(`checkout metadata: ${checkout}`)
     const path = realpathSync(checkout)
     const metadata = await inspectCheckoutGitMetadata(path)
     reads.push(`Git selection: ${path}`)
-    const selection = await resolveGitSelection(path)
+    const selection = await resolveGitSelection(path, options.process === undefined ? {} : { process: options.process })
     // The common store survives removal of the linked author checkout.
-    const git = gitIn(metadata.commonDirectory, undefined, selection)
+    const git = gitIn(metadata.commonDirectory, options.process, selection)
     reads.push(`native worktree registry: ${metadata.commonDirectory}`)
     const rows = await registeredWorktrees(git)
     const author = rows.find((row) => resolve(row.path) === path)
@@ -2195,7 +2210,7 @@ export async function prepareAuthorRelease(checkout: string, io: YrdCliIO): Prom
     ) {
       throw new Error(`${path}: no active primary worktree in captured common store ${metadata.commonDirectory}`)
     }
-    const treeGit = gitIn(path, undefined, selection)
+    const treeGit = gitIn(path, options.process, selection)
     reads.push(`checkout HEAD and declaration: ${path}@${author.head}`)
     if ((await refAt(treeGit, "HEAD")) !== author.head) {
       throw new Error(`${path}: native checkout HEAD changed during capture`)

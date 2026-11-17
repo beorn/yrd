@@ -74,6 +74,7 @@ export type YrdCliIO = {
   localBranchProtections:
     | ((
         input: Readonly<{ repo: string; branch: string; tip: string; issue?: string; retainedCheckout?: string }>,
+        budget?: CloseExecutionBudget,
       ) => Promise<LocalBranchProtectionResult>)
     | null
 }

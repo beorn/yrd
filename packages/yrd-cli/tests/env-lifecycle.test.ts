@@ -39,6 +39,8 @@ import {
 import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { createProcess } from "@yrd/process"
+import { readBranchProtections } from "../src/branch-retirement.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
 import * as publicCli from "../src/index.ts"
 import { admitEnvironmentClose, assertNoLiveEnvironmentUse, environmentCwdHolder } from "../src/env-close-holders.ts"
@@ -2774,6 +2776,50 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
   })
 
   // Public close execution is a production seam: old reporting and private census-injection tests cannot prove it.
+  it("author release capture uses the caller's existing process capability", async () => {
+    const w = await world(":")
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openAttachedEnvironment(w.work, head, "author-process")
+    const run = capture(w.work)
+    await using owner = createProcess({ cwd: w.work })
+    const process = { run: vi.fn((request: Parameters<typeof owner.run>[0]) => owner.run(request)) }
+    const budget = { signal: new AbortController().signal, remainingMs: () => 30_000 }
+    const prepared = await Reflect.apply(publicCli.prepareAuthorRelease, undefined, [path, run.io, { process, budget }])
+    expect(prepared.kind).toBe("none")
+    expect(process.run.mock.calls.length).toBeGreaterThan(1)
+    expect(process.run.mock.calls.some(([request]) => request.argv.includes("worktree"))).toBe(true)
+  })
+
+  it("branch protection receives the caller's same execution budget", async () => {
+    const run = capture("/fixture-protections")
+    const read = vi.fn(async (..._args: unknown[]) => ({ protections: [], evidence: [] }))
+    run.io.localBranchProtections = read
+    const budget = { signal: new AbortController().signal, remainingMs: () => 100 }
+    const branch = { repo: run.io.cwd, branch: "task/fixture", tip: "0".repeat(40) }
+    expect(await Reflect.apply(readBranchProtections, undefined, [run.io, branch, budget])).toEqual({
+      protections: [],
+      evidence: [],
+    })
+    expect(read).toHaveBeenCalledExactlyOnceWith(branch, budget)
+  })
+
+  it.each(["signal", "allowance"])("starts no branch protection provider after exhausted %s", async (expired) => {
+    const run = capture("/fixture-protections")
+    const read = vi.fn(async () => ({ protections: [], evidence: [] }))
+    run.io.localBranchProtections = read
+    const controller = new AbortController()
+    if (expired === "signal") controller.abort(new Error("branch protection work cutoff"))
+    const budget = { signal: controller.signal, remainingMs: () => (expired === "allowance" ? 0 : 100) }
+    await expect(
+      Reflect.apply(readBranchProtections, undefined, [
+        run.io,
+        { repo: run.io.cwd, branch: "task/fixture", tip: "0".repeat(40) },
+        budget,
+      ]),
+    ).rejects.toThrow()
+    expect(read).not.toHaveBeenCalled()
+  })
+
   it("public close forwards the same execution budget to every live-use provider read", async () => {
     const w = await world(":")
     const head = (await w.git(["rev-parse", "HEAD"])).trim()
@@ -2923,13 +2969,13 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     const remainder = dirname(failedPath!)
     expect(existsSync(remainder)).toBe(true)
     expect(warned).toHaveBeenCalled()
-    if (json)
+    if (json) {
       expect(JSON.parse(run.stdout())).toMatchObject({
         closed: path,
         cleanup: "removed-with-remainder",
         remainder: [remainder],
       })
-    else {
+    } else {
       expect(run.stdout()).toContain(`closed environment ${path}`)
       expect(run.stdout()).toContain(`removed-with-remainder: ${remainder}`)
     }
@@ -2968,13 +3014,13 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     expect(retained).toBeTypeOf("string")
     expect(existsSync(retained!)).toBe(true)
     expect(warned).toHaveBeenCalled()
-    if (json)
+    if (json) {
       expect(JSON.parse(run.stdout())).toMatchObject({
         closed: path,
         cleanup: "removed-with-remainder",
         remainder: [expect.stringContaining(retained!)],
       })
-    else {
+    } else {
       expect(run.stdout()).toContain(`closed environment ${path}`)
       expect(run.stdout()).toContain("removed-with-remainder")
       expect(run.stdout()).toContain(retained!)
