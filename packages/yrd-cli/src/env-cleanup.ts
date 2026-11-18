@@ -1511,7 +1511,11 @@ async function cleanupEnvironments(
     if (!terminal && opening.status === "recorded") {
       const openedAt = Date.parse(opening.record.at)
       if (!Number.isFinite(openedAt)) return `opening timestamp unproven: ${JSON.stringify(opening.record.at)}`
-      if (Date.now() - openedAt < FRESH_ENVIRONMENT_GRACE_MS) return `fresh: opened ${opening.record.at}`
+      // 34711: a recorded expiry that has passed ends the grace. The grace is the default lifetime for a bay that
+      // names none; a shorter recorded lifetime (a queue bay's 2 h) was otherwise held a full day.
+      const expiry = opening.record.expiresAt === undefined ? Number.NaN : Date.parse(opening.record.expiresAt)
+      const expired = Number.isFinite(expiry) && Date.now() >= expiry
+      if (!expired && Date.now() - openedAt < FRESH_ENVIRONMENT_GRACE_MS) return `fresh: opened ${opening.record.at}`
     }
     // 33758 keep-rule: an expiry is recorded permission for the CLOCK, never an inference from age. Before the
     // instant the bay is kept and the reason names the time it stays until; at or after it this function says

@@ -1201,6 +1201,43 @@ describe("yrd env open prepares the retained environment", () => {
   })
 
   /**
+   * @failure 34711: a bay opened with a recorded expiry shorter than the 24 h fresh grace (a queue bay's 2 h) was
+   *          kept as "fresh" until the grace ran out, so its recorded lifetime was never enforced.
+   * @level l2 (real `yrd env open --expires` and `yrd queue run` sweep)
+   * @consumer the queue's environment sweep, and every host disk the expired bays filled
+   */
+  it("closes a bay whose recorded expiry has passed inside the fresh grace, and keeps one whose expiry has not (34711)", async () => {
+    for (const passed of [false, true]) {
+      const fixture = await world("true")
+      await birthEventQueue(fixture.work, "main")
+      const run = capture(fixture.work)
+      const selected = (await fixture.git(["rev-parse", "HEAD"])).trim()
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--expires", "2h"], run.io),
+        run.stderr(),
+      ).toBe(0)
+      const bay = run.stdout().trim()
+      const gitDir = (await gitIn(bay)(["rev-parse", "--absolute-git-dir"])).trim()
+      const opening = readEnvOpenRecord(gitDir)
+      if (opening.status !== "recorded") throw new Error(`opening: ${JSON.stringify(opening)}`)
+      // Opened 3 h ago: well inside the 24 h grace. Its 2 h lifetime has passed, or (control) still runs.
+      const expiresAt = new Date(Date.now() + (passed ? -60 : 60) * 60 * 1000).toISOString()
+      writeEnvOpenRecord(gitDir, {
+        ...opening.record,
+        at: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+        expiresAt,
+      })
+
+      const round = capture(fixture.work)
+      const exit = await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], round.io)
+      expect(exit, round.stderr()).toBe(0)
+      const why = passed ? "closed: native retained removal proof accepted" : `kept: fresh: opened`
+      expect(round.stderr(), `passed=${passed}\n${round.stderr()}`).toContain(`yrd: environment ${bay}: ${why}`)
+      expect(existsSync(bay)).toBe(!passed)
+    }
+  })
+
+  /**
    * @failure 26906: `yrd env open`'s failed-setup report dropped the frozen-lockfile diagnosis,
    *          and the retained bay's lockfile was left rewritten by it, so the caller could not
    *          tell its own starting bytes from the diagnosis's dependency change.
