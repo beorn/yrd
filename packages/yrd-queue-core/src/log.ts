@@ -192,6 +192,10 @@ export const LOG_KINDS = [
   "local-branch-retirement",
   // Origin component retirement and explicit discard decision/result records (29770, @cto ce3f2550).
   "origin-branch-retirement",
+  // An explicit discard of a retained entry's un-witnessed component objects (34787): a `decision` row, synced and
+  // read back before GitSuper removes anything, then a `discarded` or `kept` result row. Actor is who decided; the
+  // entry's owner is recorded as unknown, never inferred.
+  "retained-discard",
   // One closed or dropped issue's branch judged by the service's closed-issue sweep (29450): the issue's
   // status as the declared resolver returned it, the retirement outcome, the archive ref and, for a
   // removed unmerged tip, the exact recovery command. A `scope: "summary"` row closes each sweep.

@@ -74,6 +74,7 @@ import type { YrdCliExitCode, YrdCliIO, CloseExecutionBudget } from "./types.ts"
 export type { CloseExecutionBudget } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 import { censusRetainedStores, retainedCloseLine } from "./retained-census.ts"
+import { discardRetainedEntry, type SuperRun } from "./retained-discard.ts"
 import { formatYrdCommand } from "./command-format.ts"
 import {
   envOpenRecordFromFlags,
@@ -961,10 +962,61 @@ export type EnvRetainedOptions = Readonly<{
   namespace?: readonly string[]
   artifactDir?: string
   entry?: readonly string[]
+  /** 34787: one direct child to discard explicitly; previews unless --apply. */
+  discard?: string
+  reason?: string
 }>
 
 // The approved batch scan measured 469-665 s; this caller alone needs room beyond gitIn's normal 300 s ceiling.
 const RETAINED_BATCH_TIMEOUT_MS = 1_200_000
+
+/** 34787: `env retained --discard <entry>`; the batch selectors never mix with it. */
+async function discardRetained(options: EnvRetainedOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+  if (options.retireExpired === true || (options.entry?.length ?? 0) > 0 || options.limit !== undefined) {
+    throw new Error(
+      "--discard names one entry and never joins --retire-expired, --entry or --limit; nothing was discarded",
+    )
+  }
+  const root = requireRepository(io)
+  const selection = await resolveGitSelection(root)
+  await using process = createProcess({ cwd: root })
+  const git = gitIn(root, process, selection)
+  const workdir = await workdirOf(git)
+  const retentionRoot =
+    options.retain === undefined ? join(workdir, "retained-modules") : resolve(io.cwd, options.retain)
+  const superGit = gitIn(root, process, selection, {
+    timeoutMs: RETAINED_BATCH_TIMEOUT_MS,
+    rootInvocationTimeoutMs: RETAINED_BATCH_TIMEOUT_MS,
+  })
+  const runSuper: SuperRun = async (args) => {
+    try {
+      const stdout = await superGit(args)
+      return { code: 0, stdout, stderr: superGit.lastInvocation?.result?.stderr ?? "" }
+    } catch (error) {
+      const result = superGit.lastInvocation?.result
+      // Only an ordinary nonzero exit carries GitSuper's own answer; a timeout or spawn defect stays loud.
+      if (result === undefined || result.signal !== null || result.exitCode === 0) throw error
+      return { code: result.exitCode, stdout: result.stdout, stderr: result.stderr }
+    }
+  }
+  return await discardRetainedEntry(
+    {
+      entry: options.discard as string,
+      reason: options.reason,
+      apply: options.apply === true,
+      json: options.json === true,
+      retentionRoot,
+      common: (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim(),
+      namespace: (options.namespace ?? []).map((path) => resolve(io.cwd, path)),
+      artifactDir: options.artifactDir === undefined ? "" : resolve(io.cwd, options.artifactDir),
+      logDirectory: join(resolve(root, workdir), "logs"),
+      actor: requesterOf(globalThis.process.env),
+    },
+    io,
+    runSuper,
+    (args, input) => git(args, input),
+  )
+}
 
 /**
  * `yrd env retained` — the census of the stores `env close` retained (#33010): live, past their own retainUntil,
@@ -972,6 +1024,10 @@ const RETAINED_BATCH_TIMEOUT_MS = 1_200_000
  * it is a dry run unless --apply is explicit. The existing Git transport owns frozen-binary selection and killing.
  */
 export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+  if (options.discard !== undefined) return discardRetained(options, io)
+  if (options.reason !== undefined) {
+    throw new Error("--reason belongs to --discard <entry>; no retained stores were touched")
+  }
   if (options.apply === true && options.retireExpired !== true) {
     throw new Error("--apply requires --retire-expired; no retained stores were touched")
   }

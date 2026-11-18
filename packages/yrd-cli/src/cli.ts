@@ -1729,7 +1729,8 @@ function buildProgram(
     .command("retained")
     .description(
       "count the stores env close retained: live, past their own retainUntil, legacy, malformed and without a " +
-        "manifest, read from manifests only; --retire-expired plans a batch, --apply deletes after re-verification",
+        "manifest, read from manifests only; --retire-expired plans a batch, --apply deletes after re-verification; " +
+        "--discard <entry> --reason <why> previews losing exactly that entry's un-witnessed commits, --apply decides it",
     )
     .option(
       "--retain <directory>",
@@ -1739,7 +1740,8 @@ function buildProgram(
     .option("--retire-expired", "select expired non-legacy stores for a dry-run batch; no deletion by default")
     .option(
       "--apply",
-      "apply the granted retirement batch after held re-verification; requires --retire-expired and explicit --entry names",
+      "apply the granted retirement batch after held re-verification (requires --retire-expired and explicit --entry " +
+        "names), or decide a previewed --discard",
     )
     .option(
       "--limit <count>",
@@ -1753,6 +1755,12 @@ function buildProgram(
       [],
     )
     .option("--artifact-dir <directory>", "external caller-owned directory for retirement evidence")
+    .option(
+      "--discard <entry>",
+      "preview the exact un-witnessed loss of one retained entry (commit roots, root pins, attribution); with --apply, " +
+        "record the decision in the Yrd log and remove the entry through GitSuper; never with --retire-expired",
+    )
+    .option("--reason <why>", "why this loss is accepted; required with --discard and recorded in its decision")
     .option(
       "--entry <name>",
       "select the exact direct-child name from a reviewed dry-run list; repeat for that list",
