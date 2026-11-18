@@ -3687,11 +3687,20 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       const refused = capture(w.work)
       expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
       expect(refused.stderr()).toContain("detached HEAD is ahead of origin/main with content changes")
-      expect(refused.stderr()).toContain("git switch -c task/<issue>, then --preserve")
+      // 34764: the component pin is on its origin/main, so the root commit is the only dirt and a branch keeps it.
+      expect(refused.stderr()).toContain("the only dirt is root commits ahead of origin/main, so a branch keeps them")
+      expect(refused.stderr()).not.toContain("then --preserve")
       expect(refused.stderr()).not.toContain("re-run with --preserve")
       expect(existsSync(path)).toBe(true)
+
+      const ahead = (await envGit(["rev-parse", "HEAD"])).trim()
+      await envGit(["switch", "--quiet", "-c", "task/34764-gitlink-on-target"])
+      const closed = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
+      expect(existsSync(path)).toBe(false)
+      expect((await w.git(["rev-parse", "refs/heads/task/34764-gitlink-on-target"])).trim()).toBe(ahead)
     }
-  })
+  }, 60_000)
 
   /**
    * @failure 34744 (@cto fa2ab09a): `yrd env close` refused a clean environment whose component pin, or whose root
