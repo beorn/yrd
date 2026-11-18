@@ -225,9 +225,10 @@ async function observe(
   let proof: RetentionVerifyResult
   try {
     proof = JSON.parse(verified.stdout) as RetentionVerifyResult
-  } catch {
+  } catch (error) {
     throw new Error(
       `git super retention verify of ${entry} gave no JSON result (exit ${String(verified.code)}): ${verified.stderr.trim()}`,
+      { cause: error },
     )
   }
   if (proof.verdict === "candidate") {
