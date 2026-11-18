@@ -279,6 +279,51 @@ it("retained drain uses the production CLI in dry-run mode and requires its name
   expect(existsSync(join(retain, "old", "manifest.json"))).toBe(true)
 })
 
+// @cto 34920-retention-calls-r1 item 2: a batch GitSuper stops on unreadable cold evidence reaches the Yrd caller as
+// exit 2 with the full report, dry run included; it is never a green run with a warning.
+it("retained drain forwards a cold-proof stop as exit 2 with its report", async () => {
+  const w = await world(":")
+  mkdirSync(join(w.work, ".git", "yrd-worktree-mutations"), { recursive: true })
+  writeFileSync(join(w.work, ".git", "yrd-worktree-mutations", "writer.lock"), "")
+  const retain = join(dirname(w.work), "retained-modules")
+  mkdirSync(join(retain, "old"), { recursive: true })
+  writeFileSync(
+    join(retain, "old", "manifest.json"),
+    JSON.stringify({ retainUntil: "2020-01-01T00:00:00Z", writerLocks: [], notCompared: [] }),
+  )
+  // A retained store outside the batch whose module owner can only be cleared by its (unreadable) manifest.
+  const owner = join(retain, "broken", "modules", "vendor", "dep")
+  await w.git(["init", "--bare", "-q", owner])
+  writeFileSync(join(retain, "broken", "manifest.json"), "{ not json")
+  const run = capture(w.work)
+  expect(
+    await runYrdProcess(
+      [
+        "bun",
+        "yrd",
+        "env",
+        "retained",
+        "--retire-expired",
+        "--retain",
+        retain,
+        "--namespace",
+        dirname(w.work),
+        "--artifact-dir",
+        join(dirname(w.work), "proof"),
+        "--json",
+      ],
+      run.io,
+    ),
+    run.stderr(),
+  ).toBe(2)
+  const report = JSON.parse(run.stdout()) as { apply: boolean; stopped?: string; owners?: { coldProofFailed: number } }
+  expect(report.apply).toBe(false)
+  expect(report.stopped).toContain("@gate/retention-cold-proof: cold-proof-incomplete")
+  expect(report.owners?.coldProofFailed).toBe(1)
+  expect(run.stderr()).toContain(`cannot prove cold owner ${owner}`)
+  expect(existsSync(join(retain, "old", "manifest.json"))).toBe(true)
+})
+
 // CTO d35ae483: live apply must use the exact granted list, never a fresh census or a silently shortened list.
 // The dry-run integration above cannot prove either apply refusal.
 it.each([
