@@ -45,6 +45,7 @@ import {
   SetupFailed,
   worktreeWithoutSubmodules,
   type Git,
+  type SameIssue,
   type GitRunner,
   type ReconstructedCommit,
   type Reconstruction,
@@ -533,7 +534,29 @@ export function environmentStampUnreadable(name: string): boolean {
  * none declaring `resolve`, has no store to ask: that is said on stderr and the open proceeds as before. Yrd
  * still learns nothing of hh's bead model; it runs the verb the project declared, within the display read's bound.
  */
-async function requireResolvableIssue(root: string, issue: string, io: YrdCliIO, git: Git): Promise<void> {
+/** How the shared issue resolution names its caller: open keeps its words, bind names its own path and verb. */
+type IssueResolutionVerb = Readonly<{
+  /** `env open` or `env bind`, as the diagnostics print it. */
+  verb: "open" | "bind"
+  /** The yrd argv a retry from the primary checkout runs; empty keeps env open's own. */
+  retry: readonly string[]
+  /** What a refusal leaves unwritten. */
+  unwritten: string
+}>
+
+const OPEN_RESOLUTION: IssueResolutionVerb = {
+  verb: "open",
+  retry: [],
+  unwritten: "no environment, branch or Refs commit was created",
+}
+
+async function requireResolvableIssue(
+  root: string,
+  issue: string,
+  io: YrdCliIO,
+  git: Git,
+  caller: IssueResolutionVerb = OPEN_RESOLUTION,
+): Promise<void> {
   const outcome = await runIssuesVerb({
     verb: "resolve",
     args: [issue],
@@ -545,7 +568,7 @@ async function requireResolvableIssue(root: string, issue: string, io: YrdCliIO,
   if (outcome.ok) return
   if (outcome.code === ISSUES_CODES.declarationMissing || outcome.code === ISSUES_CODES.unsupported) {
     io.stderr(
-      `yrd env open: --issue ${issue} was not checked against an issues store, because ${root} declares none for it: ${outcome.message}\n`,
+      `yrd env ${caller.verb}: --issue ${issue} was not checked against an issues store, because ${root} declares none for it: ${outcome.message}\n`,
     )
     return
   }
@@ -553,16 +576,140 @@ async function requireResolvableIssue(root: string, issue: string, io: YrdCliIO,
   try {
     const primary = (await registeredWorktrees(git))[0]
     if (primary?.head !== undefined && resolve(primary.path) !== resolve(root)) {
+      const retry = caller.retry.length === 0 ? ["env", "open", "--issue", issue] : caller.retry
       recovery =
         ` If this checkout's issues provider is stale, retry from the primary checkout: ` +
-        `(${formatYrdCommand(io, ["env", "open", "--issue", issue], primary.path)})`
+        `(${formatYrdCommand(io, retry, primary.path)})`
     }
   } catch (error) {
     recovery = ` Primary-checkout recovery could not be read from Git at ${root}: ${error instanceof Error ? error.message : String(error)}`
   }
   throw new Error(
-    `yrd env open: --issue ${issue} does not resolve to an issue through the issues interface declared by ${root}, ` +
-      `so no environment, branch or Refs commit was created: ${outcome.message}${recovery}`,
+    `yrd env ${caller.verb}: --issue ${issue} does not resolve to an issue through the issues interface declared by ${root}, ` +
+      `so ${caller.unwritten}: ${outcome.message}${recovery}`,
+  )
+}
+
+/** What the one binding writer did, or (dry run) would do. `head` is always the branch's CURRENT head. */
+export type IssueBindOutcome = Readonly<{
+  /** The issue key as the binding records it: the existing spelling when the branch was already bound. */
+  issue: string
+  /** The branch head after this call: the new bind commit, or the observed head when nothing was written. */
+  head: string
+  /** The head this call observed and validated before any write. */
+  previousHead: string
+  /** A bind commit was written and the branch moved to it. */
+  wrote: boolean
+  /** Dry run only: a real call would write a bind commit. */
+  wouldWrite: boolean
+  /** The commit carrying the binding: the existing one (possibly older than `head`) or the new one. */
+  bindingCommit?: string
+}>
+
+/**
+ * The ONE writer of an issue binding (#34855; `yrd env open` and `yrd env bind` both call it). It reads the
+ * branch through `issueOf` with the declared key and the project's sameness judge, so a same-issue retry or
+ * alias writes nothing and returns the CURRENT head (never the older commit that carries the binding), and a
+ * different issue refuses with `issueOf`'s own words. A write is a commit of the observed head's own tree
+ * (staged, unstaged and untracked bytes and the index stay exactly as they were) and an expected-old
+ * update-ref of exactly `refs/heads/<branch>`. Each failure names the stage it happened in: before the
+ * update-ref nothing moved; after a successful update-ref the branch HAS moved, and that is said, never
+ * rewound.
+ */
+export async function bindBranchToIssue(
+  input: Readonly<{
+    git: Git
+    branch: string
+    /** The head the caller observed; the CAS expected-old. */
+    head: string
+    /** issueOf's target head: bindings are read in merge-base(head, target)..head. */
+    target: string
+    issue: string
+    sameIssue: SameIssue
+    verb: "open" | "bind"
+    dryRun?: boolean
+  }>,
+): Promise<IssueBindOutcome> {
+  const { git, branch, head, issue, verb } = input
+  const ref = `refs/heads/${branch}`
+  const tip = (await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])).trim()
+  if (tip !== head) {
+    throw new Error(
+      `${ref} is at ${tip === "" ? "no commit" : tip}, not the observed head ${head}; nothing was written`,
+    )
+  }
+  const binding = await issueOf(git, branch, head, input.target, issue, input.sameIssue)
+  if (binding === undefined) throw new Error(`no issue resolved for requested binding ${issue}`)
+  if (binding.source === "binding") {
+    const current = (await git(["rev-parse", "HEAD"])).trim()
+    if (current !== head) {
+      throw new Error(`HEAD is at ${current}, not the observed head ${head} of ${ref}; nothing was written`)
+    }
+    return {
+      issue: binding.issue,
+      head,
+      previousHead: head,
+      wrote: false,
+      wouldWrite: false,
+      ...(binding.commit === undefined ? {} : { bindingCommit: binding.commit }),
+    }
+  }
+  if (input.dryRun === true) {
+    return { issue: binding.issue, head, previousHead: head, wrote: false, wouldWrite: true }
+  }
+  let bound: string
+  try {
+    const tree = (await git(["rev-parse", `${head}^{tree}`])).trim()
+    bound = (
+      await git(["commit-tree", tree, "-p", head, "-m", `Bind work to ${binding.issue}\n\nRefs: ${binding.issue}`])
+    ).trim()
+  } catch (error) {
+    throw new Error(
+      `could not create the bind commit for ${binding.issue}; ${ref} was not moved: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    )
+  }
+  try {
+    // A self-describing reflog message: git writes it verbatim into HEAD's
+    // reflog, so a reader can tell the binding commit from any other move.
+    // The provenance classifier treats this prefix as creating (27723).
+    await git(["update-ref", "-m", `yrd env ${verb}: bind ${binding.issue}`, ref, bound, head])
+  } catch (error) {
+    throw new Error(
+      `${ref} was not moved by this call: its expected head ${head} no longer holds or the update failed ` +
+        `(${error instanceof Error ? error.message : String(error)}); the created commit ${bound} may remain as an unreferenced object`,
+      { cause: error },
+    )
+  }
+  let current: string
+  try {
+    current = (await git(["rev-parse", "HEAD"])).trim()
+  } catch (error) {
+    throw new Error(
+      `binding already written: ${ref} moved ${head} -> ${bound} (Refs: ${binding.issue}); reading HEAD afterwards failed: ` +
+        `${error instanceof Error ? error.message : String(error)}; the branch was not rewound`,
+      { cause: error },
+    )
+  }
+  if (current !== bound) {
+    throw new Error(
+      `binding already written: ${ref} moved ${head} -> ${bound} (Refs: ${binding.issue}); HEAD then read ${current}, ` +
+        `not the bind commit; the branch was not rewound`,
+    )
+  }
+  return { issue: binding.issue, head: bound, previousHead: head, wrote: true, wouldWrite: false, bindingCommit: bound }
+}
+
+/**
+ * 29738: the bind commit carries the --issue value exactly as given, so a later Refs trailer that spells the
+ * issue the other way refuses at submit - after a review GO. ANNOUNCE the key where the split is created, in
+ * the 28113 shape: stderr only, never a refusal, naming yrd's OWN flag and key so yrd still learns nothing of
+ * hh's bead model. `--json` stdout and the exit code are unchanged. @cto 08:31:50Z fixed this wording: the line
+ * names the exact key it wrote and the rule that every later Refs trailer must spell it exactly that way.
+ */
+function announceBinding(io: YrdCliIO, branch: string, issue: string, verb: "open" | "bind"): void {
+  io.stderr(
+    `${branch} is bound to ${issue} by a yrd env ${verb} Refs commit, which carries the --issue value exactly as given; every later Refs trailer on this branch must spell it exactly that way, or submit refuses with conflicting issue bindings\n`,
   )
 }
 
@@ -755,54 +902,17 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     try {
       const environmentGit = gitIn(path, process, selection)
       headSha = (await environmentGit(["rev-parse", "HEAD"])).trim()
-      const binding = await issueOf(
-        environmentGit,
+      const bound = await bindBranchToIssue({
+        git: environmentGit,
         branch,
-        headSha,
-        base,
-        options.issue,
-        issueComparer({ projectRoot: root, cwd: root, stderr: (text) => io.stderr(text) }),
-      )
-      if (binding === undefined) throw new Error(`no issue resolved for requested binding ${options.issue}`)
-      if (binding.source !== "binding") {
-        const tree = (await environmentGit(["rev-parse", `${headSha}^{tree}`])).trim()
-        const bound = (
-          await environmentGit([
-            "commit-tree",
-            tree,
-            "-p",
-            headSha,
-            "-m",
-            `Bind work to ${binding.issue}\n\nRefs: ${binding.issue}`,
-          ])
-        ).trim()
-        // A self-describing reflog message: git writes it verbatim into HEAD's
-        // reflog, so a reader can tell the binding commit from any other move.
-        // The provenance classifier treats this prefix as creating (27723).
-        await environmentGit([
-          "update-ref",
-          "-m",
-          `yrd env open: bind ${binding.issue}`,
-          `refs/heads/${branch}`,
-          bound,
-          headSha,
-        ])
-        headSha = bound
-        // 29738: the bind commit carries the --issue value exactly as given, so a later Refs trailer that
-        // spells the issue the other way refuses at submit - after a review GO. ANNOUNCE the key here,
-        // where the split is created, in the 28113 shape: stderr only, never a refusal, naming yrd's OWN
-        // flag and key so yrd still learns nothing of hh's bead model. `--json` stdout and the exit code
-        // are unchanged. @cto 08:31:50Z fixed this wording: the line names the exact key it wrote and the
-        // rule that every later Refs trailer must spell it exactly that way.
-        io.stderr(
-          `${branch} is bound to ${binding.issue} by a yrd env open Refs commit, which carries the --issue value exactly as given; every later Refs trailer on this branch must spell it exactly that way, or submit refuses with conflicting issue bindings\n`,
-        )
-      }
-      const currentHead = (await environmentGit(["rev-parse", "HEAD"])).trim()
-      if (currentHead !== headSha) {
-        throw new Error(`HEAD changed from verified binding ${headSha} to ${currentHead}`)
-      }
-      headSha = currentHead
+        head: headSha,
+        target: base,
+        issue: options.issue,
+        sameIssue: issueComparer({ projectRoot: root, cwd: root, stderr: (text) => io.stderr(text) }),
+        verb: "open",
+      })
+      if (bound.wrote) announceBinding(io, branch, bound.issue, "open")
+      headSha = bound.head
     } catch (error) {
       const conflictHint =
         options.bay === undefined &&
@@ -1939,6 +2049,142 @@ export async function checkEnvironmentPreserve(
   return { kind: result.exitCode === 0 ? "would-preserve" : "nothing" }
 }
 
+/**
+ * The registered environment an operand names (`env close` and `env bind` share it). 34404: every operand
+ * refusal names the operand as the caller typed it, and shows the cwd resolution only when the two differ.
+ * `env close 34056-peer` (2026-11-14) otherwise reported /hh/dev/34056-peer — a path nobody typed, in the
+ * shared projection — because the bay name resolved against the caller's cwd. The accepted form is already
+ * documented on the command as `<path>`, so the message states it instead of implying the caller asked for the
+ * directory the resolution happened to produce. Only a worktree registered in this repository AND inside an
+ * environment root qualifies: shared main and any other checkout are refused by name.
+ */
+async function resolveEnvironmentOperand(
+  operand: string,
+  io: YrdCliIO,
+  git: Git,
+  root: string,
+  roots: readonly string[],
+  verb: "close" | "bind",
+): Promise<Readonly<{ path: string; registered: Awaited<ReturnType<typeof registeredWorktrees>>[number] }>> {
+  const requested = resolve(io.cwd, operand)
+  const atOperand = requested === operand ? operand : `${operand} (resolved ${requested})`
+  let path: string
+  try {
+    path = realpathSync(requested)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ENOTDIR") {
+      throw error
+    }
+    throw new Error(
+      `environment ${atOperand} is not registered at an existing path; env ${verb} takes the environment path, as \`yrd env open\` prints it — inspect git worktree list before retrying`,
+      { cause: error },
+    )
+  }
+  const registered = (await registeredWorktrees(git)).find((entry) => resolve(entry.path) === path)
+  if (registered === undefined) {
+    throw new Error(
+      `environment ${atOperand} is not registered in ${root}; pass the environment path \`yrd env open\` printed, or inspect git worktree list`,
+    )
+  }
+  const contained = roots.some((directory) => {
+    if (!existsSync(directory)) return false
+    const within = relative(realpathSync(directory), path)
+    return within !== "" && within !== ".." && !within.startsWith(`..${sep}`) && !isAbsolute(within)
+  })
+  if (!contained) {
+    throw new Error(
+      verb === "close"
+        ? `environment ${path} is outside environment roots ${roots.join(" or ")}; nothing was removed. Retire a worktree outside these roots with your repository's own worktree cleanup (git worktree remove), not yrd env close`
+        : `environment ${path} is outside environment roots ${roots.join(" or ")}; nothing was bound. yrd env bind binds only an environment yrd env open made`,
+    )
+  }
+  return { path, registered }
+}
+
+export type EnvBindOptions = Readonly<{ issue?: string; dryRun?: boolean; json?: boolean }>
+
+/**
+ * `yrd env bind <path> --issue <ref>` (#34855): bind a registered environment's attached task branch to an
+ * issue with the same Refs commit `yrd env open --issue` writes, through the one writer. It is the supported
+ * route for a dirty environment that carries no binding: no clean-tree precondition and no close census (it
+ * removes nothing), and a worktree lock that protects removal does not stop the owner binding its own work.
+ * Only this repository's branch moves; a component's binding is its own. `--dry-run` makes the same decision
+ * and writes nothing.
+ */
+export async function bindEnvironment(operand: string, options: EnvBindOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+  const issue = options.issue
+  if (issue === undefined) {
+    throw new Error(`yrd env bind ${operand} needs --issue <ref>: the issue whose Refs commit binds the branch`)
+  }
+  const root = requireRepository(io)
+  await using process = createProcess({ cwd: root })
+  const selection = await resolveGitSelection(root, { process })
+  const git = gitIn(root, process, selection)
+  const workdir = resolve(root, await workdirOf(git))
+  const roots = [baysRootOf(root), legacyBaysRoot(root), join(workdir, "environments")]
+  const { path } = await resolveEnvironmentOperand(operand, io, git, root, roots, "bind")
+  const treeGit = gitIn(path, process, selection)
+  // `--symbolic-full-name HEAD` answers `HEAD` when detached and exits 0, so any failure here is a real Git error.
+  const ref = (await treeGit(["rev-parse", "--symbolic-full-name", "HEAD"])).trim()
+  const target = await originHead(git)
+  if (!ref.startsWith("refs/heads/") || ref === "refs/heads/") {
+    throw new Error(
+      `environment ${path} has a detached HEAD; yrd env bind binds an attached task branch, so nothing was bound`,
+    )
+  }
+  const branch = ref.slice("refs/heads/".length)
+  if (branch === target || branch === "main") {
+    throw new Error(`environment ${path} is on ${branch}, the target branch, not a task branch; nothing was bound`)
+  }
+  const elsewhere = (await registeredWorktrees(git)).find(
+    (entry) => entry.branch === branch && resolve(entry.path) !== path,
+  )
+  if (elsewhere !== undefined) {
+    throw new Error(
+      `${branch} is also checked out at ${elsewhere.path}; bind it where its owner works, so nothing was bound here`,
+    )
+  }
+  const head = (await treeGit(["rev-parse", "HEAD"])).trim()
+  const base = (await resolveBaseSha(git, target, io)).sha
+  await requireResolvableIssue(root, issue, io, git, {
+    verb: "bind",
+    retry: ["env", "bind", path, "--issue", issue],
+    unwritten: `no Refs commit was written and ${branch} did not move`,
+  })
+  const outcome = await bindBranchToIssue({
+    git: treeGit,
+    branch,
+    head,
+    target: base,
+    issue,
+    sameIssue: issueComparer({ projectRoot: root, cwd: root, stderr: (text) => io.stderr(text) }),
+    verb: "bind",
+    ...(options.dryRun === true ? { dryRun: true } : {}),
+  })
+  if (outcome.wrote) announceBinding(io, branch, outcome.issue, "bind")
+  const said = outcome.wrote
+    ? `bound ${branch} to ${outcome.issue}: ${outcome.previousHead} -> ${outcome.head}`
+    : outcome.wouldWrite
+      ? `would bind ${branch} to ${outcome.issue} with a Refs commit on ${outcome.head} (dry run; nothing was written)`
+      : `${branch} is already bound to ${outcome.issue}${outcome.bindingCommit === undefined ? "" : ` at ${outcome.bindingCommit}`}; head ${outcome.head}; nothing was written`
+  if (options.json === true) {
+    io.stdout(
+      `${JSON.stringify({
+        path,
+        branch,
+        issue: outcome.issue,
+        head: outcome.head,
+        previousHead: outcome.previousHead,
+        wrote: outcome.wrote,
+        dryRun: options.dryRun === true,
+        wouldWrite: outcome.wouldWrite,
+        ...(outcome.bindingCommit === undefined ? {} : { bindingCommit: outcome.bindingCommit }),
+      })}\n`,
+    )
+  } else io.stdout(`${path}: ${said}\n`)
+  return 0
+}
+
 export async function closeEnvironment(
   operand: string,
   options: EnvCloseOptions,
@@ -1994,41 +2240,7 @@ export async function closeEnvironment(
       `--retain ${options.retain} is not an absolute directory, so it would resolve against the caller's cwd and write a retention tree there; pass an absolute path (e.g. ${join(workdir, "retained-modules")})`,
     )
   }
-  // 34404: every operand refusal names the operand as the caller typed it, and shows the cwd resolution only
-  // when the two differ. `env close 34056-peer` (2026-11-14) otherwise reported /hh/dev/34056-peer — a path
-  // nobody typed, in the shared projection — because the bay name resolved against the caller's cwd. The
-  // accepted form is already documented on the command as `<path>`, so the message states it instead of
-  // implying the caller asked for the directory the resolution happened to produce.
-  const requested = resolve(io.cwd, operand)
-  const atOperand = requested === operand ? operand : `${operand} (resolved ${requested})`
-  let path: string
-  try {
-    path = realpathSync(requested)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ENOTDIR") {
-      throw error
-    }
-    throw new Error(
-      `environment ${atOperand} is not registered at an existing path; env close takes the environment path, as \`yrd env open\` prints it — inspect git worktree list before retrying`,
-      { cause: error },
-    )
-  }
-  const registered = (await registeredWorktrees(git)).find((entry) => resolve(entry.path) === path)
-  if (registered === undefined) {
-    throw new Error(
-      `environment ${atOperand} is not registered in ${root}; pass the environment path \`yrd env open\` printed, or inspect git worktree list`,
-    )
-  }
-  const contained = roots.some((directory) => {
-    if (!existsSync(directory)) return false
-    const within = relative(realpathSync(directory), path)
-    return within !== "" && within !== ".." && !within.startsWith(`..${sep}`) && !isAbsolute(within)
-  })
-  if (!contained) {
-    throw new Error(
-      `environment ${path} is outside environment roots ${roots.join(" or ")}; nothing was removed. Retire a worktree outside these roots with your repository's own worktree cleanup (git worktree remove), not yrd env close`,
-    )
-  }
+  const { path, registered } = await resolveEnvironmentOperand(operand, io, git, root, roots, "close")
   const treeGit = gitIn(path, process, selection)
   if (registered.locked !== undefined) {
     const lockPath = join((await treeGit(["rev-parse", "--absolute-git-dir"])).trim(), "locked")
