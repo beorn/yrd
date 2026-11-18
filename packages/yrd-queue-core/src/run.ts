@@ -343,7 +343,6 @@ export async function timedStep<T>(
   }
 }
 
-/** A change as a person reads it: the branch and twelve characters of the head, the trailer's spelling shortened. */
 /**
  * The queue-owned empty hooks directory every reset and checkout runs with, under one workdir. A
  * round and an out-of-round notification share it, so both refuse it the same way when it is not
@@ -361,6 +360,7 @@ export function queueHooksPath(workdir: string): string {
   return hooksPath
 }
 
+/** A change as a person reads it: the branch and twelve characters of the head, the trailer's spelling shortened. */
 export function short(branch: string, head: string): string {
   return `${branch}@${head.slice(0, 12)}`
 }

@@ -413,6 +413,9 @@ export async function dispatchNotifications(
         repo: context.repo,
         git: context.git,
         hooksPath: queueHooksPath(context.workdir),
+        // A refused reuse falls back to a fresh full checkout, the ~3 GB write this pool exists to avoid, so its
+        // cause is named on stderr like the round's own, never swallowed.
+        note: (cause) => process.stderr.write(`yrd notify: ${cause}; building a fresh notify tree\n`),
         process: runner,
         ...(context.env === undefined ? {} : { env: context.env }),
         ...(selection === undefined ? {} : { selection }),

@@ -3,10 +3,10 @@
  * Notify dispatch: several notices over one prepared worktree, per-notice
  * results, and the ending messages a notifier is handed.
  */
-import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import { spawn } from "node:child_process"
 import { tryAcquireFlock } from "@bearly/flock"
 import { holdNotifyTree, messageFor, notifyEnvRetired, type EnvRetiredNotice } from "../src/with-notify.ts"
@@ -180,6 +180,33 @@ describe("notify tree reuse across dispatches (34755)", () => {
     // A fresh build alone takes well under a second here, so only a real wait reaches 2 s.
     expect(returnedAfterMs).toBeGreaterThanOrEqual(2000)
     expect(readFileSync(records, "utf8").trim().split("\n")).toHaveLength(1)
+  })
+
+  it("a refused reuse names its cause on stderr before it rebuilds the notify tree", async () => {
+    const { context, records, workdir } = await dispatchFixture((file) => `cat >> ${file}`)
+    await notifyEnvRetired(context, [envRetired("/w/env-a")])
+    // A tracked modification in the warm tree is the pool's own refusal: it must not be reused silently.
+    writeFileSync(join(workdir, "worktrees", "pool", "outside-round", "notify", "file.txt"), "edited in place\n")
+    const written: string[] = []
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+      written.push(String(chunk))
+      return true
+    })
+    const handed = await notifyEnvRetired(context, [envRetired("/w/env-b")]).finally(() => stderr.mockRestore())
+    expect(handed.map((each) => each.delivery)).toEqual(["sent"])
+    const named = written.filter((line) => line.startsWith("yrd notify: "))
+    expect(named).toHaveLength(1)
+    expect(named[0]).toMatch(/^yrd notify: a tracked modification.*; building a fresh notify tree\n$/su)
+    expect(readFileSync(records, "utf8").trim().split("\n")).toHaveLength(2)
+  })
+
+  it("a non-empty queue hooks directory fails the dispatch's deliveries by name", async () => {
+    const { context, workdir } = await dispatchFixture((file) => `cat >> ${file}`)
+    mkdirSync(join(workdir, "hooks-disabled"), { recursive: true })
+    writeFileSync(join(workdir, "hooks-disabled", "post-checkout"), "#!/bin/sh\n")
+    const handed = await notifyEnvRetired(context, [envRetired("/w/env-a")])
+    expect(handed.map((each) => each.delivery)).toEqual(["failed"])
+    expect(handed[0]?.failure ?? "").toContain("hooks-disabled is not empty (post-checkout)")
   })
 
   it("a failed setup fails that dispatch's deliveries by name, and the next dispatch still delivers", async () => {
