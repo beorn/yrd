@@ -4161,7 +4161,10 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       expect(preview["checked"]).toContain("clean")
       expect(preview["checked"]).not.toContain("census")
       expect(preview["notChecked"]).toContain("census")
-      expect(preview["notCertified"]).toMatchObject({ reason: expect.any(String), reader: expect.stringContaining("census read by pid ") })
+      expect(preview["notCertified"]).toMatchObject({
+        reason: expect.any(String),
+        reader: expect.stringContaining("census read by pid "),
+      })
       expect(output.stdout()).not.toContain("would be admitted")
     },
   )
