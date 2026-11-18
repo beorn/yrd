@@ -1128,6 +1128,101 @@ async function discardRetained(options: EnvRetainedOptions, io: YrdCliIO): Promi
   )
 }
 
+// The rank walk's soft deadline sits under the transport's hard kill, so an ordinary partial ranking can still
+// serialize; a single stalled walk can outlast it and then fails through the hard timeout below (#34920).
+const RETAINED_RANK_HEADROOM_MS = 120_000
+
+interface RetainedRankingReply {
+  ranked: { entry: string; bytes: number; sharedBytes: number; unreadable: number }[]
+  unmeasured: { entry: string; reason: string }[]
+  measuredBytes: number
+  partial: boolean
+  deadlineHit: boolean
+  ms: number
+}
+
+function isRankingReply(value: unknown): value is RetainedRankingReply {
+  const reply = value as Partial<RetainedRankingReply> | null
+  return (
+    typeof reply === "object" &&
+    reply !== null &&
+    Array.isArray(reply.ranked) &&
+    Array.isArray(reply.unmeasured) &&
+    typeof reply.measuredBytes === "number" &&
+    typeof reply.deadlineHit === "boolean"
+  )
+}
+
+/**
+ * Size-ranked selection for `--retire-expired` without `--entry` (#34920, @cto 34920-ranking-and-bare-r2 §1): GitSuper
+ * measures every expired store with its own byte walker (`retire-batch --rank-only`) and this keeps the `limit` stores
+ * holding the most bytes alone. The names are frozen and printed so a later `--apply --entry ...` names exactly this
+ * plan. A rank that fails, times out or returns nothing plans nothing: there is no lexical fallback.
+ */
+async function planLargestExpired(
+  batch: ReturnType<typeof gitIn>,
+  scope: readonly string[],
+  retentionRoot: string,
+  expired: readonly string[],
+  limit: number,
+  io: YrdCliIO,
+): Promise<string[] | undefined> {
+  const deadlineSeconds = (RETAINED_BATCH_TIMEOUT_MS - RETAINED_RANK_HEADROOM_MS) / 1000
+  let reply: unknown
+  try {
+    const stdout = await batch([
+      "super",
+      "--json",
+      "worktree",
+      "retention",
+      "retire-batch",
+      "--rank-only",
+      "--rank-deadline-seconds",
+      String(deadlineSeconds),
+      ...scope,
+      ...[...expired].sort().map((name) => join(retentionRoot, name)),
+    ])
+    reply = JSON.parse(stdout)
+  } catch (error) {
+    const result = batch.lastInvocation?.result
+    if (result?.stdout) io.stdout(result.stdout)
+    if (result?.stderr) io.stderr(result.stderr)
+    io.stderr(
+      result?.timedOut === true
+        ? `retained rank under ${retentionRoot}: ranking exceeded ${RETAINED_BATCH_TIMEOUT_MS / 1000} s; child killed; no batch planned\n`
+        : `retained rank under ${retentionRoot}: ${error instanceof Error ? error.message : String(error)}; no batch planned\n`,
+    )
+    // silent-fallback-allow: the failure and the child's own output are named on stderr above, and the caller exits 2
+    // with no batch planned; there is no lexical fallback.
+    return undefined
+  }
+  if (!isRankingReply(reply)) {
+    io.stderr(`retained rank under ${retentionRoot}: GitSuper returned an unreadable ranking; no batch planned\n`)
+    return undefined
+  }
+  const reasons = new Map<string, number>()
+  for (const row of reply.unmeasured) reasons.set(row.reason, (reasons.get(row.reason) ?? 0) + 1)
+  const planned = reply.ranked.slice(0, limit)
+  io.stderr(
+    `ranked ${reply.ranked.length} of ${expired.length} expired store(s) by the bytes each holds alone in ${reply.ms} ms; ` +
+      `summed rank scores ${reply.measuredBytes} B${reply.partial ? " (partial)" : ""}` +
+      (reply.deadlineHit ? `; rank deadline ${deadlineSeconds} s reached before every store` : "") +
+      (reply.unmeasured.length === 0
+        ? ""
+        : `; ${reply.unmeasured.length} unmeasured (${[...reasons].map(([reason, count]) => `${count} ${reason}`).join(", ")})`) +
+      `\nplanned ${planned.length} (rank score per store, not what the set frees; the dry run below measures that):\n`,
+  )
+  for (const row of planned) {
+    io.stderr(
+      `  ${row.bytes} B\t${basename(row.entry)}` +
+        (row.sharedBytes > 0 ? `\tshared ${row.sharedBytes} B` : "") +
+        (row.unreadable > 0 ? `\tunreadable ${row.unreadable}` : "") +
+        "\n",
+    )
+  }
+  return planned.map((row) => basename(row.entry))
+}
+
 /**
  * `yrd env retained` — the census of the stores `env close` retained (#33010): live, past their own retainUntil,
  * legacy, malformed and manifest-less, read from manifests with no size walk. --retire-expired selects a batch;
@@ -1168,11 +1263,28 @@ export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdC
     options.retain === undefined ? join(await workdirOf(git), "retained-modules") : resolve(io.cwd, options.retain)
   const census = censusRetainedStores(retentionRoot, Date.now())
   if (options.retireExpired === true) {
-    const names = options.entry?.length
-      ? [...options.entry]
-      : census.state === "read"
-        ? [...census.expiredEntries].sort().slice(0, limit)
-        : []
+    const batch = gitIn(root, process, selection, {
+      timeoutMs: RETAINED_BATCH_TIMEOUT_MS,
+      rootInvocationTimeoutMs: RETAINED_BATCH_TIMEOUT_MS,
+    })
+    const scope = [
+      "--root",
+      retentionRoot,
+      "--common",
+      (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim(),
+      ...(options.namespace ?? []).flatMap((path) => ["--namespace", resolve(io.cwd, path)]),
+      "--artifact-dir",
+      resolve(io.cwd, options.artifactDir as string),
+    ]
+    let names: string[] = []
+    if (options.entry?.length) {
+      // An explicit list is the granted list: never reranked, truncated or measured.
+      names = [...options.entry]
+    } else if (census.state === "read" && census.expiredEntries.length > 0) {
+      const planned = await planLargestExpired(batch, scope, retentionRoot, census.expiredEntries, limit, io)
+      if (planned === undefined) return 2
+      names = planned
+    }
     for (const name of names) {
       if (basename(name) !== name || name === "." || name === "..") {
         throw new Error(`--entry ${name} must name one direct child of ${retentionRoot}`)
@@ -1188,23 +1300,13 @@ export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdC
       )
       return 0
     }
-    const batch = gitIn(root, process, selection, {
-      timeoutMs: RETAINED_BATCH_TIMEOUT_MS,
-      rootInvocationTimeoutMs: RETAINED_BATCH_TIMEOUT_MS,
-    })
     const args = [
       "super",
       ...(options.json === true ? ["--json"] : []),
       "worktree",
       "retention",
       "retire-batch",
-      "--root",
-      retentionRoot,
-      "--common",
-      (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim(),
-      ...(options.namespace ?? []).flatMap((path) => ["--namespace", resolve(io.cwd, path)]),
-      "--artifact-dir",
-      resolve(io.cwd, options.artifactDir as string),
+      ...scope,
       ...(options.apply === true ? ["--apply"] : []),
       ...entries,
     ]
