@@ -1975,10 +1975,18 @@ export async function closeEnvironment(
   }
   await assertNoLiveEnvironmentUse(path, io, context?.budget)
   const admission = await admitEnvironmentClose(path, io, censusSource, context?.budget)
-  if (admission.kind === "needs-delegation") {
-    if (options.dryRun === true) {
-      throw uncertified(path, admission, "in preview; a real close would file a queue close request instead")
-    }
+  // 34777 (@cto 34777-preview-journal-go.md): a preview whose census is incomplete names that limit first, then keeps
+  // running the read-only checks below, so an owner sees the next refusal without spending a queue round. It never
+  // reads as admitted and still exits nonzero; it files no request and moves no ref. Any other refusal is unchanged.
+  let uncertifiedPreview: Extract<CloseAdmission, { kind: "needs-delegation" }> | undefined
+  if (admission.kind === "needs-delegation" && options.dryRun === true) {
+    uncertifiedPreview = admission
+    io.stderr(
+      `yrd: env close --dry-run ${path}: not certified: ${admission.refusal} (${censusReaderLine(admission.census)}); ` +
+        `this preview files no request, and a real close from here would file a queue close request instead; ` +
+        `the read-only checks below still run\n`,
+    )
+  } else if (admission.kind === "needs-delegation") {
     if (onIncompleteCensus === "refuse") {
       throw uncertified(path, admission, "", context === undefined ? undefined : { json: options.json === true, io })
     }
@@ -2105,21 +2113,30 @@ export async function closeEnvironment(
     },
   )
   if (options.dryRun === true) {
+    const certified = uncertifiedPreview === undefined
     const preview = {
       dryRun: true,
       path,
       head: commit,
-      admitted: true,
+      admitted: certified,
       checked: [
         "registration",
         "roots",
         "lock",
         "private-content",
         "live-use",
-        "census",
+        ...(certified ? ["census"] : []),
         options.preserve === true ? "preserve" : "clean",
       ],
-      notChecked: ["component-custody", "retention", "remote-reread", "teardown"],
+      notChecked: [...(certified ? [] : ["census"]), "component-custody", "retention", "remote-reread", "teardown"],
+      ...(uncertifiedPreview === undefined
+        ? {}
+        : {
+            notCertified: {
+              reason: uncertifiedPreview.refusal,
+              reader: censusReaderLine(uncertifiedPreview.census),
+            },
+          }),
       preserve: {
         requested: options.preserve === true,
         dirty: options.preserve === true ? closeState.dirty : [],
@@ -2130,11 +2147,17 @@ export async function closeEnvironment(
     if (options.json === true) io.stdout(`${JSON.stringify(preview)}\n`)
     else {
       io.stdout(
-        `dry-run: ${path} would be admitted; component custody, retention and teardown are proved only by the real close.\n`,
+        uncertifiedPreview === undefined
+          ? `dry-run: ${path} would be admitted; component custody, retention and teardown are proved only by the real close.\n`
+          : `dry-run: ${path} is not certified (${uncertifiedPreview.refusal}); the other read-only checks passed ` +
+              `(${preview.checked.join(", ")}); census, component custody, retention and teardown remain unproved.\n`,
       )
       io.stdout(
         `preserve: ${preview.preserve.requested ? JSON.stringify(preview.preserve.dirty) : "not requested"}\nteardown: ${preview.teardown ?? "(none)"}\n`,
       )
+    }
+    if (uncertifiedPreview !== undefined) {
+      throw uncertified(path, uncertifiedPreview, "in preview; a real close would file a queue close request instead")
     }
     return 0
   }

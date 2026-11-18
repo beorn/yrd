@@ -4152,6 +4152,99 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       expect(existsSync(closeRequestFile(state, path))).toBe(false)
       expect(await w.git(["worktree", "list", "--porcelain", "-z"])).toBe(registration)
       expect(existsSync(path)).toBe(true)
+      // 34777 (@cto 34777-preview-journal-go.md): the preview still runs the read-only checks after naming the census
+      // limit, and says which passed, but never reads as admitted.
+      expect(output.stderr()).toContain("not certified: ")
+      expect(output.stderr()).toContain("census read by pid ")
+      const preview = JSON.parse(output.stdout()) as Record<string, unknown>
+      expect(preview).toMatchObject({ dryRun: true, path, admitted: false })
+      expect(preview["checked"]).toContain("clean")
+      expect(preview["checked"]).not.toContain("census")
+      expect(preview["notChecked"]).toContain("census")
+      expect(preview["notCertified"]).toMatchObject({ reason: expect.any(String), reader: expect.stringContaining("census read by pid ") })
+      expect(output.stdout()).not.toContain("would be admitted")
+    },
+  )
+
+  /**
+   * @failure 34777: a seat whose census is incomplete got only "uncertified" from `env close --preserve --dry-run`, so
+   *          each later refusal (detached root, issue binding, off-target pin) cost one real queue round and a re-file
+   *          (four rounds on 2026-11-18). The preview now names the census limit and then the first later refusal.
+   * @level   l2 (injected incomplete census, real worktree, stub worktree CLI preserve --check)
+   * @consumer every seat whose sandbox cannot read every same-UID pid and previews a --preserve close
+   */
+  it.runIf(process.platform === "linux")(
+    "an incomplete-census preview keeps the census limit and reports the preserve refusal behind it, writing nothing (34777)",
+    async () => {
+      const w = await world(":")
+      const state = join(dirname(w.work), "preview-state")
+      await w.git(["config", "yrd.workdir", state])
+      const log = join(w.work, "preserve-calls.log")
+      installStubWorktreePreserve(w.work, { check: "refuse", log })
+      writeFileSync(log, "")
+      const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+      writeFileSync(join(path, "unsaved.txt"), "uncommitted on a detached HEAD\n")
+      const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
+      const refsBefore = await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])
+      processCensus.mockResolvedValue(await incompleteCensus())
+      const refused = capture(w.work)
+      const args = ["bun", "yrd", "env", "close", path, "--preserve", "--dry-run", "--json"]
+      expect(await runYrdProcess(args, refused.io), refused.stderr()).toBe(2)
+      const stderr = refused.stderr()
+      expect(stderr).toContain("not certified: ")
+      expect(stderr).toContain("a real preserve refuses now: [worktree] preserve --check: a real preserve of")
+      expect(stderr.indexOf("not certified: ")).toBeLessThan(stderr.indexOf("a real preserve refuses now"))
+      expect(refused.stdout()).toBe("")
+      expect(readFileSync(log, "utf8")).toBe("check\n")
+      expect(existsSync(closeRequestFile(state, path))).toBe(false)
+      expect(await w.git(["worktree", "list", "--porcelain", "-z"])).toBe(registration)
+      expect(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(refsBefore)
+      expect(existsSync(join(path, "unsaved.txt"))).toBe(true)
+    },
+  )
+
+  /**
+   * @failure 34777: with an incomplete census, a preview whose other checks all pass must still read as not admitted
+   *          and exit nonzero, and its preserve check must stay a check: no preserve, no teardown, no request.
+   * @level   l2 (injected incomplete census, real worktree, stub worktree CLI preserve --check that passes)
+   * @consumer every seat whose sandbox cannot read every same-UID pid and previews a --preserve close
+   */
+  it.runIf(process.platform === "linux")(
+    "an incomplete-census preview whose other checks pass stays not admitted and nonzero, writing nothing (34777)",
+    async () => {
+      const w = await world(":", "printf touched > ../preview-teardown-ran.txt")
+      const state = join(dirname(w.work), "preview-state")
+      await w.git(["config", "yrd.workdir", state])
+      const log = join(w.work, "preserve-calls.log")
+      installStubWorktreePreserve(w.work, { check: "pass", log })
+      writeFileSync(log, "")
+      const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+      writeFileSync(join(path, "root-dirt.txt"), "keep these bytes\n")
+      const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
+      const refsBefore = await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])
+      processCensus.mockResolvedValue(await incompleteCensus())
+      for (const json of [true, false]) {
+        writeFileSync(log, "")
+        const run = capture(w.work)
+        const args = ["bun", "yrd", "env", "close", path, "--preserve", "--dry-run", ...(json ? ["--json"] : [])]
+        expect(await runYrdProcess(args, run.io), run.stderr()).not.toBe(0)
+        expect(run.stderr()).toContain("not certified: ")
+        if (json) {
+          const preview = JSON.parse(run.stdout()) as Record<string, unknown>
+          expect(preview).toMatchObject({ admitted: false, preserve: { requested: true, dirty: ["?? root-dirt.txt"] } })
+          expect(preview["checked"]).toContain("preserve")
+          expect(preview["checked"]).not.toContain("census")
+        } else {
+          expect(run.stdout()).toContain("is not certified")
+          expect(run.stdout()).not.toContain("would be admitted")
+        }
+        expect(readFileSync(log, "utf8")).toBe("check\n")
+      }
+      expect(existsSync(join(dirname(path), "preview-teardown-ran.txt"))).toBe(false)
+      expect(existsSync(closeRequestFile(state, path))).toBe(false)
+      expect(await w.git(["worktree", "list", "--porcelain", "-z"])).toBe(registration)
+      expect(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(refsBefore)
+      expect(readFileSync(join(path, "root-dirt.txt"), "utf8")).toBe("keep these bytes\n")
     },
   )
 
