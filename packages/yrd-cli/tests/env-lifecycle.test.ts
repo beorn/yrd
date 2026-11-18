@@ -4161,6 +4161,9 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       expect(preview["checked"]).toContain("clean")
       expect(preview["checked"]).not.toContain("census")
       expect(preview["notChecked"]).toContain("census")
+      // No live-use reader is wired here, so live-use was not checked and must not be listed as passed (34777 nit 2).
+      expect(preview["checked"]).not.toContain("live-use")
+      expect(preview["notChecked"]).toContain("live-use")
       expect(preview["notCertified"]).toMatchObject({
         reason: expect.any(String),
         reader: expect.stringContaining("census read by pid "),

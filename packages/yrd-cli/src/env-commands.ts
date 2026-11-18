@@ -2114,6 +2114,9 @@ export async function closeEnvironment(
   )
   if (options.dryRun === true) {
     const certified = uncertifiedPreview === undefined
+    // 34777 (@dev/review2 nit 2, @chief cb6a790f): with no host reader wired, assertNoLiveEnvironmentUse checks nothing,
+    // so live-use is listed as not checked rather than passed.
+    const liveUseChecked = io.liveEnvironmentUse !== undefined
     const preview = {
       dryRun: true,
       path,
@@ -2124,11 +2127,18 @@ export async function closeEnvironment(
         "roots",
         "lock",
         "private-content",
-        "live-use",
+        ...(liveUseChecked ? ["live-use"] : []),
         ...(certified ? ["census"] : []),
         options.preserve === true ? "preserve" : "clean",
       ],
-      notChecked: [...(certified ? [] : ["census"]), "component-custody", "retention", "remote-reread", "teardown"],
+      notChecked: [
+        ...(liveUseChecked ? [] : ["live-use"]),
+        ...(certified ? [] : ["census"]),
+        "component-custody",
+        "retention",
+        "remote-reread",
+        "teardown",
+      ],
       ...(uncertifiedPreview === undefined
         ? {}
         : {
@@ -2142,7 +2152,7 @@ export async function closeEnvironment(
         dirty: options.preserve === true ? closeState.dirty : [],
       },
       teardown: config?.teardown ?? null,
-      liveEnvironmentUseChecked: io.liveEnvironmentUse !== undefined,
+      liveEnvironmentUseChecked: liveUseChecked,
     }
     if (options.json === true) io.stdout(`${JSON.stringify(preview)}\n`)
     else {
