@@ -147,6 +147,7 @@ export {
   readRemoteCommits,
   isAncestor,
   mergeChangesNothing,
+  reconstructibleFromMain,
   seamProcess,
   refAt,
   resolveGitSelection,
@@ -154,6 +155,8 @@ export {
   type GitRunner,
   type GitObservation,
   type Git,
+  type ReconstructedCommit,
+  type Reconstruction,
 } from "./git.ts"
 export {
   checkLogPath,

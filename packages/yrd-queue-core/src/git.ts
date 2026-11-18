@@ -1223,6 +1223,89 @@ export async function mergeChangesNothing(git: Git, main: string, tip: string): 
   return tree === (await git(["rev-parse", `${main}^{tree}`])).trim()
 }
 
+/** One commit a close may discard because retained history rebuilds it. */
+export interface ReconstructedCommit {
+  readonly sha: string
+  readonly subject: string
+}
+
+/** Whether every commit a tip holds beyond one main oid is a merge Git's standard merge rebuilds exactly. */
+export type Reconstruction =
+  | { readonly kind: "reconstructible"; readonly commits: readonly ReconstructedCommit[] }
+  | { readonly kind: "refused"; readonly reason: string }
+
+const EXACT_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u
+
+/**
+ * 34744 (@cto fa2ab09a, /hh/var/@cto/do-20261114T1623/34744-sync-merge-scope-1907.md): a tip that is not an
+ * ancestor of main still loses nothing when every commit it holds beyond `mainOid` is a two-parent merge whose
+ * recorded tree is exactly what Git's standard merge of those two parents writes. Such a commit is reconstructible
+ * from retained history; that is not the same as being content equal to main.
+ *
+ * `rev-list <tip> --not <mainOid>` is the complete unique set, not the tip or its first-parent line: a parent outside
+ * that listing is, by the listing itself, reachable from `mainOid`, and every parent inside it is checked here. The
+ * caller captures `mainOid` once, so every read judges against one baseline.
+ *
+ * A non-merge or octopus member, a replay that conflicts or writes a different tree, a configured merge driver
+ * (its output is not the standard merge), or any failed Git read refuses with its reason. A failure is never empty
+ * evidence.
+ */
+export async function reconstructibleFromMain(git: Git, tip: string, mainOid: string): Promise<Reconstruction> {
+  const refused = (reason: string): Reconstruction => ({ kind: "refused", reason })
+  const short = (sha: string) => sha.slice(0, 12)
+  let listing: string
+  try {
+    listing = (await git(["rev-list", "--parents", tip, "--not", mainOid])).trim()
+  } catch (error) {
+    return refused(`git rev-list ${short(tip)} --not ${short(mainOid)} failed: ${(error as Error).message}`)
+  }
+  if (listing === "") return { kind: "reconstructible", commits: [] }
+  let drivers: string
+  try {
+    drivers = (await git(["config", "--get-regexp", "^merge\\..*\\.driver$"])).trim()
+  } catch (error) {
+    if (!isExit(error, 1)) return refused(`git config --get-regexp merge drivers failed: ${(error as Error).message}`)
+    drivers = ""
+  }
+  if (drivers !== "") {
+    return refused(`a merge driver is configured (${drivers.split("\n")[0]}), so a replay is not Git's standard merge`)
+  }
+  const commits: ReconstructedCommit[] = []
+  for (const line of listing.split("\n")) {
+    const [sha, ...parents] = line.trim().split(" ")
+    if (sha === undefined || !EXACT_OID.test(sha)) return refused(`git rev-list printed no commit oid: ${line}`)
+    const [first, second] = parents
+    if (parents.length !== 2 || first === undefined || second === undefined) {
+      return refused(`${short(sha)} has ${parents.length} parent(s); only a two-parent merge can be replayed`)
+    }
+    let replayed: string
+    try {
+      replayed = (
+        await git(["-c", "core.commitGraph=false", "merge-tree", "--write-tree", "--no-messages", first, second])
+      ).trim()
+    } catch (error) {
+      if (isExit(error, 1)) return refused(`merge ${short(sha)} does not replay: its parents conflict`)
+      return refused(`git merge-tree ${short(first)} ${short(second)} failed: ${(error as Error).message}`)
+    }
+    if (!EXACT_OID.test(replayed)) return refused(`merge-tree for ${short(sha)} returned no exact tree oid`)
+    let recorded: string
+    let subject: string
+    try {
+      recorded = (await git(["rev-parse", `${sha}^{tree}`])).trim()
+      subject = (await git(["log", "-1", "--format=%s", sha])).trim()
+    } catch (error) {
+      return refused(`reading merge ${short(sha)} failed: ${(error as Error).message}`)
+    }
+    if (recorded !== replayed) {
+      return refused(
+        `merge ${short(sha)} records tree ${short(recorded)}, but the standard merge of its parents writes ${short(replayed)}`,
+      )
+    }
+    commits.push({ sha, subject })
+  }
+  return { kind: "reconstructible", commits }
+}
+
 /**
  * The heads among these the target does not contain, from ONE `rev-list` of
  * them not reachable from it. Empty heads: no git. Exit 1 is not an answer

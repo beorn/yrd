@@ -3681,6 +3681,155 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     }
   })
 
+  /**
+   * @failure 34744 (@cto fa2ab09a): `yrd env close` refused a clean environment whose component pin, or whose root
+   *          HEAD, was a merge of two commits already on main (a sync merge, a verification composition): the merge
+   *          is not an ancestor of main, yet retained history rebuilds it exactly. A relaxation must still refuse
+   *          a merge that carries authored content, including one behind an innocent tip merge, and must name every
+   *          commit it discards, a component's included.
+   * @level   l2 (real bare remotes, real materialized submodule, real worktree close)
+   * @consumer every seat closing a verification environment that merged main into its pins
+   */
+  it("closes environments whose off-main commits are merges retained history rebuilds, and names them (34744)", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const as = ["-c", "user.email=env-open@yrd.test", "-c", "user.name=yrd"]
+    const primarySub = gitIn(join(w.work, "vendor/dependency"))
+    const advanceDependencyMain = async (text: string) => {
+      writeFileSync(join(w.work, "vendor/dependency/READY"), text)
+      await primarySub(["add", "READY"])
+      await primarySub(["commit", "--quiet", "-m", `dependency main: ${text.trim()}`])
+      await primarySub(["push", "--quiet", "origin", "main"])
+    }
+    await advanceDependencyMain("advanced on remote main\n")
+    const syncInto = async (subGit: ReturnType<typeof gitIn>, subject: string) => {
+      await subGit(["fetch", "--quiet", "origin", "main"])
+      await subGit([...as, "merge", "--quiet", "--no-ff", "-m", subject, "origin/main"])
+      return (await subGit(["rev-parse", "HEAD"])).trim()
+    }
+
+    // (a) B1: the component's HEAD is a sync merge of its old pin and its main, the root gitlink uncommitted. The
+    // close admits it, names the component commit, and runs no preserve.
+    for (const preserve of [false, true]) {
+      const { path } = await openEnvironment(w.work, selected)
+      const sync = await syncInto(gitIn(join(path, "vendor/dependency")), "sync dependency with main")
+      const closed = capture(w.work)
+      expect(
+        await runYrdProcess(
+          ["bun", "yrd", "env", "close", path, ...(preserve ? ["--preserve"] : []), "--json"],
+          closed.io,
+        ),
+        closed.stderr(),
+      ).toBe(0)
+      expect(existsSync(path)).toBe(false)
+      expect(JSON.parse(closed.stdout())).toEqual({
+        closed: path,
+        discarded: [
+          {
+            repo: "vendor/dependency",
+            sha: sync,
+            subject: "sync dependency with main",
+            gitlinks: [{ path: "vendor/dependency", pin: sync }],
+          },
+        ],
+      })
+      if (preserve) expect(closed.stderr()).toContain("found nothing to preserve")
+    }
+
+    // (b) B2: a detached root commit pins that sync merge. Both the root commit and the component merge are named.
+    {
+      const { path } = await openEnvironment(w.work, selected)
+      const envGit = gitIn(path)
+      const sync = await syncInto(gitIn(join(path, "vendor/dependency")), "sync dependency with main")
+      await envGit(["add", "vendor/dependency"])
+      await envGit([...as, "commit", "--quiet", "-m", "chore(dependency): pin the sync merge"])
+      const pinCommit = (await envGit(["rev-parse", "HEAD"])).trim()
+      const closed = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
+      expect(JSON.parse(closed.stdout())).toEqual({
+        closed: path,
+        discarded: [
+          {
+            sha: pinCommit,
+            subject: "chore(dependency): pin the sync merge",
+            gitlinks: [{ path: "vendor/dependency", pin: sync }],
+          },
+          {
+            repo: "vendor/dependency",
+            sha: sync,
+            subject: "sync dependency with main",
+            gitlinks: [{ path: "vendor/dependency", pin: sync }],
+          },
+        ],
+      })
+    }
+
+    // (c) An evil merge behind an innocent tip merge refuses, naming the evil merge; the environment stays.
+    {
+      const { path } = await openEnvironment(w.work, selected)
+      const subGit = gitIn(join(path, "vendor/dependency"))
+      await subGit(["fetch", "--quiet", "origin", "main"])
+      await subGit([...as, "merge", "--quiet", "--no-ff", "--no-commit", "origin/main"])
+      writeFileSync(join(path, "vendor/dependency/AUTHORED"), "content only this merge holds\n")
+      await subGit(["add", "AUTHORED"])
+      await subGit([...as, "commit", "--quiet", "-m", "evil merge"])
+      const evil = (await subGit(["rev-parse", "HEAD"])).trim()
+      await advanceDependencyMain("advanced again\n")
+      const tip = await syncInto(subGit, "innocent tip merge")
+      const refused = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
+      expect(refused.stderr()).toContain(`submodule HEAD ${tip.slice(0, 12)} is not an ancestor`)
+      expect(refused.stderr()).toContain(`merge ${evil.slice(0, 12)} records tree`)
+      expect(existsSync(join(path, "vendor/dependency/AUTHORED"))).toBe(true)
+    }
+
+    // (d) Root: a detached verification composition of a task tip and main, both since landed on main, closes; the
+    // same composition carrying authored content refuses.
+    {
+      await w.git(["switch", "--quiet", "-c", "task/composition", selected])
+      writeFileSync(join(w.work, "task.txt"), "task work\n")
+      await w.git(["add", "task.txt"])
+      await w.git(["commit", "--quiet", "-m", "task work"])
+      const task = (await w.git(["rev-parse", "HEAD"])).trim()
+      await w.git(["switch", "--quiet", "main"])
+      writeFileSync(join(w.work, "main.txt"), "main work\n")
+      await w.git(["add", "main.txt"])
+      await w.git(["commit", "--quiet", "-m", "main work"])
+      const mainWork = (await w.git(["rev-parse", "HEAD"])).trim()
+      await w.git(["merge", "--quiet", "--no-ff", "-m", "land task", task])
+      await w.git(["push", "--quiet", "origin", "main"])
+
+      const composed = await openEnvironment(w.work, selected)
+      const envGit = gitIn(composed.path)
+      await envGit(["checkout", "--quiet", "--detach", mainWork])
+      await envGit([...as, "merge", "--quiet", "--no-ff", "-m", "verify task with main", task])
+      const composition = (await envGit(["rev-parse", "HEAD"])).trim()
+      const closed = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "close", composed.path, "--json"], closed.io),
+        closed.stderr(),
+      ).toBe(0)
+      expect(JSON.parse(closed.stdout())).toEqual({
+        closed: composed.path,
+        discarded: [{ sha: composition, subject: "verify task with main" }],
+      })
+
+      const authored = await openEnvironment(w.work, selected)
+      const authoredGit = gitIn(authored.path)
+      await authoredGit(["checkout", "--quiet", "--detach", mainWork])
+      await authoredGit([...as, "merge", "--quiet", "--no-ff", "--no-commit", task])
+      writeFileSync(join(authored.path, "authored.txt"), "only this composition holds it\n")
+      await authoredGit(["add", "authored.txt"])
+      await authoredGit([...as, "commit", "--quiet", "-m", "verify task with main, plus an edit"])
+      const refused = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", authored.path, "--json"], refused.io)).toBe(2)
+      expect(refused.stderr()).toContain("detached HEAD is ahead of origin/main with content changes")
+      expect(refused.stderr()).toContain("retained history does not rebuild it")
+      expect(existsSync(authored.path)).toBe(true)
+    }
+  })
+
   it.each([false, true])("closes a registered clean environment with declared teardown=%s", async (teardown) => {
     const w = await world(":", teardown ? 'printf "%s\\n" "$YRD_CANDIDATE_SHA" > ../closed.txt' : undefined)
     if (teardown) await addMaterializedDependency(w)

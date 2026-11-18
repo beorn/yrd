@@ -35,6 +35,7 @@ import {
   readRemoteCommit,
   readRemoteCommits,
   isAncestor,
+  reconstructibleFromMain,
   refAt,
   resolveGitSelection,
   retirePreviewSubject,
@@ -45,6 +46,8 @@ import {
   worktreeWithoutSubmodules,
   type Git,
   type GitRunner,
+  type ReconstructedCommit,
+  type Reconstruction,
 } from "@yrd/queue-core"
 import { adaptProcessGit, createProcess, type Process } from "@yrd/process"
 // 29073: `env close --preserve` reaches the ONE worktree preserve (bearly's preserveSlotState, the
@@ -1125,6 +1128,8 @@ interface DiscardedGitlink {
 }
 
 interface DiscardedCommit {
+  /** 34744: the component path that held this commit; absent for the environment's own root commits. */
+  readonly repo?: string
   readonly sha: string
   readonly subject: string
   readonly gitlinks?: readonly DiscardedGitlink[]
@@ -1161,6 +1166,10 @@ interface EnvironmentCloseState {
  *   each sha, subject, and discarded gitlink path/pin.
  * - B3: otherwise (detached HEAD with content ahead, dirty or unreachable submodule, or unbound store),
  *   close refuses and names `git switch -c task/<issue>, then --preserve` for a detached HEAD.
+ * - 34744 (@cto fa2ab09a): "an ancestor of main" in B1 and B2 widens to "discardable": also a pin, or a root's
+ *   commits ahead, whose every commit beyond one captured main oid is a two-parent merge that Git's standard merge
+ *   of its parents rebuilds exactly (reconstructibleFromMain). Those commits are listed as discards, with their
+ *   repo, so a close says what it threw away.
  */
 async function inspectEnvironmentCloseState(
   path: string,
@@ -1206,18 +1215,45 @@ async function inspectEnvironmentCloseState(
     ![...cleanByPath.entries()].some(([childPath, isClean]) => childPath.startsWith(`${repoPath}/`) && !isClean) &&
     !dirty.some((entry) => entry.slice(3) === repoPath || entry.slice(3).startsWith(`${repoPath} `))
 
-  const checkSubmodulePinOnRemoteMain = async (
+  // 34744 (@cto fa2ab09a): a clean component pin is discardable when it is an ancestor of the component's
+  // remote-tracking main (B1's fast path) or, off main, when retained history rebuilds every commit it holds beyond
+  // one captured main oid (reconstructibleFromMain). The second case is deliberately NOT "on main": its commits are
+  // reported as discards, never treated as already there.
+  const checkSubmodulePinDiscardable = async (
     repoPath: string,
     pinSha: string,
-  ): Promise<{ clean: false } | { clean: true; onRemoteMain: boolean; subGit: Git; root: string }> => {
+  ): Promise<
+    | { clean: false }
+    | { clean: true; discardable: true; reconstructed: readonly ReconstructedCommit[]; subGit: Git; root: string }
+    | { clean: true; discardable: false; reason: string; subGit: Git; root: string }
+  > => {
     const repo = repoByPath.get(repoPath)
     if (repo === undefined || repo.path === "." || !isSubmoduleClean(repoPath)) {
       return { clean: false }
     }
     const subGit = gitIn(repo.root, process, selection)
     const remoteMain = await refAt(subGit, "refs/remotes/origin/main")
-    const onRemoteMain = remoteMain !== undefined && (await isAncestor(subGit, pinSha, remoteMain))
-    return { clean: true, onRemoteMain, subGit, root: repo.root }
+    if (remoteMain === undefined) {
+      return { clean: true, discardable: false, reason: "refs/remotes/origin/main is absent", subGit, root: repo.root }
+    }
+    if (await isAncestor(subGit, pinSha, remoteMain)) {
+      return { clean: true, discardable: true, reconstructed: [], subGit, root: repo.root }
+    }
+    const replay = await reconstructibleFromMain(subGit, pinSha, remoteMain)
+    return replay.kind === "reconstructible"
+      ? { clean: true, discardable: true, reconstructed: replay.commits, subGit, root: repo.root }
+      : { clean: true, discardable: false, reason: replay.reason, subGit, root: repo.root }
+  }
+  const offMainDirt = (repoPath: string, pin: string, reason: string) =>
+    ` M ${repoPath} (submodule HEAD ${pin.slice(0, 12)} is not an ancestor of refs/remotes/origin/main, and retained history does not rebuild it: ${reason})`
+  const discarded: DiscardedCommit[] = []
+  // 34744 (@cto R5): a component's own off-main commits are named in the close receipt by repo, sha and subject,
+  // with the component path and pin, once each.
+  const discardComponentCommits = (repoPath: string, pin: string, commits: readonly ReconstructedCommit[]) => {
+    for (const commit of commits) {
+      if (discarded.some((entry) => entry.repo === repoPath && entry.sha === commit.sha)) continue
+      discarded.push({ repo: repoPath, ...commit, gitlinks: [{ path: repoPath, pin }] })
+    }
   }
 
   const admissibleGitlinks: AdmissibleGitlink[] = []
@@ -1242,9 +1278,10 @@ async function inspectEnvironmentCloseState(
     const subGit = gitIn(repo.root, process, selection)
     const subHead = (await subGit(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
     if (subHead === headPin) continue
-    const check = await checkSubmodulePinOnRemoteMain(repo.path, subHead)
+    const check = await checkSubmodulePinDiscardable(repo.path, subHead)
     if (!check.clean) continue
-    if (check.onRemoteMain) {
+    if (check.discardable) {
+      discardComponentCommits(repo.path, subHead, check.reconstructed)
       const currentBranch = (await check.subGit(["branch", "--show-current"])).trim()
       admissibleGitlinks.push({
         path: repo.path,
@@ -1254,12 +1291,9 @@ async function inspectEnvironmentCloseState(
         ...(currentBranch === "" ? {} : { previousBranch: currentBranch }),
       })
     } else {
-      dirty.push(
-        ` M ${repo.path} (submodule HEAD ${subHead.slice(0, 12)} is not an ancestor of refs/remotes/origin/main)`,
-      )
+      dirty.push(offMainDirt(repo.path, subHead, check.reason))
     }
   }
-  const discarded: DiscardedCommit[] = []
   let heldOn: EnvironmentCloseState["heldOn"]
   if (detached) {
     const originMain = await refAt(treeGit, "refs/remotes/origin/main")
@@ -1303,7 +1337,12 @@ async function inspectEnvironmentCloseState(
         } else {
           const rawLines = rawDiff.split("\n")
           const discardedGitlinks: DiscardedGitlink[] = []
+          const componentDiscards: Array<{ path: string; pin: string; commits: readonly ReconstructedCommit[] }> = []
           let allAdmissibleGitlinks = true
+          // 34744 (@cto fa2ab09a): a non-gitlink change ahead of main is admissible only when retained history rebuilds
+          // every root commit ahead of the one captured originMain. That replay never vouches for a component's
+          // contents: each moved gitlink below still needs its own clean, discardable pin.
+          let rootReplay: Reconstruction | undefined
           for (const line of rawLines) {
             const tab = line.indexOf("\t")
             if (tab < 0) {
@@ -1313,6 +1352,11 @@ async function inspectEnvironmentCloseState(
             const meta = line.slice(0, tab).trim().split(" ")
             const gitlinkPath = line.slice(tab + 1).trim()
             const [oldMode, newMode, , newOid, statusCode] = meta
+            if (oldMode !== ":160000" && newMode !== "160000") {
+              rootReplay ??= await reconstructibleFromMain(treeGit, "HEAD", originMain)
+              if (rootReplay.kind !== "reconstructible") allAdmissibleGitlinks = false
+              continue
+            }
             if (
               oldMode !== ":160000" ||
               newMode !== "160000" ||
@@ -1325,29 +1369,36 @@ async function inspectEnvironmentCloseState(
               allAdmissibleGitlinks = false
               continue
             }
-            const check = await checkSubmodulePinOnRemoteMain(gitlinkPath, newOid)
+            const check = await checkSubmodulePinDiscardable(gitlinkPath, newOid)
             if (!check.clean) {
               allAdmissibleGitlinks = false
               continue
             }
-            if (!check.onRemoteMain) {
+            if (!check.discardable) {
               allAdmissibleGitlinks = false
-              const offMainMsg = ` M ${gitlinkPath} (submodule HEAD ${newOid.slice(0, 12)} is not an ancestor of refs/remotes/origin/main)`
+              const offMainMsg = offMainDirt(gitlinkPath, newOid, check.reason)
               if (!dirty.includes(offMainMsg)) {
                 dirty.push(offMainMsg)
               }
               continue
             }
             discardedGitlinks.push({ path: gitlinkPath, pin: newOid })
+            componentDiscards.push({ path: gitlinkPath, pin: newOid, commits: check.reconstructed })
           }
-          if (allAdmissibleGitlinks && discardedGitlinks.length > 0) {
+          const rootRebuilt = rootReplay?.kind === "reconstructible"
+          if (allAdmissibleGitlinks && (discardedGitlinks.length > 0 || rootRebuilt)) {
             for (const entry of aheadCommits) {
-              discarded.push({ ...entry, gitlinks: discardedGitlinks })
+              discarded.push(discardedGitlinks.length === 0 ? entry : { ...entry, gitlinks: discardedGitlinks })
+            }
+            for (const component of componentDiscards) {
+              discardComponentCommits(component.path, component.pin, component.commits)
             }
           } else {
+            const notRebuilt =
+              rootReplay?.kind === "refused" ? `; retained history does not rebuild it: ${rootReplay.reason}` : ""
             for (const entry of aheadCommits) {
               dirty.push(
-                `detached HEAD is ahead of origin/main with content changes at ${entry.sha.slice(0, 12)} (${entry.subject})`,
+                `detached HEAD is ahead of origin/main with content changes at ${entry.sha.slice(0, 12)} (${entry.subject})${notRebuilt}`,
               )
             }
           }

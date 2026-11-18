@@ -1666,6 +1666,116 @@ describe("offTheTarget", () => {
   })
 })
 
+// @failure 34744: env close refused clean sync merges whose parents are on main (not ancestors of main), or a
+//          relaxation admitted a merge whose tree is not the standard merge of its parents, a unique commit behind a
+//          clean tip merge, a conflicted replay, an octopus, a custom merge driver or a failed Git read.
+// @level l2 (real Git history); @consumer yrd env close B1/B2 census; @testonly none
+describe("reconstructibleFromMain (34744)", () => {
+  async function history() {
+    const root = temporaryRoot("reconstructible")
+    const git = gitIn(root)
+    await git(["init", "-q", "-b", "main"])
+    await git(["config", "user.email", "t@t"])
+    await git(["config", "user.name", "t"])
+    const head = async () => (await git(["rev-parse", "HEAD"])).trim()
+    const write = async (file: string, text: string, message: string) => {
+      writeFileSync(join(root, file), text)
+      await git(["add", file])
+      await git(["commit", "-q", "-m", message])
+      return head()
+    }
+    const base = await write("f", "0\n", "base")
+    const baseG = await write("g", "0\n", "base g")
+    const y = await write("f", "1\n", "main moves f")
+    await git(["checkout", "-q", "-b", "task", baseG])
+    const t = await write("g", "task\n", "task moves g")
+    await git(["checkout", "-q", "main"])
+    await git(["merge", "-q", "--no-ff", "-m", "land task", t])
+    const main = await head()
+    const detachAt = (at: string) => git(["checkout", "-q", "--detach", at])
+    return { git, write, head, detachAt, base, baseG, y, t, main }
+  }
+
+  it("rebuilds a verification composition and a sync merge whose parents are on main", async () => {
+    const h = await history()
+    await h.detachAt(h.y)
+    await h.git(["merge", "-q", "--no-ff", "-m", "verify task with main", h.t])
+    const composition = await h.head()
+    expect(await gitRunner.isAncestor(h.git, composition, h.main)).toBe(false)
+    expect(await gitRunner.reconstructibleFromMain(h.git, composition, h.main)).toEqual({
+      kind: "reconstructible",
+      commits: [{ sha: composition, subject: "verify task with main" }],
+    })
+    await h.detachAt(h.baseG)
+    await h.git(["merge", "-q", "--no-ff", "-m", "sync main", h.main])
+    const sync = await h.head()
+    expect(await gitRunner.reconstructibleFromMain(h.git, sync, h.main)).toEqual({
+      kind: "reconstructible",
+      commits: [{ sha: sync, subject: "sync main" }],
+    })
+    expect(await gitRunner.reconstructibleFromMain(h.git, h.y, h.main)).toEqual({
+      kind: "reconstructible",
+      commits: [],
+    })
+  })
+
+  it("refuses an evil merge, and an evil merge or a unique commit behind a clean tip merge", async () => {
+    const h = await history()
+    await h.detachAt(h.y)
+    await h.git(["merge", "-q", "--no-ff", "--no-commit", h.t])
+    const evil = await h.write("extra", "authored in the merge\n", "evil merge")
+    const tipEvil = await gitRunner.reconstructibleFromMain(h.git, evil, h.main)
+    expect(tipEvil.kind === "refused" && tipEvil.reason).toContain(`merge ${evil.slice(0, 12)} records tree`)
+    await h.git(["merge", "-q", "--no-ff", "-m", "innocent tip", h.main])
+    const behindEvil = await gitRunner.reconstructibleFromMain(h.git, await h.head(), h.main)
+    expect(behindEvil.kind === "refused" && behindEvil.reason).toContain(`merge ${evil.slice(0, 12)} records tree`)
+
+    await h.detachAt(h.y)
+    const unique = await h.write("u", "unique\n", "unique authored commit")
+    await h.git(["merge", "-q", "--no-ff", "-m", "innocent tip", h.main])
+    expect(await gitRunner.reconstructibleFromMain(h.git, await h.head(), h.main)).toEqual({
+      kind: "refused",
+      reason: `${unique.slice(0, 12)} has 1 parent(s); only a two-parent merge can be replayed`,
+    })
+  })
+
+  it("refuses a conflicted replay, an octopus, a configured merge driver and a failed Git read", async () => {
+    const h = await history()
+    await h.git(["checkout", "-q", "-b", "clash", h.base])
+    const clash = await h.write("f", "clash\n", "clash on f")
+    await h.git(["checkout", "-q", "main"])
+    await h.git(["merge", "-q", "--no-ff", "--no-commit", clash]).catch(() => undefined)
+    const mainResolved = await h.write("f", "main resolution\n", "land clash")
+    await h.detachAt(h.y)
+    await h.git(["merge", "-q", "--no-ff", "--no-commit", clash]).catch(() => undefined)
+    const conflicted = await h.write("f", "another resolution\n", "resolve clash again")
+    expect(await gitRunner.reconstructibleFromMain(h.git, conflicted, mainResolved)).toEqual({
+      kind: "refused",
+      reason: `merge ${conflicted.slice(0, 12)} does not replay: its parents conflict`,
+    })
+
+    await h.detachAt(h.baseG)
+    await h.git(["merge", "-q", "--no-ff", "-m", "octopus", h.y, h.t])
+    const octopus = await h.head()
+    expect(await gitRunner.reconstructibleFromMain(h.git, octopus, h.main)).toEqual({
+      kind: "refused",
+      reason: `${octopus.slice(0, 12)} has 3 parent(s); only a two-parent merge can be replayed`,
+    })
+
+    await h.detachAt(h.y)
+    await h.git(["merge", "-q", "--no-ff", "-m", "verify task with main", h.t])
+    const composition = await h.head()
+    await h.git(["config", "merge.custom.driver", "cat %A"])
+    const driven = await gitRunner.reconstructibleFromMain(h.git, composition, h.main)
+    expect(driven.kind === "refused" && driven.reason).toContain("a merge driver is configured")
+    await h.git(["config", "--unset", "merge.custom.driver"])
+
+    const missing = "a".repeat(40)
+    const failed = await gitRunner.reconstructibleFromMain(h.git, missing, h.main)
+    expect(failed.kind === "refused" && failed.reason).toContain(`git rev-list ${missing.slice(0, 12)}`)
+  })
+})
+
 describe("readRemoteCommit on a store with a dangling ref (hh 25051)", () => {
   it("does not recurse into a real child whose remote is broken when submodule.recurse=true", async () => {
     const root = temporaryRoot("gitomic-no-submodule-recursion")
