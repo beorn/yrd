@@ -324,6 +324,64 @@ it("retained drain forwards a cold-proof stop as exit 2 with its report", async 
   expect(existsSync(join(retain, "old", "manifest.json"))).toBe(true)
 })
 
+// #34920 (@cto 34920-ranking-and-bare-r2 §1): without --entry the drain plans the stores holding the most bytes alone,
+// measured by GitSuper, and prints the frozen names; an explicit list is never reranked. Before this, selection was
+// the first `limit` names in lexical order, which the existing drain tests cannot tell apart from a size ranking.
+it.each([
+  { mode: "ranked by size without --entry", extra: ["--limit", "2"], planned: ["c-big", "a-mid"] },
+  { mode: "the explicit list as given", extra: ["--entry", "b-small"], planned: ["b-small"] },
+])("retained drain plans $mode", async ({ extra, planned }) => {
+  const w = await world(":")
+  mkdirSync(join(w.work, ".git", "yrd-worktree-mutations"), { recursive: true })
+  writeFileSync(join(w.work, ".git", "yrd-worktree-mutations", "writer.lock"), "")
+  const retain = join(dirname(w.work), "retained-modules")
+  for (const [name, size] of [
+    ["a-mid", 200_000],
+    ["b-small", 10],
+    ["c-big", 600_000],
+  ] as const) {
+    mkdirSync(join(retain, name), { recursive: true })
+    writeFileSync(
+      join(retain, name, "manifest.json"),
+      JSON.stringify({ retainUntil: "2020-01-01T00:00:00Z", writerLocks: [], notCompared: [] }),
+    )
+    writeFileSync(join(retain, name, "payload"), "x".repeat(size))
+  }
+  const run = capture(w.work)
+  expect(
+    await runYrdProcess(
+      [
+        "bun",
+        "yrd",
+        "env",
+        "retained",
+        "--retire-expired",
+        "--retain",
+        retain,
+        "--namespace",
+        dirname(w.work),
+        "--artifact-dir",
+        join(dirname(w.work), "proof"),
+        "--json",
+        ...extra,
+      ],
+      run.io,
+    ),
+    run.stderr(),
+  ).toBe(0)
+  const report = JSON.parse(run.stdout()) as { rows: { entry: string }[] }
+  expect(report.rows.map((row) => basename(row.entry))).toEqual(planned)
+  if (extra.includes("--entry")) {
+    expect(run.stderr()).not.toContain("ranked ")
+  } else {
+    expect(run.stderr()).toContain("ranked 3 of 3 expired store(s)")
+    const plan = run.stderr().slice(run.stderr().indexOf("planned 2"))
+    expect(plan.indexOf("c-big")).toBeLessThan(plan.indexOf("a-mid"))
+    expect(plan).not.toContain("b-small")
+  }
+  for (const name of ["a-mid", "b-small", "c-big"]) expect(existsSync(join(retain, name, "manifest.json"))).toBe(true)
+})
+
 // CTO d35ae483: live apply must use the exact granted list, never a fresh census or a silently shortened list.
 // The dry-run integration above cannot prove either apply refusal.
 it.each([
