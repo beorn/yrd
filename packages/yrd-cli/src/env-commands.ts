@@ -1298,15 +1298,15 @@ async function inspectEnvironmentCloseState(
   if (detached) {
     const originMain = await refAt(treeGit, "refs/remotes/origin/main")
     if (originMain !== undefined) {
-      const aheadLog = (await treeGit(["log", "--format=%H\t%s", `${originMain}..HEAD`])).trim()
+      // 34744: one HEAD read, so the ahead list, the diff and the replay judge the same commit.
+      const head = (await treeGit(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
+      const aheadLog = (await treeGit(["log", "--format=%H\t%s", `${originMain}..${head}`])).trim()
       // 33555: content ahead is judged against every ref a person keeps work on: branches, remote-tracking refs and
       // tags. A remote-tracking ref means "on the remote as of the last fetch"; no fetch is done here. Yrd's and
       // gitomic's private namespaces never count: they are pruned on their own schedule, so a commit only they hold
       // is not kept. When every ahead commit is held elsewhere, nothing is lost: no dirt, no discard record.
       const unique =
-        aheadLog === ""
-          ? ""
-          : (await treeGit(["rev-list", "HEAD", "--not", "--branches", "--remotes", "--tags"])).trim()
+        aheadLog === "" ? "" : (await treeGit(["rev-list", head, "--not", "--branches", "--remotes", "--tags"])).trim()
       if (aheadLog !== "" && unique === "") {
         const holder = (
           await treeGit([
@@ -1330,8 +1330,8 @@ async function inspectEnvironmentCloseState(
             ? { sha: line.trim(), subject: "" }
             : { sha: line.slice(0, tab).trim(), subject: line.slice(tab + 1) }
         })
-        const mergeBase = (await treeGit(["merge-base", "HEAD", originMain])).trim()
-        const rawDiff = (await treeGit(["diff", "--raw", "--no-abbrev", mergeBase, "HEAD"])).trim()
+        const mergeBase = (await treeGit(["merge-base", head, originMain])).trim()
+        const rawDiff = (await treeGit(["diff", "--raw", "--no-abbrev", mergeBase, head])).trim()
         if (rawDiff === "") {
           discarded.push(...aheadCommits)
         } else {
@@ -1353,7 +1353,7 @@ async function inspectEnvironmentCloseState(
             const gitlinkPath = line.slice(tab + 1).trim()
             const [oldMode, newMode, , newOid, statusCode] = meta
             if (oldMode !== ":160000" && newMode !== "160000") {
-              rootReplay ??= await reconstructibleFromMain(treeGit, "HEAD", originMain)
+              rootReplay ??= await reconstructibleFromMain(treeGit, head, originMain)
               if (rootReplay.kind !== "reconstructible") allAdmissibleGitlinks = false
               continue
             }

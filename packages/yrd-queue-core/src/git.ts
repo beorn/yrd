@@ -1205,22 +1205,40 @@ export async function isAncestor(git: Git, sha: string, of: string): Promise<boo
   }
 }
 
-/** Whether Git's conflict-free merge of an exact tip into main leaves main's tree unchanged. */
-export async function mergeChangesNothing(git: Git, main: string, tip: string): Promise<boolean> {
+const EXACT_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u
+
+/**
+ * Git's standard merge of two commits, written as a tree without touching an index or worktree: the tree oid, or
+ * `conflict`. The one reading of `merge-tree --write-tree` here (34744, @dev/12 REVISE 61e263c5): exit 1 with empty
+ * stderr is a content conflict; any other failure, exit 1 with a diagnostic included, rethrows as the Git error it is,
+ * and output that is not one exact tree oid throws.
+ */
+export async function mergeTreeWrite(
+  git: Git,
+  first: string,
+  second: string,
+): Promise<{ readonly kind: "tree"; readonly tree: string } | { readonly kind: "conflict" }> {
   let tree: string
   try {
     // Git 2.55 alternate-backed split graphs can invent gitlink conflicts; match GitSuper's prospectiveTree (a9aabea).
     tree = (
-      await git(["-c", "core.commitGraph=false", "merge-tree", "--write-tree", "--no-messages", main, tip])
+      await git(["-c", "core.commitGraph=false", "merge-tree", "--write-tree", "--no-messages", first, second])
     ).trim()
   } catch (error) {
-    if (isExit(error, 1) && error instanceof GitExit && error.evidence?.result?.stderr === "") return false
+    if (isExit(error, 1) && error instanceof GitExit && error.evidence?.result?.stderr === "") {
+      return { kind: "conflict" }
+    }
     throw error
   }
-  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(tree)) {
-    throw new Error(`merge-tree ${main} ${tip} returned no exact tree oid`)
-  }
-  return tree === (await git(["rev-parse", `${main}^{tree}`])).trim()
+  if (!EXACT_OID.test(tree)) throw new Error(`merge-tree ${first} ${second} returned no exact tree oid`)
+  return { kind: "tree", tree }
+}
+
+/** Whether Git's conflict-free merge of an exact tip into main leaves main's tree unchanged. */
+export async function mergeChangesNothing(git: Git, main: string, tip: string): Promise<boolean> {
+  const merged = await mergeTreeWrite(git, main, tip)
+  if (merged.kind === "conflict") return false
+  return merged.tree === (await git(["rev-parse", `${main}^{tree}`])).trim()
 }
 
 /** One commit a close may discard because retained history rebuilds it. */
@@ -1234,8 +1252,6 @@ export type Reconstruction =
   | { readonly kind: "reconstructible"; readonly commits: readonly ReconstructedCommit[] }
   | { readonly kind: "refused"; readonly reason: string }
 
-const EXACT_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u
-
 /**
  * 34744 (@cto fa2ab09a, /hh/var/@cto/do-20261114T1623/34744-sync-merge-scope-1907.md): a tip that is not an
  * ancestor of main still loses nothing when every commit it holds beyond `mainOid` is a two-parent merge whose
@@ -1248,7 +1264,8 @@ const EXACT_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u
  *
  * A non-merge or octopus member, a replay that conflicts or writes a different tree, a configured merge driver
  * (its output is not the standard merge), or any failed Git read refuses with its reason. A failure is never empty
- * evidence.
+ * evidence. A built-in driver a `.gitattributes` file selects (`merge=union`, `merge=binary`) is part of Git's own
+ * merge and deterministic, so a replay that writes the recorded tree under it is still an exact rebuild.
  */
 export async function reconstructibleFromMain(git: Git, tip: string, mainOid: string): Promise<Reconstruction> {
   const refused = (reason: string): Reconstruction => ({ kind: "refused", reason })
@@ -1278,16 +1295,14 @@ export async function reconstructibleFromMain(git: Git, tip: string, mainOid: st
     if (parents.length !== 2 || first === undefined || second === undefined) {
       return refused(`${short(sha)} has ${parents.length} parent(s); only a two-parent merge can be replayed`)
     }
-    let replayed: string
+    let replay: Awaited<ReturnType<typeof mergeTreeWrite>>
     try {
-      replayed = (
-        await git(["-c", "core.commitGraph=false", "merge-tree", "--write-tree", "--no-messages", first, second])
-      ).trim()
+      replay = await mergeTreeWrite(git, first, second)
     } catch (error) {
-      if (isExit(error, 1)) return refused(`merge ${short(sha)} does not replay: its parents conflict`)
       return refused(`git merge-tree ${short(first)} ${short(second)} failed: ${(error as Error).message}`)
     }
-    if (!EXACT_OID.test(replayed)) return refused(`merge-tree for ${short(sha)} returned no exact tree oid`)
+    if (replay.kind === "conflict") return refused(`merge ${short(sha)} does not replay: its parents conflict`)
+    const replayed = replay.tree
     let recorded: string
     let subject: string
     try {

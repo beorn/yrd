@@ -1774,6 +1774,31 @@ describe("reconstructibleFromMain (34744)", () => {
     const failed = await gitRunner.reconstructibleFromMain(h.git, missing, h.main)
     expect(failed.kind === "refused" && failed.reason).toContain(`git rev-list ${missing.slice(0, 12)}`)
   })
+
+  it("reads a merge-tree exit 1 that carries a diagnostic as a failed read, never as a conflict", async () => {
+    const h = await history()
+    await h.detachAt(h.y)
+    await h.git(["merge", "-q", "--no-ff", "-m", "verify task with main", h.t])
+    const composition = await h.head()
+    const stderr = "fatal: unable to read tree object"
+    const scripted = gitIn(
+      temporaryRoot("merge-tree-diagnostic"),
+      createScriptedProcess({
+        result: exitedResult({ exitCode: 1, stderr }),
+      }),
+    )
+    const diagnostic = await scripted(["merge-tree"]).catch((error: unknown) => error)
+    expect(diagnostic).toBeInstanceOf(gitRunner.GitExit)
+    const failingReplay = async (args: readonly string[], input?: string) => {
+      if (args.includes("merge-tree")) throw diagnostic
+      return h.git(args, input)
+    }
+    await expect(gitRunner.mergeTreeWrite(failingReplay, h.y, h.t)).rejects.toBe(diagnostic)
+    const result = await gitRunner.reconstructibleFromMain(failingReplay, composition, h.main)
+    expect(result.kind === "refused" && result.reason).toContain(`git merge-tree ${h.y.slice(0, 12)}`)
+    expect(result.kind === "refused" && result.reason).toContain(stderr)
+    expect(result.kind === "refused" && result.reason).not.toContain("conflict")
+  })
 })
 
 describe("readRemoteCommit on a store with a dangling ref (hh 25051)", () => {

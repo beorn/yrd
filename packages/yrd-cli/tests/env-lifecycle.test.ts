@@ -3690,7 +3690,7 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
    * @level   l2 (real bare remotes, real materialized submodule, real worktree close)
    * @consumer every seat closing a verification environment that merged main into its pins
    */
-  it("closes environments whose off-main commits are merges retained history rebuilds, and names them (34744)", async () => {
+  async function syncMergeWorld() {
     const w = await world(":")
     await addMaterializedDependency(w)
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
@@ -3708,7 +3708,11 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       await subGit([...as, "merge", "--quiet", "--no-ff", "-m", subject, "origin/main"])
       return (await subGit(["rev-parse", "HEAD"])).trim()
     }
+    return { w, selected, as, advanceDependencyMain, syncInto }
+  }
 
+  it("admits a component sync merge left uncommitted (B1), names it, and runs no preserve (34744)", async () => {
+    const { w, selected, syncInto } = await syncMergeWorld()
     // (a) B1: the component's HEAD is a sync merge of its old pin and its main, the root gitlink uncommitted. The
     // close admits it, names the component commit, and runs no preserve.
     for (const preserve of [false, true]) {
@@ -3736,7 +3740,10 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       })
       if (preserve) expect(closed.stderr()).toContain("found nothing to preserve")
     }
+  })
 
+  it("admits a root commit pinning a component sync merge (B2) and names both commits (34744)", async () => {
+    const { w, selected, as, syncInto } = await syncMergeWorld()
     // (b) B2: a detached root commit pins that sync merge. Both the root commit and the component merge are named.
     {
       const { path } = await openEnvironment(w.work, selected)
@@ -3764,7 +3771,10 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
         ],
       })
     }
+  })
 
+  it("refuses an evil component merge behind an innocent tip merge, naming it (34744)", async () => {
+    const { w, selected, as, advanceDependencyMain, syncInto } = await syncMergeWorld()
     // (c) An evil merge behind an innocent tip merge refuses, naming the evil merge; the environment stays.
     {
       const { path } = await openEnvironment(w.work, selected)
@@ -3783,7 +3793,10 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       expect(refused.stderr()).toContain(`merge ${evil.slice(0, 12)} records tree`)
       expect(existsSync(join(path, "vendor/dependency/AUTHORED"))).toBe(true)
     }
+  })
 
+  it("admits a root verification composition whose parents landed on main, and refuses one with an edit (34744)", async () => {
+    const { w, selected, as } = await syncMergeWorld()
     // (d) Root: a detached verification composition of a task tip and main, both since landed on main, closes; the
     // same composition carrying authored content refuses.
     {
