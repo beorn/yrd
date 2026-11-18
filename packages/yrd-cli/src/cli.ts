@@ -47,7 +47,13 @@ import {
   yrdQueueRunnerDeclarations,
 } from "@yrd/queue-core"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
-import { closeEnvironment, listEnvironments, openEnvironment, retainedEnvironments } from "./env-commands.ts"
+import {
+  bindEnvironment,
+  closeEnvironment,
+  listEnvironments,
+  openEnvironment,
+  retainedEnvironments,
+} from "./env-commands.ts"
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { repositoryHere, unaddressedRepository } from "./declaration.ts"
@@ -1805,6 +1811,30 @@ function buildProgram(
     .option("--dry-run", "preview admission and intended preservation/teardown without changing refs or files")
     .option("--json", "emit stable JSON")
     .action(async (path, options) => setExit(await closeEnvironment(path, options, io)))
+  env_
+    .command("bind <path>")
+    .description(
+      "bind a registered environment's attached task branch to an issue with the same Refs commit env open --issue " +
+        "writes; the supported route for a dirty environment that carries no binding",
+    )
+    .requiredOption("--issue <ref>", "the issue whose Refs commit binds the branch, recorded exactly as given")
+    .option(
+      "--dry-run",
+      "make the same binding decision with no commit, branch, index or worktree change (reading origin's head may refresh its fetch cache)",
+    )
+    .option("--json", "emit stable JSON")
+    .addHelpSection(
+      "What it writes:",
+      "One commit of the observed head's own tree (staged, unstaged and untracked work and the index stay exactly as " +
+        "they were) and an expected-old update of refs/heads/<branch>; a same-issue or alias retry writes nothing. " +
+        "Only this repository's branch moves; a component is bound or clean on its own. Nothing is removed, so no " +
+        "clean tree and no process census are required; env close --preserve then finds the binding. Exits 0 when " +
+        "bound, already bound or previewed; 2 on a refusal, which names the stage it stopped in, and says so when " +
+        "the branch had already moved.",
+    )
+    .action(async (path, options) =>
+      setExit(await bindEnvironment(path, options as Parameters<typeof bindEnvironment>[1], io)),
+    )
 
   const mirror = program
     .command("mirror")
