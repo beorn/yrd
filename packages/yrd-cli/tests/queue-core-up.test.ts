@@ -1224,6 +1224,18 @@ describe("yrd queue up, the service", () => {
                 stop: stop.signal,
                 afterRound: async (outcome) => {
                   await waitForEnvironmentCleanup(workdir, outcome.run)
+                  // 34928: the startup cleanup runs beside the first round, so on a loaded host the round's cleanup
+                  // can finish first; stopping then left only one completed row (1 of 3 whole-file runs at load 61).
+                  // Wait for both rows before stopping, bounded as the round wait is.
+                  await vi.waitFor(
+                    () =>
+                      expect(
+                        allCleanupRows(workdir).filter((row) => typeof row.remaining === "number").length -
+                          completedBefore,
+                        "startup and round cleanup both complete before the service stops",
+                      ).toBeGreaterThanOrEqual(2),
+                    { timeout: 30_000 },
+                  )
                   stop.abort()
                 },
               },
