@@ -674,6 +674,8 @@ const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
 /**
  * The environment a command's Git reads, and, for a submit that pushes, its remote-call count said on stderr
  * when disposed (25570 row 3); the trace directory goes with it. Any other command gets `env` back untouched.
+ * The capture travels only in the returned environment, never in process.env (25626, @cto C1): an omitted `env`
+ * becomes this process's environment plus the capture, so the submit's own Git keeps it and nothing else does.
  */
 function submitCalls(
   request: CoreQueueCommand,
@@ -682,9 +684,9 @@ function submitCalls(
 ): Readonly<{ env: NodeJS.ProcessEnv | undefined }> & Disposable {
   if (request.command !== "submit" || request.dryRun === true) return { env, [Symbol.dispose]: () => undefined }
   const directory = mkdtempSync(join(tmpdir(), "yrd-submit-trace2-"))
-  const traced = traceRemoteCalls(directory, { seams: true, refresh: true })
+  const traced = traceRemoteCalls(directory, { seams: true, refresh: true, ...(env === undefined ? {} : { env }) })
   return {
-    env: env === undefined ? undefined : { ...env, ...traced.env },
+    env: { ...(env ?? process.env), ...traced.env },
     [Symbol.dispose]() {
       try {
         const calls = traced.end()

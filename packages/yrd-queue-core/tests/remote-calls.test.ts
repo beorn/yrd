@@ -6,6 +6,7 @@
  * @consumer the round's `remote-calls` journal row and submit's stderr summary
  */
 
+import { spawn } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -559,7 +560,8 @@ describe("remote calls are counted from git's trace2 event log", () => {
     const remote = join(root, "remote.git")
     await gitIn(root)(["clone", "--quiet", "--bare", seed, remote])
     const traced = traceRemoteCalls(join(root, "trace2"), { seams: true })
-    const backend = createLegacyBackend()
+    // The backend is handed the capture in its environment, as a round's backend is (25626): nothing process-wide.
+    const backend = createLegacyBackend("git", { ...process.env, ...traced.env })
     const store = (await git(["rev-parse", "--absolute-git-dir"])).trim()
     if (backend.fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs")
     await withRemoteSeam("firstRead", () => backend.fetchRefs!(store, "refs/heads/main", remote))
@@ -833,6 +835,117 @@ describe("remote calls are counted from git's trace2 event log", () => {
     expect(row.excluded_calls).toEqual([])
     expect(row.beyond_refresh_verdict).toBe("within-limit")
     expect(row.beyond_refresh_calls).toEqual([`1 fetch @ ${elsewhere}`])
+  }, 60_000)
+
+  /**
+   * @failure 25626: the capture wrote GIT_TRACE2_EVENT and its chain into the service's global process.env, so
+   *          post-merge housekeeping spawned from that same process.env during a round was counted as the round's
+   *          own (78 owned beyond-refresh children against fifteen), and its git kept writing after end() and
+   *          recreated the deleted trace2 path as a file.
+   * @level   l2 (real git processes writing git's own trace2 event log; a stand-in ssh that runs upload-pack locally)
+   * @consumer the round's remote-calls row and its beyond_refresh_verdict
+   * @testonly none
+   */
+  it("never captures an unrelated child that inherits process.env, even one that outlives end() (25626)", async () => {
+    const { root, seed, ssh, url } = await roundFixture()
+    const housekeeping = join(root, "housekeeping")
+    mkdirSync(housekeeping)
+    await gitIn(housekeeping)(["init", "--quiet", "--initial-branch=main"])
+    const directory = join(root, "retired-trace2")
+    const traced = traceRemoteCalls(directory, { refresh: true, seams: true })
+    // UNRELATED, INHERITED: no env option, so the child takes this process's process.env as it is right now, the
+    // way housekeeping's env close does. Its first read runs inside the capture, its second after end().
+    const gate = join(root, "gate")
+    const first = join(root, "first-read")
+    const script =
+      `GIT_SSH_COMMAND='${ssh}' git ls-remote '${url}' refs/heads/main >/dev/null && : > '${first}' && ` +
+      `while [ ! -e '${gate}' ]; do sleep 0.05; done && GIT_SSH_COMMAND='${ssh}' git ls-remote '${url}' refs/heads/main >/dev/null`
+    const child = spawn("sh", ["-c", script], { cwd: housekeeping, stdio: "ignore" })
+    const exited = new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject)
+      child.once("exit", resolve)
+    })
+    try {
+      // OWNED: explicit env, the round's own read.
+      await gitIn(seed, undefined, undefined, { env: { ...process.env, ...traced.env, GIT_SSH_COMMAND: ssh } })([
+        "ls-remote",
+        url,
+        "refs/heads/main",
+      ])
+      for (let waited = 0; !existsSync(first); waited += 50) {
+        if (waited > 20_000) throw new Error(`unrelated child never finished its first read (${first})`)
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      const row = roundRemoteCallsRow(traced.end(), { beyondRefreshLimit: BEYOND_REFRESH_LIMIT })
+      // The round's own explicit-env child is positively counted, and it is the only child this capture saw.
+      expect(row.capture_owned_ssh_children).toBe(1)
+      expect(row.beyond_refresh_owned_ssh_children).toBe(1)
+      expect(row.beyond_refresh_calls).toEqual([`1 ls-remote @ ${seed}`])
+      expect(row.capture_foreign_ssh_children).toBe(0)
+      expect(row.capture_unknown_ssh_children).toBe(0)
+      expect(row.ssh_children).toBe(1)
+      expect(row.excluded_calls).toEqual([])
+      expect(row.beyond_refresh_verdict).toBe("within-limit")
+      // After end(): the unrelated child's second read cannot bring the retired trace2 path back.
+      writeFileSync(gate, "")
+      expect(await exited).toBe(0)
+      expect(existsSync(directory)).toBe(false)
+    } finally {
+      writeFileSync(gate, "")
+      await exited.catch(() => undefined)
+    }
+  }, 60_000)
+
+  /**
+   * @failure 25626 (@cto C1): with no process-wide write, nesting rides the operation's own environment. A capture
+   *          started inside another names both, through the env it was given or the env its process inherited,
+   *          while a sibling capture started beside it from the plain process.env never acquires the outer chain.
+   * @level   l2 (real git processes writing git's own trace2 event log; a stand-in ssh that runs upload-pack locally)
+   * @consumer the nested submit or runner's remote-calls row and its ownership classification
+   * @testonly none
+   */
+  it("keeps the parent chain for a nested capture and never hands it to a sibling (25626, 34390)", async () => {
+    const { root, seed, ssh, url } = await roundFixture()
+    const outer = traceRemoteCalls(join(root, "outer-trace2"), { refresh: true, seams: true })
+    const outerChain = String(outer.env[REMOTE_CAPTURE_VARIABLE])
+    const outerCapture = outerChain.split("/").at(-1)!
+    const outerEnv: NodeJS.ProcessEnv = { ...process.env, ...outer.env, YRD_CALLER_OWN: "kept" }
+    // SAME-PROCESS NESTED: the inner operation is handed the outer one's environment.
+    const inner = traceRemoteCalls(join(root, "inner-trace2"), { env: outerEnv })
+    const innerChain = String(inner.env[REMOTE_CAPTURE_VARIABLE])
+    expect(innerChain.startsWith(`${outerChain}/`)).toBe(true)
+    // The caller's own variables are its own: a capture adds its three, overwrites nothing else, mutates nothing.
+    expect(Object.keys(inner.env).sort()).toEqual(["GIT_TRACE2_ENV_VARS", "GIT_TRACE2_EVENT", REMOTE_CAPTURE_VARIABLE])
+    expect(String(inner.env.GIT_TRACE2_ENV_VARS).split(",")).toEqual(
+      expect.arrayContaining(String(outer.env.GIT_TRACE2_ENV_VARS).split(",")),
+    )
+    expect(outerEnv.YRD_CALLER_OWN).toBe("kept")
+    expect(outerEnv.GIT_TRACE2_EVENT).toBe(outer.env.GIT_TRACE2_EVENT)
+    // SIBLING: started beside the outer capture with no environment of its own, so it reads process.env.
+    const sibling = traceRemoteCalls(join(root, "sibling-trace2"))
+    expect(String(sibling.env[REMOTE_CAPTURE_VARIABLE]).split("/")).not.toContain(outerCapture)
+    sibling.end()
+    await gitIn(seed, undefined, undefined, { env: { ...outerEnv, ...inner.env, GIT_SSH_COMMAND: ssh } })([
+      "ls-remote",
+      url,
+      "refs/heads/main",
+    ])
+    const innerCalls = inner.end()
+    expect(innerCalls.sshCalls).toMatchObject([{ command: "ls-remote", ownership: "queue", capture: innerChain }])
+    // The inner child's chain is the outer round's work too, read against the outer capture.
+    expect(innerChain.split("/")).toContain(outerCapture)
+    outer.end()
+    // CHILD PROCESS: a process that inherited the outer environment starts its own capture from process.env.
+    const saved = process.env[REMOTE_CAPTURE_VARIABLE]
+    process.env[REMOTE_CAPTURE_VARIABLE] = outerChain
+    try {
+      const inherited = traceRemoteCalls(join(root, "inherited-trace2"))
+      expect(String(inherited.env[REMOTE_CAPTURE_VARIABLE]).startsWith(`${outerChain}/`)).toBe(true)
+      inherited.end()
+    } finally {
+      if (saved === undefined) delete process.env[REMOTE_CAPTURE_VARIABLE]
+      else process.env[REMOTE_CAPTURE_VARIABLE] = saved
+    }
   }, 60_000)
 
   /**

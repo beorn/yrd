@@ -1,5 +1,5 @@
 /** Validated git-super receipt facts used by event queue merges. */
-import { createLegacyBackend, executableFor, type Git } from "./git.ts"
+import { createLegacyBackend, executableFor, type Git, type GitRunner } from "./git.ts"
 
 /** The approved root-entry facts; no child repository, remote or delivery policy. */
 export type RootChanges = Readonly<{
@@ -29,7 +29,9 @@ export async function readRootChanges(git: Git, merge: string, copied?: string):
     const ref = `refs/git-super/receipts/${merge}`
     const repo = (await git(["rev-parse", "--absolute-git-dir"])).trim()
     if (repo === "") throw new Error(`Root-Changes for ${merge}: git returned an empty repository store`)
-    const backend = createLegacyBackend(executableFor(git))
+    // The runner's own backend reads the environment the runner was built from, so a round's receipt read keeps
+    // the round's trace2 capture (25626); a bare Git callback has none and gets the process environment.
+    const backend = (git as Partial<GitRunner>).backend ?? createLegacyBackend(executableFor(git))
     if (backend.listRefs === undefined) throw new Error("Root-Changes: Gitomic backend lacks listRefs")
     const receiptOid = (await backend.listRefs(repo, ref)).get(ref)
     if (receiptOid === undefined) return undefined

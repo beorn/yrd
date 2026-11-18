@@ -98,7 +98,7 @@ const request = {
 }
 
 /** A real runner with one mutation between admission and the submit-event prefix listing. */
-function beforePublication(w: World, mutate: () => Promise<void>): Git {
+function beforePublication(w: World, mutate: () => Promise<void>, env?: NodeJS.ProcessEnv): Git {
   let done = false
   const process = createProcess({ cwd: w.work })
   processes.push(process)
@@ -114,6 +114,8 @@ function beforePublication(w: World, mutate: () => Promise<void>): Git {
       },
     },
     selectionFor(w.git),
+    // 25626: a capture reaches a runner only through the environment it is built with, never process.env.
+    env === undefined ? undefined : { env },
   )
 }
 
@@ -170,7 +172,8 @@ describe("submit reuses a fenced admission observation", () => {
     await w.git(["remote", "set-url", "origin", `ssh://calls.invalid${w.remote}`])
     vi.stubEnv("GIT_SSH_COMMAND", ssh)
     const trace = traceRemoteCalls(join(w.root, "trace"), { seams: true })
-    const runner = gitIn(w.work)
+    // 25626: the capture travels in the runner's own environment, as the CLI's submit hands it over.
+    const runner = gitIn(w.work, undefined, undefined, { env: { ...process.env, ...trace.env } })
     let calls: ReturnType<typeof trace.end>
     try {
       const result = await submit(runner, "origin", request)
@@ -247,15 +250,19 @@ process.exit(result.status ?? 1)
     let calls: ReturnType<typeof trace.end>
     try {
       const result = await submit(
-        beforePublication(w, async () => {
-          await writeQueueEvent(store, "main", {
-            type: "observed",
-            commit: w.target,
-            by: "yrd-run",
-            at: new Date(),
-          })
-          mutated = true
-        }),
+        beforePublication(
+          w,
+          async () => {
+            await writeQueueEvent(store, "main", {
+              type: "observed",
+              commit: w.target,
+              by: "yrd-run",
+              at: new Date(),
+            })
+            mutated = true
+          },
+          { ...process.env, ...trace.env },
+        ),
         "origin",
         request,
       )
@@ -297,17 +304,21 @@ process.exit(result.status ?? 1)
     let calls: ReturnType<typeof trace.end>
     try {
       const result = await submit(
-        beforePublication(w, async () => {
-          await writeQueueEvent(store, "main", {
-            type: "paused",
-            cause: "stuck",
-            by: "@chief",
-            reason: "repair task/stuck",
-            at: new Date(),
-            change: { branch: "task/stuck", head: w.target, event: stuck },
-          })
-          mutated = true
-        }),
+        beforePublication(
+          w,
+          async () => {
+            await writeQueueEvent(store, "main", {
+              type: "paused",
+              cause: "stuck",
+              by: "@chief",
+              reason: "repair task/stuck",
+              at: new Date(),
+              change: { branch: "task/stuck", head: w.target, event: stuck },
+            })
+            mutated = true
+          },
+          { ...process.env, ...trace.env },
+        ),
         "origin",
         request,
       )
@@ -362,9 +373,13 @@ process.exit(result.status ?? 1)
     let calls: ReturnType<typeof trace.end>
     try {
       const result = await submit(
-        beforePublication(w, async () => {
-          await w.git(["push", "--quiet", "origin", `${w.target}:${legacyRef}`])
-        }),
+        beforePublication(
+          w,
+          async () => {
+            await w.git(["push", "--quiet", "origin", `${w.target}:${legacyRef}`])
+          },
+          { ...process.env, ...trace.env },
+        ),
         "origin",
         request,
       )

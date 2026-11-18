@@ -7,7 +7,7 @@
  * notifier was handed. Nothing internal.
  */
 
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import {
   appendFileSync,
   chmodSync,
@@ -1300,6 +1300,99 @@ it("closes the round's journal with every remote call it made, counted from git'
   // The trace2 log is removed once counted: the row is the evidence, and a kept log grew the workdir every round.
   expect(existsSync(join(w.workdir, "logs", journal.replace(/\.jsonl$/u, ""), "trace2"))).toBe(false)
 })
+
+/**
+ * An unrelated process beside an operation, as post-merge housekeeping runs beside a round in the service: each read
+ * is spawned with no environment option, so it inherits this process's process.env as it is at that moment, and
+ * makes one real SSH ls-remote through a stand-in ssh from a repository of its own, until stopped (25626).
+ */
+function besideTheOperation(root: string, remote: string) {
+  const ssh = join(root, "beside-ssh")
+  writeFileSync(ssh, '#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n')
+  chmodSync(ssh, 0o755)
+  const elsewhere = join(root, "housekeeping")
+  mkdirSync(elsewhere)
+  spawnSync("git", ["init", "--quiet", elsewhere])
+  const script = `GIT_SSH_COMMAND='${ssh}' git ls-remote 'ssh://calls.invalid${remote}' refs/heads/main >/dev/null`
+  let stopped = false
+  let reads = 0
+  let sawCapture = false
+  const loop = (async () => {
+    while (!stopped) {
+      if (process.env.GIT_TRACE2_EVENT !== undefined || process.env.YRD_REMOTE_CAPTURE !== undefined) sawCapture = true
+      await new Promise<void>((done, fail) => {
+        const child = spawn("sh", ["-c", script], { cwd: elsewhere, stdio: "ignore" })
+        child.once("error", fail)
+        child.once("exit", (code) => (code === 0 ? done() : fail(new Error(`unrelated read exited ${String(code)}`))))
+      })
+      reads++
+    }
+  })()
+  return {
+    async stop(): Promise<Readonly<{ reads: number; sawCapture: boolean }>> {
+      stopped = true
+      await loop
+      return { reads, sawCapture }
+    },
+  }
+}
+
+/**
+ * @failure 25626: the round's capture was written into the service's process.env, so housekeeping spawned beside a
+ *          round from that process.env was counted as the round's own SSH work (78 owned beyond-refresh children
+ *          against fifteen). The round now carries its capture in its own environment, given or not.
+ * @level   l3 (a real queue round, real git and git-super, beside a real inherited-env SSH child)
+ * @consumer the round's remote-calls journal row and its beyond_refresh_verdict
+ * @testonly none
+ */
+it.each(["omitted", "provided"] as const)(
+  "counts the round's own git and never an inherited-env process beside it, environment %s (25626)",
+  async (given) => {
+    const w = await world()
+    await createWorldEventQueue(w)
+    const branch = `task/own-capture-${given}`
+    await submitCommit(w, branch, `own-capture-${given}.txt`)
+    const { env: worldEnv, ...options } = await w.options({ exit: 0 })
+    if (worldEnv === undefined) throw new Error("the world names the round's environment")
+    const callerEnv = { ...worldEnv, YRD_CALLER_OWN: "kept" }
+    const callerSnapshot = { ...callerEnv }
+    // Omitted: the round runs on this process's environment, which carries what the world's would.
+    if (given === "omitted") vi.stubEnv("PATH", worldEnv.PATH)
+    const before = { trace: process.env.GIT_TRACE2_EVENT, capture: process.env.YRD_REMOTE_CAPTURE }
+    const beside = besideTheOperation(dirname(w.workdir), w.remote)
+    let outcome: QueueRunOutcome
+    let unrelated: Awaited<ReturnType<typeof beside.stop>>
+    try {
+      outcome = await queueRun({
+        ...options,
+        ...(given === "provided" ? { env: callerEnv } : {}),
+        checks: [],
+        notify: undefined,
+      })
+    } finally {
+      unrelated = await beside.stop()
+      vi.unstubAllEnvs()
+    }
+    expect(outcome).toMatchObject({ exitCode: 0, merged: [branch] })
+    // Nothing process-wide: the inherited-env reads never saw a capture, and the caller's own env is untouched.
+    expect(unrelated.reads).toBeGreaterThan(0)
+    expect(unrelated.sawCapture).toBe(false)
+    expect({ trace: process.env.GIT_TRACE2_EVENT, capture: process.env.YRD_REMOTE_CAPTURE }).toEqual(before)
+    expect(callerEnv).toEqual(callerSnapshot)
+    const counted = logRecords(outcome).at(-1)
+    // The round's own git, Gitomic and git-super children all wrote the log: a fetch, a push, and more processes.
+    expect(counted).toMatchObject({ kind: "remote-calls", unreadable: 0, excluded_calls: [] })
+    expect(counted?.fetch).toEqual(expect.any(Number))
+    expect(counted?.push).toEqual(expect.any(Number))
+    expect(Number(counted?.processes)).toBeGreaterThan(Number(counted?.fetch) + Number(counted?.push))
+    expect(Object.keys(counted ?? {})).toContain("seam.merge.push")
+    // The round's own remote is local, so every SSH child in its log would be the unrelated one: there are none.
+    expect(counted?.ssh_children).toBe(0)
+    expect(counted?.beyond_refresh_calls).toEqual([])
+    expect(counted?.beyond_refresh_verdict).toBe("within-limit")
+  },
+  60_000,
+)
 
 /** @failure A deleted event branch stayed queued forever and blocked every change behind it.
  * @level l3 @consumer queue operator and submitter

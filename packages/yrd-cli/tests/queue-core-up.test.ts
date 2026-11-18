@@ -17,7 +17,7 @@
  */
 
 import * as fs from "node:fs"
-import { execFileSync } from "node:child_process"
+import { execFileSync, spawn } from "node:child_process"
 import { shellQuote } from "git-super/shell-command"
 import {
   chmodSync,
@@ -4371,6 +4371,88 @@ describe("yrd queue up, the service", () => {
       detail,
     ).toEqual([])
   }, 30_000)
+
+  /**
+   * @failure 25626: submit's capture was written into process.env and only an explicitly supplied environment was
+   *          handed the trace, so anything beside the submit that inherited process.env joined its count, and an
+   *          omitted environment kept its own Git captured only through that same process-wide write.
+   * @level   l3 (the real submit command, real git, beside a real inherited-env SSH child)
+   * @consumer submit's remote-call summary and detail on stderr
+   * @testonly none
+   */
+  it.each(["omitted", "provided"] as const)(
+    "a submit counts its own Git and never an inherited-env process beside it, environment %s (25626)",
+    async (given) => {
+      const w = await world()
+      const branch = `task/own-capture-${given}`
+      await w.git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(w.work, "change.txt"), "candidate\n")
+      await w.git(["add", "change.txt"])
+      await w.git(["commit", "--quiet", "-m", "own capture\n\nRefs: 25626"])
+      const root = dirname(w.work)
+      const ssh = join(root, "beside-ssh")
+      writeFileSync(ssh, '#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n')
+      chmodSync(ssh, 0o755)
+      const elsewhere = join(root, "housekeeping")
+      mkdirSync(elsewhere)
+      execFileSync("git", ["init", "--quiet", elsewhere])
+      // Beside the submit: each read takes no environment option, so it inherits process.env as it is right then.
+      const script = `GIT_SSH_COMMAND='${ssh}' git ls-remote 'ssh://calls.invalid${join(root, "remote.git")}' refs/heads/main >/dev/null`
+      let stopped = false
+      let reads = 0
+      let sawCapture = false
+      const beside = (async () => {
+        while (!stopped) {
+          if (process.env.GIT_TRACE2_EVENT !== undefined || process.env.YRD_REMOTE_CAPTURE !== undefined) {
+            sawCapture = true
+          }
+          await new Promise<void>((done, fail) => {
+            const child = spawn("sh", ["-c", script], { cwd: elsewhere, stdio: "ignore" })
+            child.once("error", fail)
+            child.once("exit", (code) =>
+              code === 0 ? done() : fail(new Error(`unrelated read exited ${String(code)}`)),
+            )
+          })
+          reads++
+        }
+      })()
+      const env = given === "provided" ? { ...process.env, YRD_CALLER_OWN: "kept" } : undefined
+      const snapshot = env === undefined ? undefined : { ...env }
+      const run = capture(w.work)
+      try {
+        await expect(
+          queueCommand(
+            w.work,
+            run.io,
+            { branch, command: "submit", submitter: "@dev/1" },
+            { json: true, workdir: w.workdir, ...(env === undefined ? {} : { env }) },
+          ),
+        ).resolves.toBe(0)
+      } finally {
+        stopped = true
+        await beside
+      }
+      expect(reads).toBeGreaterThan(0)
+      expect(sawCapture).toBe(false)
+      expect(env).toEqual(snapshot)
+      const detail = run
+        .stderr()
+        .trimEnd()
+        .split("\n")
+        .find((line) => line.startsWith("yrd: submit remote call detail: "))
+      expect(detail, run.stderr()).toBeDefined()
+      const row = JSON.parse(detail!.slice("yrd: submit remote call detail: ".length)) as Record<string, unknown>
+      // Its own Git is counted, whichever environment it was given: the declaration fetch and the push.
+      expect(row["seam.declaration.fetch"], detail).toBe(1)
+      expect(row.push, detail).toBe(1)
+      expect(row.unreadable).toBe(0)
+      // The submit's own remote is local, so any SSH child in its log would be the unrelated one: there are none.
+      expect(row.ssh_children, detail).toBe(0)
+      expect(row.beyond_refresh_calls).toEqual([])
+      expect(row.excluded_calls).toEqual([])
+    },
+    60_000,
+  )
 
   // Accepted: a legacy protected declaration and its absent successor cannot
   // open a submission; malformed LOCAL hints still diagnose and reach a valid

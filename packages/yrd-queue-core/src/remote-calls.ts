@@ -335,36 +335,42 @@ export function readRemoteCalls(
 }
 
 /**
- * Point every git process this process starts at `directory` until `end()`, which puts GIT_TRACE2_EVENT back, counts
- * what was recorded and removes `directory`, whether or not it could be read: the count is the evidence, and a round
- * that kept its trace2 log would add some hundreds of KB to the workdir every round for good. The scopes that count, a round and a submit, run one at a time in a process; a caller
- * holding a Git built from an explicit environment adds `env` to it, since that Git never reads process.env again.
+ * Name `directory` as the trace2 log for the git processes an operation starts, until `end()`, which counts what
+ * was recorded and removes `directory`, whether or not it could be read: the count is the evidence, and a round
+ * that kept its trace2 log would add some hundreds of KB to the workdir every round for good.
+ *
+ * Nothing process-wide changes (25626, @cto C1): the capture lives only in the returned `env`, which the caller
+ * lays over the environment its own git spawns from. A child that inherits the process's environment instead,
+ * such as post-merge housekeeping running beside a round in the service, is never this capture's work and never
+ * writes into, or after end() recreates, its directory.
+ *
+ * `env` is the environment the operation itself was given, read and never written; omitted, the operation runs on
+ * this process's environment, so that is read. Its chain is the parent this capture nests inside (34390): an
+ * operation handed a round's environment, or a process started with one, names both, and a sibling started beside
+ * the round from the plain process environment does not.
  */
 export function traceRemoteCalls(
   directory: string,
-  options: Readonly<{ seams?: boolean; refresh?: boolean }> = {},
+  options: Readonly<{ seams?: boolean; refresh?: boolean; env?: Readonly<NodeJS.ProcessEnv> }> = {},
 ): Readonly<{ env: Readonly<NodeJS.ProcessEnv>; end(): RemoteCalls }> {
   mkdirSync(directory, { recursive: true })
-  const previous = process.env.GIT_TRACE2_EVENT
-  const previousVars = process.env.GIT_TRACE2_ENV_VARS
-  const previousCapture = process.env[REMOTE_CAPTURE_VARIABLE]
-  // The capture's own id, appended to whatever chain this process already carried (34390): a capture started
+  const incoming = options.env ?? process.env
+  const previousVars = incoming.GIT_TRACE2_ENV_VARS
+  const previousCapture = incoming[REMOTE_CAPTURE_VARIABLE]
+  // The capture's own id, appended to whatever chain the operation already carried (34390): a capture started
   // inside another names both, so a nested submit or runner stays this round's work instead of reading foreign.
   const capture = randomUUID()
   const chain = previousCapture === undefined || previousCapture === "" ? capture : `${previousCapture}/${capture}`
-  process.env.GIT_TRACE2_EVENT = directory
-  process.env[REMOTE_CAPTURE_VARIABLE] = chain
   // Always named, whatever the seam and refresh options: ownership is not an option of the capture, and a run
   // that did not record it could only ever report `unknown`.
   const recordedVars = [
     ...new Set([
-      ...(previousVars?.split(",") ?? []),
+      ...(previousVars === undefined || previousVars === "" ? [] : previousVars.split(",")),
       REMOTE_CAPTURE_VARIABLE,
       ...(options.seams ? ["YRD_SEAM"] : []),
       ...(options.refresh ? ["GIT_SUPER_PHASE"] : []),
     ]),
   ].join(",")
-  process.env.GIT_TRACE2_ENV_VARS = recordedVars
   return {
     env: {
       GIT_TRACE2_EVENT: directory,
@@ -372,12 +378,6 @@ export function traceRemoteCalls(
       [REMOTE_CAPTURE_VARIABLE]: chain,
     },
     end() {
-      if (previous === undefined) delete process.env.GIT_TRACE2_EVENT
-      else process.env.GIT_TRACE2_EVENT = previous
-      if (previousVars === undefined) delete process.env.GIT_TRACE2_ENV_VARS
-      else process.env.GIT_TRACE2_ENV_VARS = previousVars
-      if (previousCapture === undefined) delete process.env[REMOTE_CAPTURE_VARIABLE]
-      else process.env[REMOTE_CAPTURE_VARIABLE] = previousCapture
       try {
         return readRemoteCalls(directory, { requireRefreshTag: options.refresh, capture })
       } finally {
