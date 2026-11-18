@@ -1159,6 +1159,13 @@ interface EnvironmentCloseState {
    * any other entry (a component, an uncommitted byte) keeps the --preserve route.
    */
   readonly rootAheadContent: number
+  /**
+   * 34787 (@cto 34787-component-retention-ruling): on an owner's close, a clean component sitting at a gitlink the
+   * root's commits ahead moved is retained by git-super's copy, never judged by remote ancestry here. The copy's own
+   * custody check decides when it may later be retired. Each entry is named in the close receipt with the store the
+   * removal proof retained.
+   */
+  readonly retainedComponents: readonly Readonly<{ path: string; pin: string; gitDir: string }>[]
 }
 
 /**
@@ -1177,12 +1184,29 @@ interface EnvironmentCloseState {
  *   of its parents rebuilds exactly (reconstructibleFromMain). Those commits are listed as discards, with their
  *   repo, so a close says what it threw away.
  */
+/** 34787: the real path of an existing path, or the path resolved as given when it cannot be read. */
+function canonicalPath(target: string): string {
+  try {
+    return realpathSync(target)
+  } catch {
+    return resolve(target)
+  }
+}
+
+/** 34787: whether `target` is `parent` or lies under it. */
+function pathWithin(parent: string, target: string): boolean {
+  const part = relative(parent, target)
+  return part === "" || (part !== ".." && !part.startsWith(`..${sep}`) && !isAbsolute(part))
+}
+
 async function inspectEnvironmentCloseState(
   path: string,
   treeGit: Git,
   process: Process,
   selection: Awaited<ReturnType<typeof resolveGitSelection>>,
   detached: boolean,
+  /** 34787: an owner's close (no automatic component-custody proof requested) retains instead of refusing. */
+  retainComponents: boolean,
 ): Promise<EnvironmentCloseState> {
   const status = superStatus({ repo: path })
   const dirty: string[] = []
@@ -1254,6 +1278,19 @@ async function inspectEnvironmentCloseState(
   const offMainDirt = (repoPath: string, pin: string, reason: string) =>
     ` M ${repoPath} (submodule HEAD ${pin.slice(0, 12)} is not an ancestor of refs/remotes/origin/main, and retained history does not rebuild it: ${reason})`
   const discarded: DiscardedCommit[] = []
+  const retainedComponents: { path: string; pin: string; gitDir: string }[] = []
+  // 34787 (peer @dev/5 r2): retaining instead of judging is safe only for a store that outlives the checkout: one under
+  // this environment's admin modules (git-super's retained copy holds it) or one outside both the checkout and the
+  // admin dir (the removal never touches it). A store embedded in the checkout goes with it, so it keeps the old
+  // judgment. Answers the component's absolute git dir, or undefined when its store does not survive.
+  let envAdmin: string | undefined
+  const survivingStore = async (componentGit: ReturnType<typeof gitIn>): Promise<string | undefined> => {
+    envAdmin ??= canonicalPath((await treeGit(["rev-parse", "--absolute-git-dir"])).trim())
+    const gitDir = (await componentGit(["rev-parse", "--absolute-git-dir"])).trim()
+    const real = canonicalPath(gitDir)
+    if (pathWithin(join(envAdmin, "modules"), real)) return gitDir
+    return pathWithin(canonicalPath(path), real) || pathWithin(envAdmin, real) ? undefined : gitDir
+  }
   // 34744 (@cto R5): a component's own off-main commits are named in the close receipt by repo, sha and subject,
   // with the component path and pin, once each.
   const discardComponentCommits = (repoPath: string, pin: string, commits: readonly ReconstructedCommit[]) => {
@@ -1285,6 +1322,16 @@ async function inspectEnvironmentCloseState(
     const subGit = gitIn(repo.root, process, selection)
     const subHead = (await subGit(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
     if (subHead === headPin) continue
+    // 34787 (@cto 34787-component-retention-ruling): on an owner's close a clean component moved past its gitlink is
+    // neither judged by remote ancestry nor re-aligned. It stays at its own HEAD, and git-super's retention admits that
+    // selection only as part of its verified retained copy, which keeps the HEAD and its history.
+    const movedStore = retainComponents && isSubmoduleClean(repo.path) ? await survivingStore(subGit) : undefined
+    if (movedStore !== undefined) {
+      if (!retainedComponents.some((entry) => entry.path === repo.path)) {
+        retainedComponents.push({ path: repo.path, pin: subHead, gitDir: movedStore })
+      }
+      continue
+    }
     const check = await checkSubmodulePinDiscardable(repo.path, subHead)
     if (!check.clean) continue
     if (check.discardable) {
@@ -1376,6 +1423,28 @@ async function inspectEnvironmentCloseState(
               allAdmissibleGitlinks = false
               continue
             }
+            // 34787 (@cto 34787-component-retention-ruling): on an owner's close, a clean component that sits at exactly
+            // this gitlink, with a store that outlives the checkout (survivingStore), is not judged here at all.
+            // git-super's retained copy holds its HEAD and history, and that copy's own custody check decides when it
+            // may be retired, so remote ancestry alone no longer blocks. Dirt and an embedded store keep the judgment
+            // below; a component moved past its gitlink is handled by the moved-selection rule above.
+            if (retainComponents) {
+              const repo = repoByPath.get(gitlinkPath)
+              if (repo === undefined || repo.path === "." || !isSubmoduleClean(gitlinkPath)) {
+                allAdmissibleGitlinks = false
+                continue
+              }
+              const componentGit = gitIn(repo.root, process, selection)
+              const componentHead = (await componentGit(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
+              const gitDir = componentHead === newOid ? await survivingStore(componentGit) : undefined
+              if (gitDir !== undefined) {
+                if (!retainedComponents.some((entry) => entry.path === gitlinkPath)) {
+                  retainedComponents.push({ path: gitlinkPath, pin: newOid, gitDir })
+                }
+                discardedGitlinks.push({ path: gitlinkPath, pin: newOid })
+                continue
+              }
+            }
             const check = await checkSubmodulePinDiscardable(gitlinkPath, newOid)
             if (!check.clean) {
               allAdmissibleGitlinks = false
@@ -1414,7 +1483,14 @@ async function inspectEnvironmentCloseState(
       }
     }
   }
-  return { dirty, discarded, admissibleGitlinks, rootAheadContent, ...(heldOn === undefined ? {} : { heldOn }) }
+  return {
+    dirty,
+    discarded,
+    admissibleGitlinks,
+    rootAheadContent,
+    retainedComponents,
+    ...(heldOn === undefined ? {} : { heldOn }),
+  }
 }
 
 /** One status read shared by `env open`'s existing-bay cleanliness check. */
@@ -1993,7 +2069,10 @@ export async function closeEnvironment(
     return queueDelegatedClose(path, options, io, workdir, commit, admission)
   }
   const detached = registered.branch === undefined
-  let closeState = await inspectEnvironmentCloseState(path, treeGit, process, selection, detached)
+  // 34787: the automatic sweep and a queued delivery ending ask for component custody proof at removal (21122) and keep
+  // the refusal; an owner's close retains a clean component instead.
+  const retainComponents = options.componentCustody === undefined
+  let closeState = await inspectEnvironmentCloseState(path, treeGit, process, selection, detached, retainComponents)
   const dropped = (): Promise<string> => droppedIssueRoutes(path, treeGit, commit, root)
   if (closeState.heldOn !== undefined) {
     io.stderr(
@@ -2016,7 +2095,10 @@ export async function closeEnvironment(
   const preserveSkipped = (): boolean =>
     detached &&
     closeState.dirty.length === 0 &&
-    (closeState.discarded.length > 0 || closeState.admissibleGitlinks.length > 0 || closeState.heldOn !== undefined)
+    (closeState.discarded.length > 0 ||
+      closeState.admissibleGitlinks.length > 0 ||
+      closeState.retainedComponents.length > 0 ||
+      closeState.heldOn !== undefined)
   const preserve = async (phase: "before teardown" | "after teardown"): Promise<void> => {
     if (preserveSkipped()) {
       io.stderr(`yrd: env close --preserve found nothing to preserve in ${path} ${phase}; the close proceeds\n`)
@@ -2259,7 +2341,7 @@ export async function closeEnvironment(
         `environment teardown ${result.result} in preserved environment ${path}; completed custody refs: ${preservedRefs.length === 0 ? "none" : preservedRefs.join(", ")}: exit ${String(result.exit)}${result.why === undefined ? "" : ` (${result.why})`}\ncommand: ${config.teardown}\n${output}\nlog ${result.log}`,
       )
     }
-    closeState = await inspectEnvironmentCloseState(path, treeGit, process, selection, detached)
+    closeState = await inspectEnvironmentCloseState(path, treeGit, process, selection, detached, retainComponents)
     if (options.preserve !== true) {
       await requireCleanState(closeState, path, detached, dropped)
     } else {
@@ -2591,17 +2673,32 @@ export async function closeEnvironment(
   const incomplete = retirementOutcome?.retirement === "incomplete"
   const failed = retirementOutcome?.failed ?? []
   const discarded = closeState.discarded
+  // 34787: where each retained component's commits now live: its store inside the removal proof's retained copy, or,
+  // when its store was outside this environment's modules and still exists (never copied, never removed), that live
+  // store. A store that was neither copied nor survived (embedded in the removed checkout) is never named: git-super
+  // admits that one only on its own on-target proof, so its commits are on the component's remote (peer @dev/5 r1).
+  const retainedCopy = removalProof?.retained ?? undefined
+  const retainedReceipt = closeState.retainedComponents.flatMap((entry) => {
+    const inside = relative(removalProof?.modules ?? "", entry.gitDir)
+    const copied = retainedCopy !== undefined && inside !== "" && !inside.startsWith("..") && !isAbsolute(inside)
+    if (copied) return [{ path: entry.path, pin: entry.pin, store: join(retainedCopy, inside) }]
+    if (existsSync(entry.gitDir)) return [{ path: entry.path, pin: entry.pin, store: entry.gitDir }]
+    throw new Error(
+      `environment ${path} was removed, but retained component ${entry.path}@${entry.pin.slice(0, 12)} is neither in the retained copy ${retainedCopy ?? "(none)"} nor at its store ${entry.gitDir}; inspect the retention directory before anything else`,
+    )
+  })
   io.stdout(
     options.json === true
       ? `${JSON.stringify({
           closed: path,
           ...(cleanupRemainder.length === 0 ? {} : { cleanup: "removed-with-remainder", remainder: cleanupRemainder }),
           ...(discarded.length === 0 ? {} : { discarded }),
+          ...(retainedReceipt.length === 0 ? {} : { retained: retainedReceipt }),
           ...(skipped === undefined ? {} : { skipped }),
           ...(incomplete ? { retirement: "incomplete" } : {}),
           ...(failed.length > 0 ? { failed } : {}),
         })}\n`
-      : `closed environment ${path}${cleanupRemainder.length === 0 ? "" : `; removed-with-remainder: ${cleanupRemainder.join(", ")}`}${discarded.length === 0 ? "" : `; discarded ${discarded.map((entry) => `${entry.sha.slice(0, 12)} (${entry.subject})${entry.gitlinks === undefined || entry.gitlinks.length === 0 ? "" : ` [${entry.gitlinks.map((g) => `${g.path}@${g.pin.slice(0, 12)}`).join(", ")}]`}`).join(", ")}`}${failed.length > 0 ? `; branch retirement failed: ${failed.join("; ")}` : ""}\n`,
+      : `closed environment ${path}${cleanupRemainder.length === 0 ? "" : `; removed-with-remainder: ${cleanupRemainder.join(", ")}`}${discarded.length === 0 ? "" : `; discarded ${discarded.map((entry) => `${entry.sha.slice(0, 12)} (${entry.subject})${entry.gitlinks === undefined || entry.gitlinks.length === 0 ? "" : ` [${entry.gitlinks.map((g) => `${g.path}@${g.pin.slice(0, 12)}`).join(", ")}]`}`).join(", ")}`}${retainedReceipt.length === 0 ? "" : `; retained ${retainedReceipt.map((entry) => `${entry.path}@${entry.pin.slice(0, 12)} in ${entry.store}`).join(", ")}`}${failed.length > 0 ? `; branch retirement failed: ${failed.join("; ")}` : ""}\n`,
   )
   // The environment is gone either way; a failed retirement left a branch behind, so the close is not a success (30642).
   return failed.length > 0 || (incomplete && removalProof === undefined) ? 1 : 0

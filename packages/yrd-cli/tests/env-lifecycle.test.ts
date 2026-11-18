@@ -8,6 +8,7 @@
 
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -166,6 +167,18 @@ function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout
     },
     stderr: () => stderr,
     stdout: () => stdout,
+  }
+}
+
+/** The path a close prints after "retained environment removal proof", read once the close has run (34787). */
+function captureRemovalProof(run: ReturnType<typeof capture>): () => string {
+  return () => {
+    const line = run
+      .stderr()
+      .split("\n")
+      .find((text) => text.startsWith("retained environment removal proof "))
+    if (line === undefined) throw new Error(`no removal proof line in close stderr:\n${run.stderr()}`)
+    return line.slice("retained environment removal proof ".length).trim()
   }
 }
 
@@ -3359,7 +3372,7 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
    * @level   l2 (real bare remote, real materialized submodule, real worktree close)
    * @consumer every seat or operator retiring a detached/pinned environment through `yrd env close`
    */
-  it("admits the 31822 empty-bind + on-remote-gitlink shape and refuses detached content-ahead, off-remote gitlinks, and dirty submodules with B3 guidance (32124)", async () => {
+  it("admits the 31822 empty-bind + on-remote-gitlink shape, retains an off-remote clean component, and refuses detached content-ahead and dirty submodules with B3 guidance (32124, 34787)", async () => {
     const w = await world(":")
     await addMaterializedDependency(w)
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
@@ -3394,6 +3407,7 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       const bindSha = (await envGit(["rev-parse", "HEAD"])).trim()
 
       const closed = capture(w.work)
+      const proofPath = captureRemovalProof(closed)
       expect(
         await runYrdProcess(
           ["bun", "yrd", "env", "close", path, ...(preserve ? ["--preserve"] : []), "--json"],
@@ -3402,9 +3416,12 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
         closed.stderr(),
       ).toBe(0)
       expect(existsSync(path)).toBe(false)
+      // 34787: the moved component is retained at its own HEAD, never re-aligned to its gitlink.
+      const proof = JSON.parse(readFileSync(proofPath(), "utf8")) as { retained: string }
       expect(JSON.parse(closed.stdout())).toEqual({
         closed: path,
         discarded: [{ sha: bindSha, subject: "Bind work to 31822" }],
+        retained: [{ path: "vendor/dependency", pin: remoteSubTip, store: join(proof.retained, "vendor/dependency") }],
       })
       expect(closed.stdout()).toContain(bindSha.slice(0, 8))
     }
@@ -3445,7 +3462,8 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       expect((await w.git(["rev-parse", "refs/heads/task/34764-root-only"])).trim()).toBe(ahead)
     }
 
-    // (c) A gitlink whose submodule HEAD is not on its remote refuses.
+    // (c) A clean component whose HEAD is not on its remote. 34787 (@cto 34787-component-retention-ruling): remote
+    // ancestry alone no longer blocks an owner's close; the component is retained at that HEAD and named.
     {
       const { path } = await openEnvironment(w.work, selected)
       const subGit = gitIn(join(path, "vendor/dependency"))
@@ -3461,16 +3479,22 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
         "-m",
         "unpushed submodule commit",
       ])
+      const unpushed = (await subGit(["rev-parse", "HEAD"])).trim()
 
-      const refused = capture(w.work)
-      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
-      expect(refused.stderr()).toContain("vendor/dependency")
-      expect(refused.stderr()).toContain("git switch -c task/<issue>, then --preserve")
-      expect(refused.stderr()).not.toContain("re-run with --preserve")
-      expect(existsSync(path)).toBe(true)
+      const closed = capture(w.work)
+      const proofPath = captureRemovalProof(closed)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
+      expect(existsSync(path)).toBe(false)
+      const proof = JSON.parse(readFileSync(proofPath(), "utf8")) as { retained: string }
+      const store = join(proof.retained, "vendor/dependency")
+      expect(JSON.parse(closed.stdout())).toEqual({
+        closed: path,
+        retained: [{ path: "vendor/dependency", pin: unpushed, store }],
+      })
+      expect((await gitIn(w.work)(["--git-dir", store, "cat-file", "-t", unpushed])).trim()).toBe("commit")
     }
 
-    // (d) A dirty submodule refuses.
+    // (d) A dirty submodule still refuses: only remote ancestry stopped blocking.
     {
       const { path } = await openEnvironment(w.work, selected)
       writeFileSync(join(path, "vendor/dependency/READY"), "uncommitted submodule dirt\n")
@@ -3604,6 +3628,7 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       const gitlinkCommitSha = (await envGit(["rev-parse", "HEAD"])).trim()
 
       const closed = capture(w.work)
+      const proofPath = captureRemovalProof(closed)
       expect(
         await runYrdProcess(
           ["bun", "yrd", "env", "close", path, ...(preserve ? ["--preserve"] : []), "--json"],
@@ -3612,6 +3637,8 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
         closed.stderr(),
       ).toBe(0)
       expect(existsSync(path)).toBe(false)
+      // 34787: the component is retained, not judged by remote ancestry, even when its pin is on origin/main.
+      const proof = JSON.parse(readFileSync(proofPath(), "utf8")) as { retained: string }
       expect(JSON.parse(closed.stdout())).toEqual({
         closed: path,
         discarded: [
@@ -3621,6 +3648,7 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
             gitlinks: [{ path: "vendor/dependency", pin: remoteSubTip }],
           },
         ],
+        retained: [{ path: "vendor/dependency", pin: remoteSubTip, store: join(proof.retained, "vendor/dependency") }],
       })
     }
 
@@ -3654,14 +3682,29 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
         "chore(dependency): pin unpushed submodule",
       ])
 
-      const refused = capture(w.work)
-      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
-      expect(refused.stderr()).toContain("vendor/dependency")
-      expect(refused.stderr()).toContain(offMainPin.slice(0, 12))
-      expect(refused.stderr()).toContain("is not an ancestor of refs/remotes/origin/main")
-      expect(refused.stderr()).toContain("git switch -c task/<issue>, then --preserve")
-      expect(refused.stderr()).not.toContain("re-run with --preserve")
-      expect(existsSync(path)).toBe(true)
+      // 34787 (@cto 34787-component-retention-ruling): remote ancestry alone no longer blocks an owner's close. The
+      // clean component at its own gitlink is retained by git-super's copy, the removal proof names that copy, and the
+      // receipt says where the unpushed commit now lives; the root commit that only moved the pointer is discarded.
+      const rootPin = (await envGit(["rev-parse", "HEAD"])).trim()
+      const closed = capture(w.work)
+      const proofPath = captureRemovalProof(closed)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
+      expect(existsSync(path)).toBe(false)
+      const proof = JSON.parse(readFileSync(proofPath(), "utf8")) as { retained: string }
+      const store = join(proof.retained, "vendor/dependency")
+      expect(JSON.parse(closed.stdout())).toEqual({
+        closed: path,
+        discarded: [
+          {
+            sha: rootPin,
+            subject: "chore(dependency): pin unpushed submodule",
+            gitlinks: [{ path: "vendor/dependency", pin: offMainPin }],
+          },
+        ],
+        retained: [{ path: "vendor/dependency", pin: offMainPin, store }],
+      })
+      // The unpushed commit survives in the retained copy, which only its custody check may later retire.
+      expect((await gitIn(w.work)(["--git-dir", store, "cat-file", "-t", offMainPin])).trim()).toBe("commit")
     }
 
     // (c) Committed mode 160000 gitlink (on component origin/main) + text file change refuses.
@@ -3732,14 +3775,16 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     return { w, selected, as, advanceDependencyMain, syncInto }
   }
 
-  it("admits a component sync merge left uncommitted (B1), names it, and runs no preserve (34744)", async () => {
+  it("retains a component sync merge left uncommitted (B1), names it, and runs no preserve (34744, 34787)", async () => {
     const { w, selected, syncInto } = await syncMergeWorld()
     // (a) B1: the component's HEAD is a sync merge of its old pin and its main, the root gitlink uncommitted. The
-    // close admits it, names the component commit, and runs no preserve.
+    // close admits it and runs no preserve. 34787: the merge is retained at the component's HEAD, not replayed and
+    // discarded, and the receipt names where it lives.
     for (const preserve of [false, true]) {
       const { path } = await openEnvironment(w.work, selected)
       const sync = await syncInto(gitIn(join(path, "vendor/dependency")), "sync dependency with main")
       const closed = capture(w.work)
+      const proofPath = captureRemovalProof(closed)
       expect(
         await runYrdProcess(
           ["bun", "yrd", "env", "close", path, ...(preserve ? ["--preserve"] : []), "--json"],
@@ -3748,24 +3793,21 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
         closed.stderr(),
       ).toBe(0)
       expect(existsSync(path)).toBe(false)
+      const proof = JSON.parse(readFileSync(proofPath(), "utf8")) as { retained: string }
+      const store = join(proof.retained, "vendor/dependency")
       expect(JSON.parse(closed.stdout())).toEqual({
         closed: path,
-        discarded: [
-          {
-            repo: "vendor/dependency",
-            sha: sync,
-            subject: "sync dependency with main",
-            gitlinks: [{ path: "vendor/dependency", pin: sync }],
-          },
-        ],
+        retained: [{ path: "vendor/dependency", pin: sync, store }],
       })
+      expect((await gitIn(w.work)(["--git-dir", store, "cat-file", "-t", sync])).trim()).toBe("commit")
       if (preserve) expect(closed.stderr()).toContain("found nothing to preserve")
     }
   })
 
-  it("admits a root commit pinning a component sync merge (B2) and names both commits (34744)", async () => {
+  it("admits a root commit pinning a component sync merge (B2), discarding the root commit and retaining the merge (34744, 34787)", async () => {
     const { w, selected, as, syncInto } = await syncMergeWorld()
-    // (b) B2: a detached root commit pins that sync merge. Both the root commit and the component merge are named.
+    // (b) B2: a detached root commit pins that sync merge. The root commit is named as discarded. 34787: on an owner's
+    // close the component merge is no longer replayed and discarded; it is retained with its store and named there.
     {
       const { path } = await openEnvironment(w.work, selected)
       const envGit = gitIn(path)
@@ -3774,7 +3816,10 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       await envGit([...as, "commit", "--quiet", "-m", "chore(dependency): pin the sync merge"])
       const pinCommit = (await envGit(["rev-parse", "HEAD"])).trim()
       const closed = capture(w.work)
+      const proofPath = captureRemovalProof(closed)
       expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
+      const proof = JSON.parse(readFileSync(proofPath(), "utf8")) as { retained: string }
+      const store = join(proof.retained, "vendor/dependency")
       expect(JSON.parse(closed.stdout())).toEqual({
         closed: path,
         discarded: [
@@ -3783,20 +3828,18 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
             subject: "chore(dependency): pin the sync merge",
             gitlinks: [{ path: "vendor/dependency", pin: sync }],
           },
-          {
-            repo: "vendor/dependency",
-            sha: sync,
-            subject: "sync dependency with main",
-            gitlinks: [{ path: "vendor/dependency", pin: sync }],
-          },
         ],
+        retained: [{ path: "vendor/dependency", pin: sync, store }],
       })
+      expect((await gitIn(w.work)(["--git-dir", store, "cat-file", "-t", sync])).trim()).toBe("commit")
     }
   })
 
-  it("refuses an evil component merge behind an innocent tip merge, naming it (34744)", async () => {
+  it("retains an evil component merge behind an innocent tip merge instead of replaying it (34744, 34787)", async () => {
     const { w, selected, as, advanceDependencyMain, syncInto } = await syncMergeWorld()
-    // (c) An evil merge behind an innocent tip merge refuses, naming the evil merge; the environment stays.
+    // (c) An evil merge (content no parent has) behind an innocent tip merge. 34744 refused it because replay cannot
+    // rebuild it. 34787 (@cto 34787-component-retention-ruling): an owner's close no longer replays a component; the
+    // clean component is retained at its HEAD, so the evil merge's own content survives in the retained store.
     {
       const { path } = await openEnvironment(w.work, selected)
       const subGit = gitIn(join(path, "vendor/dependency"))
@@ -3808,12 +3851,126 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       const evil = (await subGit(["rev-parse", "HEAD"])).trim()
       await advanceDependencyMain("advanced again\n")
       const tip = await syncInto(subGit, "innocent tip merge")
-      const refused = capture(w.work)
-      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
-      expect(refused.stderr()).toContain(`submodule HEAD ${tip.slice(0, 12)} is not an ancestor`)
-      expect(refused.stderr()).toContain(`merge ${evil.slice(0, 12)} records tree`)
-      expect(existsSync(join(path, "vendor/dependency/AUTHORED"))).toBe(true)
+      const closed = capture(w.work)
+      const proofPath = captureRemovalProof(closed)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
+      expect(existsSync(path)).toBe(false)
+      const proof = JSON.parse(readFileSync(proofPath(), "utf8")) as { retained: string }
+      const store = join(proof.retained, "vendor/dependency")
+      expect(JSON.parse(closed.stdout())).toEqual({
+        closed: path,
+        retained: [{ path: "vendor/dependency", pin: tip, store }],
+      })
+      const retainedGit = gitIn(w.work)
+      expect((await retainedGit(["--git-dir", store, "merge-base", "--is-ancestor", evil, tip])).trim()).toBe("")
+      expect(await retainedGit(["--git-dir", store, "show", `${evil}:AUTHORED`])).toBe(
+        "content only this merge holds\n",
+      )
     }
+  })
+
+  /**
+   * @failure 34787 (@cto 34787-component-retention-ruling): with yrd's remote-ancestry check gone from an owner's close,
+   *          the retained copy is the only thing keeping a component's unpushed work. Work held only by a component's
+   *          local branch or tag must survive in that copy, and a copy that cannot be made must refuse the close with
+   *          the environment and the component's commits left in place.
+   * @level   l2 (real bare remotes, real materialized submodule, real close through git super worktree remove)
+   * @consumer every seat closing an environment whose component holds work no remote has
+   */
+  it("retains a component's branch- and tag-only work, and refuses with nothing freed when the copy cannot be made (34787)", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const as = ["-c", "user.email=env-open@yrd.test", "-c", "user.name=yrd"]
+
+    // Branch- and tag-only work: the component sits clean at its gitlink; the unpushed commits live on a local branch
+    // and a tag only. The close retains the store, and both refs come through in the copy.
+    {
+      const { path } = await openEnvironment(w.work, selected)
+      const subGit = gitIn(join(path, "vendor/dependency"))
+      const pin = (await subGit(["rev-parse", "HEAD"])).trim()
+      await subGit(["switch", "--quiet", "-c", "wip/branch-only"])
+      writeFileSync(join(path, "vendor/dependency/BRANCH_ONLY"), "only a local branch holds this\n")
+      await subGit(["add", "BRANCH_ONLY"])
+      await subGit([...as, "commit", "--quiet", "-m", "branch-only work"])
+      const branchOnly = (await subGit(["rev-parse", "HEAD"])).trim()
+      await subGit(["tag", "tag-only", branchOnly])
+      await subGit(["checkout", "--quiet", "--detach", pin])
+      const closed = capture(w.work)
+      const proofPath = captureRemovalProof(closed)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
+      expect(existsSync(path)).toBe(false)
+      const proof = JSON.parse(readFileSync(proofPath(), "utf8")) as { retained: string }
+      const store = join(proof.retained, "vendor/dependency")
+      const retainedGit = gitIn(w.work)
+      expect((await retainedGit(["--git-dir", store, "rev-parse", "refs/heads/wip/branch-only"])).trim()).toBe(
+        branchOnly,
+      )
+      expect((await retainedGit(["--git-dir", store, "rev-parse", "refs/tags/tag-only^{commit}"])).trim()).toBe(
+        branchOnly,
+      )
+    }
+
+    // A copy that cannot be made: the retention root is a regular file. The close refuses, the environment stays, and
+    // the component's unpushed commit is still in its live store.
+    {
+      const { path } = await openEnvironment(w.work, selected)
+      const subGit = gitIn(join(path, "vendor/dependency"))
+      writeFileSync(join(path, "vendor/dependency/UNPUSHED"), "no remote has this\n")
+      await subGit(["add", "UNPUSHED"])
+      await subGit([...as, "commit", "--quiet", "-m", "unpushed component work"])
+      const unpushed = (await subGit(["rev-parse", "HEAD"])).trim()
+      const blocked = join(dirname(w.work), "retain-is-a-file")
+      writeFileSync(blocked, "not a directory\n")
+      const refused = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "close", path, "--retain", blocked, "--json"], refused.io),
+      ).not.toBe(0)
+      expect(existsSync(path)).toBe(true)
+      expect((await subGit(["cat-file", "-t", unpushed])).trim()).toBe("commit")
+      expect(refused.stdout()).not.toContain('"closed"')
+    }
+  })
+
+  it("keeps judging a component whose store is embedded in the checkout, so its only commit is never freed (34787)", async () => {
+    // Peer @dev/5 r2 probe: the root COMMITS the gitlink move to a clean, unpushed component commit whose store is a
+    // .git directory inside the checkout. git-super sees no dirt and is never asked; the store goes with the checkout
+    // and no retained copy holds it. The owner close must keep the old judgment for it and refuse.
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const as = ["-c", "user.email=env-open@yrd.test", "-c", "user.name=yrd"]
+    const { path } = await openEnvironment(w.work, selected)
+    const component = join(path, "vendor/dependency")
+    const subGit = gitIn(component)
+    const store = (await subGit(["rev-parse", "--absolute-git-dir"])).trim()
+    rmSync(join(component, ".git"))
+    // Copy, not rename: the admin dir and the checkout can sit on different filesystems under the test runner.
+    cpSync(store, join(component, ".git"), { recursive: true })
+    rmSync(store, { recursive: true, force: true })
+    const embeddedConfig = join(component, ".git", "config")
+    // An absorbed store may carry core.worktree pointing back at this checkout; an embedded one must not.
+    if (readFileSync(embeddedConfig, "utf8").includes("worktree =")) {
+      await gitIn(w.work)(["config", "--file", embeddedConfig, "--unset", "core.worktree"])
+    }
+    writeFileSync(join(component, "EMBEDDED"), "only the embedded store has this\n")
+    await subGit(["add", "EMBEDDED"])
+    await subGit([...as, "commit", "--quiet", "-m", "embedded local only"])
+    const local = (await subGit(["rev-parse", "HEAD"])).trim()
+    const envGit = gitIn(path)
+    await envGit(["add", "vendor/dependency"])
+    await envGit([...as, "commit", "--quiet", "-m", "root moves the gitlink to the embedded commit"])
+
+    const refused = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io), refused.stderr()).not.toBe(
+      0,
+    )
+    expect(refused.stderr()).toContain(
+      `submodule HEAD ${local.slice(0, 12)} is not an ancestor of refs/remotes/origin/main`,
+    )
+    expect(existsSync(path)).toBe(true)
+    expect((await subGit(["cat-file", "-t", local])).trim()).toBe("commit")
+    expect(refused.stdout()).not.toContain('"closed"')
   })
 
   it("admits a root verification composition whose parents landed on main, and refuses one with an edit (34744)", async () => {
