@@ -270,12 +270,14 @@ describe("a queue started by address on a host with no checkout", () => {
     expect(receipts).toHaveLength(2)
     for (const receipt of receipts) expect(receipt).toMatchObject({ record: "merged" })
     expect(existsSync(join(owned, "notify.sh"))).toBe(false)
-    // #28503: the pooled check tree is the one registered worktree a round keeps.
+    // #28503: the pooled check tree is the one registered worktree a round keeps; since 34755 the outside-round
+    // notifications borrow one pooled tree too, so the canonical clone keeps exactly those two beside itself.
     const registered = (await git(owned, "worktree", "list", "--porcelain"))
       .split("\n")
       .filter((line) => line.startsWith("worktree "))
-    expect(registered).toHaveLength(2)
+    expect(registered, registered.join("\n")).toHaveLength(3)
     expect(registered.filter((line) => line.includes(join("pool", "main", "candidate")))).toHaveLength(1)
+    expect(registered.filter((line) => line.includes(join("pool", "outside-round", "notify")))).toHaveLength(1)
     const target = await git(remote, "rev-parse", "refs/heads/main")
     expect((await git(remote, "rev-list", "--parents", "-n", "1", target)).split(" ")).toHaveLength(3)
 

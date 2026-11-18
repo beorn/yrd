@@ -2614,7 +2614,13 @@ describe("yrd queue up, the service", () => {
           expect(run.stderr()).toContain(why)
         }
         if (generalSweepCloses) {
-          expect(run.stderr()).not.toContain("opening lifetime unrecorded")
+          // No line may give the unrecorded opening as a reason. Since 34787 the close's removal proof echoes its
+          // attribution, {"opening":"opening lifetime unrecorded"}: the record, not a reason. So every occurrence
+          // must be in that record position, quoted reasons included (@dev/2, 34922).
+          const stderr = run.stderr()
+          const occurrences = [...stderr.matchAll(/opening lifetime unrecorded/g)].length
+          const records = [...stderr.matchAll(/"opening":"opening lifetime unrecorded"/g)].length
+          expect(occurrences, stderr).toBe(records)
         }
         const closed = allCleanupRows(workdir).find((row) => row.result === "closed" && row.path === environment.path)
         if (closes) {
