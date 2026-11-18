@@ -1153,6 +1153,12 @@ interface EnvironmentCloseState {
    * where they are instead of closing with no record.
    */
   readonly heldOn?: Readonly<{ ref: string; commits: number }>
+  /**
+   * 34764 (@cto r3): how many `dirty` entries are root commits with content ahead of origin/main on a detached HEAD.
+   * When they are all of it, a branch keeps that work and a plain close then succeeds, so the refusal says so;
+   * any other entry (a component, an uncommitted byte) keeps the --preserve route.
+   */
+  readonly rootAheadContent: number
 }
 
 /**
@@ -1180,6 +1186,7 @@ async function inspectEnvironmentCloseState(
 ): Promise<EnvironmentCloseState> {
   const status = superStatus({ repo: path })
   const dirty: string[] = []
+  let rootAheadContent = 0
   for (const problem of status.submoduleProblems) {
     dirty.push(`${problem.path}: ${problem.reason}`)
   }
@@ -1400,13 +1407,14 @@ async function inspectEnvironmentCloseState(
               dirty.push(
                 `detached HEAD is ahead of origin/main with content changes at ${entry.sha.slice(0, 12)} (${entry.subject})${notRebuilt}`,
               )
+              rootAheadContent++
             }
           }
         }
       }
     }
   }
-  return { dirty, discarded, admissibleGitlinks, ...(heldOn === undefined ? {} : { heldOn }) }
+  return { dirty, discarded, admissibleGitlinks, rootAheadContent, ...(heldOn === undefined ? {} : { heldOn }) }
 }
 
 /** One status read shared by `env open`'s existing-bay cleanliness check. */
@@ -1457,9 +1465,14 @@ async function requireCleanState(
   dropped: () => Promise<string>,
 ): Promise<void> {
   if (state.dirty.length > 0) {
-    const hint = detached
-      ? ` — or attach a branch first (git switch -c task/<issue>, then --preserve) to keep this exact state in a durable ref${await dropped()}`
-      : " — or re-run with --preserve to keep this exact state in a durable ref first"
+    // 34764: root content commits alone need only a branch; the close then keeps them on it (attached root commits are
+    // not dirt). Never offered when a component or uncommitted entry is also dirty: a branch keeps neither.
+    const rootOnly = detached && state.rootAheadContent > 0 && state.rootAheadContent === state.dirty.length
+    const hint = rootOnly
+      ? ` — the only dirt is root commits ahead of origin/main, so a branch keeps them: name one (git -C ${shellQuote(path)} switch -c task/<issue>), then run yrd env close ${shellQuote(path)} again, which keeps them on that branch${await dropped()}`
+      : detached
+        ? ` — or attach a branch first (git switch -c task/<issue>, then --preserve) to keep this exact state in a durable ref${await dropped()}`
+        : " — or re-run with --preserve to keep this exact state in a durable ref first"
     throw new Error(
       `environment ${path} is dirty; preserve or commit these changes before continuing${hint}:\n${state.dirty.join("\n")}`,
     )

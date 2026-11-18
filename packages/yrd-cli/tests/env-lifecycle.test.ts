@@ -3345,7 +3345,7 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     const refused = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
     expect(existsSync(path)).toBe(true)
-    expect(refused.stderr()).toContain("git switch -c task/<issue>, then --preserve")
+    expect(refused.stderr()).toContain("the only dirt is root commits ahead of origin/main, so a branch keeps them")
     expect(refused.stderr()).toContain('issue "33555-down" state unreadable')
     expect(refused.stderr()).not.toContain("was dropped")
   }, 60_000)
@@ -3428,9 +3428,21 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
 
       const refused = capture(w.work)
       expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
-      expect(refused.stderr()).toContain("git switch -c task/<issue>, then --preserve")
+      // 34764 (@cto r3): root content commits are the only dirt, so the refusal names the branch route and no
+      // --preserve, which refuses a detached root and demands an issue binding it does not use.
+      expect(refused.stderr()).toContain("switch -c task/<issue>), then run yrd env close ")
+      expect(refused.stderr()).toContain("again, which keeps them on that branch")
+      expect(refused.stderr()).not.toContain("then --preserve")
       expect(refused.stderr()).not.toContain("re-run with --preserve")
       expect(existsSync(path)).toBe(true)
+
+      // The route it names works: a branch keeps the commit, and a plain close then succeeds and keeps the branch.
+      const ahead = (await envGit(["rev-parse", "HEAD"])).trim()
+      await envGit(["switch", "--quiet", "-c", "task/34764-root-only"])
+      const closed = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
+      expect(existsSync(path)).toBe(false)
+      expect((await w.git(["rev-parse", "refs/heads/task/34764-root-only"])).trim()).toBe(ahead)
     }
 
     // (c) A gitlink whose submodule HEAD is not on its remote refuses.
@@ -3470,7 +3482,7 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       expect(refused.stderr()).not.toContain("re-run with --preserve")
       expect(existsSync(path)).toBe(true)
     }
-  })
+  }, 60_000)
 
   /**
    * @failure 33552: `env close --preserve --dry-run` admitted a close that the real `--preserve` call then failed late
