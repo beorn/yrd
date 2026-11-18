@@ -1,13 +1,15 @@
 /** Event queue notifications and their bounded delivery transport. */
 import { randomUUID } from "node:crypto"
-import { mkdirSync } from "node:fs"
+import { readFileSync } from "node:fs"
 import { join } from "node:path"
+import { setTimeout as sleep } from "node:timers/promises"
+import { type FlockHandle, tryAcquireFlock } from "@bearly/flock"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
-import { prepareWorktree, removeEmptyWorktreeRunDirectory, discardWorktree } from "./worktree.ts"
-import type { ObservationNotice, Git } from "./git.ts"
+import { WorktreePool, pooledWorktreePath } from "./pool.ts"
+import type { ObservationNotice, Git, GitSelection } from "./git.ts"
 import type { Ending, Notifier } from "./config.ts"
 import type { OverrideEntry } from "./override.ts"
-import { short } from "./run.ts"
+import { queueHooksPath, short } from "./run.ts"
 
 const NOBODY = "none"
 
@@ -252,6 +254,55 @@ const REFUSED_EXIT = 4
 const NOTIFY_TIMEOUT_MS = 60_000
 
 /**
+ * The pool key for notifications outside a round. A workdir already belongs to one repository and one
+ * queue ref, so this names a role-only slot beside the round's own candidate and base trees.
+ */
+const OUTSIDE_ROUND_REF = "outside-round"
+
+/** How long a dispatch waits for another holder of the notify tree before its entries fail by name. */
+const NOTIFY_TREE_WAIT_MS = 10 * 60_000
+
+const NOTIFY_TREE_POLL_MS = 100
+
+/** The lock beside the pooled notify tree; the pool never removes it, so it outlives a discarded tree. */
+function notifyTreeLock(workdir: string): string {
+  return `${pooledWorktreePath(workdir, OUTSIDE_ROUND_REF, "notify")}.lock`
+}
+
+/** The resolved Git selection a queue Git carries, which the pool needs to run Git inside its tree. */
+function selectionOf(git: Git): GitSelection | undefined {
+  return (git as Git & { readonly selection?: GitSelection }).selection
+}
+
+/**
+ * Take the notify tree exclusively, waiting at most `waitMs` for another dispatch: a kernel flock, so a
+ * holder that dies releases it, and a hold that outlasts the bound throws naming the lock and its holder.
+ * That throw reaches each entry as a failed delivery, which retries as any failed delivery does.
+ */
+export async function holdNotifyTree(lock: string, waitMs: number): Promise<FlockHandle> {
+  const deadline = Date.now() + waitMs
+  for (;;) {
+    const handle = tryAcquireFlock(lock, {
+      createParent: true,
+      body: `${JSON.stringify({ pid: process.pid, command: process.argv.join(" "), since: new Date().toISOString() })}\n`,
+    })
+    if (handle !== null) return handle
+    if (Date.now() >= deadline) {
+      throw new Error(`the notify tree lock ${lock} was held past ${String(waitMs)}ms (holder: ${notifyTreeHolder(lock)})`)
+    }
+    await sleep(NOTIFY_TREE_POLL_MS)
+  }
+}
+
+function notifyTreeHolder(lock: string): string {
+  try {
+    return readFileSync(lock, "utf8").trim() || "no body written"
+  } catch (error) {
+    return `unreadable: ${error instanceof Error ? error.message : String(error)}`
+  }
+}
+
+/**
  * Give one record to every `notify:` entry that wants this ending, in the order
  * the declaration lists them, and say how each went.
  *
@@ -342,19 +393,33 @@ export async function dispatchNotifications(
   if (wanted.length === 0) return notices.map((notice) => ({ notice, delivery: "none" as const, name: NOBODY }))
   await using resources = new AsyncDisposableStack()
   const runner = context.process ?? resources.use(createProcess({ cwd: context.repo }))
+  // The checkout is shared between dispatches; the setup's log and temp are not.
   const stamp = `notify-${String(Date.now())}-${String(process.pid)}-${randomUUID().slice(0, 8)}`
-  const directory = join(context.workdir, "worktrees", stamp)
-  resources.defer(() => removeEmptyWorktreeRunDirectory(directory))
   let prepared: Promise<Readonly<{ cwd: string; runner: Process }>> | undefined
   const environment = (): Promise<Readonly<{ cwd: string; runner: Process }>> => {
     prepared ??= (async () => {
-      mkdirSync(directory, { recursive: true })
-      const tree = await prepareWorktree(context.git, context.repo, context.targetSha, join(directory, "notify"), {
-        targetSha: context.targetSha,
+      // 34755: one warm tree per workdir, borrowed and given back, instead of a fresh full checkout per
+      // dispatch (each one wrote ~3 GB, ~400 a day). The exclusive hold spans the borrow, every entry and
+      // the return, because the round lock does not: a round releases it before its post-merge
+      // notifications, and admission and override CLI calls dispatch from their own processes.
+      const hold = await holdNotifyTree(notifyTreeLock(context.workdir), NOTIFY_TREE_WAIT_MS)
+      resources.defer(() => hold.release())
+      const selection = selectionOf(context.git)
+      const pool = new WorktreePool({
+        workdir: context.workdir,
+        ref: OUTSIDE_ROUND_REF,
+        repo: context.repo,
+        git: context.git,
+        hooksPath: queueHooksPath(context.workdir),
         process: runner,
-        queueRun: true,
         ...(context.env === undefined ? {} : { env: context.env }),
+        ...(selection === undefined ? {} : { selection }),
         ...(context.populateReference === undefined ? {} : { populateReference: context.populateReference }),
+      })
+      const tree = await pool.borrow({
+        role: "notify",
+        commit: context.targetSha,
+        targetSha: context.targetSha,
         ...(context.setup === undefined
           ? {}
           : {
@@ -365,7 +430,17 @@ export async function dispatchNotifications(
               },
             }),
       })
-      resources.defer(() => discardWorktree(tree))
+      // Registered after the hold, so it runs before the release. A failed return never undoes a
+      // delivery already made; the next borrow resets and cleans again, so it is reported, not thrown.
+      resources.defer(async () => {
+        try {
+          await pool.give(tree)
+        } catch (error) {
+          process.stderr.write(
+            `yrd notify: returning the notify tree ${tree.path} failed after its deliveries were made; the next borrow resets it: ${error instanceof Error ? error.message : String(error)}\n`,
+          )
+        }
+      })
       return { cwd: tree.path, runner }
     })()
     return prepared

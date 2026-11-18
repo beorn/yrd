@@ -33,8 +33,11 @@ import {
   type SetupSpec,
 } from "./worktree.ts"
 
-/** The two trees a round needs: the candidate it judges, and the target it compares against. */
-export type PoolRole = "candidate" | "base"
+/**
+ * The two trees a round needs: the candidate it judges, and the target it compares against; and the one
+ * tree notifications outside a round borrow to run their entries at the target (34755).
+ */
+export type PoolRole = "candidate" | "base" | "notify"
 
 /** Where one pooled tree lives: a sibling of the per-run parents, keyed by the ref whose rounds are serialized. */
 export function pooledWorktreePath(workdir: string, ref: string, role: PoolRole): string {

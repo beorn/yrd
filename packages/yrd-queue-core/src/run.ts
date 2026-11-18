@@ -297,14 +297,7 @@ async function queueRunWithLog(options: QueueRunOptions, log: QueueRunLog): Prom
   options = { ...options, selection }
   const selected = gitIn(options.repo, options.process, selection, gitOptions)
   const git = options.git ?? selected
-  const hooksPath = join(options.workdir, "hooks-disabled")
-  mkdirSync(hooksPath, { recursive: true })
-  const hooks = readdirSync(hooksPath).sort()
-  if (hooks.length > 0) {
-    throw new Error(
-      `queue-owned hooks path ${hooksPath} is not empty (${hooks.join(", ")}); remove the named entries before starting another queue round`,
-    )
-  }
+  const hooksPath = queueHooksPath(options.workdir)
   const url = await remoteUrl(git, options.target.remote)
   const store = createEventStore(options.repo, options.target.remote, selection, selected.backend)
   if ((await queueFormat(store, options.target.branch)) !== "event") {
@@ -351,6 +344,23 @@ export async function timedStep<T>(
 }
 
 /** A change as a person reads it: the branch and twelve characters of the head, the trailer's spelling shortened. */
+/**
+ * The queue-owned empty hooks directory every reset and checkout runs with, under one workdir. A
+ * round and an out-of-round notification share it, so both refuse it the same way when it is not
+ * empty: a hook there would run inside a tree the queue is about to judge or hand to a notifier.
+ */
+export function queueHooksPath(workdir: string): string {
+  const hooksPath = join(workdir, "hooks-disabled")
+  mkdirSync(hooksPath, { recursive: true })
+  const hooks = readdirSync(hooksPath).sort()
+  if (hooks.length > 0) {
+    throw new Error(
+      `queue-owned hooks path ${hooksPath} is not empty (${hooks.join(", ")}); remove the named entries before starting another queue round`,
+    )
+  }
+  return hooksPath
+}
+
 export function short(branch: string, head: string): string {
   return `${branch}@${head.slice(0, 12)}`
 }

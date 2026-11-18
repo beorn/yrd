@@ -7,7 +7,9 @@ import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFile
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { messageFor, notifyEnvRetired, type EnvRetiredNotice } from "../src/with-notify.ts"
+import { spawn } from "node:child_process"
+import { tryAcquireFlock } from "@bearly/flock"
+import { holdNotifyTree, messageFor, notifyEnvRetired, type EnvRetiredNotice } from "../src/with-notify.ts"
 import { testGitIn } from "../../../tests/support/test-git-in.ts"
 
 function envRetired(environment: string): EnvRetiredNotice {
@@ -107,6 +109,98 @@ describe("env-retired dispatch", () => {
     expect(handed[1]?.notice).toBe(notices[1])
     expect(readdirSync(join(workdir, "checks", "notify"))).toHaveLength(1)
     expect(readFileSync(records, "utf8").trim().split("\n")).toHaveLength(3)
+  })
+})
+
+describe("notify tree reuse across dispatches (34755)", () => {
+  /** The fixture plus a second commit, so two dispatches can name two different targets. */
+  async function twoCommitFixture(run: (records: string) => string) {
+    const fixture = await dispatchFixture(run)
+    const git = fixture.context.git
+    writeFileSync(join(fixture.context.repo, "file.txt"), "y\n")
+    await git(["commit", "--quiet", "-am", "second commit"])
+    const second = (await git(["rev-parse", "HEAD"])).trim()
+    return { ...fixture, first: fixture.context.targetSha, second }
+  }
+
+  it("runs each dispatch at its own target in one pooled tree, re-running setup each time", async () => {
+    const { context, records, workdir, first, second } = await twoCommitFixture(
+      (file) => `cat >/dev/null; printf '%s %s\\n' "$(git rev-parse HEAD)" "$(pwd -P)" >> ${file}`,
+    )
+    const one = await notifyEnvRetired({ ...context, targetSha: first }, [envRetired("/w/env-a")])
+    const two = await notifyEnvRetired({ ...context, targetSha: second }, [envRetired("/w/env-b")])
+    expect([...one, ...two].map((each) => each.delivery)).toEqual(["sent", "sent"])
+    const rows = readFileSync(records, "utf8").trim().split("\n").map((line) => line.split(" "))
+    // Each dispatch ran at the commit it named, not at whatever the tree held before.
+    expect(rows.map(([head]) => head)).toEqual([first, second])
+    // Both ran in the same warm tree: the second dispatch moved it rather than building another.
+    expect(rows[0]?.[1]).toBe(rows[1]?.[1])
+    expect(rows[0]?.[1]).toBe(join(workdir, "worktrees", "pool", "outside-round", "notify"))
+    // The checkout outlives the dispatch, so the next one only writes what changed.
+    expect(readdirSync(join(workdir, "worktrees", "pool", "outside-round", "notify"))).toContain("file.txt")
+    // Setup is not a cache: it ran once per dispatch, each with its own stamp.
+    expect(readdirSync(join(workdir, "checks", "notify"))).toHaveLength(2)
+  })
+
+  it("waits while another process holds the notify tree, then delivers once that holder dies", async () => {
+    const { context, records, workdir } = await dispatchFixture((file) => `cat >> ${file}`)
+    const lock = join(workdir, "worktrees", "pool", "outside-round", "notify.lock")
+    // An independent process takes the lock and exits without releasing it: the kernel drops a dead
+    // holder's flock, which is the only release this dispatch may rely on.
+    const holder = spawn(
+      process.execPath,
+      [
+        "--eval",
+        [
+          `const { tryAcquireFlock } = await import("@bearly/flock")`,
+          `const held = tryAcquireFlock(${JSON.stringify(lock)}, { createParent: true, body: "child holder" })`,
+          `if (held === null) process.exit(9)`,
+          `console.log("held")`,
+          `await new Promise((resolve) => setTimeout(resolve, 2500))`,
+          `process.exit(0)`,
+        ].join("\n"),
+      ],
+      { cwd: import.meta.dirname, stdio: ["ignore", "pipe", "inherit"] },
+    )
+    const exited = new Promise<number | null>((resolve) => holder.on("exit", (code) => resolve(code)))
+    await new Promise<void>((resolve, reject) => {
+      holder.stdout.on("data", (chunk: Buffer) => {
+        if (String(chunk).includes("held")) resolve()
+      })
+      holder.on("exit", (code) => reject(new Error(`holder exited ${String(code)} before holding`)))
+    })
+    const startedAt = Date.now()
+    const handed = await notifyEnvRetired(context, [envRetired("/w/env-a")])
+    const returnedAfterMs = Date.now() - startedAt
+    expect(await exited).toBe(0)
+    expect(handed.map((each) => each.delivery)).toEqual(["sent"])
+    // A fresh build alone takes well under a second here, so only a real wait reaches 2 s.
+    expect(returnedAfterMs).toBeGreaterThanOrEqual(2000)
+    expect(readFileSync(records, "utf8").trim().split("\n")).toHaveLength(1)
+  })
+
+  it("a failed setup fails that dispatch's deliveries by name, and the next dispatch still delivers", async () => {
+    const { context, records } = await dispatchFixture((file) => `cat >> ${file}`)
+    const failed = await notifyEnvRetired({ ...context, setup: "exit 7" }, [envRetired("/w/env-a")])
+    expect(failed.map((each) => each.delivery)).toEqual(["failed"])
+    expect(failed[0]?.failure ?? "").not.toBe("")
+    const after = await notifyEnvRetired(context, [envRetired("/w/env-b")])
+    expect(after.map((each) => each.delivery)).toEqual(["sent"])
+    expect(readFileSync(records, "utf8").trim().split("\n")).toHaveLength(1)
+  })
+
+  it("a hold that outlasts its bound fails with the lock and its holder named, never silently", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "yrd-notify-hold-")))
+    fixtureRoots.push(root)
+    const lock = join(root, "notify.lock")
+    const held = tryAcquireFlock(lock, { createParent: true, body: "other dispatch pid 4242\n" })
+    try {
+      await expect(holdNotifyTree(lock, 200)).rejects.toThrow(/notify\.lock was held past 200ms \(holder: other dispatch pid 4242\)/u)
+    } finally {
+      held?.release()
+    }
+    const mine = await holdNotifyTree(lock, 200)
+    mine.release()
   })
 })
 
