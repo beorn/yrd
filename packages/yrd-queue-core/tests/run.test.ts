@@ -907,17 +907,14 @@ it("keeps nonempty queue and notify parents after their worktrees close", async 
   const parent = join(w.workdir, "worktrees")
   const names = readdirSync(parent)
   // #28503 moved the check tree into the pool, so the round's OWN parent has no
-  // worktree beside it and is correctly removed; the notify parent, which still
-  // holds the file its notify wrote beside its worktree, is the one to keep.
+  // worktree beside it and is correctly removed. #34755 moved the notify tree into
+  // the pool too: no per-dispatch notify parent exists any more, and the file its
+  // notify wrote beside its worktree stays in the pooled slot, which no cleanup removes.
   expect(names).not.toContain(outcome.run)
-  const notify = names.find((name) => name.startsWith("notify-"))
-  expect(notify).toBeDefined()
-  const retained = warnings.filter((line) => line.startsWith("yrd: kept non-empty worktree run directory "))
-  expect(retained).toHaveLength(1)
-  const path = join(parent, notify as string)
-  expect(readdirSync(path)).toEqual(["keep"])
-  expect(retained[0]).toContain(path)
-  expect(retained[0]).toMatch(/\b(?:ENOTEMPTY|EEXIST)\b/u)
+  expect(names.filter((name) => name.startsWith("notify-"))).toEqual([])
+  const slot = join(parent, "pool", "outside-round")
+  expect(readdirSync(slot)).toEqual(expect.arrayContaining(["keep", "notify"]))
+  expect(warnings.filter((line) => line.startsWith("yrd: kept non-empty worktree run directory "))).toEqual([])
 })
 
 it("leaves an idle event round unnumbered and the next index value at one (26193)", async () => {

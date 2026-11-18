@@ -87,7 +87,7 @@ export class WorktreePool {
   async borrow(input: BorrowPooled): Promise<PreparedWorktree> {
     const base = pooledWorktreePath(this.options.workdir, this.options.ref, input.role)
     const path = base
-    if (!existsSync(path)) return await this.materialize(path, input)
+    if (!existsSync(path)) return this.materialize(path, input)
     let cause: string
     try {
       cause = await this.reuseRefusal(path)
@@ -96,19 +96,19 @@ export class WorktreePool {
       // judge either. The rebuild below is fresh-by-construction, so it is safe
       // to abandon the directory, and the cause is named rather than swallowed.
       this.note(input, `pooled ${input.role} tree could not be inspected: ${messageOf(error)}`)
-      return await this.materialize(await this.discard(path), input)
+      return this.materialize(await this.discard(path), input)
     }
     if (cause !== "") {
       this.note(input, cause)
-      return await this.materialize(await this.discard(path), input)
+      return this.materialize(await this.discard(path), input)
     }
     try {
       await this.reset(path, input)
     } catch (error) {
       this.note(input, `pooled ${input.role} tree could not be reset: ${messageOf(error)}`)
-      return await this.materialize(await this.discard(path), input)
+      return this.materialize(await this.discard(path), input)
     }
-    return await this.setupAt(path, base, input)
+    return this.setupAt(path, base, input)
   }
 
   /** Discard a pooled tree and hand back the path the round should materialize at. */
@@ -140,7 +140,7 @@ export class WorktreePool {
 
   /** A fresh tree, materialized and provisioned by the same code `yrd check` uses. */
   private async materialize(path: string, input: BorrowPooled): Promise<PreparedWorktree> {
-    return await prepareWorktree(this.options.git, this.options.repo, input.commit, path, {
+    return prepareWorktree(this.options.git, this.options.repo, input.commit, path, {
       targetSha: input.targetSha,
       queueRun: true,
       ...this.selectionOptions(),

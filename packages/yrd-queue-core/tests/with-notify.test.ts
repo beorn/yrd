@@ -130,7 +130,10 @@ describe("notify tree reuse across dispatches (34755)", () => {
     const one = await notifyEnvRetired({ ...context, targetSha: first }, [envRetired("/w/env-a")])
     const two = await notifyEnvRetired({ ...context, targetSha: second }, [envRetired("/w/env-b")])
     expect([...one, ...two].map((each) => each.delivery)).toEqual(["sent", "sent"])
-    const rows = readFileSync(records, "utf8").trim().split("\n").map((line) => line.split(" "))
+    const rows = readFileSync(records, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => line.split(" "))
     // Each dispatch ran at the commit it named, not at whatever the tree held before.
     expect(rows.map(([head]) => head)).toEqual([first, second])
     // Both ran in the same warm tree: the second dispatch moved it rather than building another.
@@ -195,7 +198,9 @@ describe("notify tree reuse across dispatches (34755)", () => {
     const lock = join(root, "notify.lock")
     const held = tryAcquireFlock(lock, { createParent: true, body: "other dispatch pid 4242\n" })
     try {
-      await expect(holdNotifyTree(lock, 200)).rejects.toThrow(/notify\.lock was held past 200ms \(holder: other dispatch pid 4242\)/u)
+      await expect(holdNotifyTree(lock, 200)).rejects.toThrow(
+        /notify\.lock was held past 200ms \(holder: other dispatch pid 4242\)/u,
+      )
     } finally {
       held?.release()
     }

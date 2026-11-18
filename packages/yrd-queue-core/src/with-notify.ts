@@ -288,7 +288,9 @@ export async function holdNotifyTree(lock: string, waitMs: number): Promise<Floc
     })
     if (handle !== null) return handle
     if (Date.now() >= deadline) {
-      throw new Error(`the notify tree lock ${lock} was held past ${String(waitMs)}ms (holder: ${notifyTreeHolder(lock)})`)
+      throw new Error(
+        `the notify tree lock ${lock} was held past ${String(waitMs)}ms (holder: ${notifyTreeHolder(lock)})`,
+      )
     }
     await sleep(NOTIFY_TREE_POLL_MS)
   }
