@@ -2614,7 +2614,10 @@ describe("yrd queue up, the service", () => {
           expect(run.stderr()).toContain(why)
         }
         if (generalSweepCloses) {
-          expect(run.stderr()).not.toContain("opening lifetime unrecorded")
+          // No line may give the unrecorded opening as a reason. Since 34787 the close's removal proof echoes its
+          // attribution, {"opening":"opening lifetime unrecorded"}: that quoted JSON value is the record, not a
+          // reason, so only an unquoted occurrence fails.
+          expect(run.stderr()).not.toMatch(/(^|[^"])opening lifetime unrecorded/m)
         }
         const closed = allCleanupRows(workdir).find((row) => row.result === "closed" && row.path === environment.path)
         if (closes) {
