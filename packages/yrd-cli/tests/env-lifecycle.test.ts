@@ -3932,6 +3932,62 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     }
   })
 
+  /**
+   * @failure 34787 (@cto 34787-component-retention-ruling correction 3): an owner's close deleted the opening record
+   *          with the worktree, so the retained copy said nothing of whom it was for; a receipt could only guess.
+   * @level   l2 (real issues provider subprocess, real git-super worktree removal and manifest)
+   * @consumer whoever later decides a retained copy's retirement
+   */
+  it("records the opening issue and the closing actor, owner unknown, in the retained manifest (34787)", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    const provider = join(import.meta.dirname, "support", "fake-issues-provider.ts")
+    writeFileSync(
+      join(w.work, "issues.yml"),
+      `view: ${JSON.stringify([process.execPath, provider, "reply", JSON.stringify({ status: "wip" })])}\n`,
+    )
+    await w.git(["add", "issues.yml"])
+    await w.git(["commit", "--quiet", "-m", "declare the issues interface"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", "--bay", "prov", "--issue", "34787-prov", "--json", "--expires", "1d"],
+        opened.io,
+      ),
+      opened.stderr(),
+    ).toBe(0)
+    const path = (JSON.parse(opened.stdout()) as { path: string }).path
+    const previous = process.env["YRD_DEFAULT_SUBMITTER"]
+    process.env["YRD_DEFAULT_SUBMITTER"] = "@seat/closer"
+    try {
+      const closed = capture(w.work)
+      const proofPath = captureRemovalProof(closed)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
+      expect(existsSync(path)).toBe(false)
+      const manifest = JSON.parse(readFileSync(proofPath(), "utf8")) as {
+        attribution?: Record<string, string | null>
+        repositoryHeads?: { path: string; head: string }[]
+      }
+      // The actor is the caller, never the owner; no yrd record establishes an owner, so it stays null (unknown).
+      expect(manifest.attribution).toMatchObject({
+        actor: "@seat/closer",
+        owner: null,
+        issue: "34787-prov",
+        bay: "prov",
+        lifetime: "job",
+      })
+      expect(manifest.repositoryHeads?.map((entry) => entry.path)).toEqual(
+        expect.arrayContaining([path, join(path, "vendor/dependency")]),
+      )
+      // The receipt promises no attribution of its own: the manifest is the record (its path is on stderr).
+      expect(JSON.parse(closed.stdout())).toEqual({ closed: path })
+    } finally {
+      if (previous === undefined) delete process.env["YRD_DEFAULT_SUBMITTER"]
+      else process.env["YRD_DEFAULT_SUBMITTER"] = previous
+    }
+  })
+
   it("keeps judging a component whose store is embedded in the checkout, so its only commit is never freed (34787)", async () => {
     // Peer @dev/5 r2 probe: the root COMMITS the gitlink move to a clean, unpushed component commit whose store is a
     // .git directory inside the checkout. git-super sees no dirt and is never asked; the store goes with the checkout

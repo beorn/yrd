@@ -2073,6 +2073,25 @@ export async function closeEnvironment(
   // the refusal; an owner's close retains a clean component instead.
   const retainComponents = options.componentCustody === undefined
   let closeState = await inspectEnvironmentCloseState(path, treeGit, process, selection, detached, retainComponents)
+  // 34787 (@cto 34787-component-retention-ruling correction 3): what this retention is for, recorded opaquely in
+  // git-super's manifest before git deletes the opening record with the worktree, read here while the
+  // environment certainly exists (before any concurrent-removal checkpoint). The actor is the caller as yrd
+  // knows it (the launched seat, else "unknown"); it is never the owner. No yrd ownership evidence exists yet, so
+  // the owner stays null (unknown), never inferred from the path, the issue or the closer. The opening record
+  // supplies the issue and the entry's own metadata only when present.
+  const opening = readEnvOpenRecord((await treeGit(["rev-parse", "--absolute-git-dir"])).trim())
+  const attribution: Record<string, string | null> = {
+    actor: requesterOf(globalThis.process.env),
+    owner: null,
+    ...(opening.status === "recorded"
+      ? {
+          openedAt: opening.record.at,
+          lifetime: opening.record.lifetime,
+          ...(opening.record.issue === undefined ? {} : { issue: opening.record.issue }),
+          ...(opening.record.bay === undefined ? {} : { bay: opening.record.bay }),
+        }
+      : { opening: opening.why }),
+  }
   const dropped = (): Promise<string> => droppedIssueRoutes(path, treeGit, commit, root)
   if (closeState.heldOn !== undefined) {
     io.stderr(
@@ -2463,6 +2482,7 @@ export async function closeEnvironment(
         const outcome = await native.remove(path, {
           retention: {
             root: retain,
+            attribution,
             report: (proof) => {
               nativeProof = proof
             },
@@ -2510,6 +2530,8 @@ export async function closeEnvironment(
             ? []
             : ["--component-custody", JSON.stringify(options.componentCustody)]),
           ...preservedRefs.flatMap((ref) => ["--preserved", ref]),
+          "--attribution",
+          JSON.stringify(attribution),
         ])
         // A successful git() records its result before resolving; failure throws before reaching here.
         // oxlint-disable-next-line typescript/no-non-null-assertion
