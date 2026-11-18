@@ -110,7 +110,8 @@ export type ReleaseCheckoutRound = (request: StoredReleaseRequest) => Promise<
     needsDelegation: readonly ReleaseRoundRow[]
   }>
 >
-// Covers opening through the first commit, including time waiting for review.
+// Covers opening through the first commit, including time waiting for review, unless the bay's recorded expiry has
+// passed first (34711).
 const FRESH_ENVIRONMENT_GRACE_MS = 24 * 60 * 60 * 1000
 /**
  * 33170: the wall time one round may spend reading recorded issues' states. A read costs about 1.5 s against the
@@ -1507,7 +1508,8 @@ async function cleanupEnvironments(
     if (liveUseFailure !== undefined) return liveUseFailure
     const holder = liveUseHolder(path)
     if (holder !== undefined) return holder
-    // An exact terminal job can close immediately; an unfinished opening keeps its grace.
+    // An exact terminal job can close immediately; an unfinished opening keeps its grace unless its recorded expiry
+    // has passed.
     if (!terminal && opening.status === "recorded") {
       const openedAt = Date.parse(opening.record.at)
       if (!Number.isFinite(openedAt)) return `opening timestamp unproven: ${JSON.stringify(opening.record.at)}`
@@ -1519,7 +1521,8 @@ async function cleanupEnvironments(
     }
     // 33758 keep-rule: an expiry is recorded permission for the CLOCK, never an inference from age. Before the
     // instant the bay is kept and the reason names the time it stays until; at or after it this function says
-    // nothing extra and the sweep's existing protections decide, so the clock never widens what is removable.
+    // nothing extra and the sweep's existing protections decide. A passed expiry ends the fresh grace above (34711)
+    // but never overrides those protections: the clock alone never makes a protected bay removable.
     // A bay with no expiry is unowned and takes the ancestry path exactly as before — a missing field is never
     // permission to delete.
     // A terminal row is a bay whose branch has already landed or was withdrawn: its work is kept elsewhere,
