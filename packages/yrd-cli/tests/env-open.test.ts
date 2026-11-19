@@ -1489,6 +1489,11 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
     await w.git(["commit", "--quiet", "-m", "retain nested dependency"])
     await w.git(["push", "--quiet", "origin", "main"])
     const sharedStores = [w.work, dependency, join(dependency, "vendor/dependency")]
+    // Provisioning's existing alternate-store setup is already present in a configured reference.
+    for (const store of sharedStores) {
+      await gitIn(store)(["config", "submodule.alternateLocation", "superproject"])
+      await gitIn(store)(["config", "submodule.alternateErrorStrategy", "info"])
+    }
     const configs = await Promise.all(
       sharedStores.map(async (store) => {
         const path = (await gitIn(store)(["rev-parse", "--path-format=absolute", "--git-path", "config"])).trim()
