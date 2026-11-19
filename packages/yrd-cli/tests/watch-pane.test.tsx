@@ -12,9 +12,10 @@
  * @consumer the operator reading `yrd watch`
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { gzipSync } from "node:zlib"
 import type React from "react"
 import { act } from "react"
 import { describe, expect, it, vi } from "vitest"
@@ -4510,6 +4511,49 @@ describe("one tab per stage of the round, from its journal (25441 slice 2)", () 
         "gone.stdout.bin on this machine",
       )
       expect(readCommandOutput({ args: ["push"], cwd: dir, failure: "spawn" })).toEqual({ why: "spawn" })
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  // 34923: the retention sweep keeps a round's raw output as `<path>.gz`; the journal still names `<path>`.
+  it("reads gzip-retained command output exactly as its plain file, and names a corrupt or unreadable one", () => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-34923-"))
+    try {
+      const stdout = join(dir, "1.stdout.bin")
+      const stderr = join(dir, "1.stderr.bin")
+      writeFileSync(stdout, Array.from({ length: 20_000 }, (_, index) => `line ${String(index)}`).join("\n"))
+      writeFileSync(stderr, "\u001b[31mwarning: red\u001b[0m\n")
+      const plain = readCommandOutput({ args: ["log"], cwd: dir, stderr, stdout })
+      expect(plain.text?.split("\n")[0]).toMatch(/^line \d+$/u)
+      for (const path of [stdout, stderr]) {
+        writeFileSync(`${path}.gz`, gzipSync(readFileSync(path)))
+        rmSync(path)
+      }
+      expect(readCommandOutput({ args: ["log"], cwd: dir, stderr, stdout })).toEqual(plain)
+
+      const gone = readCommandOutput({ args: ["log"], cwd: dir, stdout: join(dir, "gone.stdout.bin") }).why
+      expect(gone).toContain("gone.stdout.bin on this machine")
+      expect(gone).toContain("gone.stdout.bin.gz")
+
+      const corrupt = join(dir, "2.stdout.bin")
+      writeFileSync(`${corrupt}.gz`, "not gzip at all")
+      const broken = readCommandOutput({ args: ["log"], cwd: dir, stdout: corrupt }).why
+      expect(broken).toContain(`${corrupt}.gz is not a readable gzip`)
+      expect(broken).not.toContain("no output at")
+
+      const locked = join(dir, "3.stdout.bin")
+      writeFileSync(locked, "plain\n")
+      writeFileSync(`${locked}.gz`, gzipSync("compressed\n"))
+      chmodSync(locked, 0o000)
+      try {
+        const refused = readCommandOutput({ args: ["log"], cwd: dir, stdout: locked })
+        expect(refused.text).toBeUndefined()
+        expect(refused.why).toContain(`the output at ${locked} could not be read`)
+        expect(refused.why).toContain("EACCES")
+      } finally {
+        chmodSync(locked, 0o600)
+      }
     } finally {
       rmSync(dir, { force: true, recursive: true })
     }

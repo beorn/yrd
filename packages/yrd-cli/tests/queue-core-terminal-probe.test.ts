@@ -4,9 +4,10 @@
  * @consumer the queue's read path, which repairs only a journal proven terminal
  * @testonly none
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { gzipSync } from "node:zlib"
 import { afterEach, describe, expect, it } from "vitest"
 import { runTerminalProbe } from "../src/queue-core-commands.ts"
 
@@ -21,6 +22,7 @@ const ABSENT_ID = "main@absent@2026-09-03T20:00:00.000Z"
 const PRESENT_ID = "main@present@2026-09-03T20:00:00.000Z"
 const NOPID_ID = "main@nopid@2026-09-03T20:00:00.000Z"
 const UNREADABLE_ID = "main@unreadable@2026-09-03T20:00:00.000Z"
+const GZIP_DEAD_ID = "main@gzipdead@2026-09-03T20:00:00.000Z"
 
 const roots: string[] = []
 const dir = (): string => {
@@ -82,6 +84,28 @@ describe("the terminality probe handed to the reader (28918)", () => {
     expect(left).toEqual([
       `run ${LIVE_OTHER_PRESENT}: source-changed, left alone — ${LIVE_WHY}; its writer PID ${String(process.pid)} is present, so the round may still be finishing`,
     ])
+  })
+
+  /**
+   * @failure 34923: a gzip-retained journal's header could not be read, so its
+   *          source-changed projection was never repaired and every read folded it raw.
+   * @level l1
+   */
+  it("proves a gzip-retained run terminal from its compressed header", () => {
+    const root = dir()
+    // A real header, as openLog writes it: the core reader keeps only records naming their run and instant.
+    journal(root, GZIP_DEAD_ID, { pid: DEAD_PID, run: GZIP_DEAD_ID, at: "2026-09-03T20:00:00.000Z" })
+    const plain = join(root, `${GZIP_DEAD_ID}.jsonl`)
+    writeFileSync(`${plain}.gz`, gzipSync(readFileSync(plain)))
+    rmSync(plain)
+    const left: string[] = []
+    const probe = runTerminalProbe(
+      { kind: "dead", pid: DEAD_PID, why: `runner h/${String(DEAD_PID)}: PID absent` },
+      root,
+      (m) => left.push(m),
+    )
+    expect(probe(GZIP_DEAD_ID)).toBe(true)
+    expect(left).toEqual([])
   })
 
   /** @failure A dead runner's finished journal kept reading source-changed forever. @level l1 */

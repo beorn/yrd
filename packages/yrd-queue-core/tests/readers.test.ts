@@ -14,6 +14,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSy
 import * as fs from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { gzipSync } from "node:zlib"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import {
   checksOf,
@@ -32,7 +33,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import type { CheckSpec, Git, Row } from "../src/index.ts"
 // `openLog` is the writer, and index.ts lists only what a consumer outside the
 // package imports. A test that writes a journal is inside it.
-import { openLog, readRunLog, recentCasRefusalStreak } from "../src/log.ts"
+import { openLog, readJournalProjection, readRunLog, recentCasRefusalStreak } from "../src/log.ts"
 import { journalRun } from "../../../tests/support/journal-run.ts"
 
 const roots: string[] = []
@@ -1923,5 +1924,154 @@ describe("a check an override skipped (25296 X3)", () => {
       ["verify", "skipped"],
       ["other", "not-run"],
     ])
+  })
+})
+
+/** Replace a run's plain journal with its gzip copy, as the retention sweep will (34923). */
+function gzipJournal(dir: string, run: string, text?: string): string {
+  const plain = join(dir, `${run}.jsonl`)
+  const compressed = `${plain}.gz`
+  writeFileSync(compressed, gzipSync(text ?? fs.readFileSync(plain)))
+  if (text === undefined) rmSync(plain)
+  return compressed
+}
+
+/**
+ * @failure 34923: the retention sweep gzips old journals, and a reader that knew
+ *          only `<run>.jsonl` dropped those runs from listings, windows, explicit
+ *          links and projection repair while every read still looked complete;
+ *          or a permission or gzip failure read as "no journal".
+ * @level l1 (journal files in a temporary directory; no Git)
+ * @consumer `yrd list`/`show`/`watch` and the publication refusal scan, through readJournals and readRunLog
+ */
+describe("a gzip-retained journal (34923)", () => {
+  const at = new Date("2026-09-03T20:00:00.000Z")
+  const later = new Date(at.getTime() + 8 * 24 * 60 * 60 * 1000)
+  const key = journalKey("task/one", "abc123")
+  const records = [
+    { kind: "run", base: "aaa", queue: "q", target: "main" },
+    { kind: "change", branch: "task/one", head: "abc123", decision: "failed" },
+  ] as const
+
+  it("finds a compressed-only run by discovery, by window and by explicit runIds", () => {
+    const { dir, run } = journalDir(records, at)
+    const plain = readRunLog(dir, run)
+    gzipJournal(dir, run)
+    expect(fs.existsSync(join(dir, `${run}.jsonl`))).toBe(false)
+    expect(readRunLog(dir, run)).toEqual(plain)
+    expect(readJournals(dir, { now: at }).runs.get(key)?.[0]).toMatchObject({ id: run, decision: "failed" })
+    expect(readJournals(dir, { now: later }).absent).toContain("its 1 run journal(s) are all older than the window")
+    expect(readJournals(dir, { now: later, runIds: [run] }).runs.get(key)?.[0]).toMatchObject({ id: run })
+    expect(readJournals(dir, { now: at, runIds: [] }).unread).toBe(1)
+  })
+
+  it("counts a run present as both plain and compressed once, reading the plain file", () => {
+    const { dir, run } = journalDir(records, at)
+    const merged = fs
+      .readFileSync(join(dir, `${run}.jsonl`), "utf8")
+      .replace('"decision":"failed"', '"decision":"merged"')
+    gzipJournal(dir, run, merged)
+    const journals = readJournals(dir, { now: at })
+    expect(journals.runs.get(key)).toHaveLength(1)
+    expect(journals.runs.get(key)?.[0]).toMatchObject({ id: run, decision: "failed" })
+    expect(readJournals(dir, { now: later }).absent).toContain("its 1 run journal(s) are all older than the window")
+    expect(readJournals(dir, { now: at, runIds: [] }).unread).toBe(1)
+    expect(readJournals(dir, { now: later, runIds: [run] }).runs.get(key)).toHaveLength(1)
+  })
+
+  it("keeps malformed-record reporting on a compressed journal", () => {
+    const { dir, run } = journalDir(records, at)
+    appendFileSync(join(dir, `${run}.jsonl`), "not a record\n")
+    const plain = readJournals(dir, { now: at }).malformed
+    expect(plain).toHaveLength(1)
+    rmSync(join(dir, `${run}.projection.json`), { force: true })
+    gzipJournal(dir, run)
+    expect(readJournals(dir, { now: at }).malformed).toEqual(plain)
+  })
+
+  it("judges valid, stale and missing projections against the compressed file it reads", () => {
+    const dir = join(scratch("gzip-projection"), "logs")
+    const log = openLog(dir, () => at)
+    for (const record of records) log.write(record)
+    log.finish()
+    const artifact = join(dir, `${log.id}.projection.json`)
+    expect(fs.existsSync(artifact)).toBe(true)
+    const compressed = gzipJournal(dir, log.id)
+    const ino = String(fs.statSync(compressed, { bigint: true }).ino)
+
+    // Stale: the projection names the plain file it was built from.
+    const stale = readJournalProjection(dir, log.id)
+    expect(stale).toMatchObject({ kind: "raw", fallback: { reason: "source-changed" } })
+    expect(stale.source?.ino).toBe(ino)
+    const unproven = readJournals(dir, { now: at, runTerminal: () => false })
+    expect(unproven.fallbacks).toMatchObject({ reasons: [{ reason: "source-changed", count: 1 }] })
+    expect(unproven.fallbacks?.persisted).toBeUndefined()
+    expect(unproven.runs.get(key)?.[0]).toMatchObject({ id: log.id, decision: "failed" })
+    const repaired = readJournals(dir, { now: at, runTerminal: () => true })
+    expect(repaired.fallbacks).toMatchObject({ reasons: [{ reason: "source-changed", count: 1 }], persisted: 1 })
+
+    // Valid: rebuilt against the compressed file, and served from the projection.
+    const valid = readJournalProjection(dir, log.id)
+    expect(valid.kind).toBe("projection")
+    expect(valid.source?.ino).toBe(ino)
+    const served = readJournals(dir, { now: at })
+    expect(served.fallbacks).toBeUndefined()
+    expect(served.runs.get(key)?.[0]).toMatchObject({ id: log.id, decision: "failed" })
+
+    // Missing: rebuilt from the compressed file; the projection itself stays plain.
+    rmSync(artifact)
+    const missing = readJournals(dir, { now: at })
+    expect(missing.fallbacks).toMatchObject({ reasons: [{ reason: "missing", count: 1 }], persisted: 1 })
+    expect(fs.existsSync(artifact)).toBe(true)
+    expect(fs.existsSync(`${artifact}.gz`)).toBe(false)
+    expect(readJournals(dir, { now: at }).fallbacks).toBeUndefined()
+  })
+
+  it("counts a compressed refusal in the publication scan", () => {
+    const dir = join(scratch("gzip-refusals"), "logs")
+    const ref = "refs/yrd/main/queue"
+    const marker = "c".repeat(40)
+    const times = ["2026-09-25T19:00:00.000Z", "2026-09-25T19:10:00.000Z"]
+    const ids = times.map((time) => {
+      const log = openLog(dir, () => new Date(time))
+      log.write({ kind: "warning", subject: "cas-refused", ref, marker })
+      return log.id
+    })
+    gzipJournal(dir, ids[0] ?? "")
+    expect(recentCasRefusalStreak(dir, ref, marker, new Date(0))).toEqual({ count: 2, firstAt: times[0] })
+  })
+
+  it("names a corrupt gzip as unreadable, never as an absent journal", () => {
+    const { dir, run } = journalDir(records, at)
+    rmSync(join(dir, `${run}.jsonl`))
+    writeFileSync(join(dir, `${run}.jsonl.gz`), "not gzip at all")
+    expect(() => readRunLog(dir, run)).toThrow(/\.jsonl\.gz is not a readable gzip/u)
+    expect(() => readJournals(dir, { now: at })).toThrow(/\.jsonl\.gz is not a readable gzip/u)
+    expect(() => readJournals(dir, { now: later, runIds: [run] })).toThrow(
+      /cannot read run journal .*\.jsonl\.gz is not a readable gzip/u,
+    )
+  })
+
+  it("names a plain journal it may not read instead of falling back to its gzip copy", () => {
+    const { dir, run } = journalDir(records, at)
+    const plain = join(dir, `${run}.jsonl`)
+    gzipJournal(dir, run, fs.readFileSync(plain, "utf8"))
+    fs.chmodSync(plain, 0o000)
+    try {
+      expect(() => readRunLog(dir, run)).toThrow(/EACCES/u)
+      expect(() => readJournals(dir, { now: later, runIds: [run] })).toThrow(/cannot read run journal .*EACCES/u)
+    } finally {
+      fs.chmodSync(plain, 0o600)
+    }
+  })
+
+  it("names both files it looked for when a selected run has neither", () => {
+    const { dir, run } = journalDir(records, at)
+    const missing = "q-20260903T200001000Z-missing"
+    const read = readJournals(dir, { now: later, runIds: [run, missing] })
+    expect(read.runs.size).toBe(1)
+    expect(read.absent).toContain(join(dir, `${missing}.jsonl`))
+    expect(read.absent).toContain(join(dir, `${missing}.jsonl.gz`))
+    expect(read.absent).toContain("missing")
   })
 })

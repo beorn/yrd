@@ -30,6 +30,7 @@ import { hostname, tmpdir } from "node:os"
 import { dirname, isAbsolute, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
+import { gunzipSync } from "node:zlib"
 import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
@@ -6929,6 +6930,33 @@ async function snapshotOf(
 const LOG_TAIL_BYTES = 64 * 1024
 
 /**
+ * A round's raw output file, read whole (34923): the plain path the journal
+ * names, and only when that is GENUINELY absent (ENOENT) the `<path>.gz` copy
+ * log retention keeps. Any other failure of the plain file is that failure,
+ * never absence. Neither present throws the plain file's own ENOENT; a corrupt
+ * gzip is named.
+ */
+function readRoundOutput(path: string): Buffer {
+  try {
+    return readFileSync(path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    let compressed: Buffer
+    try {
+      compressed = readFileSync(`${path}.gz`)
+    } catch (compressedError) {
+      if ((compressedError as NodeJS.ErrnoException).code === "ENOENT") throw error
+      throw compressedError
+    }
+    try {
+      return gunzipSync(compressed)
+    } catch (gzipError) {
+      throw new Error(`${path}.gz is not a readable gzip: ${String(gzipError)}`, { cause: gzipError })
+    }
+  }
+}
+
+/**
  * A check with what its log actually holds. Every way there is no output has
  * its own sentence — no path recorded, the file is not on this machine, it
  * could not be read — because an empty pane that does not say what it looked
@@ -6950,12 +6978,12 @@ export function readCommandOutput(command: JournalCommand): DiffText {
     if (path === undefined) continue
     let bytes: Buffer
     try {
-      bytes = readFileSync(path)
+      bytes = readRoundOutput(path)
     } catch (error) {
       return {
         why:
           (error as NodeJS.ErrnoException).code === "ENOENT"
-            ? `no output at ${path} on this machine; the queue writes its journal where it runs`
+            ? `no output at ${path} on this machine; the queue writes its journal where it runs (looked for ${path} and ${path}.gz)`
             : `the output at ${path} could not be read: ${error instanceof Error ? error.message : String(error)}`,
       }
     }
@@ -6976,8 +7004,9 @@ function readOutput(check: CheckView): CheckPanel {
     return { ...check, why: "no log path is recorded for this check" }
   }
   try {
-    const size = statSync(check.log).size
-    const text = readFileSync(check.log, "utf8")
+    const bytes = readRoundOutput(check.log)
+    const size = bytes.length
+    const text = bytes.toString("utf8")
     // A log is evidence, and its colors are not: vitest and friends write
     // chalk backgrounds, and a background inside a Text is a strict-render
     // refusal that took the whole pane down on 2026-09-05 (soak, minute one).
@@ -7004,8 +7033,8 @@ function readOutput(check: CheckView): CheckPanel {
             // check's log is never merely unwritten: it exists on the machine
             // the queue runs on. Missing HERE means this is not that machine,
             // which is the same fact the ended arm below reports.
-            `running, but no log at ${check.log} on this machine; the queue writes its logs where it runs`
-          : `no log at ${check.log} on this machine; the queue writes its logs where it runs`
+            `running, but no log at ${check.log} on this machine; the queue writes its logs where it runs (looked for ${check.log} and ${check.log}.gz)`
+          : `no log at ${check.log} on this machine; the queue writes its logs where it runs (looked for ${check.log} and ${check.log}.gz)`
         : `the log at ${check.log} could not be read: ${error instanceof Error ? error.message : String(error)}`
     return { ...check, why }
   }
@@ -7447,7 +7476,14 @@ export function runTerminalProbe(
     const path = join(dir, `${id}.jsonl`)
     let pid: number | undefined
     try {
-      pid = readRunHeader(path).pid
+      try {
+        pid = readRunHeader(path).pid
+      } catch (error) {
+        // 34923: log retention keeps an old journal as `<id>.jsonl.gz`; only a
+        // genuinely absent plain file is read through the core's one resolution.
+        if (((error as Error).cause as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw error
+        pid = readRunHeader(path, readRunLog(dir, id)).pid
+      }
     } catch (error) {
       onLeftAlone(
         `run ${id}: source-changed, left alone — ${liveness.why}; its header could not be read: ${String(error)}`,

@@ -1588,6 +1588,8 @@ exec '${selected.replaceAll("'", "'\\''")}' "$@"
       // asserting its absence could no longer fail. The guard it stood for is
       // the live one: a log the pane can read must not also be reported missing.
       else expect(shown.stdout()).not.toContain("no log at")
+      // 34923: a missing log names the gzip copy it also looked for.
+      if (body === undefined) expect(shown.stdout()).toContain(`${log}.gz`)
     }
   })
 

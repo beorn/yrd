@@ -53,6 +53,7 @@ import {
   writeSync,
 } from "node:fs"
 import { join } from "node:path"
+import { gunzipSync } from "node:zlib"
 import { incidentIn, type Incident } from "./incident.ts"
 import type { GitInvocation, GitInvocationOptions, GitOutputSink } from "./git.ts"
 
@@ -272,9 +273,10 @@ export type QueueRunLog = Readonly<{
  * rebuild a missing or unusable projection from the raw journal, so the
  * rebuild happens once rather than on every read (28908).
  */
-function persistJournalProjection(path: string, id: string): void {
-  const before = journalSource(path, id)
-  const { records } = runLogRecords(readFileSync(path, "utf8"), true)
+function persistJournalProjection(dir: string, id: string): void {
+  const path = journalPath(dir, id)
+  const before = journalSource(dir, id)
+  const { records } = runLogRecords(readJournalText(dir, id), true)
   // A writer never produces what its reader rejects: the reader names an
   // artifact with no run header "partial", and "partial" is repairable, so
   // persisting one would be rewritten on every read, forever.
@@ -284,12 +286,12 @@ function persistJournalProjection(path: string, id: string): void {
   const startedAt = runStartedAt(id)
   if (startedAt === undefined) throw new Error(`journal ${path}: run id has no start instant`)
   const runs = runsIn(records, id, startedAt, "omit")
-  const source = journalSource(path, id)
+  const source = journalSource(dir, id)
   if (JSON.stringify(before) !== JSON.stringify(source)) {
     throw new Error(`journal ${path}: source changed while building its projection`)
   }
   atomicWriteFileSync(
-    path.replace(/\.jsonl$/u, ".projection.json"),
+    projectionPath(dir, id),
     `${JSON.stringify({
       schema: JOURNAL_PROJECTION_SCHEMA,
       fold: JOURNAL_PROJECTION_FOLD,
@@ -360,7 +362,7 @@ export function openLog(
     write,
     finish() {
       try {
-        persistJournalProjection(path, id)
+        persistJournalProjection(directory, id)
       } catch (error) {
         // A disposable projection cannot change the queue's outcome. If even
         // the raw journal cannot carry the warning, stderr names both failures.
@@ -707,7 +709,7 @@ export function readRunLog(dir: string, run: string): readonly LogRecord[] {
 }
 
 function readRunLogWithMalformed(dir: string, run: string) {
-  return runLogRecords(readFileSync(join(dir, `${run}.jsonl`), "utf8"))
+  return runLogRecords(readJournalText(dir, run))
 }
 
 /**
@@ -858,8 +860,69 @@ function journalPath(dir: string, id: string): string {
   return join(dir, `${id}.jsonl`)
 }
 
-/** Metadata identity for completed local append-only journals; never a content hash. */
-function journalSource(path: string, run: string): JournalSource {
+/** The plain projection beside a run journal, whichever physical file holds the journal. */
+function projectionPath(dir: string, id: string): string {
+  return join(dir, `${id}.projection.json`)
+}
+
+const GZIP_JOURNAL = ".jsonl.gz"
+
+/**
+ * The run ids a directory listing holds journals for, each once (34923). Log
+ * retention keeps an old journal as `<id>.jsonl.gz`; a run present as both
+ * plain and gzip during an interrupted conversion is one run, read plain.
+ */
+function journalIds(names: readonly string[], keep: (name: string) => boolean = () => true): readonly string[] {
+  const ids = new Set<string>()
+  for (const name of names) {
+    if (!keep(name)) continue
+    if (name.endsWith(".jsonl")) ids.add(name.slice(0, -".jsonl".length))
+    else if (name.endsWith(GZIP_JOURNAL)) ids.add(name.slice(0, -GZIP_JOURNAL.length))
+  }
+  return [...ids]
+}
+
+/**
+ * The one physical-file resolution for a logical run journal (34923): use the
+ * plain `<id>.jsonl`, and only when that is GENUINELY absent (ENOENT) its
+ * gzip copy `<id>.jsonl.gz`. Any other failure of the plain file — permission,
+ * I/O — is that failure, never absence. Neither present throws the plain
+ * file's own ENOENT, so callers keep telling a missing journal apart.
+ */
+function onJournalFile<T>(dir: string, id: string, read: (path: string, compressed: boolean) => T): T {
+  const plain = journalPath(dir, id)
+  try {
+    return read(plain, false)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    try {
+      return read(`${plain}.gz`, true)
+    } catch (compressedError) {
+      if ((compressedError as NodeJS.ErrnoException).code === "ENOENT") throw error
+      throw compressedError
+    }
+  }
+}
+
+/** A run journal's text, from whichever physical file {@link onJournalFile} resolves. A corrupt gzip is named, never absent. */
+function readJournalText(dir: string, id: string): string {
+  return onJournalFile(dir, id, (path, compressed) => {
+    const bytes = readFileSync(path)
+    if (!compressed) return bytes.toString("utf8")
+    try {
+      return gunzipSync(bytes).toString("utf8")
+    } catch (error) {
+      throw new Error(`run journal ${path} is not a readable gzip: ${String(error)}`, { cause: error })
+    }
+  })
+}
+
+/** Metadata identity for completed local append-only journals; never a content hash. Identity of the file actually read. */
+function journalSource(dir: string, run: string): JournalSource {
+  return onJournalFile(dir, run, (path) => journalFileSource(path, run))
+}
+
+function journalFileSource(path: string, run: string): JournalSource {
   const stat = statSync(path, { bigint: true })
   const fields = ["dev", "ino", "size", "mtimeNs", "ctimeNs"] as const
   for (const field of fields) {
@@ -993,7 +1056,7 @@ export function readJournalProjection(
   options: Readonly<{ detail?: "include" | "omit" }> = {},
 ): JournalProjectionRead<JournalSummary> {
   const path = journalPath(dir, id)
-  const artifact = path.replace(/\.jsonl$/u, ".projection.json")
+  const artifact = projectionPath(dir, id)
   let source: JournalSource | undefined
   const raw = (reason: JournalProjectionFallback["reason"], detail: string): JournalProjectionRead<JournalSummary> => ({
     kind: "raw",
@@ -1001,7 +1064,7 @@ export function readJournalProjection(
     fallback: { run: id, reason, detail },
   })
   try {
-    source = journalSource(path, id)
+    source = journalSource(dir, id)
   } catch (error) {
     return raw(error instanceof UnsupportedJournalIdentity ? "unsupported-identity" : "unreadable", String(error))
   }
@@ -1066,7 +1129,7 @@ export function readJournalProjection(
     }
     let after: JournalSource
     try {
-      after = journalSource(path, id)
+      after = journalSource(dir, id)
     } catch (error) {
       // Failure to validate the source is an I/O/identity fallback, not corrupt
       // projection bytes. Do not reuse a raw cache under the earlier identity.
@@ -1109,14 +1172,10 @@ function pruneJournalCache(dir: string, windowed: readonly string[]): void {
  * (@i/10-yrd/28799 finding 2). It throws, and {@link unreadInWindow} says so.
  */
 function journalsInWindow(dir: string, now: Date, sinceMs: number): readonly string[] {
-  const names = readdirSync(dir)
-  return names
-    .filter((name) => name.endsWith(".jsonl"))
-    .map((name) => name.slice(0, -".jsonl".length))
-    .filter((id) => {
-      const startedAt = runStartedAt(id)
-      return startedAt !== undefined && now.getTime() - startedAt.getTime() <= sinceMs
-    })
+  return journalIds(readdirSync(dir)).filter((id) => {
+    const startedAt = runStartedAt(id)
+    return startedAt !== undefined && now.getTime() - startedAt.getTime() <= sinceMs
+  })
 }
 
 /**
@@ -1254,10 +1313,10 @@ function attemptJournalPersist(dir: string, id: string, source: JournalSource): 
   const recorded = failedJournalPersists.get(key)
   if (recorded !== undefined) return { kind: "failed", detail: recorded }
   try {
-    persistJournalProjection(path, id)
+    persistJournalProjection(dir, id)
     return { kind: "persisted" }
   } catch (error) {
-    const detail = `${path.replace(/\.jsonl$/u, ".projection.json")}: ${String(error)}`
+    const detail = `${projectionPath(dir, id)}: ${String(error)}`
     failedJournalPersists.set(key, detail)
     return { kind: "failed", detail }
   }
@@ -1313,7 +1372,7 @@ function cachedRunsIn(
   let persist: JournalPersistOutcome | undefined
   if (projection.source !== undefined) {
     try {
-      if (sameJournalSource(projection.source, journalSource(path, id))) {
+      if (sameJournalSource(projection.source, journalSource(dir, id))) {
         journalFileCache.set(cacheKey, { source: projection.source, runs, malformed: read.malformed, commandJournal })
         // The raw rebuild just paid for these facts: persist them through the
         // one projection writer so the next read finds the projection present
@@ -1398,11 +1457,7 @@ function recentPublicationWarnings(
     throw error
   }
   const firstRun = `q-${openedAt.toISOString().replace(/[-:.]/gu, "")}`
-  const ids = names
-    .filter((name) => name.startsWith("q-") && name.endsWith(".jsonl"))
-    .map((name) => name.slice(0, -".jsonl".length))
-    .sort()
-    .reverse()
+  const ids = [...journalIds(names, (name) => name.startsWith("q-"))].sort().reverse()
   // A runner-written marker may be born after its run journal opened. Include
   // that run and all timestamp ties. The CLI's ROUND_LOCK serializes rounds in
   // one workdir, so the runner's clock gives this exact bound. A foreign writer
@@ -1566,7 +1621,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
   } else {
     names = [...new Set(options.runIds)].map((id) => `${id}.jsonl`)
   }
-  const ours = names.filter((name) => name.endsWith(".jsonl")).map((name) => name.slice(0, -".jsonl".length))
+  const ours = journalIds(names)
   const windowed = ours.filter((id) => {
     const startedAt = runStartedAt(id)
     return (
@@ -1627,10 +1682,14 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
     } catch (error) {
       if (options.runIds === undefined) throw error
       if (options.runIds !== undefined && (error as NodeJS.ErrnoException).code === "ENOENT") {
-        unavailable.push(`journal detail unavailable: selected run ${id} at ${join(dir, `${id}.jsonl`)} is missing`)
+        unavailable.push(
+          `journal detail unavailable: selected run ${id} at ${journalPath(dir, id)} (or ${journalPath(dir, id)}.gz) is missing`,
+        )
         continue
       }
-      throw new Error(`cannot read run journal ${join(dir, `${id}.jsonl`)}: ${String(error)}`, { cause: error })
+      throw new Error(`cannot read run journal ${journalPath(dir, id)} (or its .gz copy): ${String(error)}`, {
+        cause: error,
+      })
     }
     if (read.fallback !== undefined) fallbacks.push(read.fallback)
     if (read.persist !== undefined) persists.push(read.persist)

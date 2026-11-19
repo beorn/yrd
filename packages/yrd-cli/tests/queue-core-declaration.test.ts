@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url"
 import * as fs from "node:fs"
 import * as removely from "removely"
 import { dirname, join, resolve } from "node:path"
+import { gzipSync } from "node:zlib"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import {
   CHANGE_STATUSES,
@@ -1469,6 +1470,16 @@ describe("a queue is the selected origin branch carrying config", () => {
           expect.objectContaining({ name: "integration", state: "not-run" }),
         ])
         expect(detail.note).toBeUndefined()
+
+        // 34923: a gzip-retained check log reads as its plain file did, the tail cut included.
+        fs.writeFileSync(log, Array.from({ length: 20_000 }, (_, index) => `unit line ${String(index)}`).join("\n"))
+        const plainChecks = (await openEventDetail(git, config, item, "main", repo, selected)).checks
+        expect(plainChecks[0]?.output?.length).toBeLessThanOrEqual(64 * 1024)
+        fs.writeFileSync(`${log}.gz`, gzipSync(fs.readFileSync(log)))
+        fs.rmSync(log)
+        expect((await openEventDetail(git, config, item, "main", repo, selected)).checks).toEqual(plainChecks)
+        fs.rmSync(`${log}.gz`)
+        fs.writeFileSync(log, "unit passed\n")
 
         // Queue history has its own declaration projection. Distinct opening,
         // judgment and current target declarations must not change measured checks.
