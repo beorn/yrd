@@ -159,9 +159,9 @@ describe("yrd logs prune obeys the target's declared holds judge (34952)", () =>
       mode === "fail"
         ? 'process.stderr.write("state rail unreachable\\n"); process.exit(1)\n'
         : [
-            'const request = JSON.parse(await Bun.stdin.text())',
+            "const request = JSON.parse(await Bun.stdin.text())",
             'const verdicts = request.candidates.map((c) => ({ path: c.path, held: true, proof: "cited by pm/x.md:1" }))',
-            'process.stdout.write(JSON.stringify({ version: 1, verdicts, read: {} }))',
+            "process.stdout.write(JSON.stringify({ version: 1, verdicts, read: {} }))",
           ].join("\n"),
     )
     return path

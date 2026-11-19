@@ -81,10 +81,14 @@ export const ROUND_REMOVAL_BATCH = 8
 
 /**
  * A target that declares a holds judge (34952) has its whole destructive pass judged at most once per this spacing,
- * inside the existing round loop: one hh holds read measured 5.9 s elapsed (refresh 1.8 s), and ~600 rounds a day
- * would otherwise pay it every round. The owner tunes it from measured drain (@cto 72645433 item 5).
+ * inside the existing round loop (the post-merge worker, off the merge line). Measured on the hh-dev queue
+ * 2026-11-14..19: 1,014-1,856 rounds a day, 966-1,317 expired directories removed a day, and compression at its
+ * 256-file bound every pass with 58,977 units deferred; one hh holds read is 5.9 s elapsed plus a 1.8 s refresh. At
+ * three minutes, rounds permitting, that is up to 480 passes a day: 3,840 removals (2.9x the peak) and 122,880
+ * compressed files, for about an hour of judge time a day. Ten minutes (144 passes, 1,152 removals) would not keep up.
+ * The owner tunes it from measured drain (@cto 72645433 item 5).
  */
-export const RETENTION_JUDGED_SPACING_MS = 10 * 60 * 1000
+export const RETENTION_JUDGED_SPACING_MS = 3 * 60 * 1000
 
 /** The round loop's memory of its last judged pass: one per service start, like `settled`. */
 export type RetentionPace = { last?: Date }
@@ -648,7 +652,9 @@ async function judgeHolds(
     ...(scan.compressible === undefined ? {} : { compressible: { ...scan.compressible, candidates: [] } }),
     failure,
   })
-  if (candidates.length === 0) return { selected: [], ...(scan.compressible === undefined ? {} : { compressible: scan.compressible }), held: [] }
+  if (candidates.length === 0) {
+    return { selected: [], ...(scan.compressible === undefined ? {} : { compressible: scan.compressible }), held: [] }
+  }
   let verdicts: readonly HoldsVerdict[]
   try {
     verdicts = await judge(candidates)
@@ -661,7 +667,11 @@ async function judgeHolds(
   const isHeld = (path: string): boolean => byPath.get(path)?.held !== false
   const held: HeldOutput[] = candidates
     .filter((candidate) => isHeld(candidate.path))
-    .map((candidate) => ({ path: candidate.path, kind: candidate.kind, proof: byPath.get(candidate.path)?.proof ?? "" }))
+    .map((candidate) => ({
+      path: candidate.path,
+      kind: candidate.kind,
+      proof: byPath.get(candidate.path)?.proof ?? "",
+    }))
   return {
     selected: scan.entries.filter((entry) => !isHeld(entry.path)),
     ...(scan.compressible === undefined
@@ -707,10 +717,14 @@ export function holdsJudgeCommand(
       )
     }
     if (result.sweepFailure !== undefined || result.escapedDescendant === true) {
-      throw new Error(`retention.holds ${shown} did not settle cleanly: ${result.sweepFailure ?? "a descendant held its output open"}`)
+      throw new Error(
+        `retention.holds ${shown} did not settle cleanly: ${result.sweepFailure ?? "a descendant held its output open"}`,
+      )
     }
     if (result.outputTruncation !== undefined && result.outputTruncation.length > 0) {
-      throw new Error(`retention.holds ${shown} wrote more than ${HOLDS_JUDGE_MAX_OUTPUT_BYTES} bytes; its answer was truncated`)
+      throw new Error(
+        `retention.holds ${shown} wrote more than ${HOLDS_JUDGE_MAX_OUTPUT_BYTES} bytes; its answer was truncated`,
+      )
     }
     let answer: unknown
     try {
@@ -728,25 +742,20 @@ export function holdsJudgeCommand(
 }
 
 /** Why `verdicts` is not exactly one well-formed answer per candidate, or undefined when it is. */
-export function verdictProblem(
-  candidates: readonly HoldsCandidate[],
-  verdicts: readonly HoldsVerdict[],
-): string | undefined {
+export function verdictProblem(candidates: readonly HoldsCandidate[], verdicts: unknown): string | undefined {
   if (!Array.isArray(verdicts)) return "the holds judge answered no verdict list"
   const asked = new Set(candidates.map((candidate) => candidate.path))
   if (asked.size !== candidates.length) return "the holds pass named one path twice"
   const seen = new Set<string>()
-  for (const verdict of verdicts) {
-    if (verdict === null || typeof verdict !== "object" || typeof verdict.path !== "string") {
-      return "the holds judge answered a malformed verdict"
-    }
-    if (!asked.has(verdict.path)) return `the holds judge answered for ${verdict.path}, which it was not asked about`
-    if (seen.has(verdict.path)) return `the holds judge answered twice for ${verdict.path}`
-    if (typeof verdict.held !== "boolean") return `the holds judge's verdict for ${verdict.path} is neither held nor cleared`
-    if (verdict.held && (typeof verdict.proof !== "string" || verdict.proof === "")) {
-      return `the holds judge held ${verdict.path} without a proof`
-    }
-    seen.add(verdict.path)
+  for (const item of verdicts as readonly unknown[]) {
+    if (item === null || typeof item !== "object") return "the holds judge answered a malformed verdict"
+    const { path, held, proof } = item as { path?: unknown; held?: unknown; proof?: unknown }
+    if (typeof path !== "string") return "the holds judge answered a verdict with no path"
+    if (!asked.has(path)) return `the holds judge answered for ${path}, which it was not asked about`
+    if (seen.has(path)) return `the holds judge answered twice for ${path}`
+    if (typeof held !== "boolean") return `the holds judge's verdict for ${path} is neither held nor cleared`
+    if (held && (typeof proof !== "string" || proof === "")) return `the holds judge held ${path} without a proof`
+    seen.add(path)
   }
   if (seen.size !== asked.size) {
     const missing = candidates.find((candidate) => !seen.has(candidate.path))
