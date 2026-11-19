@@ -158,6 +158,13 @@ export type QueueConfig = Readonly<{
    * (branch-retirement.ts:823), and `readConfig(git, queueState.declaration, ...)` (event-run.ts:995).
    */
   issuesProvider?: Readonly<{ read?: readonly string[]; update?: readonly string[] }>
+  /**
+   * Target-owned retention policy (hh 34952, @cto 72645433). `holds` is an opaque argv the queue's round sweep and
+   * `yrd logs prune` run once per destructive pass, before anything is removed or compressed: it answers which
+   * candidates the target still holds. Absent, retention behaves as it always has; declared, a failure to judge
+   * keeps the whole pass.
+   */
+  retention?: Readonly<{ holds: readonly string[] }>
   /** Target-owned pre-submit policy command. Exit 1 refuses; failures to judge warn. */
   admission?: Readonly<{ run: string; timeoutMs: number }>
   checks: readonly CheckSpec[]
@@ -262,6 +269,7 @@ export function parseConfig(
   const teardown = optionalString(declared, "teardown")
   const issuesProvider = readIssuesProvider(declared.issuesProvider)
   const admission = readAdmission(declared.admission)
+  const retention = readRetention(declared.retention)
   const queueRoot = readQueueRoot(declared["queue-root"])
   return {
     archiveAfter: readArchiveAfter(declared["archive-after"]),
@@ -273,6 +281,7 @@ export function parseConfig(
     ignore: readIgnore(declared.ignore),
     ...(issuesProvider === undefined ? {} : { issuesProvider }),
     ...(admission === undefined ? {} : { admission }),
+    ...(retention === undefined ? {} : { retention }),
     notify,
     setup,
     ...(derive === undefined ? {} : { derive }),
@@ -541,6 +550,7 @@ const TOP_KEYS = [
   "teardown",
   "notify",
   "queue-root",
+  "retention",
   "revert-guard",
 ] as const
 
@@ -555,6 +565,24 @@ function readAdmission(value: unknown): QueueConfig["admission"] {
     throw new Error(".yrd.yml admission.timeoutMs: must be a positive integer")
   }
   return { run: value.run, timeoutMs: value.timeoutMs as number }
+}
+
+function readRetention(value: unknown): QueueConfig["retention"] {
+  if (value === undefined) return undefined
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(".yrd.yml retention: must be a mapping with a holds argv")
+  }
+  const retention = value as Record<string, unknown>
+  onlyKeys(retention, ["holds"], ".yrd.yml retention")
+  const argv = retention.holds
+  if (
+    !Array.isArray(argv) ||
+    argv.length === 0 ||
+    argv.some((part) => typeof part !== "string" || part === "" || /[\r\n\0]/.test(part))
+  ) {
+    throw new Error(".yrd.yml retention.holds: must be a non-empty argv list of single-line strings")
+  }
+  return { holds: argv as string[] }
 }
 
 function readIssuesProvider(value: unknown): QueueConfig["issuesProvider"] {

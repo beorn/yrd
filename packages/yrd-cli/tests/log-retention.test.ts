@@ -44,8 +44,12 @@ import {
   ROUND_COMPRESSION_FILES,
   ROUND_COMPRESSION_UNITS,
   ROUND_OUTPUT_WINDOW_MS,
+  RETENTION_JUDGED_SPACING_MS,
   ROUND_REMOVAL_BATCH,
   appendRetentionObservation,
+  holdsJudgeCommand,
+  type HoldsCandidate,
+  type HoldsJudge,
   compressionVisitOrder,
   expiredRoundOutput,
   pruneRoundOutput,
@@ -1271,5 +1275,182 @@ describe("a compression failure is a result, never a failed round (34923 ruling 
     expect(next?.compression?.compressed).toBe(1)
     gone(stdout)
     expect(readRetainedFile(stdout).toString("utf8")).toBe(body("kept"))
+  })
+})
+
+// #34952 (@cto 72645433): a target that declares `retention.holds` has every destructive unit of a pass judged first,
+// removal and compression alike; nothing the judge did not clear is removed or unlinked, and a failed judge keeps all.
+describe("a target's holds judge (34952)", () => {
+  /** A judge that holds every candidate path in `held`, recording what it was asked. */
+  const judging = (held: ReadonlySet<string>) => {
+    const asked: HoldsCandidate[][] = []
+    const judge: HoldsJudge = async (candidates) => {
+      asked.push([...candidates])
+      return candidates.map((candidate) =>
+        held.has(candidate.path)
+          ? { path: candidate.path, held: true, proof: `held at delete: cited by pm/x.md:${String(asked.length)}` }
+          : { path: candidate.path, held: false },
+      )
+    }
+    return { judge, asked }
+  }
+
+  it("keeps a newly cited expired directory and removes the uncited one beside it", async () => {
+    const { logs, checks } = tree("holds-cited")
+    const cited = place(join(logs, round(ago(20))))
+    const control = place(join(logs, round(ago(19))))
+    const { judge, asked } = judging(new Set([cited]))
+    const result = await pruneRoundOutput({ roots: [logs, { path: checks, optional: true }], now: NOW, holds: judge })
+    expect(asked).toHaveLength(1)
+    expect(existsSync(cited)).toBe(true)
+    expect(existsSync(control)).toBe(false)
+    expect(result.removed.map((entry) => entry.path)).toEqual([control])
+    expect(result.held).toEqual([{ path: cited, kind: "removal", proof: "held at delete: cited by pm/x.md:1" }])
+    expect(result.remaining.map((entry) => entry.path)).toEqual([cited])
+  })
+
+  it("keeps the whole pass when the judge throws, answers short, answers twice, or names a path it was not asked", async () => {
+    const answers: Record<string, HoldsJudge> = {
+      throws: async () => {
+        throw new Error("state rail unreachable")
+      },
+      short: async (candidates) => candidates.slice(1).map((candidate) => ({ path: candidate.path, held: false })),
+      twice: async (candidates) => [
+        ...candidates.map((candidate) => ({ path: candidate.path, held: false })),
+        { path: candidates[0]?.path ?? "", held: false },
+      ],
+      stranger: async (candidates) => [
+        ...candidates.slice(1).map((candidate) => ({ path: candidate.path, held: false })),
+        { path: "/elsewhere/q-x", held: false },
+      ],
+      unproven: async (candidates) => candidates.map((candidate) => ({ path: candidate.path, held: true })),
+    }
+    for (const [name, judge] of Object.entries(answers)) {
+      const { logs, checks } = tree(`holds-fail-${name}`)
+      const one = place(join(logs, round(ago(20))))
+      const two = place(join(logs, round(ago(19))))
+      const result = await pruneRoundOutput({ roots: [logs, { path: checks, optional: true }], now: NOW, holds: judge })
+      expect([existsSync(one), existsSync(two)], name).toEqual([true, true])
+      expect(result.removed, name).toEqual([])
+      expect(result.holdsFailure, name).toBeTypeOf("string")
+      expect(retentionRowWorthWriting(result), name).toBe(true)
+    }
+  })
+
+  it("never stalls on held entries: more held than a batch, and the eligible one behind them drains", async () => {
+    const { logs, checks } = tree("holds-prefix")
+    const heldOld = Array.from({ length: ROUND_REMOVAL_BATCH * 3 }, (_, index) =>
+      place(join(logs, round(ago(40 - index * 0.5)))),
+    )
+    const control = place(join(logs, round(ago(15))))
+    const { judge } = judging(new Set(heldOld))
+    const first = await sweepRoundOutputInRound({
+      workdir: dirname(logs),
+      now: NOW,
+      report: () => {},
+      holds: judge,
+    })
+    expect(existsSync(control)).toBe(false)
+    expect(first?.removed.map((entry) => entry.path)).toEqual([control])
+    expect(heldOld.every((path) => existsSync(path))).toBe(true)
+    expect(first?.held).toHaveLength(heldOld.length)
+    void checks
+  })
+
+  it("judges compression units with the removals: a held round keeps its plain output, an uncited one is gzipped", async () => {
+    const { workdir, logs } = tree("holds-compress")
+    const cited = finishedRound(logs, ago(3))
+    const plainCited = output(join(logs, cited.id, "git", "1.stdout.bin"), body("cited"))
+    const free = finishedRound(logs, ago(2))
+    const plainFree = output(join(logs, free.id, "git", "1.stdout.bin"), body("free"))
+    finishedRound(logs, ago(0.5))
+    const expired = place(join(logs, round(ago(20))))
+    const { judge, asked } = judging(new Set([join(logs, cited.id)]))
+    const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {}, holds: judge })
+    expect(asked).toHaveLength(1)
+    const kinds = new Set(asked[0]?.map((candidate) => candidate.kind))
+    expect(kinds.has("removal") && kinds.has("round")).toBe(true)
+    expect(existsSync(expired)).toBe(false)
+    plain(plainCited)
+    gone(plainFree)
+    expect(result?.held?.map((entry) => entry.path)).toEqual([join(logs, cited.id)])
+  })
+
+  it("a failed judge also keeps compression, and its row names the failure", async () => {
+    const { workdir, logs } = tree("holds-compress-fail")
+    const round1 = finishedRound(logs, ago(3))
+    const plain1 = output(join(logs, round1.id, "git", "1.stdout.bin"), body("kept"))
+    finishedRound(logs, ago(0.5))
+    const lines: string[] = []
+    const result = await sweepRoundOutputInRound({
+      workdir,
+      now: NOW,
+      report: (line) => lines.push(line),
+      holds: async () => {
+        throw new Error("dev main moved")
+      },
+    })
+    plain(plain1)
+    expect(result?.compression?.compressed ?? 0).toBe(0)
+    expect(lines.join("")).toContain("the target's holds judge did not answer (dev main moved)")
+    expect(retentionRows(workdir).at(-1)).toMatchObject({ holdsFailure: "dev main moved" })
+  })
+
+  it("runs a judged pass at most once per spacing, and judges afresh after it", async () => {
+    const { workdir, logs } = tree("holds-pace")
+    const cited = place(join(logs, round(ago(20))))
+    const { judge, asked } = judging(new Set([cited]))
+    const pace = {}
+    await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {}, holds: judge, pace })
+    const soon = new Date(NOW.getTime() + RETENTION_JUDGED_SPACING_MS - 1)
+    expect(await sweepRoundOutputInRound({ workdir, now: soon, report: () => {}, holds: judge, pace })).toBeUndefined()
+    expect(asked).toHaveLength(1)
+    const later = new Date(NOW.getTime() + RETENTION_JUDGED_SPACING_MS)
+    await sweepRoundOutputInRound({ workdir, now: later, report: () => {}, holds: judge, pace })
+    expect(asked).toHaveLength(2)
+    expect(existsSync(cited)).toBe(true)
+  })
+})
+
+describe("holdsJudgeCommand: the declared argv, strictly read (34952)", () => {
+  const script = (label: string, text: string): string => {
+    const { workdir } = tree(`holds-argv-${label}`)
+    const path = join(workdir, "judge.sh")
+    writeFileSync(path, `#!/bin/sh\n${text}\n`)
+    chmodSync(path, 0o755)
+    return path
+  }
+  const candidates: HoldsCandidate[] = [
+    { path: "/q/logs/q-a", kind: "removal" },
+    { path: "/q/logs/q-b", kind: "round" },
+  ]
+
+  it("passes the request on stdin and returns the verdicts", async () => {
+    const { workdir } = tree("holds-argv-ok")
+    const seen = join(workdir, "stdin.json")
+    const path = script(
+      "ok",
+      `cat > ${seen}; echo '{"version":1,"verdicts":[{"path":"/q/logs/q-a","held":true,"proof":"cited"},{"path":"/q/logs/q-b","held":false}],"read":{"railBase":"abc"}}'`,
+    )
+    const judge = holdsJudgeCommand({ argv: [path], cwd: workdir, roots: ["/q/logs"] })
+    expect(await judge(candidates)).toEqual([
+      { path: "/q/logs/q-a", held: true, proof: "cited" },
+      { path: "/q/logs/q-b", held: false },
+    ])
+    expect(JSON.parse(readFileSync(seen, "utf8"))).toEqual({ version: 1, roots: ["/q/logs"], candidates })
+  })
+
+  it("throws on a non-zero exit, a missing command, non-JSON, or another version", async () => {
+    const { workdir } = tree("holds-argv-bad")
+    const cases: Record<string, string[]> = {
+      exit: [script("exit", "echo 'rail unreachable' >&2; exit 1")],
+      missing: [join(workdir, "no-such-judge")],
+      garbage: [script("garbage", "echo not-json")],
+      version: [script("version", `echo '{"version":2,"verdicts":[]}'`)],
+    }
+    for (const [name, argv] of Object.entries(cases)) {
+      const judge = holdsJudgeCommand({ argv, cwd: workdir, roots: ["/q/logs"] })
+      await expect(judge(candidates), name).rejects.toThrow(/retention\.holds|ENOENT|no such|not found/u)
+    }
   })
 })

@@ -21,7 +21,7 @@ import { basename, dirname, join, relative, sep } from "node:path"
 import { Transform, Writable } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import { createGunzip, createGzip } from "node:zlib"
-import { pidPresence } from "@yrd/process"
+import { createProcess, pidPresence } from "@yrd/process"
 import { readJournalLine, readJournalProjection, readJournals, runStartedAt } from "@yrd/queue-core"
 import { environmentDirectoryStartedAt, environmentStampUnreadable } from "./env-commands.ts"
 import { safeRemove } from "removely"
@@ -78,6 +78,16 @@ export const ROUND_OUTPUT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000
  * (30 s, 400 spawns).
  */
 export const ROUND_REMOVAL_BATCH = 8
+
+/**
+ * A target that declares a holds judge (34952) has its whole destructive pass judged at most once per this spacing,
+ * inside the existing round loop: one hh holds read measured 5.9 s elapsed (refresh 1.8 s), and ~600 rounds a day
+ * would otherwise pay it every round. The owner tunes it from measured drain (@cto 72645433 item 5).
+ */
+export const RETENTION_JUDGED_SPACING_MS = 10 * 60 * 1000
+
+/** The round loop's memory of its last judged pass: one per service start, like `settled`. */
+export type RetentionPace = { last?: Date }
 
 /** Raw output of a finished round is compressed once its round NAME is older than a day (34923). */
 export const ROUND_OUTPUT_COMPRESS_AFTER_MS = 24 * 60 * 60 * 1000
@@ -250,7 +260,30 @@ export type RetentionResult = Readonly<{
   missing: readonly string[]
   /** The round sweep's compression pass (34923); absent where none ran (`yrd logs prune` only removes). */
   compression?: RetentionCompression
+  /** Candidates the target's holds judge held this pass (34952): kept, named, and judged afresh next pass. */
+  held?: readonly HeldOutput[]
+  /** The target's holds judge could not answer (34952): the whole pass was kept, and this says why. */
+  holdsFailure?: string
 }>
+
+/** One candidate the target still holds, with the judge's proof. */
+export type HeldOutput = Readonly<{ path: string; kind: HoldsCandidate["kind"]; proof: string }>
+
+/**
+ * One destructive unit put to a target's holds judge (34952, @cto 72645433): an expired round-output directory to
+ * remove, or a compression unit (a round directory, a run journal, a leftover temp) whose plain source the pass
+ * would unlink. A round directory is judged whole, so a held round keeps all of its plain files.
+ */
+export type HoldsCandidate = Readonly<{ path: string; kind: "removal" | CompressionCandidate["kind"] }>
+
+/** The judge's answer for one candidate: held (with its proof) or cleared. */
+export type HoldsVerdict = Readonly<{ path: string; held: boolean; proof?: string }>
+
+/**
+ * A target's holds judge: every candidate of one pass in, exactly one verdict per candidate out. A throw, or an
+ * answer that is not exactly that, keeps the whole pass; nothing it did not clear is ever removed or unlinked.
+ */
+export type HoldsJudge = (candidates: readonly HoldsCandidate[]) => Promise<readonly HoldsVerdict[]>
 
 /**
  * A `yrd logs prune` drain: the usual result, plus the list the run SELECTED
@@ -530,6 +563,8 @@ export async function pruneRoundOutput(
     limit?: number
     dryRun?: boolean
     compress?: CompressionSelection
+    /** The target's holds judge (34952): asked once, before the first removal, about removals AND compression units. */
+    holds?: HoldsJudge
   }>,
 ): Promise<RetentionDrain> {
   if (input.limit !== undefined && (!Number.isSafeInteger(input.limit) || input.limit < 0)) {
@@ -542,7 +577,8 @@ export async function pruneRoundOutput(
     windowMs,
     ...(input.compress === undefined ? {} : { compress: input.compress }),
   })
-  const selected = scan.entries
+  const judged = await judgeHolds(input.holds, scan)
+  const selected = judged.selected
   const planned = input.limit === undefined ? selected : selected.slice(0, input.limit)
   // 28836: the budget counts successful REMOVALS, not attempts. Walk `selected` oldest-first and pass over a
   // failure, so a directory that will not remove can never fill the prefix and starve the entries behind it.
@@ -571,12 +607,152 @@ export async function pruneRoundOutput(
     removed,
     failures,
     failuresOmitted,
-    remaining: selected.filter((entry) => !removedPaths.has(entry.path)),
+    remaining: scan.entries.filter((entry) => !removedPaths.has(entry.path)),
     missing: scan.missing,
     unreadable: scan.unreadable,
     withheld: scan.withheld,
-    ...(scan.compressible === undefined ? {} : { compressible: scan.compressible }),
+    ...(judged.compressible === undefined ? {} : { compressible: judged.compressible }),
+    ...(judged.held === undefined ? {} : { held: judged.held }),
+    ...(judged.failure === undefined ? {} : { holdsFailure: judged.failure }),
   }
+}
+
+/**
+ * Put one pass's whole destructive selection to the target's judge, once, before anything acts (34952). The union
+ * is every expired directory AND every compression unit, so neither path acts on a candidate the judge did not
+ * clear. The full selection is judged, never a capped prefix, so held entries are filtered out of the order and the
+ * cleared ones behind them still drain. A failed or incomplete answer keeps the whole pass: nothing is selected for
+ * removal and nothing for compression, and the failure is returned to be reported.
+ */
+async function judgeHolds(
+  judge: HoldsJudge | undefined,
+  scan: RetentionScan,
+): Promise<
+  Readonly<{
+    selected: readonly ExpiredRoundOutput[]
+    compressible?: CompressionCandidates
+    held?: readonly HeldOutput[]
+    failure?: string
+  }>
+> {
+  if (judge === undefined) {
+    return { selected: scan.entries, ...(scan.compressible === undefined ? {} : { compressible: scan.compressible }) }
+  }
+  const units = scan.compressible?.candidates ?? []
+  const candidates: HoldsCandidate[] = [
+    ...scan.entries.map((entry) => ({ path: entry.path, kind: "removal" as const })),
+    ...units.map((unit) => ({ path: unit.path, kind: unit.kind })),
+  ]
+  const kept = (failure: string) => ({
+    selected: [],
+    ...(scan.compressible === undefined ? {} : { compressible: { ...scan.compressible, candidates: [] } }),
+    failure,
+  })
+  if (candidates.length === 0) return { selected: [], ...(scan.compressible === undefined ? {} : { compressible: scan.compressible }), held: [] }
+  let verdicts: readonly HoldsVerdict[]
+  try {
+    verdicts = await judge(candidates)
+  } catch (cause) {
+    return kept(message(cause))
+  }
+  const problem = verdictProblem(candidates, verdicts)
+  if (problem !== undefined) return kept(problem)
+  const byPath = new Map(verdicts.map((verdict) => [verdict.path, verdict]))
+  const isHeld = (path: string): boolean => byPath.get(path)?.held !== false
+  const held: HeldOutput[] = candidates
+    .filter((candidate) => isHeld(candidate.path))
+    .map((candidate) => ({ path: candidate.path, kind: candidate.kind, proof: byPath.get(candidate.path)?.proof ?? "" }))
+  return {
+    selected: scan.entries.filter((entry) => !isHeld(entry.path)),
+    ...(scan.compressible === undefined
+      ? {}
+      : { compressible: { ...scan.compressible, candidates: units.filter((unit) => !isHeld(unit.path)) } }),
+    held,
+  }
+}
+
+/** How long a declared holds judge may take before the whole pass is kept (34952). */
+export const HOLDS_JUDGE_TIMEOUT_MS = 60_000
+
+/** Its stdout capture bound: a verdict list for every candidate of a large backlog fits; a truncated one fails. */
+const HOLDS_JUDGE_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+
+/**
+ * The target's declared `retention.holds` argv as a {@link HoldsJudge} (34952): run once per pass in the target's
+ * execution context, `{version: 1, roots, candidates}` on stdin, and exactly `{version: 1, verdicts, read}` expected
+ * on stdout. A launch failure, non-zero exit, signal, timeout, truncated or unparseable output, or a version Yrd does
+ * not read throws, which keeps the whole pass. `read` is the target's receipt of what it read; Yrd never interprets it.
+ */
+export function holdsJudgeCommand(
+  input: Readonly<{ argv: readonly string[]; cwd: string; env?: NodeJS.ProcessEnv; roots: readonly string[] }>,
+): HoldsJudge {
+  const shown = JSON.stringify(input.argv)
+  return async (candidates) => {
+    const process = createProcess({
+      cwd: input.cwd,
+      ...(input.env === undefined ? {} : { env: input.env }),
+      maxOutputBytes: HOLDS_JUDGE_MAX_OUTPUT_BYTES,
+    })
+    const result = await process.run({
+      argv: input.argv,
+      cwd: input.cwd,
+      stdin: JSON.stringify({ version: 1, roots: input.roots, candidates }),
+      timeoutMs: HOLDS_JUDGE_TIMEOUT_MS,
+    })
+    const tail = result.stderr.trim().split("\n").slice(-3).join(" | ")
+    if (result.timedOut) throw new Error(`retention.holds ${shown} timed out after ${HOLDS_JUDGE_TIMEOUT_MS} ms`)
+    if (result.exitCode !== 0 || result.signal !== null) {
+      throw new Error(
+        `retention.holds ${shown} exited ${result.exitCode}${result.signal === null ? "" : ` (${result.signal})`}${tail === "" ? "" : `: ${tail}`}`,
+      )
+    }
+    if (result.sweepFailure !== undefined || result.escapedDescendant === true) {
+      throw new Error(`retention.holds ${shown} did not settle cleanly: ${result.sweepFailure ?? "a descendant held its output open"}`)
+    }
+    if (result.outputTruncation !== undefined && result.outputTruncation.length > 0) {
+      throw new Error(`retention.holds ${shown} wrote more than ${HOLDS_JUDGE_MAX_OUTPUT_BYTES} bytes; its answer was truncated`)
+    }
+    let answer: unknown
+    try {
+      answer = JSON.parse(result.stdout)
+    } catch (cause) {
+      throw new Error(`retention.holds ${shown} answered no JSON: ${message(cause)}`)
+    }
+    if (answer === null || typeof answer !== "object" || (answer as { version?: unknown }).version !== 1) {
+      throw new Error(`retention.holds ${shown} answered no version-1 object`)
+    }
+    const verdicts = (answer as { verdicts?: unknown }).verdicts
+    if (!Array.isArray(verdicts)) throw new Error(`retention.holds ${shown} answered no verdicts list`)
+    return verdicts as HoldsVerdict[]
+  }
+}
+
+/** Why `verdicts` is not exactly one well-formed answer per candidate, or undefined when it is. */
+export function verdictProblem(
+  candidates: readonly HoldsCandidate[],
+  verdicts: readonly HoldsVerdict[],
+): string | undefined {
+  if (!Array.isArray(verdicts)) return "the holds judge answered no verdict list"
+  const asked = new Set(candidates.map((candidate) => candidate.path))
+  if (asked.size !== candidates.length) return "the holds pass named one path twice"
+  const seen = new Set<string>()
+  for (const verdict of verdicts) {
+    if (verdict === null || typeof verdict !== "object" || typeof verdict.path !== "string") {
+      return "the holds judge answered a malformed verdict"
+    }
+    if (!asked.has(verdict.path)) return `the holds judge answered for ${verdict.path}, which it was not asked about`
+    if (seen.has(verdict.path)) return `the holds judge answered twice for ${verdict.path}`
+    if (typeof verdict.held !== "boolean") return `the holds judge's verdict for ${verdict.path} is neither held nor cleared`
+    if (verdict.held && (typeof verdict.proof !== "string" || verdict.proof === "")) {
+      return `the holds judge held ${verdict.path} without a proof`
+    }
+    seen.add(verdict.path)
+  }
+  if (seen.size !== asked.size) {
+    const missing = candidates.find((candidate) => !seen.has(candidate.path))
+    return `the holds judge answered ${seen.size} of ${asked.size} candidates; none for ${missing?.path ?? "?"}`
+  }
+  return undefined
 }
 
 /** Everything one compression pass has done so far. Every step adds to it; nothing throws past it. */
@@ -1288,6 +1464,11 @@ export function retentionObservation(result: RetentionResult, input: Readonly<{ 
     // An optional root that was not on disk is named in the row: "removed 0"
     // must never be the only fact a reader has about where the sweep looked.
     ...(result.missing.length === 0 ? {} : { missing: result.missing }),
+    // The target's holds judge (34952): how many it held, and a judge that failed, which kept the whole pass.
+    ...(result.held === undefined || result.held.length === 0
+      ? {}
+      : { held: result.held.length, heldSample: result.held.slice(0, 8) }),
+    ...(result.holdsFailure === undefined ? {} : { holdsFailure: result.holdsFailure }),
     // The round sweep's compression pass (34923): what it converted, the bytes
     // in and out, what the bound left for a later round, and every candidate it
     // named or failed on — bounded like `failures`.
@@ -1404,6 +1585,7 @@ export function retentionRowWorthWriting(result: RetentionResult): boolean {
     result.removed.length > 0 ||
     result.failures.length > 0 ||
     result.failuresOmitted > 0 ||
+    result.holdsFailure !== undefined ||
     compressionWorthNaming(result.compression)
   )
 }
@@ -1443,10 +1625,29 @@ export function appendRetentionObservation(workdir: string, result: RetentionRes
  * keeps one for its lifetime, and without it every round examines afresh.
  */
 export async function sweepRoundOutputInRound(
-  input: Readonly<{ workdir: string; now: Date; report?: (line: string) => void; settled?: Set<string> }>,
+  input: Readonly<{
+    workdir: string
+    now: Date
+    report?: (line: string) => void
+    settled?: Set<string>
+    /** The target's declared holds judge (34952); absent, the sweep runs every round as it always has. */
+    holds?: HoldsJudge
+    /** The service's memory of its last judged pass; a judged pass runs at most once per spacing. */
+    pace?: RetentionPace
+  }>,
 ): Promise<RetentionDrain | undefined> {
   const report = input.report ?? ((line: string): void => void process.stderr.write(line))
   const logs = join(input.workdir, "logs")
+  if (input.holds !== undefined && input.pace !== undefined) {
+    const last = input.pace.last
+    if (last !== undefined && input.now.getTime() - last.getTime() < RETENTION_JUDGED_SPACING_MS) {
+      // silent-fallback-allow: not a failure and not a skipped duty. A target with a holds judge does its whole
+      // destructive pass at most once per spacing (34952, @cto 72645433 item 5); the next due round runs it, and the
+      // pass it ran is already on record in its own row.
+      return undefined
+    }
+    input.pace.last = input.now
+  }
   let result: RetentionDrain
   try {
     result = await pruneRoundOutput({
@@ -1458,6 +1659,7 @@ export async function sweepRoundOutputInRound(
         roundAfterMs: ROUND_OUTPUT_COMPRESS_AFTER_MS,
         journalAfterMs: JOURNAL_COMPRESS_AFTER_MS,
       },
+      ...(input.holds === undefined ? {} : { holds: input.holds }),
     })
   } catch (cause) {
     // The sweep could not even RUN — a required root missing or unreadable. It is
@@ -1474,6 +1676,11 @@ export async function sweepRoundOutputInRound(
     // gave up". Throwing here is what let one unremovable directory stop the merge
     // line (@cto 2026-10-10T23:16Z).
     return undefined
+  }
+  if (result.holdsFailure !== undefined) {
+    report(
+      `yrd: log retention kept this whole pass: the target's holds judge did not answer (${result.holdsFailure}); the next judged pass asks again\n`,
+    )
   }
   for (const failure of result.failures) {
     report(`yrd: log retention could not remove ${failure.path}: ${failure.error}; the next round retries\n`)

@@ -38,6 +38,8 @@ import {
   isQueueEventShapeUnreadable,
   lookupRunIndex,
   parseDuration,
+  readConfig,
+  readRemoteCommits,
   resolveGitSelection,
   refAt,
   readRunLog,
@@ -57,9 +59,16 @@ import {
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { repositoryHere, unaddressedRepository } from "./declaration.ts"
-import { appendRetentionObservation, pruneRoundOutput, retentionHumanLines } from "./log-retention.ts"
+import {
+  appendRetentionObservation,
+  holdsJudgeCommand,
+  type HoldsJudge,
+  pruneRoundOutput,
+  retentionHumanLines,
+} from "./log-retention.ts"
 import {
   hostWorkdirHere,
+  originHead,
   resolveDeclaredQueueLocations,
   resolveQueueLocation,
   retainedComponentStoreHere,
@@ -1632,7 +1641,24 @@ function buildProgram(
       // The ONE composition — select once, remove the oldest `limit` in bounded
       // batches — lives in `pruneRoundOutput`, so this verb and its tests run the
       // same selection and the batches never re-walk the tree.
-      const result = await pruneRoundOutput({ roots, now, limit, dryRun })
+      // The target's declared holds judge (34952, @cto 72645433 item 3): read from the target as the queue reads it,
+      // fetched now, so this verb and the round sweep obey the same policy. A declaration that cannot be read is
+      // a refusal, never "nothing declared".
+      let holds: HoldsJudge | undefined
+      try {
+        holds = await targetHoldsJudge(location, roots, env)
+      } catch (cause) {
+        io.stderr(
+          `yrd: logs prune: cannot read the target's retention declaration, so nothing was removed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+        )
+        setExit(1)
+        return
+      }
+      const result = await pruneRoundOutput({ roots, now, limit, dryRun, ...(holds === undefined ? {} : { holds }) })
+      if (result.holdsFailure !== undefined) {
+        io.stderr(`yrd: logs prune kept everything: the target's holds judge did not answer (${result.holdsFailure})\n`)
+        setExit(1)
+      }
       // At most one observation row per sweep, journaled BESIDE the run journals,
       // never among them: every `logs/*.jsonl` is a run, and a q-<utc>-<id> name
       // on this row made the runner's own header read refuse the newest journal
@@ -1668,6 +1694,8 @@ function buildProgram(
               planned: result.planned.length,
               removed: result.removed.length,
               remaining: result.remaining.length,
+              ...(result.held === undefined ? {} : { held: result.held }),
+              ...(result.holdsFailure === undefined ? {} : { holdsFailure: result.holdsFailure }),
               ...(result.missing.length === 0 ? {} : { missing: result.missing }),
               ...(result.unreadable.length === 0 ? {} : { unreadable: result.unreadable }),
               ...(result.withheld.length === 0 ? {} : { withheld: result.withheld }),
@@ -1961,6 +1989,28 @@ function addQueueExamples(queue: CliCommand, name: string): void {
  * (plan § The final design). A check that failed is exit 1 and returned by the
  * command itself, never thrown.
  */
+/**
+ * The holds judge the queue's target declares (`retention.holds`, 34952), read from the target's branch as fetched
+ * now, exactly as the round sweep reads it; undefined when the target declares none or has no `.yrd.yml`. Any read
+ * failure throws: a declared policy that could not be read is never treated as absent.
+ */
+async function targetHoldsJudge(
+  location: QueueLocation,
+  roots: readonly Readonly<{ path: string }>[],
+  env: NodeJS.ProcessEnv,
+): Promise<HoldsJudge | undefined> {
+  const git = gitIn(location.repo, undefined, location.selection, { env })
+  const remote = "origin"
+  const branch = location.queue ?? (await originHead(git, remote))
+  const fetched = await readRemoteCommits(git, remote, [`refs/heads/${branch}`])
+  const oid = fetched.get(`refs/heads/${branch}`)
+  if (oid === undefined) throw new Error(`the target ${remote}/${branch} is not at ${remote}`)
+  const config = await readConfig(git, oid, { branch, remote })
+  const argv = config?.retention?.holds
+  if (argv === undefined) return undefined
+  return holdsJudgeCommand({ argv, cwd: location.repo, env, roots: roots.map((root) => root.path) })
+}
+
 export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Promise<YrdCliExitCode> {
   const args = argv.slice(2)
   const env = process.env

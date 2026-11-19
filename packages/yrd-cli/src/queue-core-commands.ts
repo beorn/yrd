@@ -56,7 +56,7 @@ import {
   componentDropHint,
   componentsHoldingBranch,
 } from "./branch-retirement.ts"
-import { sweepRoundOutputInRound } from "./log-retention.ts"
+import { holdsJudgeCommand, type RetentionPace, sweepRoundOutputInRound } from "./log-retention.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
 import { runAdmission } from "./admission.ts"
 import {
@@ -1318,6 +1318,8 @@ export async function coreQueueCommand(
   // Retention candidates with nothing more owed (34923): finished, kept plain, or named unproven. Held for this
   // service start, so a running queue never re-examines them; a restart examines them afresh.
   const retentionSettled = new Set<string>()
+  // When the target declares a holds judge (34952), its last judged pass: at most one per spacing, this service start.
+  const retentionPace: RetentionPace = {}
   const housekeepingFor = (): ReturnType<typeof openLog> => {
     if (housekeepingLog !== undefined) return housekeepingLog
     const opened = openLog(join(workdir, "logs", "post-merge"))
@@ -1547,7 +1549,25 @@ export async function coreQueueCommand(
     // and in its row and RETURNS, so the round's outcome stands and the service
     // keeps running instead of exiting into Hab's restart budget.
     // The same sweep gzip-compresses what it keeps, bounded per round (34923).
-    await sweepRoundOutputInRound({ workdir, now: new Date(), settled: retentionSettled })
+    // A target that declares `retention.holds` (34952, @cto 72645433) has every destructive unit of the pass judged
+    // first, by its argv run where its issuesProvider runs (the queue repo, the queue's env).
+    const holds = config.retention?.holds
+    await sweepRoundOutputInRound({
+      workdir,
+      now: new Date(),
+      settled: retentionSettled,
+      ...(holds === undefined
+        ? {}
+        : {
+            holds: holdsJudgeCommand({
+              argv: holds,
+              cwd: repo,
+              env,
+              roots: [join(workdir, "logs"), join(workdir, "checks")],
+            }),
+            pace: retentionPace,
+          }),
+    })
   }
 
   let roundCleanup: ((merged: readonly string[]) => Promise<void>) | undefined
