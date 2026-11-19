@@ -40,6 +40,7 @@ import { createPostMerge, readPostMergeIssueDiagnostics } from "./post-merge.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup, type ClosedEnvironment } from "./env-cleanup.ts"
 import { ENV_CLOSE_QUEUED_EXIT, environmentInventory } from "./env-commands.ts"
+import { processTerminate, type TerminatePort } from "./terminate.ts"
 import {
   captureMergedComponentAuthors,
   componentRetirementOwner,
@@ -432,30 +433,6 @@ const sourceAtLoad = await (async () => {
     return { error: error instanceof Error ? error.message : String(error) }
   }
 })()
-
-/** The termination signal a running service answers with its last document (25430). */
-export type TerminatePort = Readonly<{
-  /** Call `handler` with the termination signal; answers the unsubscribe. */
-  on: (handler: (signal?: NodeJS.Signals) => void) => () => void
-  /** End the process as the signal would have, after the handler ran. */
-  reraise: (signal?: NodeJS.Signals) => void
-}>
-
-const processTerminate: TerminatePort = {
-  on: (handler) => {
-    const signals = ["SIGTERM", "SIGHUP", "SIGINT"] as const
-    const listeners = signals.map((signal) => ({ signal, listener: () => handler(signal) }))
-    for (const { signal, listener } of listeners) process.on(signal, listener)
-    return () => {
-      for (const { signal, listener } of listeners) process.off(signal, listener)
-    }
-  },
-  // Re-raised with no listener left, so the process dies OF the signal exactly
-  // as before: the service's `restart: "on-codes"` keeps a signal terminal.
-  reraise: (signal = "SIGTERM") => {
-    process.kill(process.pid, signal)
-  },
-}
 
 export type CoreQueueCommand =
   | Readonly<{

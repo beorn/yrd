@@ -23,6 +23,7 @@ import { rebuildRetainedCopyProof, verifyRetainedCopy } from "git-super"
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { createGitWorkspace, worktreeHomeRoot, type ProvisionedBay } from "@yrd/bay"
+import { processTerminate, type TerminatePort } from "./terminate.ts"
 import {
   checkedTree,
   declaredPrivateSubmodules,
@@ -1075,6 +1076,8 @@ export type EnvRetainedOptions = Readonly<{
   /** 34787: one direct child to discard explicitly; previews unless --apply. */
   discard?: string
   reason?: string
+  /** #35047: the termination port a retirement batch answers; the process signals unless a test injects one. */
+  terminate?: TerminatePort
 }>
 
 // The approved batch scan measured 469-665 s; this caller alone needs room beyond gitIn's normal 300 s ceiling.
@@ -1263,6 +1266,31 @@ export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdC
     options.retain === undefined ? join(await workdirOf(git), "retained-modules") : resolve(io.cwd, options.retain)
   const census = censusRetainedStores(retentionRoot, Date.now())
   if (options.retireExpired === true) {
+    // #35047: a TERM, INT or HUP to this CLI closes its Process owner before the process dies of the signal, so the
+    // GitSuper batch's detached process group gets the owner's TERM-then-KILL settlement instead of outliving the CLI
+    // and writing evidence after the caller's deadline (observed 2026-11-19: twice). A SIGKILL runs no handler.
+    const terminate = options.terminate ?? processTerminate
+    const offTerminate = terminate.on((received) => {
+      offTerminate()
+      const signal = received ?? "SIGTERM"
+      io.stderr(`retained batch under ${retentionRoot}: ${signal} received; settling the GitSuper child before exit\n`)
+      void process.close().then(
+        () => terminate.reraise(signal),
+        (error) => {
+          io.stderr(
+            `retained batch under ${retentionRoot}: settling the child failed before ${signal}: ${String(error)}\n`,
+          )
+          terminate.reraise(signal)
+        },
+      )
+    })
+    try {
+      return await retireExpiredBatch()
+    } finally {
+      offTerminate()
+    }
+  }
+  async function retireExpiredBatch(): Promise<YrdCliExitCode> {
     const batch = gitIn(root, process, selection, {
       timeoutMs: RETAINED_BATCH_TIMEOUT_MS,
       rootInvocationTimeoutMs: RETAINED_BATCH_TIMEOUT_MS,
