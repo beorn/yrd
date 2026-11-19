@@ -1533,9 +1533,28 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
     const events = readFileSync(trace, "utf8")
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line))
+      .map((line) => JSON.parse(line) as { event: string; sid: string; argv?: string[]; [key: string]: unknown })
     expect(events.some((event) => event.event === "start" && event.argv?.includes("fetch"))).toBe(true)
-    expect(events.filter((event) => event.event === "child_start" && event.argv?.includes("maintenance"))).toEqual([])
+    const admin = (await gitIn(bay)(["rev-parse", "--absolute-git-dir"])).trim()
+    const ownedPath = (path: string) =>
+      path === bay || path.startsWith(`${bay}/`) || path === admin || path.startsWith(`${admin}/`)
+    // The reference repo's initial target fetch precedes provisioning and keeps its own settings.
+    // Judge only operations against this environment's stores, including its nested git directories.
+    const ownedSessions = new Set(
+      events
+        .filter(
+          (event) =>
+            (event.event === "def_repo" && typeof event.worktree === "string" && ownedPath(event.worktree)) ||
+            (event.event === "start" && event.argv?.some(ownedPath)),
+        )
+        .map((event) => event.sid),
+    )
+    expect(ownedSessions.size).toBeGreaterThan(0)
+    expect(
+      events.filter(
+        (event) => ownedSessions.has(event.sid) && event.event === "child_start" && event.argv?.includes("maintenance"),
+      ),
+    ).toEqual([])
   })
 })
 
