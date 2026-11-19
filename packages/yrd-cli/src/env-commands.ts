@@ -335,10 +335,33 @@ async function materializedSubmodulePaths(root: string, git: GitRunner): Promise
   return found
 }
 
+const ENV_STORE_MAINTENANCE_SETTINGS = [
+  ["maintenance.auto", "false"],
+  ["gc.auto", "0"],
+] as const
+
+/** Invocation-only protection before provisioning establishes the owned module stores. */
+export function environmentProvisioningProcess(process: Pick<Process, "run">): Pick<Process, "run"> {
+  return {
+    run(request) {
+      const env = request.env ?? globalThis.process.env
+      const settings = ENV_STORE_MAINTENANCE_SETTINGS.map(([key, value]) => `'${key}=${value}'`).join(" ")
+      return process.run({
+        ...request,
+        env: {
+          ...env,
+          GIT_CONFIG_PARAMETERS: [env.GIT_CONFIG_PARAMETERS, settings].filter(Boolean).join(" "),
+        },
+      })
+    },
+  }
+}
+
 /**
  * Configure automatic maintenance and the caller's declared identity in every materialized
  * submodule. Alternate-backed split graphs written by automatic maintenance can make root
  * merges fatal (#35119); explicit maintenance and graph reads remain available.
+ * Module-local settings do not depend on the separate root identity verification.
  * A submodule is its own repository, so the root's worktree
  * config never reaches it and a commit there fell through to the shared
  * `~/.gitconfig` identity — in this fleet the operator's, so a seat's commits
@@ -367,8 +390,7 @@ async function pinSubmoduleConfiguration(
       )
     }
     const settings: readonly (readonly [string, string])[] = [
-      ["maintenance.auto", "false"],
-      ["gc.auto", "0"],
+      ...ENV_STORE_MAINTENANCE_SETTINGS,
       ...(identity === undefined
         ? []
         : ([
@@ -791,22 +813,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     await requireResolvableIssue(root, options.issue, io, gitIn(root, undefined, selection))
   }
   await using process = createProcess({ cwd: root })
-  // Before the owned stores exist, Git and GitSuper's children inherit these invocation-only
-  // settings. Persist them below once materialization has established each store's ownership.
-  const provisioningProcess: Pick<Process, "run"> = {
-    run(request) {
-      const env = request.env ?? globalThis.process.env
-      return process.run({
-        ...request,
-        env: {
-          ...env,
-          GIT_CONFIG_PARAMETERS: [env.GIT_CONFIG_PARAMETERS, "'maintenance.auto=false' 'gc.auto=0'"]
-            .filter(Boolean)
-            .join(" "),
-        },
-      })
-    },
-  }
+  const provisioningProcess = environmentProvisioningProcess(process)
   const git = gitIn(root, process, selection)
   const resolvedBase =
     commit === undefined

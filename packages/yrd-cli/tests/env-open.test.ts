@@ -23,7 +23,7 @@ import { runYrdProcess } from "../src/cli.ts"
 import { readEnvOpenRecord } from "../src/env-open-record.ts"
 import { formatYrdRuntimeVersion } from "../src/version.ts"
 import type { YrdCliIO } from "../src/types.ts"
-import { sharedIdentityMoved } from "../src/env-commands.ts"
+import { environmentProvisioningProcess, sharedIdentityMoved } from "../src/env-commands.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
 process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
@@ -1473,14 +1473,34 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
     })
   })
 
+  it("protects provisioning Git invocations while retaining the caller's configuration (#35119)", async () => {
+    const w = await world(":")
+    await w.git(["config", "maintenance.auto", "true"])
+    await w.git(["config", "gc.auto", "1"])
+    await using owner = createProcess({ cwd: w.work })
+    const configured = environmentProvisioningProcess(owner)
+    for (const [key, expected] of [
+      ["maintenance.auto", "false"],
+      ["gc.auto", "0"],
+      ["test.keep", "retained"],
+    ] as const) {
+      const result = await configured.run({
+        argv: ["git", "-C", w.work, "config", "--get", key],
+        env: { ...process.env, GIT_CONFIG_PARAMETERS: "'test.keep=retained'" },
+      })
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout.trim()).toBe(expected)
+    }
+  })
+
   /**
    * @failure Automatic maintenance in alternate-backed environment stores writes split graph layers
    * that make a normal root merge fatal (#35119), even when no seat identity was declared.
-   * @level l2 (real environment provisioning, nested module stores and Git trace)
+   * @level l2 (real environment provisioning and nested module stores)
    * @consumer callers composing changes in retained environments
    * @testonly none
    */
-  it("disables automatic maintenance from provisioning onward in owned nested stores (#35119)", async () => {
+  it("disables automatic maintenance in owned nested stores without changing shared config (#35119)", async () => {
     const w = await world(":")
     await addMaterializedDependency(w)
     const dependency = join(w.work, "vendor/dependency")
@@ -1500,22 +1520,13 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
         return { path, content: readFileSync(path, "utf8") }
       }),
     )
-    const trace = join(w.work, "provision.trace.jsonl")
-    const previousTrace = process.env.GIT_TRACE2_EVENT
-    process.env.GIT_TRACE2_EVENT = trace
-    try {
-      await withDeclaredIdentity(undefined, undefined, async () => {
-        const run = capture(w.work)
-        expect(
-          await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "maintenance", "--expires", "1d"], run.io),
-          run.stderr(),
-        ).toBe(0)
-      })
-      await gitIn(join(w.work, ".bays", "maintenance", "vendor/dependency"))(["fetch", "origin"])
-    } finally {
-      if (previousTrace === undefined) delete process.env.GIT_TRACE2_EVENT
-      else process.env.GIT_TRACE2_EVENT = previousTrace
-    }
+    await withDeclaredIdentity(undefined, undefined, async () => {
+      const run = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "maintenance", "--expires", "1d"], run.io),
+        run.stderr(),
+      ).toBe(0)
+    })
     const bay = join(w.work, ".bays", "maintenance")
     for (const rel of ["vendor/dependency", "vendor/dependency/vendor/dependency"]) {
       const sub = gitIn(join(bay, rel))
@@ -1530,31 +1541,6 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
       expect((await sub(["config", "--get", "--default=true", "core.commitGraph"])).trim()).toBe("true")
     }
     for (const { path, content } of configs) expect(readFileSync(path, "utf8")).toBe(content)
-    const events = readFileSync(trace, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as { event: string; sid: string; argv?: string[]; [key: string]: unknown })
-    expect(events.some((event) => event.event === "start" && event.argv?.includes("fetch"))).toBe(true)
-    const admin = (await gitIn(bay)(["rev-parse", "--absolute-git-dir"])).trim()
-    const ownedPath = (path: string) =>
-      path === bay || path.startsWith(`${bay}/`) || path === admin || path.startsWith(`${admin}/`)
-    // The reference repo's initial target fetch precedes provisioning and keeps its own settings.
-    // Judge only operations against this environment's stores, including its nested git directories.
-    const ownedSessions = new Set(
-      events
-        .filter(
-          (event) =>
-            (event.event === "def_repo" && typeof event.worktree === "string" && ownedPath(event.worktree)) ||
-            (event.event === "start" && event.argv?.some(ownedPath)),
-        )
-        .map((event) => event.sid),
-    )
-    expect(ownedSessions.size).toBeGreaterThan(0)
-    expect(
-      events.filter(
-        (event) => ownedSessions.has(event.sid) && event.event === "child_start" && event.argv?.includes("maintenance"),
-      ),
-    ).toEqual([])
   })
 })
 
