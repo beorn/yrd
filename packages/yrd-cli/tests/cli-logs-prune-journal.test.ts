@@ -63,7 +63,9 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
 }
 
 /** A declared queue whose log tree holds one expired round directory to prune. */
-async function queueWithAnExpiredRound(): Promise<Readonly<{ work: string; workdir: string; logs: string }>> {
+async function queueWithAnExpiredRound(
+  retention = "",
+): Promise<Readonly<{ work: string; workdir: string; logs: string }>> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-logs-prune-"))
   roots.push(root)
   const seed = gitIn(root)
@@ -75,7 +77,7 @@ async function queueWithAnExpiredRound(): Promise<Readonly<{ work: string; workd
   await git(["config", "user.email", "queue@yrd.test"])
   await git(["config", "user.name", "yrd"])
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(work, ".yrd.yml"), "checks:\n  - verify:\n      run: test -f pass.txt\n")
+  writeFileSync(join(work, ".yrd.yml"), `checks:\n  - verify:\n      run: test -f pass.txt\n${retention}`)
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
@@ -142,5 +144,56 @@ describe("yrd logs prune journals its observation beside the run journals (28499
       .split("\n")
       .map((line) => JSON.parse(line) as Record<string, unknown>)
     expect(JSON.stringify(rows.at(-1)?.failures)).toContain(expired)
+  })
+})
+
+// #34952 (@cto 72645433 item 3): the explicit verb reads the TARGET's declaration, as fetched now, and obeys its judge.
+describe("yrd logs prune obeys the target's declared holds judge (34952)", () => {
+  /** A judge script: holds every candidate whose path contains `hold`, or exits 1 when `fail` is set. */
+  const judgeScript = (mode: "hold" | "fail"): string => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-cli-holds-judge-"))
+    roots.push(dir)
+    const path = join(dir, "judge.mjs")
+    writeFileSync(
+      path,
+      mode === "fail"
+        ? 'process.stderr.write("state rail unreachable\\n"); process.exit(1)\n'
+        : [
+            'const request = JSON.parse(await Bun.stdin.text())',
+            'const verdicts = request.candidates.map((c) => ({ path: c.path, held: true, proof: "cited by pm/x.md:1" }))',
+            'process.stdout.write(JSON.stringify({ version: 1, verdicts, read: {} }))',
+          ].join("\n"),
+    )
+    return path
+  }
+  const declare = (script: string): string =>
+    `retention:\n  holds: [${JSON.stringify(process.execPath)}, ${JSON.stringify(script)}]\n`
+
+  it("keeps a directory the judge holds, and names it", async () => {
+    const { work, logs } = await queueWithAnExpiredRound(declare(judgeScript("hold")))
+    const expired = join(logs, "q-20260901T000000000Z-deadbeef")
+    const prune = await yrd(work, "logs", "prune", "--json")
+    expect(prune.exitCode, prune.report).toBe(0)
+    expect(existsSync(expired), prune.report).toBe(true)
+    const reported = JSON.parse(prune.stdout) as { removed: number; held: readonly { path: string }[] }
+    expect(reported.removed).toBe(0)
+    expect(reported.held.map((entry) => entry.path)).toEqual([expired])
+  })
+
+  it("exits non-zero and removes nothing when the declared judge fails", async () => {
+    const { work, logs } = await queueWithAnExpiredRound(declare(judgeScript("fail")))
+    const expired = join(logs, "q-20260901T000000000Z-deadbeef")
+    const prune = await yrd(work, "logs", "prune", "--json")
+    expect(prune.exitCode, prune.report).toBe(1)
+    expect(existsSync(expired), prune.report).toBe(true)
+    expect(prune.stderr).toContain("the target's holds judge did not answer")
+    expect(prune.stderr).toContain("state rail unreachable")
+  })
+
+  it("without a declaration it removes as before (the undeclared control)", async () => {
+    const { work, logs } = await queueWithAnExpiredRound()
+    const prune = await yrd(work, "logs", "prune", "--json")
+    expect(prune.exitCode, prune.report).toBe(0)
+    expect(existsSync(join(logs, "q-20260901T000000000Z-deadbeef")), prune.report).toBe(false)
   })
 })

@@ -26,6 +26,7 @@ const QUEUE_KEYS = {
   revertGuard: "supported",
   setup: "supported",
   derive: "supported",
+  retention: "supported",
   teardown: "refused",
 } as const satisfies Record<keyof QueueConfig, "supported" | "refused">
 const CHECK_KEYS = new Set([
