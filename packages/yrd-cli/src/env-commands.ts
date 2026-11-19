@@ -336,8 +336,10 @@ async function materializedSubmodulePaths(root: string, git: GitRunner): Promise
 }
 
 /**
- * Pin the caller's declared identity into every submodule the environment
- * materialized. A submodule is its own repository, so the root's worktree
+ * Configure automatic maintenance and the caller's declared identity in every materialized
+ * submodule. Alternate-backed split graphs written by automatic maintenance can make root
+ * merges fatal (#35119); explicit maintenance and graph reads remain available.
+ * A submodule is its own repository, so the root's worktree
  * config never reaches it and a commit there fell through to the shared
  * `~/.gitconfig` identity — in this fleet the operator's, so a seat's commits
  * were attributed to the operator (#27403). The write is the submodule's OWN
@@ -346,10 +348,10 @@ async function materializedSubmodulePaths(root: string, git: GitRunner): Promise
  * itself a linked worktree would store the write in the config every worktree
  * of that submodule inherits, so it is refused loudly.
  */
-async function pinSubmoduleIdentities(
+async function pinSubmoduleConfiguration(
   root: string,
   git: GitRunner,
-  identity: Readonly<{ email: string; name: string }>,
+  identity: Readonly<{ email: string; name: string }> | undefined,
   io: YrdCliIO,
 ): Promise<void> {
   const pinned: string[] = []
@@ -360,22 +362,32 @@ async function pinSubmoduleIdentities(
     if (gitDir !== commonDir) {
       throw new Error(
         `yrd env open: submodule ${rel} in ${root} is itself a linked worktree (git dir ${gitDir}, common dir ` +
-          `${commonDir}); pinning an identity there would land in the config every worktree of that submodule ` +
+          `${commonDir}); pinning environment settings there would land in the config every worktree of that submodule ` +
           `inherits, so it is refused`,
       )
     }
-    await sub(["config", "--local", "user.name", identity.name])
-    await sub(["config", "--local", "user.email", identity.email])
-    const pinnedName = (await sub(["config", "--get", "user.name"])).trim()
-    if (pinnedName !== identity.name) {
-      throw new Error(
-        `yrd env open: pinning ${identity.name} in submodule ${rel} of ${root} did not take ` +
-          `(user.name reads '${pinnedName}')`,
-      )
+    const settings: readonly (readonly [string, string])[] = [
+      ["maintenance.auto", "false"],
+      ["gc.auto", "0"],
+      ...(identity === undefined
+        ? []
+        : ([
+            ["user.name", identity.name],
+            ["user.email", identity.email],
+          ] as const)),
+    ]
+    for (const [key, value] of settings) {
+      await sub(["config", "--local", key, value])
+      const actual = (await sub(["config", "--local", "--get", key])).trim()
+      if (actual !== value) {
+        throw new Error(
+          `yrd env open: setting ${key}=${value} in submodule ${rel} of ${root} did not take (reads '${actual}')`,
+        )
+      }
     }
     pinned.push(rel)
   }
-  if (pinned.length > 0) {
+  if (pinned.length > 0 && identity !== undefined) {
     io.stderr(
       `${root}: pinned seat identity ${identity.name} <${identity.email}> into ${pinned.length} materialized ` +
         `submodule(s) (${pinned.join(", ")}); a commit there names the seat\n`,
@@ -417,7 +429,7 @@ async function sharedIdentity(git: GitRunner): Promise<Readonly<{ email: string;
  * the shared config is never written from here; the caller's exported
  * `GIT_AUTHOR_*` still names every commit. The write is verified against the
  * shared file and refused loudly if it ever landed there. Submodules the
- * environment materialized are pinned by {@link pinSubmoduleIdentities}, from
+ * environment materialized are pinned by {@link pinSubmoduleConfiguration}, from
  * this same declared identity.
  */
 async function pinDeclaredIdentity(
@@ -455,7 +467,6 @@ async function pinDeclaredIdentity(
     `${path}: pinned seat identity ${identity.name} <${identity.email}> to worktree config; ` +
       `do not run bare git config user.* in linked worktrees\n`,
   )
-  await pinSubmoduleIdentities(path, git, identity, io)
 }
 
 /**
@@ -780,6 +791,22 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     await requireResolvableIssue(root, options.issue, io, gitIn(root, undefined, selection))
   }
   await using process = createProcess({ cwd: root })
+  // Before the owned stores exist, Git and GitSuper's children inherit these invocation-only
+  // settings. Persist them below once materialization has established each store's ownership.
+  const provisioningProcess: Pick<Process, "run"> = {
+    run(request) {
+      const env = request.env ?? globalThis.process.env
+      return process.run({
+        ...request,
+        env: {
+          ...env,
+          GIT_CONFIG_PARAMETERS: [env.GIT_CONFIG_PARAMETERS, "'maintenance.auto=false' 'gc.auto=0'"]
+            .filter(Boolean)
+            .join(" "),
+        },
+      })
+    },
+  }
   const git = gitIn(root, process, selection)
   const resolvedBase =
     commit === undefined
@@ -817,7 +844,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     const path = resolve(environments, name)
     if (!path.startsWith(`${environments}/`)) throw new Error(`environment name '${name}' escapes ${environments}`)
     mkdirSync(environments, { recursive: true })
-    await freshWorktree(git, root, base, path)
+    await freshWorktree(gitIn(root, provisioningProcess, selection), root, base, path)
     provisioned = { path, headSha: base, baseSha: base, adoption: "detached" }
   } else {
     const shadow = await branchPathConflict(git, branch)
@@ -863,7 +890,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
         `environment ${existing.path} is clean and merged into requested base ${base}; close must finish before reopening. A close this caller cannot certify is queued, not closed: it exits 0 and says so, and the queue's round finishes it — wait for that before reopening. To continue: ${close} && ${reopen}`,
       )
     }
-    const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
+    const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process: provisioningProcess })
     const result = await workspace.provision({
       bay: name,
       name,
@@ -886,6 +913,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     }
   }
   const { path, baseSha } = provisioned
+  await pinSubmoduleConfiguration(path, gitIn(path, process, selection), declaredIdentity, io)
   await pinDeclaredIdentity(path, gitIn(path, process, selection), declaredIdentity, io)
   await recordOpenedLifetime(path, process, selection, options, expiresAt)
   if (options.hold !== undefined) {
