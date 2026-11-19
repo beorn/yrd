@@ -883,14 +883,15 @@ function journalIds(names: readonly string[], keep: (name: string) => boolean = 
 }
 
 /**
- * The one physical-file resolution for a logical run journal (34923): use the
- * plain `<id>.jsonl`, and only when that is GENUINELY absent (ENOENT) its
- * gzip copy `<id>.jsonl.gz`. Any other failure of the plain file — permission,
- * I/O — is that failure, never absence. Neither present throws the plain
- * file's own ENOENT, so callers keep telling a missing journal apart.
+ * The one physical-file resolution for a retained log file (34923): use the
+ * plain path, and only when that is GENUINELY absent (ENOENT) its gzip copy
+ * `<path>.gz`, which log retention keeps. Any other failure of the plain
+ * file — permission, I/O — is that failure, never absence. Neither present
+ * throws the plain file's own ENOENT, so callers keep telling a missing file
+ * apart. Journals and round output (yrd-cli's output panes) both read through
+ * it, so there is one rule for what a retained file is.
  */
-function onJournalFile<T>(dir: string, id: string, read: (path: string, compressed: boolean) => T): T {
-  const plain = journalPath(dir, id)
+export function onRetainedFile<T>(plain: string, read: (path: string, compressed: boolean) => T): T {
   try {
     return read(plain, false)
   } catch (error) {
@@ -904,17 +905,26 @@ function onJournalFile<T>(dir: string, id: string, read: (path: string, compress
   }
 }
 
-/** A run journal's text, from whichever physical file {@link onJournalFile} resolves. A corrupt gzip is named, never absent. */
-function readJournalText(dir: string, id: string): string {
-  return onJournalFile(dir, id, (path, compressed) => {
+/** A retained file's bytes, from whichever physical file {@link onRetainedFile} resolves. A corrupt gzip is named, never absent. */
+export function readRetainedFile(plain: string): Buffer {
+  return onRetainedFile(plain, (path, compressed) => {
     const bytes = readFileSync(path)
-    if (!compressed) return bytes.toString("utf8")
+    if (!compressed) return bytes
     try {
-      return gunzipSync(bytes).toString("utf8")
+      return gunzipSync(bytes)
     } catch (error) {
-      throw new Error(`run journal ${path} is not a readable gzip: ${String(error)}`, { cause: error })
+      throw new Error(`${path} is not a readable gzip: ${String(error)}`, { cause: error })
     }
   })
+}
+
+/** A logical run journal: `<id>.jsonl`, else `<id>.jsonl.gz` ({@link onRetainedFile}). */
+function onJournalFile<T>(dir: string, id: string, read: (path: string, compressed: boolean) => T): T {
+  return onRetainedFile(journalPath(dir, id), read)
+}
+
+function readJournalText(dir: string, id: string): string {
+  return readRetainedFile(journalPath(dir, id)).toString("utf8")
 }
 
 /** Metadata identity for completed local append-only journals; never a content hash. Identity of the file actually read. */

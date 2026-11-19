@@ -30,7 +30,6 @@ import { hostname, tmpdir } from "node:os"
 import { dirname, isAbsolute, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
-import { gunzipSync } from "node:zlib"
 import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
@@ -124,6 +123,7 @@ import {
   readConfig,
   readJournals,
   readRunLog,
+  readRetainedFile,
   readStatus,
   remoteHead,
   remoteUrl,
@@ -6930,33 +6930,6 @@ async function snapshotOf(
 const LOG_TAIL_BYTES = 64 * 1024
 
 /**
- * A round's raw output file, read whole (34923): the plain path the journal
- * names, and only when that is GENUINELY absent (ENOENT) the `<path>.gz` copy
- * log retention keeps. Any other failure of the plain file is that failure,
- * never absence. Neither present throws the plain file's own ENOENT; a corrupt
- * gzip is named.
- */
-function readRoundOutput(path: string): Buffer {
-  try {
-    return readFileSync(path)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
-    let compressed: Buffer
-    try {
-      compressed = readFileSync(`${path}.gz`)
-    } catch (compressedError) {
-      if ((compressedError as NodeJS.ErrnoException).code === "ENOENT") throw error
-      throw compressedError
-    }
-    try {
-      return gunzipSync(compressed)
-    } catch (gzipError) {
-      throw new Error(`${path}.gz is not a readable gzip: ${String(gzipError)}`, { cause: gzipError })
-    }
-  }
-}
-
-/**
  * A check with what its log actually holds. Every way there is no output has
  * its own sentence — no path recorded, the file is not on this machine, it
  * could not be read — because an empty pane that does not say what it looked
@@ -6978,7 +6951,7 @@ export function readCommandOutput(command: JournalCommand): DiffText {
     if (path === undefined) continue
     let bytes: Buffer
     try {
-      bytes = readRoundOutput(path)
+      bytes = readRetainedFile(path)
     } catch (error) {
       return {
         why:
@@ -7004,7 +6977,7 @@ function readOutput(check: CheckView): CheckPanel {
     return { ...check, why: "no log path is recorded for this check" }
   }
   try {
-    const bytes = readRoundOutput(check.log)
+    const bytes = readRetainedFile(check.log)
     const size = bytes.length
     const text = bytes.toString("utf8")
     // A log is evidence, and its colors are not: vitest and friends write

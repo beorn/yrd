@@ -181,6 +181,7 @@ export {
   readJournals,
   readJournalLine,
   readJournalProjection,
+  readRetainedFile,
   FULL_READ_RUNS_MS,
   READ_HORIZON_MS,
   readRunLog,
