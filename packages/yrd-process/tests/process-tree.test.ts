@@ -61,6 +61,54 @@ describe("createProcess — full process-tree settlement (21012 S1)", () => {
     expect(pgid).toBe(String(child.pid))
   })
 
+  // #35047: the direct child honours TERM and exits inside the kill grace, and the TERM-ignoring grandchild holds no
+  // pipe, so the drain is clean. The armed SIGKILL must still reach the group: before the fix run() cancelled it on
+  // the child's exit and the grandchild kept running after the caller had stopped (retire-batch evidence writers).
+  test("a TERM-ignoring grandchild WITHOUT the pipe is dead when a timed-out run() resolves", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-process-tree-"))
+    temporary.push(dir)
+    const childPidFile = join(dir, "child.pid")
+    const grandchildPidFile = join(dir, "grandchild.pid")
+    writeFileSync(
+      join(dir, "grandchild.ts"),
+      [
+        `import { writeFileSync } from "node:fs"`,
+        `process.on("SIGTERM", () => {})`,
+        `writeFileSync(${JSON.stringify(grandchildPidFile)}, String(process.pid))`,
+        `setInterval(() => {}, 1000)`,
+      ].join("\n"),
+    )
+    writeFileSync(
+      join(dir, "child.ts"),
+      [
+        `import { existsSync, writeFileSync } from "node:fs"`,
+        `writeFileSync(${JSON.stringify(childPidFile)}, String(process.pid))`,
+        `Bun.spawn([${JSON.stringify(bunExe)}, ${JSON.stringify(join(dir, "grandchild.ts"))}], { stdout: "ignore", stderr: "ignore", stdin: "ignore" })`,
+        `setInterval(() => {}, 1000)`,
+      ].join("\n"),
+    )
+
+    await using proc = createProcess({ cwd: dir, killGraceMs: 1_000 })
+    const result = await proc.run({ argv: [bunExe, join(dir, "child.ts")], timeoutMs: 1_500 })
+    const pids = [childPidFile, grandchildPidFile].map((f) => Number(readFileSync(f, "utf-8").trim()))
+    try {
+      expect(result.timedOut).toBe(true)
+      const [childPid, grandchildPid] = pids as [number, number]
+      // Read at resolution, with only the zombie-reap allowance: a survivor here outlives the caller's stop.
+      expect(await waitDead(childPid, 300), `child ${childPid} survived settlement`).toBe(true)
+      expect(await waitDead(grandchildPid, 300), `grandchild ${grandchildPid} survived settlement`).toBe(true)
+    } finally {
+      for (const pid of pids) {
+        if (!Number.isFinite(pid) || pid <= 1) continue
+        try {
+          process.kill(pid, "SIGKILL")
+        } catch {
+          // silent-fallback-allow: ESRCH means cleanup already reached the asserted dead state.
+        }
+      }
+    }
+  }, 30_000)
+
   test("a TERM-ignoring grandchild HOLDING THE STDOUT PIPE dies at the bound; run() resolves; zero survivors", async () => {
     const dir = mkdtempSync(join(tmpdir(), "yrd-process-tree-"))
     temporary.push(dir)

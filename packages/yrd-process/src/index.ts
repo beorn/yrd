@@ -301,6 +301,16 @@ function sweepLiveProcessGroups(): void {
   liveProcessGroups.clear()
 }
 
+/** True while any member of process group `pgid` exists; a probe we may not send to counts as live. */
+function processGroupLive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0)
+    return true
+  } catch (error) {
+    return (error as { code?: string }).code !== "ESRCH"
+  }
+}
+
 /** Track one live group for the exit sweep; returns its deregistration. */
 function trackProcessGroup(pgid: number): () => void {
   if (!exitSweepInstalled) {
@@ -505,6 +515,9 @@ export function createProcess(
         // one more grace, then stop awaiting the PID exit so run() returns with
         // a LOUD sweepFailure instead of hanging on a child that never settles.
         const forcedExit = Promise.withResolvers<number>()
+        // #35047: resolves when the armed SIGKILL escalation has fired, so a terminated run whose direct child
+        // exits inside the grace can still wait for it instead of cancelling it with a live group behind.
+        const escalated = Promise.withResolvers<void>()
         let childSettled = false
         const terminate = (): void => {
           if (terminating) return
@@ -512,6 +525,7 @@ export function createProcess(
           signalTree("SIGTERM")
           cancelKill = runScope.timeout(() => {
             signalTree("SIGKILL")
+            escalated.resolve()
             cancelReap = runScope.timeout(() => {
               if (childSettled) return
               sweepFailure ??= `direct child did not exit within ${postKillReapGraceMs}ms after SIGKILL — may survive pid ${child.pid}; inspect and kill manually`
@@ -651,6 +665,10 @@ export function createProcess(
           })
           drainAbort.abort()
         }
+        // #35047: a terminated tree is settled when its GROUP is empty, not when the direct child is. A TERM-ignoring
+        // descendant that does not hold our pipes survives the child's exit and the clean drain; cancelling the armed
+        // SIGKILL below would leave it running after the caller has stopped (observed: retire-batch evidence writers).
+        if (terminating && groupSettlement && processGroupLive(child.pid)) await escalated.promise
         const [[stdout, stderr]] = await capturesDone
         closeExtraStdio?.()
         const extraResult = extra?.result()
