@@ -109,6 +109,20 @@ export const ROUND_COMPRESSION_FILES = 256
 export const ROUND_COMPRESSION_UNITS = 64
 
 /**
+ * The run journals' share of a pass's units (journals and the sweep's leftover temps of them), examined first
+ * (@cto 34923 ruling 2118). A ceiling and an opportunity, not a promise: the pass's file and byte bounds still apply,
+ * so a journal can fill the byte bound before any round runs, and units a kind cannot use flow to the other kind.
+ */
+export const JOURNAL_UNIT_SHARE = 16
+
+/**
+ * Per kind, how many of the newest unsettled candidates are examined before that kind's ring, so a round or journal
+ * that has just become eligible gets priority in the next pass of any service lifetime. Priority, not guaranteed
+ * compression: a failed proof, an exhausted bound or a burst of more than this many still leaves it for later.
+ */
+export const NEWEST_LANE_UNITS = 4
+
+/**
  * Below one filesystem block (4 KiB) a gzip copy frees nothing, so the file stays
  * plain. Measured: 35,274 of 37,498 raw output files are under it (26,727 empty),
  * holding 1.5 MB of 1 GB.
@@ -1003,6 +1017,60 @@ async function compressFile(
   return installArchive(plain, archive, within, source, twin, links, pass)
 }
 
+/** A candidate's place on its kind's ring, and the ring's start for a given clock: one 32-bit hash for both. */
+function ringKey(text: string): number {
+  return createHash("sha256").update(text).digest().readUInt32BE(0)
+}
+
+/**
+ * One kind's examination order: its {@link NEWEST_LANE_UNITS} newest candidates (latest start first, then path), then
+ * every other candidate exactly once around a ring ordered by path hash (then path), starting at the first key at or
+ * after the hash of the injected clock. A fixed clock repeats the order; an advancing one moves the start, so a
+ * restarted service does not begin at the same place every time. Nothing is stored.
+ */
+function kindVisitOrder(candidates: readonly CompressionCandidate[], now: Date): CompressionCandidate[] {
+  const newest = [...candidates]
+    .sort((left, right) => right.started.getTime() - left.started.getTime() || left.path.localeCompare(right.path))
+    .slice(0, NEWEST_LANE_UNITS)
+  const lane = new Set(newest.map((candidate) => candidate.path))
+  const ring = candidates
+    .filter((candidate) => !lane.has(candidate.path))
+    .map((candidate) => ({ candidate, key: ringKey(candidate.path) }))
+    .sort((left, right) => left.key - right.key || left.candidate.path.localeCompare(right.candidate.path))
+  const start = ringKey(String(now.getTime()))
+  const from = ring.findIndex((entry) => entry.key >= start)
+  const at = from < 0 ? 0 : from
+  return [...newest, ...[...ring.slice(at), ...ring.slice(0, at)].map((entry) => entry.candidate)]
+}
+
+/**
+ * The order one pass examines candidates in (@cto 34923 ruling 2118). Settled candidates are left out (free, as
+ * before) and each path appears once, so a candidate is charged at most one unit per pass whatever its outcome.
+ * Journals take up to {@link JOURNAL_UNIT_SHARE} places first, then every round, then the remaining journals: with the
+ * pass's unit bound that gives rounds the rest of the units and hands each kind whatever the other cannot use.
+ */
+export function compressionVisitOrder(
+  candidates: readonly CompressionCandidate[],
+  settled: ReadonlySet<string>,
+  now: Date,
+): CompressionCandidate[] {
+  const seen = new Set<string>()
+  const open = candidates.filter((candidate) => {
+    if (settled.has(candidate.path) || seen.has(candidate.path)) return false
+    seen.add(candidate.path)
+    return true
+  })
+  const journals = kindVisitOrder(
+    open.filter((candidate) => candidate.kind !== "round"),
+    now,
+  )
+  const rounds = kindVisitOrder(
+    open.filter((candidate) => candidate.kind === "round"),
+    now,
+  )
+  return [...journals.slice(0, JOURNAL_UNIT_SHARE), ...rounds, ...journals.slice(JOURNAL_UNIT_SHARE)]
+}
+
 /** Whether a candidate is finished with after this file outcome; a deferral is counted. */
 function settledBy(outcome: FileOutcome, pass: CompressionPass): boolean {
   if (outcome === "deferred") {
@@ -1113,7 +1181,8 @@ function refreshProjections(logs: string, runs: readonly string[], now: Date, pa
 
 /**
  * The round sweep's compression pass (34923 rulings 3, 4): examine the
- * candidates oldest first, at most {@link ROUND_COMPRESSION_UNITS} of them, and
+ * candidates in {@link compressionVisitOrder} (@cto ruling 2118: journals' share
+ * first, newest lanes, then rotating rings), at most {@link ROUND_COMPRESSION_UNITS} of them, and
  * convert at most {@link ROUND_COMPRESSION_FILES} files and
  * {@link ROUND_COMPRESSION_BYTES} source bytes; what the bounds leave is counted
  * as deferred and a later round continues. `settled` remembers, for the life of
@@ -1144,8 +1213,7 @@ async function compressRetainedOutput(
     refresh,
     ...(input.selection.newestJournal === undefined ? {} : { newestJournal: input.selection.newestJournal }),
   }
-  for (const candidate of input.selection.candidates) {
-    if (input.settled.has(candidate.path)) continue
+  for (const candidate of compressionVisitOrder(input.selection.candidates, input.settled, input.now)) {
     if (
       pass.units >= ROUND_COMPRESSION_UNITS ||
       pass.files >= ROUND_COMPRESSION_FILES ||
