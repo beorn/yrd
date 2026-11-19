@@ -7449,14 +7449,8 @@ export function runTerminalProbe(
     const path = join(dir, `${id}.jsonl`)
     let pid: number | undefined
     try {
-      try {
-        pid = readRunHeader(path).pid
-      } catch (error) {
-        // 34923: log retention keeps an old journal as `<id>.jsonl.gz`; only a
-        // genuinely absent plain file is read through the core's one resolution.
-        if (((error as Error).cause as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw error
-        pid = readRunHeader(path, readRunLog(dir, id)).pid
-      }
+      // readRunHeader reads a gzip-retained `<id>.jsonl.gz` itself (34923).
+      pid = readRunHeader(path).pid
     } catch (error) {
       onLeftAlone(
         `run ${id}: source-changed, left alone — ${liveness.why}; its header could not be read: ${String(error)}`,

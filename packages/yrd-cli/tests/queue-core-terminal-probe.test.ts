@@ -93,7 +93,7 @@ describe("the terminality probe handed to the reader (28918)", () => {
    */
   it("proves a gzip-retained run terminal from its compressed header", () => {
     const root = dir()
-    // A real header, as openLog writes it: the core reader keeps only records naming their run and instant.
+    // A real header, as openLog writes it.
     journal(root, GZIP_DEAD_ID, { pid: DEAD_PID, run: GZIP_DEAD_ID, at: "2026-09-03T20:00:00.000Z" })
     const plain = join(root, `${GZIP_DEAD_ID}.jsonl`)
     writeFileSync(`${plain}.gz`, gzipSync(readFileSync(plain)))

@@ -36,6 +36,7 @@ import {
   LOG_KINDS,
   readJournalLine,
   readJournalProjection,
+  readRetainedFile,
   runDiedInPreamble,
   runStartedAt,
   serviceStoppedLine,
@@ -83,8 +84,15 @@ export type RunnerRun = Readonly<{
   id: string
   number?: number
   startedAt: Date
-  /** The instant the journal was last appended to: the file's mtime. */
-  lastWriteAt: Date
+  /**
+   * The instant the journal was last appended to: the plain journal file's
+   * mtime. Absent only when the round is held solely as its gzip copy (34923):
+   * that file's mtime is when retention compressed it, never the round's last
+   * write, so the instant is unobserved and {@link lastWriteUnobserved} says why.
+   */
+  lastWriteAt?: Date
+  /** Why {@link lastWriteAt} is absent: the sentence the runner row carries. */
+  lastWriteUnobserved?: string
   /** What the run's own header record said, after any initial Git evidence. */
   command?: string
   target?: string
@@ -509,9 +517,20 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
     const why = (error as NodeJS.ErrnoException).code === "ENOENT" ? "there is no such directory" : String(error)
     return { absent: `no run journal was read: ${journalDir} — ${why}`, journalDir, service }
   }
-  const ours = names
-    .filter((name) => name.endsWith(".jsonl"))
-    .map((name) => name.slice(0, -".jsonl".length))
+  // The same id rule as the core's journal listing (log.ts journalIds, 34923):
+  // `<id>.jsonl` or its retained `<id>.jsonl.gz`, each run once; which file is
+  // read (plain first) is the core's retained-file resolution, not this list's.
+  const ours = [
+    ...new Set(
+      names.flatMap((name) =>
+        name.endsWith(".jsonl")
+          ? [name.slice(0, -".jsonl".length)]
+          : name.endsWith(".jsonl.gz")
+            ? [name.slice(0, -".jsonl.gz".length)]
+            : [],
+      ),
+    ),
+  ]
     .filter((id) => runStartedAt(id) !== undefined)
     .sort()
   let selected:
@@ -551,7 +570,18 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
     return { absent: `no run journal was read: ${journalDir} — ${held}`, journalDir, service }
   }
   const { id, startedAt, path, projection, read } = selected
-  const lastWriteAt = statSync(path).mtime
+  // The plain file's mtime is the journal's last write. A round held only as
+  // its gzip copy has no such file, and the copy's mtime is when retention
+  // compressed it: the last write is then unobserved and named (34923).
+  let lastWrite: Readonly<{ lastWriteAt: Date }> | Readonly<{ lastWriteUnobserved: string }>
+  try {
+    lastWrite = { lastWriteAt: statSync(path).mtime }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    lastWrite = {
+      lastWriteUnobserved: `round ${id} is held only as ${path}.gz, so its last write is unobserved (that file's time is when it was compressed)`,
+    }
+  }
   // THE HEADER'S PID OUTRANKS THE WORKTREE'S, and during a preamble it is the
   // only one there is: `claimWorktrees` does not run until after the whole Git
   // preamble (yrd-queue-core/src/run.ts:476), so for the entire window in which
@@ -592,7 +622,7 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
     latest: {
       alive,
       id,
-      lastWriteAt,
+      ...lastWrite,
       startedAt,
       ...(pid === undefined ? {} : { pid }),
       ...header,
@@ -659,9 +689,11 @@ export function readRunHeader(path: string, projected?: readonly LogRecord[]): J
   try {
     // Retain the one interpreter, including read-time date handling. Compact
     // non-Git records use exactly the same path as raw journal lines.
+    // A raw read takes the core's retained-file resolution: the plain journal,
+    // or its `.gz` copy only when the plain file is genuinely absent (34923).
     text =
       projected === undefined
-        ? readFileSync(path, "utf8")
+        ? readRetainedFile(path).toString("utf8")
         : projected.map((record) => JSON.stringify(record)).join("\n")
   } catch (error) {
     throw new Error(`run journal ${path}: required run header cannot be read: ${errorDetail(error)}`, {
@@ -1149,7 +1181,7 @@ function runnerLineOf(
   const latest = facts?.latest
   const word = STATE_WORDS[state].word
   const since = (at: Date): string => mediaDuration(now.getTime() - at.getTime())
-  const beat = latest === undefined ? undefined : since(latest.lastWriteAt)
+  const beat = latest?.lastWriteAt === undefined ? undefined : since(latest.lastWriteAt)
   const at = latest === undefined ? {} : { at: latest.startedAt }
   const service = facts?.service
   const published = facts?.published
@@ -1171,7 +1203,11 @@ function runnerLineOf(
     latest === undefined
       ? `${facts?.absent ?? "no history here"} · the check output is on the queue's machine only`
       : (died ??
-        [`${latest.alive ? "runner alive" : "no process"} · round started ${clock(latest.startedAt)}`, checksText]
+        [
+          `${latest.alive ? "runner alive" : "no process"} · round started ${clock(latest.startedAt)}`,
+          checksText,
+          latest.lastWriteUnobserved ?? "",
+        ]
           .filter((part) => part !== "")
           .join(" · ")
           .replace(/[—\s]+$/u, ""))
@@ -1380,7 +1416,7 @@ function runnerLineOf(
           holderDate && !Number.isNaN(holderDate.getTime())
             ? `lock body names pid ${String(holder.pid)} since ${clock(holderDate)} (the body's claim, not measured ownership)`
             : `lock body names pid ${String(holder.pid)} (the body's claim, not measured ownership)`
-        holdsText = `${startText} · ${word} ${beat ?? "0:00"} · ${holderText}`
+        holdsText = `${startText} · ${word} ${beat ?? (latest?.lastWriteUnobserved === undefined ? "0:00" : "last write unobserved")} · ${holderText}`
       } else if (waiting === 0) {
         holdsText = "nothing in line"
       } else {

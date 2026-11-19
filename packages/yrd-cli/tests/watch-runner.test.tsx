@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "n
 import * as fs from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { gzipSync } from "node:zlib"
 import { describe, expect, it, vi } from "vitest"
 import {
   exitedHealthDocument,
@@ -423,7 +424,8 @@ describe("readRunnerFacts", () => {
       expect(latest.alive).toBe(true)
       expect(latest.pid).toBe(process.pid)
       expect(latest.startedAt.getTime()).toBe(NOW.getTime() - 60_000)
-      expect(Math.abs(latest.lastWriteAt.getTime() - (NOW.getTime() - 5_000))).toBeLessThan(1_500)
+      expect(Math.abs((latest.lastWriteAt?.getTime() ?? Number.NaN) - (NOW.getTime() - 5_000))).toBeLessThan(1_500)
+      expect(latest.lastWriteUnobserved).toBeUndefined()
       expect(latest.target).toBe("main")
       expect(latest.checks).toEqual(["typecheck", "test"])
       expect(latest.gitlink?.startsWith("3c285a41af46")).toBe(true)
@@ -674,6 +676,110 @@ describe("readRunnerFacts", () => {
  *           against a reader that opens nothing.
  * @level    l1 (a real health document in a real workdir)
  */
+/** Replace a plain journal with its gzip copy, as log retention will (34923); `text` keeps the plain file too. */
+function gzipJournal(path: string, text?: string): void {
+  fs.writeFileSync(`${path}.gz`, gzipSync(text ?? fs.readFileSync(path)))
+  if (text === undefined) fs.unlinkSync(path)
+}
+
+/** A run journal header as a round (no command) or a standalone CLI command writes it. */
+function headerLine(id: string, at: Date, fields: Readonly<Record<string, unknown>> = {}): string {
+  return `${JSON.stringify({ kind: "run", run: id, at: at.toISOString(), target: "main", queue: "main", checks: ["verify"], ...fields })}\n`
+}
+
+/**
+ * @failure 34923: log retention gzips old journals, and the runner row lists only
+ *          `.jsonl`, so a queue whose newest round was compressed read as having
+ *          no round at all; or a compressed round's last write was read from the
+ *          gzip file's mtime, making an old round look freshly written.
+ * @level    l1 (journal files in a temporary workdir)
+ * @consumer the operator reading the runner row of `yrd list` and `yrd watch`
+ */
+describe("readRunnerFacts over gzip-retained journals (34923)", () => {
+  it("finds a compressed-only latest round and leaves its last write unobserved, never the gzip install time", async () => {
+    const workdir = workdirWith({ ageMs: 60_000, lastWriteAgoMs: 5_000 })
+    const plain = (await readRunnerFacts(workdir, NOW)).latest
+    if (plain === undefined) throw new Error("fixture wrote no journal")
+    const name = `${plain.id}.jsonl`
+    gzipJournal(join(workdir, "logs", name))
+    const facts = await readRunnerFacts(workdir, NOW)
+    const latest = facts.latest
+    if (latest === undefined) throw new Error(`no run read: ${facts.absent ?? ""}`)
+    expect(latest.id).toBe(name.slice(0, -".jsonl".length))
+    expect(latest.target).toBe("main")
+    expect(latest.checks).toEqual(["typecheck", "test"])
+    expect(latest.lastWriteAt).toBeUndefined()
+    expect(latest.lastWriteUnobserved).toContain(`${name}.gz`)
+    const line = runnerLine(facts, NOW)
+    expect(line.detail).toContain("last write is unobserved")
+    expect(line.duration).toBeUndefined()
+  })
+
+  it("counts a round present as plain and gzip once, reading the plain journal", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-watch-runner-gzip-"))
+    const logs = join(workdir, "logs")
+    mkdirSync(logs)
+    const at = new Date(NOW.getTime() - 60_000)
+    const round = runId(at)
+    const path = join(logs, `${round}.jsonl`)
+    fs.writeFileSync(path, headerLine(round, at))
+    gzipJournal(path, headerLine(round, at, { target: "from-the-gzip-copy" }))
+    const both = await readRunnerFacts(workdir, NOW)
+    expect(both.latest?.id).toBe(round)
+    expect(both.latest?.target).toBe("main")
+    expect(both.latest?.lastWriteAt).toBeInstanceOf(Date)
+
+    // A standalone command journal held both ways is ONE excluded journal.
+    const command = runId(new Date(NOW.getTime() - 30_000))
+    const commandPath = join(logs, `${command}.jsonl`)
+    const commandHeader = headerLine(command, NOW, { command: "drop --local" })
+    fs.writeFileSync(commandPath, commandHeader)
+    gzipJournal(commandPath, commandHeader)
+    fs.unlinkSync(path)
+    fs.unlinkSync(`${path}.gz`)
+    expect((await readRunnerFacts(workdir, NOW)).absent).toContain(
+      "no queue-round journal qualified (1 standalone command journal(s) were excluded)",
+    )
+  })
+
+  it("excludes a compressed standalone command journal and reads the compressed round beneath it", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-watch-runner-gzip-"))
+    const logs = join(workdir, "logs")
+    mkdirSync(logs)
+    const at = new Date(NOW.getTime() - 60_000)
+    const round = runId(at)
+    const command = runId(new Date(NOW.getTime() - 30_000))
+    fs.writeFileSync(join(logs, `${round}.jsonl`), headerLine(round, at))
+    fs.writeFileSync(join(logs, `${command}.jsonl`), headerLine(command, NOW, { command: "withdraw" }))
+    gzipJournal(join(logs, `${round}.jsonl`))
+    gzipJournal(join(logs, `${command}.jsonl`))
+    const facts = await readRunnerFacts(workdir, NOW)
+    expect(facts.latest?.id).toBe(round)
+    expect(facts.latest?.command).toBeUndefined()
+  })
+
+  it("falls back to the raw compressed header when the projection is stale or missing", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-watch-runner-gzip-"))
+    const logs = join(workdir, "logs")
+    const log = openLog(logs, () => new Date(NOW.getTime() - 60_000))
+    log.write({ kind: "run", target: "main", queue: "main", checks: ["verify"] })
+    log.write({ kind: "remote-calls", count: 1, ms: 5 })
+    log.finish()
+    gzipJournal(log.path)
+    const stale = await readRunnerFacts(workdir, NOW)
+    expect(stale.latest?.id).toBe(log.id)
+    expect(stale.latest?.checks).toEqual(["verify"])
+    expect(stale.projectionFallback?.reason).toBe("source-changed")
+
+    fs.unlinkSync(join(logs, `${log.id}.projection.json`))
+    const missing = await readRunnerFacts(workdir, NOW)
+    expect(missing.latest?.id).toBe(log.id)
+    expect(missing.latest?.checks).toEqual(["verify"])
+    expect(missing.latest?.ended).toBe(true)
+    expect(missing.projectionFallback?.reason).toBe("missing")
+  })
+})
+
 describe("readRunnerService, the loop's own liveness", () => {
   it("reads a document believable by its OWN deadline as beating", async () => {
     const workdir = workdirWith({ ageMs: 1_000, health: healthDocument({ staleAfterMs: 5 * 60_000 }) })

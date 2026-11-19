@@ -891,7 +891,7 @@ function journalIds(names: readonly string[], keep: (name: string) => boolean = 
  * apart. Journals and round output (yrd-cli's output panes) both read through
  * it, so there is one rule for what a retained file is.
  */
-export function onRetainedFile<T>(plain: string, read: (path: string, compressed: boolean) => T): T {
+function onRetainedFile<T>(plain: string, read: (path: string, compressed: boolean) => T): T {
   try {
     return read(plain, false)
   } catch (error) {
