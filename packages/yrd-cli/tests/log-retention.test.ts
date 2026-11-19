@@ -900,9 +900,12 @@ describe("the round sweep gzips finished round output past 24 hours (34923 rulin
 describe("the round sweep gzips journals past seven days, never the newest (34923 ruling 3, 4)", () => {
   it("converts old journals, keeps the newer and the newest plain, and their readers read the same runs", async () => {
     const { workdir, logs } = tree("gz-journals")
-    const old = finishedRound(logs, ago(17))
-    const eight = finishedRound(logs, ago(15))
+    // Journals compress at seven days while raw output is kept fourteen (34952): the 10- and 8-day rounds' journals
+    // are gzipped here, and their round directories, inside the window, stay.
+    const old = finishedRound(logs, ago(10))
+    const eight = finishedRound(logs, ago(8))
     const six = finishedRound(logs, ago(6))
+    const raw = output(join(logs, old.id, "git", "1.stdout.bin"), body("ten days"))
     const ids = [old.id, eight.id]
     const before = {
       logs: ids.map((id) => readRunLog(logs, id)),
@@ -910,10 +913,12 @@ describe("the round sweep gzips journals past seven days, never the newest (3492
     }
 
     const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
-    expect(result?.compression?.compressed).toBe(2)
     gone(old.path)
     gone(eight.path)
     plain(six.path)
+    // The 10-day round's raw output is inside the fourteen-day window: nothing is removed.
+    expect(result?.removed).toEqual([])
+    expect(existsSync(raw) || existsSync(`${raw}.gz`)).toBe(true)
     expect(ids.map((id) => readRunLog(logs, id))).toEqual(before.logs)
     expect(readJournals(logs, { runIds: ids, now: NOW }).runs).toEqual(before.runs)
     // The projection still serves the converted journal: refreshed against the archive, never left stale.
