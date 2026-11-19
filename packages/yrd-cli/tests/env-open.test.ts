@@ -1511,6 +1511,7 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
           run.stderr(),
         ).toBe(0)
       })
+      await gitIn(join(w.work, ".bays", "maintenance", "vendor/dependency"))(["fetch", "origin"])
     } finally {
       if (previousTrace === undefined) delete process.env.GIT_TRACE2_EVENT
       else process.env.GIT_TRACE2_EVENT = previousTrace
@@ -1533,7 +1534,7 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line))
-    expect(events.some((event) => event.event === "child_start" && event.argv?.includes("fetch"))).toBe(true)
+    expect(events.some((event) => event.event === "start" && event.argv?.includes("fetch"))).toBe(true)
     expect(events.filter((event) => event.event === "child_start" && event.argv?.includes("maintenance"))).toEqual([])
   })
 })
