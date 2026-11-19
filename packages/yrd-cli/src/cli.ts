@@ -1604,7 +1604,7 @@ function buildProgram(
   logs
     .command("prune")
     .description(
-      "remove round output older than the retention window (default 7 days), oldest first; journals are kept",
+      "remove round output older than the retention window (default 14 days), oldest first; journals are kept",
     )
     .option("--dry-run", "list what would be removed and remove nothing")
     .option("--limit <count>", "remove at most this many round-output directories", int)

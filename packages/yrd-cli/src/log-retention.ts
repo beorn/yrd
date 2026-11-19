@@ -61,8 +61,11 @@ import { safeRemove } from "removely"
  * is durably installed beside it ({@link compressRetainedOutput}).
  */
 
-/** Seven days: the round-output window @cto ruled (28499). Journals are never windowed by this. */
-export const ROUND_OUTPUT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+/**
+ * Fourteen days: the round-output window. @cto ruled seven (28499); the operator's later disk rule 2 gives queue logs
+ * fourteen (hh 33167, 2026-11-10), applied by @cto 08bcb1af (hh 34952). Journals are never windowed by this.
+ */
+export const ROUND_OUTPUT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000
 
 /**
  * How many round-output directories are removed per batch, oldest first. Two
@@ -79,8 +82,11 @@ export const ROUND_REMOVAL_BATCH = 8
 /** Raw output of a finished round is compressed once its round NAME is older than a day (34923). */
 export const ROUND_OUTPUT_COMPRESS_AFTER_MS = 24 * 60 * 60 * 1000
 
-/** A run journal is compressed once its round NAME is older than the window; it is never removed. */
-export const JOURNAL_COMPRESS_AFTER_MS = ROUND_OUTPUT_WINDOW_MS
+/**
+ * A run journal is compressed once its round NAME is older than seven days; it is never removed. Seven is the old
+ * round-output window, kept when that window became fourteen (hh 34952), so journal compression did not change.
+ */
+export const JOURNAL_COMPRESS_AFTER_MS = 7 * 24 * 60 * 60 * 1000
 
 /**
  * Source bytes one round's sweep streams through gzip (34923 ruling 4). Measured

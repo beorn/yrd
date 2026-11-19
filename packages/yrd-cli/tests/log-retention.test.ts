@@ -111,15 +111,15 @@ function place(path: string, rel = "git/1.stdout.bin"): string {
 describe("expiredRoundOutput (selection, by name only)", () => {
   it("selects every round-output directory older than the window across all four shapes", () => {
     const { logs, checks } = tree("select")
-    const oldRound = place(join(logs, round(ago(8))))
+    const oldRound = place(join(logs, round(ago(15))))
     const newRound = place(join(logs, round(ago(1))))
-    const oldCheck = place(join(logs, "check", round(ago(9))))
-    const oldEnv = place(join(logs, "environments", "fixer-28499", round(ago(10))))
+    const oldCheck = place(join(logs, "check", round(ago(16))))
+    const oldEnv = place(join(logs, "environments", "fixer-28499", round(ago(17))))
     // An old `<commit12>-q-…` parent that still holds a round inside the window is named, not removed.
     const namedParent = join(logs, "environments", `abc123def456-${round(ago(20))}`)
     const namedEnv = place(join(namedParent, round(ago(1))))
-    const oldChecksFlat = place(join(checks, "fixer", round(ago(8))))
-    const oldChecksDeep = place(join(checks, "dev", "8", "26673-thing@20eb", round(ago(8))))
+    const oldChecksFlat = place(join(checks, "fixer", round(ago(15))))
+    const oldChecksDeep = place(join(checks, "dev", "8", "26673-thing@20eb", round(ago(15))))
 
     const scan = expiredRoundOutput({ roots: [logs, checks], now: NOW })
     const paths = scan.entries.map((entry) => entry.path).sort()
@@ -141,13 +141,13 @@ describe("expiredRoundOutput (selection, by name only)", () => {
     const { logs } = tree("env-empty-old")
     const oldDir = join(logs, "environments", "fixer-28499")
     mkdirSync(oldDir, { recursive: true })
-    utimesSync(oldDir, ago(12), ago(12))
+    utimesSync(oldDir, ago(19), ago(19))
     const youngDir = join(logs, "environments", "fixer-young")
     mkdirSync(youngDir, { recursive: true })
     utimesSync(youngDir, ago(1), ago(1))
     const held = join(logs, "environments", "fixer-held")
     place(join(held, round(ago(1))))
-    utimesSync(held, ago(12), ago(12))
+    utimesSync(held, ago(19), ago(19))
     const found = expiredRoundOutput({ roots: [logs], now: NOW }).entries.map((entry) => entry.path)
     expect(found).toEqual([oldDir])
   })
@@ -160,8 +160,8 @@ describe("expiredRoundOutput (selection, by name only)", () => {
   it("keeps an old plain container that holds an old round and selects the round", () => {
     const { logs } = tree("env-old-round")
     const parent = join(logs, "environments", "fixer-28499")
-    const child = place(join(parent, round(ago(12))))
-    utimesSync(parent, ago(12), ago(12))
+    const child = place(join(parent, round(ago(19))))
+    utimesSync(parent, ago(19), ago(19))
     const found = expiredRoundOutput({ roots: [logs], now: NOW }).entries.map((entry) => entry.path)
     expect(found).toEqual([child])
   })
@@ -173,16 +173,16 @@ describe("expiredRoundOutput (selection, by name only)", () => {
    */
   it("selects an old environment directory named <commit>-q-<utc>-<id> with no round child", () => {
     const { logs } = tree("env-stamp")
-    const envDir = place(join(logs, "environments", `0010d72a646a-${round(ago(12))}`), "setup.log")
+    const envDir = place(join(logs, "environments", `0010d72a646a-${round(ago(19))}`), "setup.log")
     const found = expiredRoundOutput({ roots: [logs], now: NOW }).entries
     expect(found.map((entry) => entry.path)).toEqual([envDir])
-    expect(found[0]?.started.toISOString()).toBe(ago(12).toISOString())
+    expect(found[0]?.started.toISOString()).toBe(ago(19).toISOString())
   })
 
   it("selects an old stamped environment once every round inside it is past the window", () => {
     const { logs } = tree("env-old-children")
     const parent = join(logs, "environments", `0010d72a646a-${round(ago(20))}`)
-    const child = place(join(parent, round(ago(12))))
+    const child = place(join(parent, round(ago(19))))
     const scan = expiredRoundOutput({ roots: [logs], now: NOW })
     expect(scan.entries.map((entry) => entry.path)).toEqual([parent])
     expect(scan.entries.map((entry) => entry.path)).not.toContain(child)
@@ -203,7 +203,7 @@ describe("expiredRoundOutput (selection, by name only)", () => {
     const broken = join(logs, "environments", "0010d72a646a-q-2026not-a-stamp")
     place(broken, "setup.log")
     const bay = join(logs, "environments", "topic-q-1-not-a-stamp")
-    const oldChild = place(join(bay, round(ago(12))))
+    const oldChild = place(join(bay, round(ago(19))))
     const scan = expiredRoundOutput({ roots: [logs], now: NOW })
     expect(scan.entries.map((entry) => entry.path)).toEqual([oldChild])
     expect(scan.unreadable).toEqual([broken])
@@ -222,9 +222,9 @@ describe("expiredRoundOutput (selection, by name only)", () => {
     expect(found).toEqual([])
   })
 
-  it("defaults to the seven-day window and honours an explicit one", () => {
+  it("defaults to the fourteen-day window and honours an explicit one", () => {
     const { logs } = tree("window")
-    expect(ROUND_OUTPUT_WINDOW_MS).toBe(7 * DAY)
+    expect(ROUND_OUTPUT_WINDOW_MS).toBe(14 * DAY)
     place(join(logs, round(ago(5))))
     const fiveDays = expiredRoundOutput({ roots: [logs], now: NOW, windowMs: 3 * DAY }).entries
     expect(fiveDays).toHaveLength(1)
@@ -303,10 +303,10 @@ describe("pruneRoundOutput (bounded removal through removely)", () => {
 
   it("removes across every root and shape, oldest first", async () => {
     const { logs, checks } = tree("across")
-    const oldRound = place(join(logs, round(ago(9))))
-    const oldCheck = place(join(logs, "check", round(ago(8))))
+    const oldRound = place(join(logs, round(ago(16))))
+    const oldCheck = place(join(logs, "check", round(ago(15))))
     const oldEnv = place(join(logs, "environments", "seat", round(ago(30))))
-    const oldChecks = place(join(checks, "fixer", round(ago(10))))
+    const oldChecks = place(join(checks, "fixer", round(ago(17))))
 
     const result = await pruneRoundOutput({ roots: [logs, checks], now: NOW, limit: 10 })
     expect(result.removed.map((entry) => entry.path)).toEqual([oldEnv, oldChecks, oldRound, oldCheck])
@@ -370,7 +370,7 @@ describe("retentionHumanLines (the operator's rendering)", () => {
       },
       { roots: ["/x/logs", "/x/checks"], dryRun: true, listed: selected },
     )
-    expect(lines[0]).toContain("would remove 2 round-output directories older than 7 days")
+    expect(lines[0]).toContain("would remove 2 round-output directories older than 14 days")
     expect(lines[1]).toContain("searched /x/logs, /x/checks")
     expect(lines.slice(2)).toEqual(["/x/logs/q-a", "/x/logs/q-b"])
   })
@@ -380,7 +380,7 @@ describe("retentionHumanLines (the operator's rendering)", () => {
       { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], failuresOmitted: 0, remaining: [], missing: [] },
       { roots: ["/x/logs", "/x/checks"], dryRun: false, listed: [] },
     )
-    expect(lines[0]).toContain("removed 0 round-output directories older than 7 days")
+    expect(lines[0]).toContain("removed 0 round-output directories older than 14 days")
     expect(lines[1]).toContain("searched /x/logs, /x/checks")
     expect(lines).toHaveLength(2)
   })
@@ -514,8 +514,8 @@ describe("an absent optional root is named in the row, never a healthy zero (F2)
 describe("sweepRoundOutputInRound (the round hook)", () => {
   it("removes at most one ROUND_REMOVAL_BATCH per round, oldest first, and records one observation row", async () => {
     const { workdir, logs } = tree("round-bound")
-    // Ten expired rounds, listed oldest first: ago(17) is the oldest.
-    const oldestFirst = [17, 16, 15, 14, 13, 12, 11, 10, 9, 8].map((days) => place(join(logs, round(ago(days)))))
+    // Ten expired rounds, listed oldest first: ago(24) is the oldest.
+    const oldestFirst = [24, 23, 22, 21, 20, 19, 18, 17, 16, 15].map((days) => place(join(logs, round(ago(days)))))
     const first = await sweepRoundOutputInRound({ workdir, now: NOW })
     // The round takes a BOUNDED batch, not the whole backlog: removal is the
     // oldest prefix, so the newest rounds survive for a later round.
@@ -535,7 +535,7 @@ describe("sweepRoundOutputInRound (the round hook)", () => {
       removed: ROUND_REMOVAL_BATCH,
       remaining: oldestFirst.length - ROUND_REMOVAL_BATCH,
     })
-    expect(rows[0]?.oldest).toBe(round(ago(9)))
+    expect(rows[0]?.oldest).toBe(round(ago(16)))
     // A second round makes progress on the rest, still within its bound.
     const second = await sweepRoundOutputInRound({ workdir, now: NOW })
     expect(second?.removed).toHaveLength(oldestFirst.length - ROUND_REMOVAL_BATCH)
@@ -900,8 +900,8 @@ describe("the round sweep gzips finished round output past 24 hours (34923 rulin
 describe("the round sweep gzips journals past seven days, never the newest (34923 ruling 3, 4)", () => {
   it("converts old journals, keeps the newer and the newest plain, and their readers read the same runs", async () => {
     const { workdir, logs } = tree("gz-journals")
-    const old = finishedRound(logs, ago(10))
-    const eight = finishedRound(logs, ago(8))
+    const old = finishedRound(logs, ago(17))
+    const eight = finishedRound(logs, ago(15))
     const six = finishedRound(logs, ago(6))
     const ids = [old.id, eight.id]
     const before = {
@@ -923,7 +923,7 @@ describe("the round sweep gzips journals past seven days, never the newest (3492
   it("never compresses the newest round journal, however old", async () => {
     const { workdir, logs } = tree("gz-journal-newest")
     const older = finishedRound(logs, ago(20))
-    const newest = finishedRound(logs, ago(9))
+    const newest = finishedRound(logs, ago(16))
     const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
     gone(older.path)
     plain(newest.path)
@@ -934,7 +934,7 @@ describe("the round sweep gzips journals past seven days, never the newest (3492
 describe("yrd logs prune only removes; compression is the queue round's (34923)", () => {
   it("leaves finished output and old journals plain, and says so in its rendering", async () => {
     const { logs, checks } = tree("gz-prune-verb")
-    const old = finishedRound(logs, ago(10))
+    const old = finishedRound(logs, ago(17))
     const log = finishedRound(logs, ago(2))
     finishedRound(logs, ago(0.5))
     const stdout = output(join(logs, log.id, "git", "1.stdout.bin"), body("verb"))
@@ -948,7 +948,7 @@ describe("yrd logs prune only removes; compression is the queue round's (34923)"
 })
 
 describe("compressed output still expires by round name; journals never (34923 ruling 4)", () => {
-  it("removes a compressed round directory at seven days by its name, and keeps the compressed journal", async () => {
+  it("removes a compressed round directory at fourteen days by its name, and keeps the compressed journal", async () => {
     const { workdir, logs } = tree("gz-expiry")
     const log = finishedRound(logs, ago(6.5))
     finishedRound(logs, ago(0.5))
@@ -956,8 +956,8 @@ describe("compressed output still expires by round name; journals never (34923 r
     const first = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
     expect(first?.compression?.compressed).toBe(1)
     gone(stdout)
-    // A day later the round is 7.5 days old: its directory goes by NAME, though the archive inside was written today.
-    const later = new Date(NOW.getTime() + DAY)
+    // Eight days later the round is 14.5 days old: its directory goes by NAME, though the archive inside is newer.
+    const later = new Date(NOW.getTime() + 8 * DAY)
     const second = await sweepRoundOutputInRound({ workdir, now: later, report: () => {} })
     expect(second?.removed.map((entry) => entry.path)).toEqual([join(logs, log.id)])
     expect(existsSync(join(logs, log.id))).toBe(false)
@@ -1044,7 +1044,7 @@ describe("compression work is bounded per round and later rounds progress (34923
       path: `/logs/${kind}-${String(index).padStart(3, "0")}`,
       run: `q-${String(index)}`,
       within: "/logs",
-      started: new Date(ago(10).getTime() + minutes * 60_000),
+      started: new Date(ago(17).getTime() + minutes * 60_000),
       entry: kind === "round" ? ("directory" as const) : ("file" as const),
     })
 
@@ -1154,7 +1154,7 @@ describe("compression work is bounded per round and later rounds progress (34923
   // Shares are ceilings under the global byte bound, with the native first-file exception kept (ruling 2118 point 4).
   it("a journal that fills the byte bound first leaves rounds deferred, honestly counted, for the next pass", async () => {
     const { workdir, logs } = tree("gz-bytes-journal-first")
-    const big = openLog(logs, () => ago(9))
+    const big = openLog(logs, () => ago(16))
     big.write({ kind: "run", target: "main", queue: "main" })
     const size = Math.floor(ROUND_COMPRESSION_BYTES * 0.6)
     for (let written = 0; written < size; written += 100_000) {
@@ -1218,7 +1218,7 @@ describe("a compression failure is a result, never a failed round (34923 ruling 
     const stuck = finishedRound(logs, ago(3))
     const fine = finishedRound(logs, ago(2))
     finishedRound(logs, ago(0.5))
-    const expired = place(join(logs, round(ago(9))))
+    const expired = place(join(logs, round(ago(16))))
     const stuckGit = join(logs, stuck.id, "git")
     const stuckFile = output(join(stuckGit, "1.stdout.bin"), body("stuck"))
     const fineFile = output(join(logs, fine.id, "git", "1.stdout.bin"), body("fine"))
