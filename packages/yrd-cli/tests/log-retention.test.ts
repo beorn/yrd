@@ -36,6 +36,8 @@ import { afterAll, describe, expect, it, vi } from "vitest"
 import { journalKey, openLog, readJournalProjection, readJournals, readRetainedFile, readRunLog } from "@yrd/queue-core"
 import { readCommandOutput } from "../src/queue-core-commands.ts"
 import {
+  JOURNAL_UNIT_SHARE,
+  NEWEST_LANE_UNITS,
   RETENTION_JOURNAL,
   RETENTION_JOURNAL_MAX_BYTES,
   ROUND_COMPRESSION_BYTES,
@@ -44,6 +46,7 @@ import {
   ROUND_OUTPUT_WINDOW_MS,
   ROUND_REMOVAL_BATCH,
   appendRetentionObservation,
+  compressionVisitOrder,
   expiredRoundOutput,
   pruneRoundOutput,
   removeExpiredRoundOutput,
@@ -988,7 +991,9 @@ describe("compression work is bounded per round and later rounds progress (34923
     for (const path of files) gone(path)
   })
 
-  it("examines at most ROUND_COMPRESSION_UNITS candidates a round, oldest first; the service's memory moves on", async () => {
+  // The expected SET changed with @cto 34923 ruling 2118: the pass no longer walks oldest first, so which 64 of the 66
+  // rounds go first is the newest lane's 4 plus the ring's next 60. The counts, the bound and the memory are unchanged.
+  it("examines at most ROUND_COMPRESSION_UNITS candidates a round, newest lane first; the service's memory moves on", async () => {
     const { workdir, logs } = tree("gz-bound-units")
     // The service keeps one `settled` set for its life (queue-core-commands.ts): a finished round is not examined twice.
     const settled = new Set<string>()
@@ -1000,8 +1005,10 @@ describe("compression work is bounded per round and later rounds progress (34923
     const first = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {}, settled })
     expect(first?.compression?.compressed).toBe(ROUND_COMPRESSION_UNITS)
     expect(first?.compression?.deferred).toBe(2)
-    for (const path of files.slice(0, ROUND_COMPRESSION_UNITS)) gone(path)
-    for (const path of files.slice(ROUND_COMPRESSION_UNITS)) plain(path)
+    const left = files.filter((path) => existsSync(path))
+    expect(left).toHaveLength(2)
+    // The newest lane: the 4 latest eligible rounds are examined first, whatever the ring's start.
+    for (const path of files.slice(-NEWEST_LANE_UNITS)) gone(path)
     const second = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {}, settled })
     expect(second?.compression?.compressed).toBe(2)
     expect(second?.compression?.deferred).toBe(0)
@@ -1009,6 +1016,182 @@ describe("compression work is bounded per round and later rounds progress (34923
     // Without that memory (a restarted service) the finished rounds are examined again, still within the bound.
     const restarted = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
     expect(restarted?.compression).toMatchObject({ compressed: 0, deferred: 2, failures: [] })
+  })
+
+  // Live 2026-11-18 (34923 row 6, @cto 2023): 41 passes converted nothing, because ~59k older journals that cannot be
+  // proven finished took every unit, and the service's memory of them ends at each restart. Rounds come first.
+  it("reaches a completed round in a fresh lifetime past more than one budget of older unprovable journals", async () => {
+    const { workdir, logs } = tree("gz-order-journals")
+    const stale = Array.from({ length: ROUND_COMPRESSION_UNITS + 2 }, (_, index) =>
+      unfinishedRound(logs, new Date(ago(20).getTime() + index * 60_000)),
+    )
+    const kept = finishedRound(logs, ago(2))
+    finishedRound(logs, ago(0.5))
+    const stdout = output(join(logs, kept.id, "git", "1.stdout.bin"), body("kept"))
+    const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    // One round and 63 journals examined (still charged and named), 3 journals deferred.
+    expect(result?.compression).toMatchObject({ compressed: 1, deferred: 3, failures: [] })
+    gone(stdout)
+    for (const log of stale) plain(log.path)
+    expect(skipReasons(result).join("\n")).toMatch(/names no writer pid/u)
+  })
+
+  // @cto 34923 ruling 2118: the visit order is journals' share first, newest lanes, rotating rings. These pin the
+  // order itself, which the counts-only tests above cannot see.
+  describe("the visit order (34923 ruling 2118)", () => {
+    const candidate = (kind: "round" | "journal", index: number, minutes = index) => ({
+      kind,
+      path: `/logs/${kind}-${String(index).padStart(3, "0")}`,
+      run: `q-${String(index)}`,
+      within: "/logs",
+      started: new Date(ago(10).getTime() + minutes * 60_000),
+      entry: kind === "round" ? ("directory" as const) : ("file" as const),
+    })
+
+    it("puts the journals' share first, then every round, then the other journals; settled and repeated paths never", () => {
+      const journals = Array.from({ length: 40 }, (_, index) => candidate("journal", index))
+      const rounds = Array.from({ length: 70 }, (_, index) => candidate("round", index))
+      const settled = new Set([rounds[3]?.path ?? "", journals[5]?.path ?? ""])
+      const order = compressionVisitOrder([...journals, ...rounds, ...rounds.slice(0, 5)], settled, NOW)
+      const kinds = order.map((entry) => entry.kind)
+      expect(kinds.slice(0, JOURNAL_UNIT_SHARE).every((kind) => kind === "journal")).toBe(true)
+      expect(kinds.slice(JOURNAL_UNIT_SHARE, JOURNAL_UNIT_SHARE + 69).every((kind) => kind === "round")).toBe(true)
+      expect(order).toHaveLength(40 + 70 - 2)
+      expect(new Set(order.map((entry) => entry.path)).size).toBe(order.length)
+      expect(order.some((entry) => settled.has(entry.path))).toBe(false)
+      // Work-conserving: with few rounds, the journals beyond their share fill the pass's units after them.
+      const manyJournals = Array.from({ length: 100 }, (_, index) => candidate("journal", index))
+      const fewRounds = compressionVisitOrder([...manyJournals, ...rounds.slice(0, 10)], new Set(), NOW)
+      // 16 journals, the 10 rounds, then 38 more journals: 64 units, none left idle.
+      expect(fewRounds.slice(0, ROUND_COMPRESSION_UNITS).filter((entry) => entry.kind === "journal")).toHaveLength(54)
+    })
+
+    it("leads each kind with its newest candidates, repeats for a fixed clock, and moves the ring's start with it", () => {
+      const rounds = Array.from({ length: 200 }, (_, index) => candidate("round", index))
+      const order = compressionVisitOrder(rounds, new Set(), NOW)
+      expect(order.slice(0, NEWEST_LANE_UNITS).map((entry) => entry.path)).toEqual(
+        rounds
+          .slice(-NEWEST_LANE_UNITS)
+          .reverse()
+          .map((entry) => entry.path),
+      )
+      expect(compressionVisitOrder(rounds, new Set(), NOW)).toEqual(order)
+      const later = compressionVisitOrder(rounds, new Set(), new Date(NOW.getTime() + 144_000))
+      expect(later.slice(0, NEWEST_LANE_UNITS)).toEqual(order.slice(0, NEWEST_LANE_UNITS))
+      expect(later[NEWEST_LANE_UNITS]?.path).not.toBe(order[NEWEST_LANE_UNITS]?.path)
+      expect(new Set(later.map((entry) => entry.path))).toEqual(new Set(order.map((entry) => entry.path)))
+    })
+  })
+
+  // A restarted service has a fresh `settled` set; here every pass is a restart, the harshest schedule. The clock
+  // advances 2.4 minutes a pass (one queue round). Observed counts are this fixture's, not a coverage theorem.
+  describe("progress when every pass starts with a fresh memory (34923 ruling 2118)", () => {
+    const STEP_MS = 144_000
+    async function sweepUntilConverted(
+      workdir: string,
+      files: () => readonly string[],
+      options: { maxPasses: number; arrive?: (pass: number, now: Date) => void },
+    ): Promise<number> {
+      for (let pass = 1; pass <= options.maxPasses; pass++) {
+        const now = new Date(NOW.getTime() + pass * STEP_MS)
+        options.arrive?.(pass, now)
+        await sweepRoundOutputInRound({ workdir, now, report: () => {} })
+        if (files().every((path) => !existsSync(path))) return pass
+      }
+      throw new Error(`not every file converted within ${String(options.maxPasses)} passes`)
+    }
+    function backlog(logs: string, count: number): string[] {
+      return Array.from({ length: count }, (_, index) => {
+        const log = finishedRound(logs, new Date(ago(3).getTime() + index * 60_000))
+        return output(join(logs, log.id, "git", "1.stdout.bin"), body(log.id, 300))
+      })
+    }
+
+    it("no new arrivals: a backlog of three lifetimes' budget converts", async () => {
+      const { workdir, logs } = tree("gz-progress-still")
+      const files = backlog(logs, 3 * ROUND_COMPRESSION_UNITS)
+      finishedRound(logs, ago(0.5))
+      const passes = await sweepUntilConverted(workdir, () => files, { maxPasses: 40 })
+      expect(passes).toBeGreaterThanOrEqual(3)
+    })
+
+    it("regular arrivals: each newcomer converts in the pass after it becomes eligible, and the backlog still drains", async () => {
+      const { workdir, logs } = tree("gz-progress-regular")
+      const files = backlog(logs, 2 * ROUND_COMPRESSION_UNITS)
+      finishedRound(logs, ago(0.5))
+      const arrivals: string[] = []
+      const passes = await sweepUntilConverted(workdir, () => [...files, ...arrivals], {
+        maxPasses: 40,
+        arrive: (pass) => {
+          if (arrivals.length > 0) gone(arrivals[arrivals.length - 1] ?? "")
+          // An eligible newcomer: just past the 24-hour line, newer than every backlog round.
+          const log = finishedRound(logs, new Date(ago(1.1).getTime() + pass * 60_000))
+          arrivals.push(output(join(logs, log.id, "git", "1.stdout.bin"), body(log.id, 300)))
+        },
+      })
+      expect(passes).toBeGreaterThanOrEqual(2)
+    })
+
+    it("bursty arrivals: a burst wider than the newest lane still drains with the backlog", async () => {
+      const { workdir, logs } = tree("gz-progress-bursty")
+      const files = backlog(logs, ROUND_COMPRESSION_UNITS)
+      finishedRound(logs, ago(0.5))
+      const arrivals: string[] = []
+      await sweepUntilConverted(workdir, () => [...files, ...arrivals], {
+        maxPasses: 40,
+        arrive: (pass) => {
+          if (pass > 3) return
+          for (let index = 0; index < 3 * NEWEST_LANE_UNITS; index++) {
+            // Every burst member is already past the 24-hour line, so the whole burst is eligible at once.
+            const log = finishedRound(logs, new Date(ago(1.5).getTime() + (pass * 20 + index) * 60_000))
+            arrivals.push(output(join(logs, log.id, "git", "1.stdout.bin"), body(log.id, 300)))
+          }
+        },
+      })
+    })
+  })
+
+  // Shares are ceilings under the global byte bound, with the native first-file exception kept (ruling 2118 point 4).
+  it("a journal that fills the byte bound first leaves rounds deferred, honestly counted, for the next pass", async () => {
+    const { workdir, logs } = tree("gz-bytes-journal-first")
+    const big = openLog(logs, () => ago(9))
+    big.write({ kind: "run", target: "main", queue: "main" })
+    const size = Math.floor(ROUND_COMPRESSION_BYTES * 0.6)
+    for (let written = 0; written < size; written += 100_000) {
+      big.write({ kind: "warning", subject: "pad", reason: "j".repeat(100_000) })
+    }
+    big.finish()
+    const kept = finishedRound(logs, ago(2))
+    finishedRound(logs, ago(0.5))
+    const stdout = output(join(logs, kept.id, "git", "1.stdout.bin"), Buffer.alloc(size, 0x61))
+    const first = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(first?.compression).toMatchObject({ compressed: 1, deferred: 1, failures: [] })
+    gone(big.path)
+    plain(stdout)
+    const second = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(second?.compression).toMatchObject({ compressed: 1, deferred: 0 })
+    gone(stdout)
+  })
+
+  it("a round's single file larger than the byte bound converts alone, and the next round waits a pass", async () => {
+    const { workdir, logs } = tree("gz-bytes-first-file")
+    const huge = finishedRound(logs, ago(2.5))
+    const after = finishedRound(logs, ago(2))
+    finishedRound(logs, ago(0.5))
+    const hugeFile = output(
+      join(logs, huge.id, "git", "1.stdout.bin"),
+      Buffer.alloc(ROUND_COMPRESSION_BYTES + 4096, 0x63),
+    )
+    const afterFile = output(join(logs, after.id, "git", "1.stdout.bin"), body("after"))
+    const first = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    // Newest lane: `after` is examined first and converts; then `huge` is a positive cost past a started pass.
+    expect(first?.compression).toMatchObject({ compressed: 1, deferred: 1 })
+    gone(afterFile)
+    plain(hugeFile)
+    const second = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    // Alone in its pass, the first-file exception lets it through whole.
+    expect(second?.compression).toMatchObject({ compressed: 1, bytesIn: ROUND_COMPRESSION_BYTES + 4096, deferred: 0 })
+    gone(hugeFile)
   })
 
   it("reads at most ROUND_COMPRESSION_BYTES of source a round, a single larger file alone", async () => {
