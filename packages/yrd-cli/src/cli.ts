@@ -626,7 +626,7 @@ function buildProgram(
         if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error
         detail = {
           status: "unavailable",
-          reason: `${journal} is absent on this host; the index record remains authoritative`,
+          reason: `${journal} and ${journal}.gz are absent on this host; the index record remains authoritative`,
         }
       }
       const product = { address: address.canonical, number: lookup.number, record: lookup.record, detail }

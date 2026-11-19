@@ -3,7 +3,9 @@
  *           writes beside its journal — `logs/q-<utc>-<id>/` (git, trace2),
  *           `logs/check/q-<utc>-<id>/`, `logs/environments/<name>/<runId>/` and
  *           the separate `checks/<…>/q-<utc>-<id>/` tree — is read only on
- *           demand and retained forever, with nothing that prunes it (28499).
+ *           demand and retained forever, with nothing that prunes it (28499);
+ *           and what IS kept — round output inside the window, every journal —
+ *           stays plain, so the kept history alone fills the disk (34923).
  * @level    l2 (a hermetic log tree on a real filesystem, real removely removal)
  * @consumer queue operator, host-health (disk and IO pressure)
  * @testonly none
@@ -11,6 +13,7 @@
  */
 import {
   accessSync,
+  appendFileSync,
   chmodSync,
   constants,
   existsSync,
@@ -19,17 +22,25 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { randomBytes } from "node:crypto"
+import { gzipSync } from "node:zlib"
 import { homedir, tmpdir } from "node:os"
 import { dirname, join, resolve, sep } from "node:path"
 import { safeRemoveSync } from "removely"
-import { afterAll, describe, expect, it } from "vitest"
-import { journalKey, openLog, readJournals } from "@yrd/queue-core"
+import { afterAll, describe, expect, it, vi } from "vitest"
+import { journalKey, openLog, readJournalProjection, readJournals, readRetainedFile, readRunLog } from "@yrd/queue-core"
+import { readCommandOutput } from "../src/queue-core-commands.ts"
 import {
   RETENTION_JOURNAL,
   RETENTION_JOURNAL_MAX_BYTES,
+  ROUND_COMPRESSION_BYTES,
+  ROUND_COMPRESSION_FILES,
+  ROUND_COMPRESSION_UNITS,
   ROUND_OUTPUT_WINDOW_MS,
   ROUND_REMOVAL_BATCH,
   appendRetentionObservation,
@@ -47,6 +58,23 @@ const NOW = new Date("2026-10-10T12:00:00.000Z")
 const ago = (days: number): Date => new Date(NOW.getTime() - days * DAY)
 /** The name `@yrd/queue-core` mints for a round, reproduced here so a fixture names a round the way the writer does. */
 const round = (when: Date): string => `q-${when.toISOString().replace(/[-:.]/gu, "")}-deadbeef`
+
+/**
+ * 34923: a removal the test chooses fails, so the sweep's own "remove the plain
+ * file" step can be made to fail AFTER its archive is installed. Every other
+ * removal is the real removely.
+ */
+const removalFault = vi.hoisted(() => ({ path: undefined as string | undefined }))
+vi.mock("removely", async (importOriginal) => {
+  const real = await importOriginal<typeof import("removely")>()
+  return {
+    ...real,
+    safeRemove: async (target: string, options: Parameters<typeof real.safeRemove>[1]): Promise<void> => {
+      if (target === removalFault.path) throw new Error(`injected removal failure for ${target}`)
+      return real.safeRemove(target, options)
+    },
+  }
+})
 
 const roots: string[] = []
 afterAll(() => {
@@ -644,5 +672,416 @@ describe("retention.jsonl is bounded (28499, @cto 2026-10-10T23:16Z)", () => {
       .map((line) => JSON.parse(line) as Record<string, unknown>)
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ kind: "observation", scope: "log-retention", removed: 1 })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 34923 slice 2: the same round sweep gzip-compresses what it keeps.
+// ---------------------------------------------------------------------------
+
+/** Text big enough to be worth compressing (more than one 4 KiB block), distinct per label. */
+const body = (label: string, lines = 2000): string =>
+  `${Array.from({ length: lines }, (_, index) => `${label} line ${String(index)}`).join("\n")}\n`
+
+/** A round whose writer FINISHED: header, a change, padding past one block, and the projection `finish()` publishes. */
+function finishedRound(dir: string, when: Date): ReturnType<typeof openLog> {
+  const log = openLog(dir, () => when)
+  log.write({ kind: "run", target: "main", queue: "main" })
+  log.write({ kind: "change", branch: "task/kept", head: "abc123", decision: "failed" })
+  for (let index = 0; index < 60; index++) log.write({ kind: "warning", subject: "pad", reason: "x".repeat(80) })
+  log.finish()
+  return log
+}
+
+/** A round with no projection: only its header, naming `pid` when given. */
+function unfinishedRound(dir: string, when: Date, pid?: number): ReturnType<typeof openLog> {
+  const log = openLog(dir, () => when)
+  log.write({ kind: "run", target: "main", queue: "main", ...(pid === undefined ? {} : { pid }) })
+  for (let index = 0; index < 60; index++) log.write({ kind: "warning", subject: "pad", reason: "x".repeat(80) })
+  return log
+}
+
+function output(path: string, text: string | Buffer): string {
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, text)
+  return path
+}
+
+/** A pid that existed and is gone: a child that has already exited. */
+function exitedPid(): number {
+  const child = spawnSync("true")
+  if (child.pid === undefined || child.pid <= 0) throw new Error("fixture: could not spawn a child to learn a dead pid")
+  return child.pid
+}
+
+function retentionRows(workdir: string): Record<string, unknown>[] {
+  return readFileSync(join(workdir, RETENTION_JOURNAL), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+}
+
+function gone(path: string): void {
+  expect(existsSync(path), `${path} should be converted`).toBe(false)
+  expect(existsSync(`${path}.gz`), `${path}.gz should be installed`).toBe(true)
+}
+
+function plain(path: string): void {
+  expect(existsSync(path), `${path} should stay plain`).toBe(true)
+  expect(existsSync(`${path}.gz`), `${path} should not be compressed`).toBe(false)
+}
+
+const skipReasons = (result: Awaited<ReturnType<typeof sweepRoundOutputInRound>>): string[] =>
+  (result?.compression?.skipped ?? []).map((skip) => `${skip.path}: ${skip.reason}`)
+
+describe("the round sweep gzips finished round output past 24 hours (34923 ruling 2, 3)", () => {
+  it("converts a finished round's raw output and check logs; every reader returns the same text", async () => {
+    const { workdir, logs, checks } = tree("gz-raw")
+    const log = finishedRound(logs, ago(2))
+    const live = finishedRound(logs, ago(0.5))
+    const git = join(logs, log.id, "git")
+    const stdout = output(join(git, "1.stdout.bin"), body("out"))
+    const stderr = output(join(git, "1.stderr.bin"), `\u001b[31m${body("err")}\u001b[0m`)
+    // Metadata, trace2, a sub-block file and anything unknown stay plain.
+    const metadata = output(join(git, "1.stdout.bin.json"), `{"padding":"${"y".repeat(5000)}"}\n`)
+    const tiny = output(join(git, "2.stdout.bin"), "small\n")
+    const trace = output(join(logs, log.id, "trace2", "1.trace2"), body("trace"))
+    const unknown = output(join(git, "1.stdout.bin.link-123"), body("unknown"))
+    // A queue round's check log, as event-run.ts writes it: checks/<branch>@<head>/<run>/attempt-N/<phase>/<name>.log.
+    const checkLog = output(join(checks, "task", "kept@abc123", log.id, "attempt-1", "merge", "unit.log"), body("unit"))
+    // The live round: younger than 24 hours, and the newest journal.
+    const young = output(join(logs, live.id, "git", "1.stdout.bin"), body("young"))
+    const projection = log.path.replace(/\.jsonl$/u, ".projection.json")
+
+    const command = { args: ["log"], cwd: workdir, stdout, stderr }
+    const before = {
+      command: readCommandOutput(command),
+      check: readRetainedFile(checkLog).toString("utf8"),
+      journal: readRunLog(logs, log.id),
+    }
+    expect(before.command.text).toContain("out line 1999")
+
+    const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(result?.compression).toMatchObject({ compressed: 3, deferred: 0, failures: [] })
+    for (const path of [stdout, stderr, checkLog]) gone(path)
+    for (const path of [metadata, tiny, trace, unknown, young, log.path, projection]) plain(path)
+
+    // Same text through every reader: the command pane, the check pane's one read, the journal.
+    expect(readCommandOutput(command)).toEqual(before.command)
+    expect(readRetainedFile(checkLog).toString("utf8")).toBe(before.check)
+    expect(readRunLog(logs, log.id)).toEqual(before.journal)
+    expect(readFileSync(`${stdout}.gz`).length).toBeLessThan(Buffer.byteLength(body("out")))
+
+    const row = retentionRows(workdir)
+    expect(row).toHaveLength(1)
+    const compression = row[0]?.compression as { compressed: number; bytesIn: number; bytesOut: number }
+    expect(compression).toMatchObject({ compressed: 3 })
+    expect(compression.bytesIn).toBe(
+      Buffer.byteLength(body("out")) +
+        Buffer.byteLength(`\u001b[31m${body("err")}\u001b[0m`) +
+        Buffer.byteLength(body("unit")),
+    )
+    expect(compression.bytesOut).toBeGreaterThan(0)
+    expect(compression.bytesOut).toBeLessThan(compression.bytesIn)
+  })
+
+  it("proves a round with no projection finished when its header's writer pid is gone", async () => {
+    const { workdir, logs } = tree("gz-pid-gone")
+    const log = unfinishedRound(logs, ago(3), exitedPid())
+    finishedRound(logs, ago(0.5))
+    const stdout = output(join(logs, log.id, "git", "1.stdout.bin"), body("dead"))
+    const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(result?.compression?.compressed).toBe(1)
+    gone(stdout)
+  })
+
+  it("leaves the live, unproven and symlinked candidates untouched and names each one", async () => {
+    const { workdir, logs, checks } = tree("gz-unproven")
+    const otherWriter = unfinishedRound(logs, ago(3), process.ppid)
+    const ownWriter = unfinishedRound(logs, ago(2.8), process.pid)
+    const noPid = unfinishedRound(logs, ago(2.6))
+    const linked = finishedRound(logs, ago(2.4))
+    // The newest round journal is the live round, however old it reads.
+    const newest = finishedRound(logs, ago(1.5))
+    const paths = {
+      otherWriter: output(join(logs, otherWriter.id, "git", "1.stdout.bin"), body("a")),
+      ownWriter: output(join(logs, ownWriter.id, "git", "1.stdout.bin"), body("b")),
+      noPid: output(join(logs, noPid.id, "git", "1.stdout.bin"), body("c")),
+      linked: join(logs, linked.id, "git", "1.stdout.bin"),
+      orphan: output(join(checks, "fix", "y@def456", round(ago(2.2)), "attempt-1", "merge", "unit.log"), body("d")),
+      newest: output(join(logs, newest.id, "git", "1.stdout.bin"), body("e")),
+      environment: output(join(logs, "environments", "bay", round(ago(2)), "logs", "setup.log"), body("f")),
+    }
+    const target = output(join(workdir, "elsewhere.bin"), body("target"))
+    mkdirSync(dirname(paths.linked), { recursive: true })
+    symlinkSync(target, paths.linked)
+
+    const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(result?.compression?.compressed).toBe(0)
+    for (const path of Object.values(paths)) plain(path)
+    expect(readFileSync(target, "utf8")).toBe(body("target"))
+    const named = skipReasons(result).join("\n")
+    expect(named).toMatch(new RegExp(`${otherWriter.id}.*PID ${String(process.ppid)} is present`, "u"))
+    expect(named).toMatch(new RegExp(`${ownWriter.id}.*this process`, "u"))
+    expect(named).toMatch(new RegExp(`${noPid.id}.*names no writer pid`, "u"))
+    expect(named).toContain(`${paths.linked}: a symbolic link`)
+    expect(named).toMatch(/y@def456.*no run journal/u)
+    expect(named).toMatch(new RegExp(`${newest.id}.*newest round journal`, "u"))
+    // An environment tree is a live writer's (a bay): kept plain by class, not a candidate at all.
+    expect(named).not.toContain("environments")
+  })
+
+  it("resumes every interrupted state and never loses the sole readable copy", async () => {
+    const { workdir, logs } = tree("gz-restart")
+    const log = finishedRound(logs, ago(2))
+    finishedRound(logs, ago(0.5))
+    const git = join(logs, log.id, "git")
+    // gzip only: done; nothing to do.
+    const gzOnly = join(git, "1.stdout.bin")
+    output(`${gzOnly}.gz`, gzipSync(body("a")))
+    // both, archive verifies equal: the plain copy goes.
+    const bothEqual = output(join(git, "2.stdout.bin"), body("b"))
+    output(`${bothEqual}.gz`, gzipSync(body("b")))
+    // both, archive decodes to other bytes: a conflict, both kept.
+    const bothDiffer = output(join(git, "3.stdout.bin"), body("c"))
+    output(`${bothDiffer}.gz`, gzipSync(body("not c")))
+    // both, archive corrupt: named, plain kept, archive never overwritten.
+    const corrupt = output(join(git, "4.stdout.bin"), body("d"))
+    output(`${corrupt}.gz`, "not gzip at all")
+    // a temp the sweep left behind: removed, and the file converted afresh.
+    const leftover = output(join(git, "5.stdout.bin"), body("e"))
+    const temp = output(`${leftover}.gz.tmp-${String(exitedPid())}`, "partial")
+
+    const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(result?.compression?.failures).toEqual([])
+    expect(readRetainedFile(gzOnly).toString("utf8")).toBe(body("a"))
+    gone(bothEqual)
+    expect(readRetainedFile(bothEqual).toString("utf8")).toBe(body("b"))
+    expect(readFileSync(bothDiffer, "utf8")).toBe(body("c"))
+    expect(readFileSync(`${bothDiffer}.gz`)).toEqual(gzipSync(body("not c")))
+    expect(readFileSync(corrupt, "utf8")).toBe(body("d"))
+    expect(readFileSync(`${corrupt}.gz`, "utf8")).toBe("not gzip at all")
+    expect(existsSync(temp)).toBe(false)
+    gone(leftover)
+    expect(readRetainedFile(leftover).toString("utf8")).toBe(body("e"))
+    expect(result?.compression?.compressed).toBe(2)
+    const named = skipReasons(result).join("\n")
+    expect(named).toContain(`${bothDiffer}: ${bothDiffer}.gz decodes to different bytes`)
+    expect(named).toContain(`${corrupt}: ${corrupt}.gz is not a readable gzip`)
+  })
+
+  it("abandons a source that changes while it is compressed and keeps the plain file", async () => {
+    const { workdir, logs } = tree("gz-changing")
+    const log = finishedRound(logs, ago(2))
+    finishedRound(logs, ago(0.5))
+    // Incompressible bytes, so the stream runs long enough for the writer below to land mid-compression.
+    const source = output(join(logs, log.id, "git", "1.stdout.bin"), randomBytes(24 * 1024 * 1024))
+    const temp = `${source}.gz.tmp-${String(process.pid)}`
+    const sweep = sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    let appended = false
+    for (let spin = 0; spin < 100_000 && !appended; spin++) {
+      if (existsSync(temp)) {
+        appendFileSync(source, "late write\n")
+        appended = true
+      } else await new Promise((resolveTick) => setImmediate(resolveTick))
+    }
+    expect(appended, "the fixture must land its write while the source is being compressed").toBe(true)
+    const result = await sweep
+    plain(source)
+    expect(existsSync(temp)).toBe(false)
+    expect(readFileSync(source).subarray(-11).toString("utf8")).toBe("late write\n")
+    expect(skipReasons(result).join("\n")).toContain(`${source}: it changed while it was compressed`)
+  })
+})
+
+describe("the round sweep gzips journals past seven days, never the newest (34923 ruling 3, 4)", () => {
+  it("converts old journals, keeps the newer and the newest plain, and their readers read the same runs", async () => {
+    const { workdir, logs } = tree("gz-journals")
+    const old = finishedRound(logs, ago(10))
+    const eight = finishedRound(logs, ago(8))
+    const six = finishedRound(logs, ago(6))
+    const ids = [old.id, eight.id]
+    const before = {
+      logs: ids.map((id) => readRunLog(logs, id)),
+      runs: readJournals(logs, { runIds: ids, now: NOW }).runs,
+    }
+
+    const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(result?.compression?.compressed).toBe(2)
+    gone(old.path)
+    gone(eight.path)
+    plain(six.path)
+    expect(ids.map((id) => readRunLog(logs, id))).toEqual(before.logs)
+    expect(readJournals(logs, { runIds: ids, now: NOW }).runs).toEqual(before.runs)
+    // The projection still serves the converted journal: refreshed against the archive, never left stale.
+    for (const id of ids) expect(readJournalProjection(logs, id, { detail: "omit" }).kind).toBe("projection")
+  })
+
+  it("never compresses the newest round journal, however old", async () => {
+    const { workdir, logs } = tree("gz-journal-newest")
+    const older = finishedRound(logs, ago(20))
+    const newest = finishedRound(logs, ago(9))
+    const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    gone(older.path)
+    plain(newest.path)
+    expect(skipReasons(result).join("\n")).toContain(`${newest.path}: the newest round journal`)
+  })
+})
+
+describe("yrd logs prune only removes; compression is the queue round's (34923)", () => {
+  it("leaves finished output and old journals plain, and says so in its rendering", async () => {
+    const { logs, checks } = tree("gz-prune-verb")
+    const old = finishedRound(logs, ago(10))
+    const log = finishedRound(logs, ago(2))
+    finishedRound(logs, ago(0.5))
+    const stdout = output(join(logs, log.id, "git", "1.stdout.bin"), body("verb"))
+    const result = await pruneRoundOutput({ roots: [logs, { path: checks, optional: true }], now: NOW })
+    expect(result.compression).toBeUndefined()
+    plain(stdout)
+    plain(old.path)
+    const lines = retentionHumanLines(result, { roots: [logs, checks], dryRun: false, listed: result.removed })
+    expect(lines[1]).toContain("journals kept; this verb never compresses, the queue round's own sweep does")
+  })
+})
+
+describe("compressed output still expires by round name; journals never (34923 ruling 4)", () => {
+  it("removes a compressed round directory at seven days by its name, and keeps the compressed journal", async () => {
+    const { workdir, logs } = tree("gz-expiry")
+    const log = finishedRound(logs, ago(6.5))
+    finishedRound(logs, ago(0.5))
+    const stdout = output(join(logs, log.id, "git", "1.stdout.bin"), body("expiring"))
+    const first = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(first?.compression?.compressed).toBe(1)
+    gone(stdout)
+    // A day later the round is 7.5 days old: its directory goes by NAME, though the archive inside was written today.
+    const later = new Date(NOW.getTime() + DAY)
+    const second = await sweepRoundOutputInRound({ workdir, now: later, report: () => {} })
+    expect(second?.removed.map((entry) => entry.path)).toEqual([join(logs, log.id)])
+    expect(existsSync(join(logs, log.id))).toBe(false)
+    // Its journal is now past seven days too: compressed, never removed.
+    gone(log.path)
+    const third = await sweepRoundOutputInRound({
+      workdir,
+      now: new Date(later.getTime() + 30 * DAY),
+      report: () => {},
+    })
+    expect(third?.removed).toEqual([])
+    expect(existsSync(`${log.path}.gz`)).toBe(true)
+    expect(readRunLog(logs, log.id).some((record) => record.kind === "run")).toBe(true)
+  })
+})
+
+describe("compression work is bounded per round and later rounds progress (34923 ruling 4)", () => {
+  it("converts at most ROUND_COMPRESSION_FILES files a round, counts the rest deferred, and finishes next round", async () => {
+    const { workdir, logs } = tree("gz-bound-files")
+    const log = finishedRound(logs, ago(2))
+    finishedRound(logs, ago(0.5))
+    const files = Array.from({ length: ROUND_COMPRESSION_FILES + 3 }, (_, index) =>
+      output(join(logs, log.id, "git", `${String(index + 1)}.stdout.bin`), body(`file ${String(index)}`, 500)),
+    )
+    const first = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(first?.compression?.compressed).toBe(ROUND_COMPRESSION_FILES)
+    expect(first?.compression?.deferred).toBe(1)
+    const second = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(second?.compression?.compressed).toBe(3)
+    expect(second?.compression?.deferred).toBe(0)
+    for (const path of files) gone(path)
+  })
+
+  it("examines at most ROUND_COMPRESSION_UNITS candidates a round, oldest first; the service's memory moves on", async () => {
+    const { workdir, logs } = tree("gz-bound-units")
+    // The service keeps one `settled` set for its life (queue-core-commands.ts): a finished round is not examined twice.
+    const settled = new Set<string>()
+    const rounds = Array.from({ length: ROUND_COMPRESSION_UNITS + 2 }, (_, index) =>
+      finishedRound(logs, new Date(ago(3).getTime() + index * 60_000)),
+    )
+    finishedRound(logs, ago(0.5))
+    const files = rounds.map((log) => output(join(logs, log.id, "git", "1.stdout.bin"), body(log.id, 300)))
+    const first = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {}, settled })
+    expect(first?.compression?.compressed).toBe(ROUND_COMPRESSION_UNITS)
+    expect(first?.compression?.deferred).toBe(2)
+    for (const path of files.slice(0, ROUND_COMPRESSION_UNITS)) gone(path)
+    for (const path of files.slice(ROUND_COMPRESSION_UNITS)) plain(path)
+    const second = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {}, settled })
+    expect(second?.compression?.compressed).toBe(2)
+    expect(second?.compression?.deferred).toBe(0)
+    for (const path of files) gone(path)
+    // Without that memory (a restarted service) the finished rounds are examined again, still within the bound.
+    const restarted = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(restarted?.compression).toMatchObject({ compressed: 0, deferred: 2, failures: [] })
+  })
+
+  it("reads at most ROUND_COMPRESSION_BYTES of source a round, a single larger file alone", async () => {
+    const { workdir, logs } = tree("gz-bound-bytes")
+    const log = finishedRound(logs, ago(2))
+    finishedRound(logs, ago(0.5))
+    const size = Math.floor(ROUND_COMPRESSION_BYTES * 0.6)
+    const first = output(join(logs, log.id, "git", "1.stdout.bin"), Buffer.alloc(size, 0x61))
+    const second = output(join(logs, log.id, "git", "2.stdout.bin"), Buffer.alloc(size, 0x62))
+    const one = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(one?.compression).toMatchObject({ compressed: 1, bytesIn: size, deferred: 1 })
+    gone(first)
+    plain(second)
+    const two = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(two?.compression).toMatchObject({ compressed: 1, bytesIn: size, deferred: 0 })
+    gone(second)
+    expect(readRetainedFile(second).equals(Buffer.alloc(size, 0x62))).toBe(true)
+  })
+})
+
+describe("a compression failure is a result, never a failed round (34923 ruling 4)", () => {
+  it("reports a gzip that cannot be written, keeps the plain file, still drains the rest, and retries next round", async () => {
+    const { workdir, logs } = tree("gz-fail-write")
+    const stuck = finishedRound(logs, ago(3))
+    const fine = finishedRound(logs, ago(2))
+    finishedRound(logs, ago(0.5))
+    const expired = place(join(logs, round(ago(9))))
+    const stuckGit = join(logs, stuck.id, "git")
+    const stuckFile = output(join(stuckGit, "1.stdout.bin"), body("stuck"))
+    const fineFile = output(join(logs, fine.id, "git", "1.stdout.bin"), body("fine"))
+    chmodSync(stuckGit, 0o500)
+    const lines: string[] = []
+    let result: Awaited<ReturnType<typeof sweepRoundOutputInRound>>
+    try {
+      result = await sweepRoundOutputInRound({ workdir, now: NOW, report: (line) => lines.push(line) })
+    } finally {
+      chmodSync(stuckGit, 0o700)
+    }
+    expect(result).toBeDefined()
+    expect(result?.removed.map((entry) => entry.path)).toEqual([expired])
+    expect(result?.compression?.failures.map((failure) => failure.path)).toEqual([stuckFile])
+    plain(stuckFile)
+    gone(fineFile)
+    expect(lines.join("")).toContain(`could not compress ${stuckFile}`)
+    expect(lines.join("")).toContain("the next round retries")
+    expect(JSON.stringify(retentionRows(workdir)[0]?.compression)).toContain(stuckFile)
+    const next = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(next?.compression?.failures).toEqual([])
+    gone(stuckFile)
+  })
+
+  it("reports a plain file that cannot be removed after its archive is installed, and the next round finishes it", async () => {
+    const { workdir, logs } = tree("gz-fail-remove")
+    const log = finishedRound(logs, ago(2))
+    finishedRound(logs, ago(0.5))
+    const stdout = output(join(logs, log.id, "git", "1.stdout.bin"), body("kept"))
+    removalFault.path = stdout
+    const lines: string[] = []
+    let result: Awaited<ReturnType<typeof sweepRoundOutputInRound>>
+    try {
+      result = await sweepRoundOutputInRound({ workdir, now: NOW, report: (line) => lines.push(line) })
+    } finally {
+      removalFault.path = undefined
+    }
+    expect(result).toBeDefined()
+    expect(result?.compression?.failures.map((failure) => failure.error).join("")).toContain("injected removal failure")
+    // Both copies remain readable; nothing was lost.
+    expect(readFileSync(stdout, "utf8")).toBe(body("kept"))
+    expect(readRetainedFile(`${stdout}`).toString("utf8")).toBe(body("kept"))
+    expect(lines.join("")).toContain(`could not compress ${stdout}`)
+    const next = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(next?.compression?.compressed).toBe(1)
+    gone(stdout)
+    expect(readRetainedFile(stdout).toString("utf8")).toBe(body("kept"))
   })
 })

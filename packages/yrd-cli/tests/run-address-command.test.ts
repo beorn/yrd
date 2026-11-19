@@ -113,7 +113,13 @@ describe("yrd runs show", () => {
       address: `${address}#1`,
       number: 1,
       record: { id: "opaque-test-run" },
-      detail: { status: "unavailable", reason: expect.stringContaining("absent on this host") },
+      // 34923: log retention keeps an old journal as `<id>.jsonl.gz`, so the absence names both files it looked for.
+      detail: {
+        status: "unavailable",
+        reason: expect.stringMatching(
+          /opaque-test-run\.jsonl and \S*opaque-test-run\.jsonl\.gz are absent on this host/u,
+        ),
+      },
     })
     const human = await yrd(work, "runs", "show", `${address}#1`)
     expect(human.code, human.stderr).toBe(0)

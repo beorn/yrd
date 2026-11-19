@@ -1315,6 +1315,9 @@ export async function coreQueueCommand(
    * (post-merge.ts:631-637); nothing finer than that is claimed here.
    */
   let housekeepingLog: ReturnType<typeof openLog> | undefined
+  // Retention candidates with nothing more owed (34923): finished, kept plain, or named unproven. Held for this
+  // service start, so a running queue never re-examines them; a restart examines them afresh.
+  const retentionSettled = new Set<string>()
   const housekeepingFor = (): ReturnType<typeof openLog> => {
     if (housekeepingLog !== undefined) return housekeepingLog
     const opened = openLog(join(workdir, "logs", "post-merge"))
@@ -1543,7 +1546,8 @@ export async function coreQueueCommand(
     // line (@cto 2026-10-10T23:16Z): the sweep reports every failure on stderr
     // and in its row and RETURNS, so the round's outcome stands and the service
     // keeps running instead of exiting into Hab's restart budget.
-    await sweepRoundOutputInRound({ workdir, now: new Date() })
+    // The same sweep gzip-compresses what it keeps, bounded per round (34923).
+    await sweepRoundOutputInRound({ workdir, now: new Date(), settled: retentionSettled })
   }
 
   let roundCleanup: ((merged: readonly string[]) => Promise<void>) | undefined
