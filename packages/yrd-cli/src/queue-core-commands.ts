@@ -5183,6 +5183,7 @@ export async function coreQueueCommand(
         const { run } = await import("silvery/runtime")
         const { createElement } = await import("react")
         const { WATCH_RUN_OPTIONS } = await import("./watch-run-options.ts")
+        using _crash = await (await import("./watch-crash-record.ts")).installWatchCrashRecord()
         const app = await run(
           createElement(WatchPane, {
             ...source,
