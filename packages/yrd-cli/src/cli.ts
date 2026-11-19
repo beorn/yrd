@@ -1226,6 +1226,7 @@ function buildProgram(
         const { run } = await import("silvery/runtime")
         const { createElement } = await import("react")
         const { WATCH_RUN_OPTIONS } = await import("./watch-run-options.ts")
+        using _crash = await (await import("./watch-crash-record.ts")).installWatchCrashRecord()
         const snapshot = sources.find((source) => source.snapshot !== undefined)?.snapshot ?? {
           queue: "Declared queues",
           queues: [],
