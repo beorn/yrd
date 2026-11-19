@@ -190,6 +190,24 @@ describe("yrd logs prune obeys the target's declared holds judge (34952)", () =>
     expect(prune.stderr).toContain("state rail unreachable")
   })
 
+  it("refuses with exit 1 and removes nothing when the target's declaration cannot be read", async () => {
+    const { work, logs } = await queueWithAnExpiredRound()
+    const expired = join(logs, "q-20260901T000000000Z-deadbeef")
+    // The queue is already born; the target's main now carries a retention key the reader refuses. A declared policy
+    // that cannot be read is never "nothing declared" (@cto 72645433 item 3).
+    const git = gitIn(work)
+    writeFileSync(
+      join(work, ".yrd.yml"),
+      "checks:\n  - verify:\n      run: test -f pass.txt\nretention:\n  holds: []\n",
+    )
+    await git(["commit", "--quiet", "-am", "an unreadable retention declaration"])
+    await git(["push", "--quiet", "origin", "main"])
+    const prune = await yrd(work, "logs", "prune", "--json")
+    expect(prune.exitCode, prune.report).toBe(1)
+    expect(prune.stderr).toContain("cannot read the target's retention declaration, so nothing was removed")
+    expect(existsSync(expired), prune.report).toBe(true)
+  })
+
   it("without a declaration it removes as before (the undeclared control)", async () => {
     const { work, logs } = await queueWithAnExpiredRound()
     const prune = await yrd(work, "logs", "prune", "--json")
