@@ -1151,6 +1151,91 @@ describe("yrd queue up, the service", () => {
   }, 120_000)
 
   /**
+   * @failure The queue round removes expired round output the target still cites, because the round sweep never
+   *          runs the target's declared `retention.holds` judge (34952).
+   * @level l2
+   * @consumer the hh-dev queue, whose .yrd.yml declares host-store-cleanup --judge-holds
+   * @testonly none
+   */
+  it("a round runs the target's declared holds judge and keeps what it holds (34952)", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const judgeDir = mkdtempSync(join(tmpdir(), "yrd-cli-up-holds-"))
+    roots.push(judgeDir)
+    const asked = join(judgeDir, "asked.json")
+    const judge = join(judgeDir, "judge.mjs")
+    writeFileSync(
+      judge,
+      [
+        "import { writeFileSync } from 'node:fs'",
+        "const request = JSON.parse(await Bun.stdin.text())",
+        `writeFileSync(${JSON.stringify(asked)}, JSON.stringify(request))`,
+        "const verdicts = request.candidates.map((c) => ({ path: c.path, held: true, proof: 'cited by pm/x.md:1' }))",
+        "process.stdout.write(JSON.stringify({ version: 1, verdicts, read: {} }))",
+      ].join("\n"),
+    )
+    await redeclare(
+      w,
+      `setup: ':'\nretention:\n  holds: [${JSON.stringify(process.execPath)}, ${JSON.stringify(judge)}]\n`,
+    )
+    const expired = join(workdir, "logs", "q-20250101T000000000Z-deadbeef")
+    fs.mkdirSync(join(expired, "git"), { recursive: true })
+    writeFileSync(join(expired, "git", "1.stdout.bin"), "cited\n")
+    const branch = "task/34952-holds"
+    await w.git(["checkout", "--quiet", "-b", branch, "main"])
+    writeFileSync(join(w.work, "work.txt"), `${branch}\n`)
+    await w.git(["add", "work.txt"])
+    await w.git(["commit", "--quiet", "-m", `${branch} work`])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", { branch, submitter: "fixture", target: { remote: "origin", branch: "main" } })
+    const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue({
+      complete: true,
+      unreadable: [],
+      mechanism: "proc",
+      rows: [],
+    })
+    try {
+      const stop = new AbortController()
+      const io = capture(w.work)
+      io.io.localBranchProtections = async () => ({ protections: [], evidence: [] })
+      io.io.liveEnvironmentUse = async () => []
+      expect(
+        await queueCommand(
+          w.work,
+          io.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async (outcome) => {
+              if (outcome.merged.length === 0) return
+              await vi.waitFor(() => expect(existsSync(asked), "the round's sweep asked the judge").toBe(true), {
+                timeout: 60_000,
+                interval: 100,
+              })
+              stop.abort()
+            },
+          },
+          { json: true, workdir },
+        ),
+        io.stderr(),
+      ).toBe(0)
+      const request = JSON.parse(readFileSync(asked, "utf8")) as {
+        version: number
+        roots: string[]
+        candidates: { path: string; kind: string }[]
+      }
+      expect(request.version).toBe(1)
+      expect(request.roots).toEqual([join(workdir, "logs"), join(workdir, "checks")])
+      expect(request.candidates).toContainEqual({ path: expired, kind: "removal" })
+      expect(existsSync(expired), "the held directory survives the round").toBe(true)
+    } finally {
+      census.mockRestore()
+    }
+  }, 120_000)
+
+  /**
    * @failure An external declared use has no process cwd holder between
    *          commands, so automatic cleanup destroys its environment.
    * @level l2
