@@ -73,6 +73,8 @@ export type Worktree = Readonly<{
    * tree it builds carries an empty list.
    */
   excludedSubmodules: readonly string[]
+  /** Count reported by Git-super after the requested directories were kept absent. */
+  omittedTrackedFiles?: number
   /** Remove the worktree and everything under it. */
   remove(): Promise<void>
 }>
@@ -85,6 +87,7 @@ export type FreshWorktree = Readonly<{
    * (29560); git-super's merge refuses an exclusion whose pin differs at HEAD, the target or their one merge base.
    */
   excludedSubmodules?: readonly string[]
+  omitCheckoutDirectories?: readonly string[]
   /**
    * Whether this repository is the queue's OWN clone, and may therefore be
    * given the stores it lends.
@@ -132,6 +135,8 @@ export async function freshWorktree(
   // An invalid commit makes ls-tree fail; only empty output means absence.
   const modules = await git(["ls-tree", commit, "--", ".gitmodules"])
   const excluded: readonly string[] = [...new Set(options.excludedSubmodules ?? [])].sort()
+  const omissions = options.omitCheckoutDirectories ?? []
+  let omittedTrackedFiles: number | undefined
   if (excluded.length > 0) {
     // Only a declared submodule can be left out; any other path is the caller's error, never dropped (@cto 7015ba5e).
     const declared = await declaredSubmodules(git, commit)
@@ -146,7 +151,7 @@ export async function freshWorktree(
       )
     }
   }
-  if (modules.trim() === "") {
+  if (modules.trim() === "" && omissions.length === 0) {
     // A commit that declares no submodules has no boundary for git-super to
     // cross. `worktreeWithoutSubmodules` re-asks that question rather than
     // trusting this branch, so a refactor that moves the call cannot silently
@@ -207,6 +212,7 @@ export async function freshWorktree(
         "--reference",
         repo,
         ...excluded.flatMap((excludedPath) => ["--exclude-submodule", excludedPath]),
+        ...omissions.flatMap((directory) => ["--omit-checkout-directory", directory]),
       ])
     } catch (error) {
       const said = error instanceof Error ? error.message : String(error)
@@ -235,10 +241,18 @@ export async function freshWorktree(
         { cause: error },
       )
     }
-    if (!materializedWorktree(result, resolve(repo, path), commit)) {
+    if (!materializedWorktree(result, resolve(repo, path), commit, modules.trim() !== "")) {
       throw new Error(
         `malformed git-super result for worktree ${path} at ${commit}: no complete matching materialization; inspect git worktree list before retrying`,
       )
+    }
+    if (omissions.length > 0) {
+      const count = (result as { omittedTrackedFiles?: unknown }).omittedTrackedFiles
+      if (typeof count !== "number" || !Number.isSafeInteger(count) || count <= 0) {
+        await removeWorktree(git, path, repo, options)
+        throw new Error(`git-super returned no verified omitted file count for ${path} at ${commit}`)
+      }
+      omittedTrackedFiles = count
     }
     // A COMPOSE THAT SUCCEEDED IS NOT THE SAME AS A COMPOSE THAT BORROWED. With
     // the reference populated every gitlink should come off local disk, so a
@@ -265,6 +279,7 @@ export async function freshWorktree(
   return {
     commit,
     excludedSubmodules: excluded,
+    ...(omittedTrackedFiles === undefined ? {} : { omittedTrackedFiles }),
     path,
     remove: async () => {
       await removeWorktree(git, path, repo, options)
@@ -345,6 +360,7 @@ export type PrepareWorktree = Readonly<{
   gitOptions?: GitInvocationOptions
   /** The target every base is measured against: `YRD_BASE_SHA` is the merge base of it and the worktree's HEAD. */
   targetSha: string
+  omitCheckoutDirectories?: readonly string[]
   /** Whether `repo` is the queue's own clone; see {@link FreshWorktree.populateReference}. */
   populateReference?: boolean
   /** Run once in the fresh worktree, after materialization and before any check. Absent, nothing runs. */
@@ -586,6 +602,9 @@ export async function prepareWorktree(
   const worktree = await freshWorktree(git, repo, commit, path, {
     ...(options.populateReference === undefined ? {} : { populateReference: options.populateReference }),
     ...(options.env === undefined ? {} : { env: options.env }),
+    ...(options.omitCheckoutDirectories === undefined
+      ? {}
+      : { omitCheckoutDirectories: options.omitCheckoutDirectories }),
     ...(options.gitOptions === undefined ? {} : { gitOptions: options.gitOptions }),
     ...(options.plumbing === undefined ? {} : { plumbing: options.plumbing }),
     ...(options.process === undefined ? {} : { process: options.process }),
@@ -610,6 +629,15 @@ export async function prepareWorktree(
         starting: options.starting,
         tree,
       })
+      for (const directory of options.omitCheckoutDirectories ?? []) {
+        try {
+          lstatSync(join(worktree.path, directory))
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
+          throw error
+        }
+        throw new Error(`setup repopulated omitted checkout directory ${JSON.stringify(directory)} at ${commit}`)
+      }
     }
     return prepared
   } catch (error) {
@@ -795,7 +823,7 @@ function degradedGitlinks(
 }
 
 /** Validate the external command's success claim before admitting its tree. */
-function materializedWorktree(value: unknown, path: string, commit: string): boolean {
+function materializedWorktree(value: unknown, path: string, commit: string, gitmodules: boolean): boolean {
   if (typeof value !== "object" || value === null) return false
   const result = value as Record<string, unknown>
   if (
@@ -804,7 +832,7 @@ function materializedWorktree(value: unknown, path: string, commit: string): boo
     result.path !== path ||
     result.requested !== commit ||
     result.commit !== commit ||
-    result.gitmodules !== true
+    result.gitmodules !== gitmodules
   ) {
     return false
   }
