@@ -52,6 +52,8 @@ A check's environment is built, not inherited. It gets:
 
 `programRoot: true` gives a check the queue branch's own program as well as the fresh checkout. The check names `$YRD_PROGRAM_ROOT` in its command, and the queue sets it last, so no passed-through value can replace it. Without `programRoot`, a check gets no `YRD_PROGRAM_ROOT`; the name is reserved either way. This limits what the queue supplies, not what an arbitrary shell command can read.
 
+`omitCheckoutDirectories` is an optional list of literal repository-relative directories that both setup and the named check can run without. A fresh manual `yrd check` checkout omits a directory only when every selected check declares that same directory. Omit the field or give an empty list for a full checkout. Program-root checks and queue runs use full checkouts. Each declared directory must resolve at the candidate commit, and setup must leave omitted directories absent. The check receipt records the checkout mode, omitted paths, omitted tracked-file count, and measured allocation.
+
 ## Admission
 
 `admission` runs at submit time, before anything is pushed, in a clean checkout of the queue branch. It runs the queue branch's copy even if the submitted branch edits the script, and it runs without `setup:`.

@@ -226,6 +226,59 @@ describe("yrd check judges HEAD, never the invoking tree", () => {
   })
 })
 
+it("materializes the shared allowance of the selected checks and refuses a missing directory at HEAD", async () => {
+  const w = await world(
+    true,
+    [
+      'setup: "test -f retained.txt"',
+      "checks:",
+      "  - eligible:",
+      '      run: "test -f retained.txt"',
+      "      omitCheckoutDirectories: [generated]",
+      "  - needs-full:",
+      '      run: "test -f generated/data.txt"',
+    ].join("\n") + "\n",
+  )
+  mkdirSync(join(w.work, "generated"))
+  writeFileSync(join(w.work, "generated/data.txt"), "omittable\n")
+  writeFileSync(join(w.work, "retained.txt"), "retained\n")
+  await w.git(["add", "generated", "retained.txt"])
+  await w.git(["commit", "--quiet", "-m", "candidate adds the generated directory"])
+
+  const run = async (names: readonly string[]) => {
+    const output = capture(w.work)
+    const exit = await coreQueueCommand(
+      w.work,
+      output.io,
+      { command: "check", names },
+      { workdir: w.workdir, json: true },
+    )
+    expect(exit).toBe(0)
+    return JSON.parse(output.stdout()) as { materializations: Array<{ path: string }> }
+  }
+  const sparse = await run(["eligible"])
+  expect(sparse.materializations).toMatchObject([
+    { mode: "sparse", omittedPaths: ["generated"], omittedTrackedFiles: 1, allocatedBytes: expect.any(Number) },
+  ])
+  const full = await run(["eligible", "needs-full"])
+  expect(full.materializations).toMatchObject([
+    { mode: "full", omittedPaths: [], omittedTrackedFiles: 0, allocatedBytes: expect.any(Number) },
+  ])
+  for (const { path } of [...sparse.materializations, ...full.materializations]) expect(existsSync(path)).toBe(false)
+
+  await w.git(["mv", "generated", "renamed"])
+  await w.git(["commit", "--quiet", "-m", "candidate renames the generated directory"])
+  const head = (await w.git(["rev-parse", "HEAD"])).trim()
+  await expect(
+    coreQueueCommand(
+      w.work,
+      capture(w.work).io,
+      { command: "check", names: ["eligible", "needs-full"] },
+      { workdir: w.workdir, json: true },
+    ),
+  ).rejects.toThrow(`eligible: omitCheckoutDirectories path "generated" not a directory in tree at ${head}`)
+})
+
 /**
  * @failure An opted-in check refused without P, or could judge candidate code / publish its subject.
  * @level l2: the actual command caller, real Git and shell children in the existing isolated world.

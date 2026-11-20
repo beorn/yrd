@@ -15,6 +15,7 @@
 
 import { shellQuote } from "git-super/shell-command"
 import { inspectCheckoutGitMetadata } from "git-super"
+import { readCommitPath } from "git-super/commit-graph"
 import {
   existsSync,
   appendFileSync,
@@ -38,7 +39,7 @@ import { issueComparer, samenessDetail } from "./issue-sameness.ts"
 import { formatYrdCommand } from "./command-format.ts"
 import { createPostMerge, readPostMergeIssueDiagnostics } from "./post-merge.ts"
 import { repositoryHere } from "./declaration.ts"
-import { createEnvironmentCleanup, type ClosedEnvironment } from "./env-cleanup.ts"
+import { createEnvironmentCleanup, environmentBytes, type ClosedEnvironment } from "./env-cleanup.ts"
 import { ENV_CLOSE_QUEUED_EXIT, environmentInventory } from "./env-commands.ts"
 import { processTerminate, type TerminatePort } from "./terminate.ts"
 import {
@@ -5344,9 +5345,74 @@ export async function coreQueueCommand(
         onInvocation: journal.writeGitInvocation,
       }
       const checkGit = gitIn(repo, undefined, selection, gitOptions)
+      const materializations: Array<{
+        path: string
+        mode: "full" | "sparse"
+        omittedPaths: readonly string[]
+        omittedTrackedFiles: number
+        allocatedBytes: number | "unknown"
+        allocationFailure?: string
+        role?: "program" | "subject"
+      }> = []
+      let plannedOmissions: readonly string[] | undefined
+      const recordMaterialization = async (
+        path: string,
+        omittedPaths: readonly string[],
+        omittedTrackedFiles: number,
+        role?: "program" | "subject",
+      ): Promise<void> => {
+        const started = Date.now()
+        let allocationFailure: string | undefined
+        const allocatedBytes = await environmentBytes(path, (reason) => {
+          allocationFailure = reason
+        })
+        const receipt = {
+          path,
+          mode: omittedPaths.length === 0 ? ("full" as const) : ("sparse" as const),
+          omittedPaths,
+          omittedTrackedFiles,
+          allocatedBytes,
+          ...(allocationFailure === undefined ? {} : { allocationFailure }),
+          ...(role === undefined ? {} : { role }),
+        }
+        materializations.push(receipt)
+        journal.write({ kind: "step", name: "check materialization", head, ms: Date.now() - started, ...receipt })
+      }
       try {
         const tree = await checkedTree(repo, captured.oid, undefined, selection, gitOptions)
         if (tree.candidate !== head) throw new Error(`check subject moved: expected ${head}, read ${tree.candidate}`)
+        const pathGit = {
+          run: async (request: { repo: string; args: readonly string[] }) => ({
+            code: 0,
+            stdout: await checkGit.at(request.repo)(request.args),
+            stderr: "",
+          }),
+        }
+        const declaredDirectories = new Set<string>()
+        for (const spec of specs) {
+          if (spec.programRoot === true) continue
+          for (const directory of spec.omitCheckoutDirectories ?? []) {
+            if (declaredDirectories.has(directory)) continue
+            const entry = await readCommitPath(pathGit, repo, head, directory).catch((error: unknown) => {
+              throw new Error(
+                `${spec.name}: omitCheckoutDirectories cannot read path ${JSON.stringify(directory)} at ${head}: ${error instanceof Error ? error.message : String(error)}`,
+                { cause: error },
+              )
+            })
+            if (entry?.type !== "tree") {
+              throw new Error(
+                `${spec.name}: omitCheckoutDirectories path ${JSON.stringify(directory)} not a directory in tree at ${head}`,
+              )
+            }
+            declaredDirectories.add(directory)
+          }
+        }
+        const omissions = [...declaredDirectories]
+          .filter((directory) =>
+            specs.every((spec) => spec.programRoot !== true && spec.omitCheckoutDirectories?.includes(directory)),
+          )
+          .sort()
+        plannedOmissions = omissions
         const branch = (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
         const logDir = join(workdir, "checks", changeName({ branch, head }), run, "check")
         // The worktrees root of this run, claimed before anything is made in it:
@@ -5382,19 +5448,24 @@ export async function coreQueueCommand(
                 populateReference: options.populateReference,
                 plumbing: options.log?.child("worktree"),
                 setup: config.setup,
+                observeWorktree: (path, role) => recordMaterialization(path, [], 0, role),
               })
             } else {
               // Legacy checks keep their existing shared HEAD tree and shell semantics.
               // An opted-in-only invocation must not prepare an unused third root.
-              prepared ??= await prepareWorktree(checkGit, repo, head, join(worktrees, "check", head.slice(0, 12)), {
-                env: options.env,
-                populateReference: options.populateReference,
-                selection,
-                gitOptions,
-                plumbing: options.log?.child("worktree"),
-                targetSha: captured.oid,
-                ...(config.setup === undefined ? {} : { setup: { logDir, run: config.setup, tmpdir: tempRoot } }),
-              })
+              if (prepared === undefined) {
+                prepared = await prepareWorktree(checkGit, repo, head, join(worktrees, "check", head.slice(0, 12)), {
+                  env: options.env,
+                  populateReference: options.populateReference,
+                  selection,
+                  gitOptions,
+                  plumbing: options.log?.child("worktree"),
+                  targetSha: captured.oid,
+                  ...(omissions.length === 0 ? {} : { omitCheckoutDirectories: omissions }),
+                  ...(config.setup === undefined ? {} : { setup: { logDir, run: config.setup, tmpdir: tempRoot } }),
+                })
+                await recordMaterialization(prepared.path, omissions, prepared.omittedTrackedFiles ?? 0)
+              }
               result = await runCheck({
                 cwd: prepared.path,
                 env: options.env,
@@ -5432,15 +5503,31 @@ export async function coreQueueCommand(
             checks: results,
             command: "check",
             head,
+            materializations,
             ...(dirty === "" ? {} : { uncommitted: dirty.split("\n").length }),
           },
-          `${results.map((result) => `${result.name} ${result.result} exit=${String(result.exit)} ${String(result.durationMs)} ms (log ${result.log})${result.why === undefined ? "" : `: ${result.why}`}`).join("\n")}${unjudged}`,
+          `${results.map((result) => `${result.name} ${result.result} exit=${String(result.exit)} ${String(result.durationMs)} ms (log ${result.log})${result.why === undefined ? "" : `: ${result.why}`}`).join("\n")}${unjudged}${materializations.map(({ mode, omittedTrackedFiles, allocatedBytes, allocationFailure, role, omittedPaths }) => `\ncheckout${role === undefined ? "" : ` ${role}`} ${mode}, ${omittedTrackedFiles} omitted tracked files, ${allocatedBytes} allocated bytes${omittedPaths.length === 0 ? "" : ` (${omittedPaths.join(", ")})`}${allocationFailure === undefined ? "" : ` (${allocationFailure})`}`).join("")}`,
         )
         return results.some((result) => result.result === "stuck")
           ? 2
           : results.some((result) => result.result === "fail")
             ? 1
             : 0
+      } catch (error) {
+        journal.write({
+          kind: "warning",
+          head,
+          name: "check",
+          reason: error instanceof Error ? error.message : String(error),
+          ...(materializations.length === 0 && plannedOmissions !== undefined
+            ? {
+                mode: plannedOmissions.length === 0 ? "full" : "sparse",
+                requestedOmissions: plannedOmissions,
+                allocatedBytes: "unknown",
+              }
+            : {}),
+        })
+        throw error
       } finally {
         // A sweep that cannot run must not replace the check's verdict, so it is reported, never thrown and never
         // swallowed: the refs it could not list stay behind until the next check's opening sweep (27258 AC2).
