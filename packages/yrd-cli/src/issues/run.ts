@@ -40,12 +40,19 @@ export type IssuesFailure = Readonly<{ ok: false; exitCode: 1 | 2; code: IssuesC
 
 export type IssuesOutcome = Readonly<{ ok: true; envelope: IssuesEnvelope }> | IssuesFailure
 
+type IssuesRequester = Readonly<{ authority: string; subject: string }>
+type IssuesAssignmentAudit = Readonly<{ expectedOwner?: string | null; requestedBy?: IssuesRequester }>
+
 export type RunIssuesVerbOptions = Readonly<{
   verb: string
   /** The verb's positional operands, in {@link ISSUES_VERBS} order. */
   args: readonly string[]
   /** The replay key; required by every write verb. */
   id?: string
+  /** Owner observed by the assign caller. Explicit null means no owner was present. */
+  expectedOwner?: IssuesAssignmentAudit["expectedOwner"]
+  /** Provider-neutral requester audit data. The provider validates its own authority policy. */
+  requestedBy?: IssuesAssignmentAudit["requestedBy"]
   /** The project root; absent, the toplevel of `cwd`'s repository. */
   projectRoot?: string
   /** Read this exact ancestor of main; automatic effects use their delivered merge commit. */
@@ -76,6 +83,51 @@ function fail(exitCode: 1 | 2, code: IssuesCode, subject: string, detail: string
 
 function commandText(argv: readonly string[]): string {
   return argv.map((word) => (word === "" || /[\s"'`$\\]/u.test(word) ? JSON.stringify(word) : word)).join(" ")
+}
+
+function isExpectedOwner(value: unknown): value is string | null {
+  return value === null || typeof value === "string"
+}
+
+function isIssuesRequester(value: unknown): value is IssuesRequester {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false
+  const identity = value as Record<string, unknown>
+  return (
+    Object.keys(identity).length === 2 &&
+    Object.hasOwn(identity, "authority") &&
+    typeof identity.authority === "string" &&
+    identity.authority.length > 0 &&
+    Object.hasOwn(identity, "subject") &&
+    typeof identity.subject === "string" &&
+    identity.subject.length > 0
+  )
+}
+
+const EXPECTED_OWNER_JSON = "--expected-owner requires a JSON string or null"
+const REQUESTED_BY_JSON = "--requested-by requires a JSON object with authority and subject strings"
+
+function parseAssignJson(text: string, error: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch (cause) {
+    throw new TypeError(error, { cause })
+  }
+}
+
+/** Decode Commander operands into the same typed options used by library callers. */
+export function parseIssuesAssignmentAudit(
+  expectedOwnerJson?: string,
+  requestedByJson?: string,
+): IssuesAssignmentAudit {
+  const expectedOwner =
+    expectedOwnerJson === undefined ? undefined : parseAssignJson(expectedOwnerJson, EXPECTED_OWNER_JSON)
+  const requestedBy = requestedByJson === undefined ? undefined : parseAssignJson(requestedByJson, REQUESTED_BY_JSON)
+  if (expectedOwner !== undefined && !isExpectedOwner(expectedOwner)) throw new TypeError(EXPECTED_OWNER_JSON)
+  if (requestedBy !== undefined && !isIssuesRequester(requestedBy)) throw new TypeError(REQUESTED_BY_JSON)
+  return {
+    ...(expectedOwner === undefined ? {} : { expectedOwner }),
+    ...(requestedBy === undefined ? {} : { requestedBy }),
+  }
 }
 
 /** Validate the request before any git read: a malformed call is exit 2 whatever the declaration says. */
@@ -114,6 +166,18 @@ function checkRequest(
       `event ${JSON.stringify(values.kind)}`,
       `kind must be ${ISSUES_EVENT_KINDS.join(", ")}`,
     )
+  }
+  const { expectedOwner, requestedBy } = options
+  if ((expectedOwner !== undefined || requestedBy !== undefined) && verb !== "assign") {
+    return fail(2, ISSUES_CODES.badArguments, verb, "--expected-owner and --requested-by apply only to assign")
+  }
+  if (expectedOwner !== undefined) {
+    if (!isExpectedOwner(expectedOwner)) return fail(2, ISSUES_CODES.badArguments, verb, EXPECTED_OWNER_JSON)
+    values["expected-owner"] = JSON.stringify(expectedOwner)
+  }
+  if (requestedBy !== undefined) {
+    if (!isIssuesRequester(requestedBy)) return fail(2, ISSUES_CODES.badArguments, verb, REQUESTED_BY_JSON)
+    values.requester = JSON.stringify({ authority: requestedBy.authority, subject: requestedBy.subject })
   }
   if (options.targetCommit !== undefined && options.declarationCommit === undefined) {
     return fail(2, ISSUES_CODES.badArguments, verb, "targetCommit is the ancestry tip for declarationCommit; pass both")
@@ -285,6 +349,23 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
   }
   if (declared === undefined) {
     return fail(1, ISSUES_CODES.unsupported, verb, `${verb} is not declared in ${where} (unsupported)`)
+  }
+
+  if (verb === "assign") {
+    for (const [key, flag] of [
+      ["expected-owner", "--expected-owner"],
+      ["requester", "--requested-by"],
+    ] as const) {
+      const token = `<${key}>`
+      const advertised = declared.includes(token)
+      const supplied = request.values[key] !== undefined
+      if (advertised && !supplied) {
+        return fail(2, ISSUES_CODES.badArguments, verb, `${where} declares ${token}; provide ${flag}`)
+      }
+      if (!advertised && supplied) {
+        return fail(1, ISSUES_CODES.unsupported, verb, `${where} does not declare ${token} for ${flag}`)
+      }
+    }
   }
 
   const argv = substituteArgv(declared, request.values)
