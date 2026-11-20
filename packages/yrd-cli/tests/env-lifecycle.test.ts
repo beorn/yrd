@@ -3209,6 +3209,8 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       const json = capture(w.work)
       expect(await publicCli.listEnvironments({ json: true }, json.io), json.stderr()).toBe(0)
       const inventory = JSON.parse(json.stdout()) as { environments: publicCli.EnvRow[] }
+      // The producer owns the transport shape: host policy must retain its exact opening binding.
+      expect(publicCli.parseEnvironmentList(json.stdout())).toEqual(inventory.environments)
       expect(inventory.environments).toHaveLength(1)
       const actual = inventory.environments[0]!
       expect(actual).toMatchObject({ path, issueBinding: row.binding })
