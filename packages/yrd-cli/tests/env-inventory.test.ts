@@ -4,16 +4,29 @@
  * @consumer host cleanup, worktree pool and post-close inventory readers
  * @testonly none
  */
-import { expect, it, vi } from "vitest"
+import { expect, it } from "vitest"
+import { fileURLToPath } from "node:url"
+import { createProcess } from "@yrd/process"
 
 it("imports the public environment reader without starting a process", async () => {
-  using spawn = vi.spyOn(Bun, "spawn").mockImplementation(() => {
-    throw new Error("unexpected process on data import")
+  // Import in a fresh production runtime, so a previously loaded CLI or the test runner's module cache cannot
+  // supply the result. Only process creation inside that data import is counted.
+  await using process = createProcess({ cwd: fileURLToPath(new URL("..", import.meta.url)) })
+  const result = await process.run({
+    argv: [
+      globalThis.process.execPath,
+      "-e",
+      `
+      let starts = 0;
+      const refuse = () => { starts++; throw new Error("unexpected process on data import"); };
+      Bun.spawn = refuse;
+      Bun.spawnSync = refuse;
+      await import("@yrd/cli/environments");
+      console.log(JSON.stringify({ starts }));
+    `,
+    ],
+    timeoutMs: 10_000,
   })
-  using spawnSync = vi.spyOn(Bun, "spawnSync").mockImplementation(() => {
-    throw new Error("unexpected sync process on data import")
-  })
-  await import("@yrd/cli/environments")
-  expect(spawn).not.toHaveBeenCalled()
-  expect(spawnSync).not.toHaveBeenCalled()
+  expect(result.exitCode, result.stderr).toBe(0)
+  expect(JSON.parse(result.stdout)).toEqual({ starts: 0 })
 })

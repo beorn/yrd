@@ -1,12 +1,7 @@
 export { runYrdExecutable, runYrdProcess, resolveSubmitter } from "./cli.ts"
 export { coreQueueCommand, type CoreQueueCommand } from "./queue-core-commands.ts"
-export {
-  listEnvironments,
-  openEnvironment,
-  parseEnvironmentList,
-  type EnvRow,
-  type EnvIssueBinding,
-} from "./env-commands.ts"
+export { listEnvironments, openEnvironment } from "./env-commands.ts"
+export { parseEnvironmentList, type EnvRow, type EnvIssueBinding } from "./env-inventory.ts"
 export type { EnvLifetime } from "./env-open-record.ts"
 import {
   closeEnvironment as closeEnvironmentInternal,

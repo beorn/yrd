@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./environments": "./src/env-inventory.ts"
   },
   "dependencies": {
     "@bearly/durable-file": "0.1.0",
