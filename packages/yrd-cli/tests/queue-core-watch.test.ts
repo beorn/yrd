@@ -82,7 +82,8 @@ const rendered: {
   snapshot: undefined,
 }))
 vi.mock("node:fs", async (original) => ({ ...(await original<typeof import("node:fs")>()) }))
-vi.mock("silvery/runtime", () => ({
+vi.mock("silvery/runtime", async (original) => ({
+  ...(await original<typeof import("silvery/runtime")>()),
   run: async (element: Readonly<{ props: PaneProps }>) => {
     rendered.sources = element.props.sources
     rendered.snapshot = element.props.snapshot
