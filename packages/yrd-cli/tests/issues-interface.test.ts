@@ -100,6 +100,34 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
 const ALL_READS = { view: provider("json", "<key>"), list: provider("json") }
 
 describe("yrd issues", () => {
+  // @failure Guarded assign drops an expected owner/requester or launches a provider lacking the declared capability.
+  // @level l2 @consumer 35144 Hightea source assignment; existing write tests only carry the replay id.
+  it("forwards guarded assign operands only to a provider declaring both placeholders", async () => {
+    const root = project({
+      "issues.yml": declare({ assign: provider("json", "<key>", "<seat>", "<expected-owner>", "<requester>", "<id>") }),
+    })
+    const requester = JSON.stringify({ authority: "hightea:workspace-a", subject: "member-a" })
+    const args = ["issues", "assign", "key", "@dev/4", "--id", "intent"]
+    for (const expectedOwner of ["null", JSON.stringify("@dev/3")]) {
+      const ran = await yrd(root, ...args, "--expected-owner", expectedOwner, "--requested-by", requester)
+      expect(ran.exitCode, ran.stderr).toBe(0)
+      expect(envelopeOf(ran).result).toEqual({ argv: ["key", "@dev/4", expectedOwner, requester, "intent"] })
+    }
+    const missing = await yrd(root, ...args)
+    expect(missing.exitCode).toBe(2)
+    expect(missing.stderr).toContain("<expected-owner>")
+    const malformed = await yrd(root, ...args, "--expected-owner", "false", "--requested-by", requester)
+    expect(malformed.exitCode).toBe(2)
+    expect(malformed.stderr).toContain("--expected-owner")
+    const legacy = project({ "issues.yml": declare({ assign: provider("json", "<key>", "<seat>", "<id>") }) })
+    const unused = await yrd(legacy, ...args, "--expected-owner", "null")
+    expect(unused.exitCode).toBe(1)
+    expect(unused.stderr).toContain("yrd-issues-verb-unsupported")
+    const unguarded = await yrd(legacy, ...args)
+    expect(unguarded.exitCode, unguarded.stderr).toBe(0)
+    expect(envelopeOf(unguarded).result).toEqual({ argv: ["key", "@dev/4", "intent"] })
+  })
+
   // CTO 6ef56c77: the provider owns key grammar; both input and returned identities stay opaque here.
   it("resolve preserves the raw operand and opaque provider keys without a replay id", async () => {
     const raw = " -one.md, two / 三\nnext "
