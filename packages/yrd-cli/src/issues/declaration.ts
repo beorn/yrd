@@ -38,6 +38,7 @@ export const ISSUES_VERBS = {
   // One item event on the issue a change names (@cto 721b42d7, #31194): <raw> is the change's issue value exactly as
   // Yrd holds it, resolved by the provider; <source> is `<repository>@<sha>`; <text> is the same on every replay.
   event: ["raw", "kind", "source", "text"],
+  "list-page": ["page"],
 } as const satisfies Record<string, readonly string[]>
 
 export type IssuesVerb = keyof typeof ISSUES_VERBS
@@ -132,6 +133,9 @@ export function parseIssuesDeclaration(text: string, where: string): IssuesDecla
     }
     if (ISSUES_WRITE_VERBS.has(key) && !argv.includes("<id>")) {
       throw refuse(`write verb ${key} lacks <id>; add <id> where the provider takes its replay key`)
+    }
+    if (key === "list-page" && !argv.includes("<page>")) {
+      throw refuse("list-page lacks <page>; add <page> where the provider takes its finite page request")
     }
     declaration[key] = argv
   }

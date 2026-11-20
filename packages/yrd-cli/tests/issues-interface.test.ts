@@ -100,6 +100,37 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
 const ALL_READS = { view: provider("json", "<key>"), list: provider("json") }
 
 describe("yrd issues", () => {
+  // @failure A page request is silently replaced by the flat list or dropped by the declaration.
+  // @level l2 @consumer 35144 finite provider paging; existing flat list accepts no operands.
+  it("runs one finite page through a declared read while preserving the flat list", async () => {
+    const request = JSON.stringify({
+      binding: "workspace-a/native",
+      population: "all-beads",
+      generation: "first",
+      limit: 2,
+    })
+    const root = project({
+      "issues.yml": declare({ ...ALL_READS, "list-page": provider("json", "<page>") }),
+    })
+    const page = await yrd(root, "issues", "list-page", request)
+    expect(page.exitCode, page.stderr).toBe(0)
+    expect(envelopeOf(page)).toMatchObject({ verb: "list-page", result: { argv: [request] } })
+    const flat = await yrd(root, "issues", "list")
+    expect(flat.exitCode, flat.stderr).toBe(0)
+    expect(envelopeOf(flat)).toMatchObject({ verb: "list", result: { argv: [] } })
+    const legacy = project({ "issues.yml": declare(ALL_READS) })
+    const unsupported = await yrd(legacy, "issues", "list-page", request)
+    expect(unsupported.exitCode).toBe(1)
+    expect(unsupported.stderr).toContain("yrd-issues-verb-unsupported")
+    const invalid = await yrd(root, "issues", "list-page", "[]")
+    expect(invalid.exitCode).toBe(2)
+    expect(invalid.stderr).toContain("<page>")
+    const missingOperand = project({ "issues.yml": declare({ "list-page": provider("json") }) })
+    const missing = await yrd(missingOperand, "issues", "list-page", request)
+    expect(missing.exitCode).toBe(1)
+    expect(missing.stderr).toContain("lacks <page>")
+  })
+
   // @failure Guarded assign drops an expected owner/requester or launches a provider lacking the declared capability.
   // @level l2 @consumer 35144 Hightea source assignment; existing write tests only carry the replay id.
   it("forwards guarded assign operands only to a provider declaring both placeholders", async () => {

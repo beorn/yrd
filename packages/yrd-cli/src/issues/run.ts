@@ -151,6 +151,18 @@ function checkRequest(
   operands.forEach((name, index) => {
     values[name] = options.args[index] as string
   })
+  if (verb === "list-page") {
+    const detail = "<page> must be a JSON object describing a finite page request"
+    let page: unknown
+    try {
+      page = JSON.parse(values.page as string)
+    } catch {
+      return fail(2, ISSUES_CODES.badArguments, verb, detail)
+    }
+    if (page === null || typeof page !== "object" || Array.isArray(page)) {
+      return fail(2, ISSUES_CODES.badArguments, verb, detail)
+    }
+  }
   if (verb === "close" && !(ISSUES_CLOSE_REASONS as readonly string[]).includes(values.reason as string)) {
     return fail(
       2,
