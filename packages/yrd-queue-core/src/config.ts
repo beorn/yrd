@@ -485,7 +485,7 @@ function readChecks(value: unknown): readonly CheckSpec[] {
     value,
     "checks",
     ["submit", "merge"],
-    ["timeoutMs", "environmentPassthrough", "scripts", "programRoot", "long"],
+    ["timeoutMs", "environmentPassthrough", "scripts", "programRoot", "long", "omitCheckoutDirectories"],
   ).map((entry, index) => {
     const { body, name } = entry
     const where = `.yrd.yml checks[${index}] ${name}`
@@ -511,6 +511,15 @@ function readChecks(value: unknown): readonly CheckSpec[] {
     if (programRoot !== undefined && programRoot !== true) {
       throw new Error(`${where}: programRoot: must be true when present`)
     }
+    const omitCheckoutDirectories = body.omitCheckoutDirectories
+    if (
+      omitCheckoutDirectories !== undefined &&
+      (!Array.isArray(omitCheckoutDirectories) || !omitCheckoutDirectories.every(isLiteralCheckoutDirectory))
+    ) {
+      throw new Error(
+        `${where}: omitCheckoutDirectories: must be a list of literal normalized repository-relative directories`,
+      )
+    }
     const long = body.long
     if (long !== undefined) {
       if (!isRecord(long)) {
@@ -526,12 +535,22 @@ function readChecks(value: unknown): readonly CheckSpec[] {
       ...(long === undefined ? {} : { long: { timeoutMs: long.timeoutMs as number } }),
       name,
       on: entry.on as readonly ("submit" | "merge")[] | undefined,
+      ...(omitCheckoutDirectories === undefined ? {} : { omitCheckoutDirectories }),
       ...(programRoot === true ? { programRoot: true as const } : {}),
       run: entry.run,
       scripts: scripts as readonly string[] | undefined,
       timeoutMs,
     }
   })
+}
+
+function isLiteralCheckoutDirectory(path: unknown): path is string {
+  return (
+    typeof path === "string" &&
+    !/[\u0000-\u001f\\*?\[\]]/u.test(path) &&
+    !/^[a-z]:/iu.test(path) &&
+    path.split("/").every((part) => part !== "" && part !== "." && part !== "..")
+  )
 }
 
 // Ruling A6's set, plus environment setup/teardown: every key here has a
