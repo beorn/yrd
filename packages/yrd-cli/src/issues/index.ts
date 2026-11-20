@@ -12,6 +12,7 @@ export {
   type IssuesDeclaration,
   type IssuesVerb,
 } from "./declaration.ts"
+export { branchIssueId } from "./branch-issue.ts"
 export {
   runIssuesVerb,
   type IssuesEnvelope,

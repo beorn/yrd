@@ -64,6 +64,8 @@ export type QueueLsResult = Readonly<{
   totalCount: number
 }>
 
+import { branchIssueId } from "./issues/branch-issue.ts"
+
 /**
  * Extract an issue number or leaf identifier from a change's issue reference,
  * branch name, or commit subject.
@@ -72,14 +74,13 @@ export function extractIssueNumber(row: Row): string | undefined {
   if (row.issue !== undefined && row.issue.trim() !== "") {
     const raw = row.issue.trim()
     const leaf = raw.split("/").at(-1) ?? raw
-    const numMatch = leaf.match(/(?:^|[\/@#\-_])(\d{4,6})(?:[-/.]|$)/) ?? leaf.match(/^#?(\d+)(?:[-/.]|$)/)
-    if (numMatch !== null) return numMatch[1]
+    const numMatch = branchIssueId(raw.replace(/^#/u, "")) ?? leaf.match(/^#?(\d+)(?:[-/.]|$)/)?.[1]
+    if (numMatch !== undefined) return numMatch
     if (leaf !== "") return leaf
   }
   if (row.branch !== undefined) {
-    const leaf = row.branch.split("/").at(-1) ?? row.branch
-    const branchMatch = leaf.match(/(?:^|[\/@#\-_])(\d{4,6})(?:[-/.]|$)/) ?? leaf.match(/^#?(\d+)(?:[-/.]|$)/)
-    if (branchMatch !== null) return branchMatch[1]
+    const branchId = branchIssueId(row.branch)
+    if (branchId !== undefined) return branchId
   }
   if (row.subject !== undefined) {
     const subMatch = row.subject.match(/(?:#|\b)(\d{4,6})\b\)?$/)

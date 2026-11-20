@@ -37,6 +37,7 @@ export type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 export {
   ISSUES_CODES,
   ISSUES_VERB_NAMES,
+  branchIssueId,
   runIssuesVerb,
   type IssuesEnvelope,
   type IssuesFailure,

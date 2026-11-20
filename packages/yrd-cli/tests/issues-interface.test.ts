@@ -502,4 +502,22 @@ describe("yrd issues", () => {
       message: expect.stringContaining("no output for 300 ms after "),
     })
   })
+
+  it("maps branch names to issue ids across all 7 semantic disagreement and negative fixtures (#37174)", async () => {
+    const { branchIssueId } = await import("../src/issues/index.ts")
+    const { extractIssueNumber } = await import("../src/queue-ls.ts")
+    const fixtures = [
+      ["task/9000-work", "9000"],
+      ["task/29673-probe", "29673"],
+      ["task/dev6-26488-context", "26488"],
+      ["task/dev6-26488-main-merge-1004", "26488"],
+      ["task/dead12345beef-fix", undefined],
+      ["task/2026-11-19-fix", undefined],
+      ["task/main-merge-1004", undefined],
+    ] as const
+    for (const [branch, expected] of fixtures) {
+      expect(branchIssueId(branch), branch).toBe(expected)
+      expect(extractIssueNumber({ branch } as never), `extractIssueNumber(${branch})`).toBe(expected)
+    }
+  })
 })
