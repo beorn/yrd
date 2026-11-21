@@ -2910,7 +2910,9 @@ export async function advancedCure(
 
 /** What the owner's advanced drop records beside the head it keeps: the recorded commit, the ending it follows, the
  * count and the target. */
-export type AdvancedRecord = Readonly<{ recorded: string; ended: "cancelled" | "merged" } & Omit<AdvancedDrop, "tip">>
+export type AdvancedRecord = Readonly<
+  { recorded: string; ended: "cancelled" | "merged" | "failed" } & Omit<AdvancedDrop, "tip">
+>
 
 /** The advanced-drop check and ordinary drop receipts count against the same observed target. */
 export async function dropCommitCount(git: Git, head: string, target: string): Promise<number> {
@@ -2975,9 +2977,29 @@ export async function advancedDrop(
   const owners = retirementActors({ state, events, queue: input.queue })
   if (isOpen(state.status)) return { detail: "; change is still open; withdraw it before dropping its advanced tip" }
   // A merged change's branch that advanced with rejected work drops the same way as a cancelled one's (30999).
+  // 37360: a FAILED change is an ending too; it drops like a cancelled one, keeping both commits.
   const ended =
     (state.status === "cancelled" && state.ending?.kind === "cancelled") ||
-    (state.status === "merged" && state.ending?.kind === "merged")
+    (state.status === "merged" && state.ending?.kind === "merged") ||
+    (state.status === "failed" && state.ending?.kind === "failed")
+  if (state.status === "failed" && ended && !held) {
+    let descends: boolean
+    try {
+      descends = await isAncestor(git, recorded, input.head)
+    } catch (error) {
+      return {
+        detail: `; whether ${input.head} descends from ${recorded} is unknown (${error instanceof Error ? error.message : String(error)})`,
+      }
+    }
+    // 37360: only an advance past the failed tip is dropped here; a rewritten branch is a different change.
+    if (!descends) {
+      return {
+        detail:
+          `; ${input.head} does not descend from the recorded change tip ${recorded}, so this is not an advance past ` +
+          `its failed change: submit it as its own change, or name the tip the failure recorded`,
+      }
+    }
+  }
   if (held || !ended || (input.discard !== true && !owners.includes(input.by))) {
     return refusal()
   }
@@ -3000,7 +3022,7 @@ export async function advancedDrop(
   return {
     advanced: {
       recorded,
-      ended: state.status === "merged" ? "merged" : "cancelled",
+      ended: state.status === "merged" ? "merged" : state.status === "failed" ? "failed" : "cancelled",
       uniqueCommits,
       target: { ref: `refs/heads/${input.queue}`, tip: input.target },
     },

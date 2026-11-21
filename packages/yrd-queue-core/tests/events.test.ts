@@ -2729,6 +2729,22 @@ describe("the queue-format boundary", () => {
       ],
       { expect: null },
     )
+    if (ending === "failed") {
+      // @failure a caller bypassing the CLI drops a rewritten branch past a failed change (37360 F1, 30683 V1).
+      await git(["checkout", "--quiet", "--orphan", "rewritten"])
+      await git(["commit", "--allow-empty", "-m", "rewritten", "--quiet"])
+      const rewritten = (await git(["rev-parse", "HEAD"])).trim()
+      await expect(
+        drop(location, {
+          queue: "lab",
+          branch,
+          by: "@dev/2",
+          note: "superseded",
+          local: { tip: rewritten, advanced: { uniqueCommits: 1, target: { ref: "refs/heads/lab", tip: recorded } } },
+        }),
+      ).rejects.toThrow(/needs its recorded commit .* as an ancestor/)
+      expect(await chain.head()).toBe(before.head)
+    }
     const dropping = drop(location, {
       queue: "lab",
       branch,
@@ -2737,8 +2753,14 @@ describe("the queue-format boundary", () => {
       local: { tip: advanced, advanced: { uniqueCommits: 1, target: { ref: "refs/heads/lab", tip: recorded } } },
     })
     if (ending === "failed") {
-      await expect(dropping).rejects.toThrow(/advanced drop needs a cancelled or merged change/)
-      expect(await chain.head()).toBe(before.head)
+      // 37360: a failed ending is an ending; the dropped event keeps the recorded commit and the advanced tip.
+      const dropped = await dropping
+      expect(await chain.head()).not.toBe(before.head)
+      expect((await chain.events()).at(-1)).toMatchObject({
+        id: dropped.event,
+        type: "cancelled",
+        links: expect.arrayContaining([recorded, advanced]),
+      })
     } else {
       // The merge stays the ending; a retained event keeps the advanced tip and records the reason.
       const dropped = await dropping

@@ -53,7 +53,7 @@ export type LocalBranchRetirement = Readonly<{
         queue: string
         /** The owner's drop of a tip past `recorded`: a cancelled chain's dropped event keeps both and records what
          * the target lacks (30683); a merged chain's retained event keeps the tip, its merged ending `recorded` (30999). */
-        advanced?: Readonly<{ recorded: string; ended: "cancelled" | "merged" } & Omit<AdvancedDrop, "tip">>
+        advanced?: Readonly<{ recorded: string; ended: "cancelled" | "merged" | "failed" } & Omit<AdvancedDrop, "tip">>
       }>
     | Readonly<{
         kind: "landed"
