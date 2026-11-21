@@ -458,6 +458,19 @@ describe("a withheld environment is counted in the row, never a silent remaining
     expect(observation.withheldSample).toEqual(withheld.slice(0, 8))
   })
 
+  it("carries withheld from the round sweep into the row it writes", async () => {
+    const { workdir, logs } = tree("withheld-round")
+    // The removal makes the row worth writing; the young round keeps its old environment whole.
+    place(join(logs, round(ago(30))))
+    const env = join(logs, "environments", `abc123def456-${round(ago(20))}`)
+    place(join(env, round(ago(1))))
+    await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    const rows = readFileSync(join(workdir, RETENTION_JOURNAL), "utf8").trim().split("\n")
+    const row = JSON.parse(rows.at(-1) ?? "{}") as Record<string, unknown>
+    expect(row.withheld).toBe(1)
+    expect(row.withheldSample).toEqual([env])
+  })
+
   it("writes no withheld fields when nothing was withheld", () => {
     const observation = retentionObservation(
       { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], failuresOmitted: 0, remaining: [], missing: [] },
