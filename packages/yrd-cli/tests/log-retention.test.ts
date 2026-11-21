@@ -1054,16 +1054,30 @@ describe("compression work is bounded per round and later rounds progress (34923
       finishedRound(logs, new Date(ago(3).getTime() + index * 60_000)),
     )
     finishedRound(logs, ago(0.5))
-    const files = rounds.map((log) => output(join(logs, log.id, "git", "1.stdout.bin"), body(log.id, 300)))
+    // Every round holds output so it stays a candidate, but only every 4th file is past the 4 KiB compression floor:
+    // the units bound (2048 since @cto 340938a3) is what ends the pass, never ROUND_COMPRESSION_FILES (1024), which a
+    // compressible file in every round would hit first. Files under the floor are left and count no file.
+    const withFile = (index: number): boolean => index % 4 === 0
+    const files = rounds.flatMap((log, index) => {
+      const path = join(logs, log.id, "git", "1.stdout.bin")
+      if (!withFile(index)) {
+        output(path, "small\n")
+        return []
+      }
+      return [output(path, body(log.id, 300))]
+    })
+    expect(files.length).toBeLessThan(ROUND_COMPRESSION_FILES)
     const first = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {}, settled })
-    expect(first?.compression?.compressed).toBe(ROUND_COMPRESSION_UNITS)
     expect(first?.compression?.deferred).toBe(2)
     const left = files.filter((path) => existsSync(path))
-    expect(left).toHaveLength(2)
+    expect(left.length).toBeLessThanOrEqual(2)
+    expect(first?.compression?.compressed).toBe(files.length - left.length)
     // The newest lane: the 4 latest eligible rounds are examined first, whatever the ring's start.
-    for (const path of files.slice(-NEWEST_LANE_UNITS)) gone(path)
+    rounds.forEach((log, index) => {
+      if (index >= rounds.length - NEWEST_LANE_UNITS && withFile(index)) gone(join(logs, log.id, "git", "1.stdout.bin"))
+    })
     const second = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {}, settled })
-    expect(second?.compression?.compressed).toBe(2)
+    expect(second?.compression?.compressed).toBe(left.length)
     expect(second?.compression?.deferred).toBe(0)
     for (const path of files) gone(path)
     // Without that memory (a restarted service) the finished rounds are examined again, still within the bound.
@@ -1222,6 +1236,10 @@ describe("compression work is bounded per round and later rounds progress (34923
       }
       throw new Error(`not every file converted within ${String(options.maxPasses)} passes`)
     }
+    // What one pass can convert when every round holds one compressible file: the smaller of the units and files
+    // bounds. Since units went to 2048 (@cto 340938a3) that is the files bound, so the backlogs keep their 1024-unit
+    // sizes and their run time instead of doubling past the 30 s test timeout on a loaded host.
+    const PASS_BUDGET = Math.min(ROUND_COMPRESSION_UNITS, ROUND_COMPRESSION_FILES)
     // A minute apart from ten days back: 3 x 1024 rounds span ~2.1 days, all past the 24-hour line and inside the
     // 14-day window (37402; from three days back the newest third was too young to be eligible at all).
     function backlog(logs: string, count: number): string[] {
@@ -1233,7 +1251,7 @@ describe("compression work is bounded per round and later rounds progress (34923
 
     it("no new arrivals: a backlog of three lifetimes' budget converts", async () => {
       const { workdir, logs } = tree("gz-progress-still")
-      const files = backlog(logs, 3 * ROUND_COMPRESSION_UNITS)
+      const files = backlog(logs, 3 * PASS_BUDGET)
       finishedRound(logs, ago(0.5))
       const passes = await sweepUntilConverted(workdir, () => files, { maxPasses: 40 })
       expect(passes).toBeGreaterThanOrEqual(3)
@@ -1241,7 +1259,7 @@ describe("compression work is bounded per round and later rounds progress (34923
 
     it("regular arrivals: each newcomer converts in the pass after it becomes eligible, and the backlog still drains", async () => {
       const { workdir, logs } = tree("gz-progress-regular")
-      const files = backlog(logs, 2 * ROUND_COMPRESSION_UNITS)
+      const files = backlog(logs, 2 * PASS_BUDGET)
       finishedRound(logs, ago(0.5))
       const arrivals: string[] = []
       const passes = await sweepUntilConverted(workdir, () => [...files, ...arrivals], {
@@ -1258,7 +1276,7 @@ describe("compression work is bounded per round and later rounds progress (34923
 
     it("bursty arrivals: a burst wider than the newest lane still drains with the backlog", async () => {
       const { workdir, logs } = tree("gz-progress-bursty")
-      const files = backlog(logs, ROUND_COMPRESSION_UNITS)
+      const files = backlog(logs, PASS_BUDGET)
       finishedRound(logs, ago(0.5))
       const arrivals: string[] = []
       await sweepUntilConverted(workdir, () => [...files, ...arrivals], {
