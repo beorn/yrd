@@ -114,7 +114,8 @@ export const JOURNAL_COMPRESS_AFTER_MS = 7 * 24 * 60 * 60 * 1000
  * Raised 4x by #37402. Measured on the hh-dev queue 2026-11-19 18:00 to 11-21 08:00 (474 passes): the byte bound
  * ended 403 of them, at 62.8 MB a pass and 12.5 passes an hour (the 34952 judged spacing, not one pass a round),
  * about 18.8 GB a day, while the queue wrote about 22.7 GB of round output a day, so 60,920 units stayed deferred
- * and grew. 256 MiB is about 75 GB a day, over 3x that intake, for about 2 s of gzip a pass.
+ * and grew. 256 MiB is about 75 GB a day, over 3x that intake, for about 4-5 s a pass inside the post-merge round
+ * (gzip measured at 77 MB/s under load 27 on 32 cores, plus the decode-back verify and fsyncs; @dev/16 2026-11-21).
  */
 export const ROUND_COMPRESSION_BYTES = 256 * 1024 * 1024
 
