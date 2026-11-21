@@ -84,6 +84,10 @@ const NOTIFY_SHAPE = "notify: [- <name>: {on: [merged, failed], run: <command>}]
 // `env-retired` (29720) is likewise a housekeeping occasion about a merged
 // change: post-merge cleanup sealed and removed the author's environment.
 // The record names the change so its submitter hears where the folder went.
+// `post-merge-abandoned` (37513, @cto 68bee3e1) is a housekeeping occasion
+// about a merged change too: its post-merge issue update failed on every
+// carried attempt, so its issue stays open with its code on the target until
+// a person reruns the close. Only an entry that names it hears it.
 export const ENDINGS = [
   "admission-warning",
   "merged",
@@ -95,6 +99,7 @@ export const ENDINGS = [
   "override",
   "retired-root-written",
   "env-retired",
+  "post-merge-abandoned",
   "cancelled",
 ] as const
 const DEFAULT_ENDINGS = ["merged", "failed", "stuck", "merged-direct", "cancelled"] as const

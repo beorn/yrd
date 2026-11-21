@@ -27,7 +27,7 @@ import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartId
 import { readIssueDisplay } from "./issue-resolver.ts"
 import { issueComparer, samenessDetail } from "./issue-sameness.ts"
 import { formatYrdCommand } from "./command-format.ts"
-import { createPostMerge, readPostMergeIssueDiagnostics } from "./post-merge.ts"
+import { type AbandonedPostMerge, createPostMerge, readPostMergeIssueDiagnostics } from "./post-merge.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup, environmentBytes, type ClosedEnvironment } from "./env-cleanup.ts"
 import { ENV_CLOSE_QUEUED_EXIT, environmentInventory } from "./env-commands.ts"
@@ -153,6 +153,7 @@ import {
   type OverrideFact,
   type OverrideEntry,
   type EnvRetiredNotice,
+  type PostMergeAbandonedNotice,
   type NotifyRecord,
   type OutsideRound,
   type RetiredRootNotice,
@@ -163,6 +164,7 @@ import {
   notifyOutsideRound,
   notifyRetiredRoot,
   notifyEnvRetired,
+  notifyPostMergeAbandoned,
   dispatchNotifications,
   overrideNotice,
   HEARTBEAT_GRACE_MS,
@@ -1568,6 +1570,15 @@ export async function coreQueueCommand(
           git,
           store: eventStore,
           report: (message) => io.stderr("yrd: " + message + "\n"),
+          // A branch whose issue update failed every carried attempt reaches a reader over the notify rail
+          // (37513, @cto 68bee3e1): the declaration's post-merge-abandoned entry decides who.
+          abandoned: (context, given) =>
+            tellPostMergeAbandoned(
+              { config, git, repo, targetSha: context.target, workdir, tempRoot, env },
+              given,
+              (branch) => readClosedChange(eventStore, config.target.branch, branch),
+              io,
+            ),
           cleanup: async (context: {
             code: string
             config: string
@@ -6294,6 +6305,54 @@ async function tellRetiredRoot(
     io,
   )
   return handed.every((each) => each.delivery !== "failed")
+}
+
+/**
+ * Tell the declaration's notify entries which merged branches the post-merge runner stopped carrying after
+ * every allowed attempt failed (37513, @cto 68bee3e1), one dispatch for the set. Never throws and never gates:
+ * the merges stand. A change the chain cannot read is still told, by branch alone; nobody wanting the occasion
+ * is said on stderr against every branch, so the give-up never reads as delivered.
+ */
+async function tellPostMergeAbandoned(
+  context: OutsideRoundTellContext,
+  given: readonly AbandonedPostMerge[],
+  readChange: (branch: string) => Promise<EventChange | undefined>,
+  io: YrdCliIO,
+): Promise<void> {
+  const notices: PostMergeAbandonedNotice[] = []
+  for (const each of given) {
+    let change: EventChange | undefined
+    try {
+      change = await readChange(each.branch)
+    } catch (error) {
+      io.stderr(`yrd: could not read ${each.branch}'s change for its post-merge-abandoned notice: ${String(error)}\n`)
+    }
+    notices.push({
+      record: "post-merge-abandoned",
+      change: each.branch,
+      endingId: `post-merge-abandoned:${each.evidence}:${each.branch}`,
+      endedAt: new Date().toISOString(),
+      ...(change?.submitter === undefined ? {} : { submitter: change.submitter }),
+      ...(change?.issue === undefined ? {} : { issue: change.issue }),
+      ...(change?.merge === undefined ? {} : { merge: change.merge }),
+      reason: each.reason,
+      log: each.evidence,
+      attempts: each.attempts,
+    })
+  }
+  const branchOf = (each: TellDelivery): string =>
+    each.notice?.record === "post-merge-abandoned" ? each.notice.change : given.map(({ branch }) => branch).join(", ")
+  await handToEntries(
+    context,
+    (outside) => notifyPostMergeAbandoned(outside, notices),
+    {
+      none: (each) =>
+        `yrd: no notify entry in .yrd.yml wants post-merge-abandoned, so nobody was told that ${branchOf(each)}'s issue update was given up on\n`,
+      failed: (each) =>
+        `yrd: could not tell ${each.name} that ${branchOf(each)}'s issue update was given up on: ${each.failure ?? "no reason given"}\n`,
+    },
+    io,
+  )
 }
 
 /** The one line a retirement nobody wants env-retired for gets, whoever notices first. */

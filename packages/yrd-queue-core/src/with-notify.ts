@@ -72,8 +72,9 @@ export type NotifyRecord =
   | Readonly<{ record: "observed"; notice: ObservationNotice }>
   | OverrideNotice
   | EnvRetiredNotice
+  | PostMergeAbandonedNotice
   | Readonly<{
-      record: Exclude<Ending, "observed" | "override" | "retired-root-written" | "env-retired">
+      record: Exclude<Ending, "observed" | "override" | "retired-root-written" | "env-retired" | "post-merge-abandoned">
       change: string
       endingId: string
       endedAt: string
@@ -133,6 +134,27 @@ export type EnvRetiredNotice = Readonly<{
   environment: string
   proof: string
   retainUntil: string
+}>
+
+/**
+ * The post-merge-abandoned occasion (37513, @cto 68bee3e1): a merged change's
+ * post-merge issue update failed on `attempts` carried attempts, so the
+ * service stopped carrying it. `reason` is the last attempt's failure and `log`
+ * that attempt's evidence record. The merge stands; what is owed is the close,
+ * rerun by a person, so the record asks its reader for that action.
+ */
+export type PostMergeAbandonedNotice = Readonly<{
+  record: "post-merge-abandoned"
+  /** The merged branch whose issue update was given up on. */
+  change: string
+  endingId: string
+  endedAt: string
+  submitter?: string
+  issue?: string
+  merge?: string
+  reason: string
+  log: string
+  attempts: number
 }>
 
 /**
@@ -375,6 +397,17 @@ export async function notifyEnvRetired(
   notices: readonly EnvRetiredNotice[],
 ): Promise<readonly NotifyDelivery[]> {
   return dispatchNotifications(context, "env-retired", notices)
+}
+
+/**
+ * Hand post-merge-abandoned notices to every `notify:` entry that wants them,
+ * outside any round, as env-retired notices are. Never gates: the merges stand.
+ */
+export async function notifyPostMergeAbandoned(
+  context: OutsideRound,
+  notices: readonly PostMergeAbandonedNotice[],
+): Promise<readonly NotifyDelivery[]> {
+  return dispatchNotifications(context, "post-merge-abandoned", notices)
 }
 
 /**
