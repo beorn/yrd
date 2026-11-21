@@ -76,7 +76,7 @@ export function requireFrozenGitSuper(env: NodeJS.ProcessEnv, why: string): Froz
   const selection = frozenGitSuperSelection(env)
   if (selection === undefined) {
     refuse(
-      `no frozen git-super selection for ${why}: ${YRD_GIT_SUPER_BIN}/${YRD_GIT_SUPER_SHA} are unset. The queue must be launched by tools/yrd-runtime.mjs, which freezes its own physical landing root's git-super; there is no ambient-PATH or candidate fallback (27098)`,
+      `no frozen git-super selection for ${why}: ${YRD_GIT_SUPER_BIN}/${YRD_GIT_SUPER_SHA} are unset. The queue must be launched by tools/yrd-runtime.mjs, which freezes its own physical landing root's git-super; there is no ambient-PATH or candidate fallback (27098). From a checkout, run Yrd as \`@in -- bun yrd <same arguments>\` (the package script, which runs that launcher); the bare node_modules/.bin/yrd, as in \`@in -- yrd ...\`, is not a launcher (37550)`,
     )
   }
   return selection
