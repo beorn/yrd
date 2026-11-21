@@ -1,5 +1,5 @@
 import { isAbsolute, parse, relative, sep } from "node:path"
-import { realpathSync } from "node:fs"
+import { readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs"
 import {
   clearedByIdentity,
   inspectProcessCensus,
@@ -86,6 +86,12 @@ function unreadableLabel(entry: UnreadableProcess): string {
   return `pid ${entry.pid} ${entry.comm ?? "(no comm)"}${codes.length === 0 ? "" : ` (${codes.join(", ")})`}`
 }
 
+/** The same naming rule for an fd source this census could not read. */
+function fdGapLabel(entry: Readonly<{ pid: number; comm?: string; issues: readonly { code?: string }[] }>): string {
+  const codes = [...new Set(entry.issues.flatMap((issue) => (issue.code === undefined ? [] : [issue.code])))]
+  return `pid ${entry.pid} ${entry.comm ?? "(no comm)"}${codes.length === 0 ? "" : ` (${codes.join(", ")})`}`
+}
+
 export function environmentCwdHolder(
   path: string,
   snapshot: ProcessCwdProjection,
@@ -109,6 +115,71 @@ export function environmentCwdHolder(
 
 /** One open descriptor from the same census that answered the cwd question. */
 export type EnvironmentFdRow = Readonly<{ pid: number; name: string; target: string }>
+
+/**
+ * A process the census could not read because it EXITED mid-walk is not a gap (@dev/5's reproduction,
+ * 37533): the walk enumerates first and reads after, so a short-lived `.bun-wrapped` leaves an ENOENT
+ * behind. Proved by re-stat: the entry is gone, it is a zombie (which holds no files), or it answers
+ * with another birth time (pid reuse). Every other failure stays a gap - an EACCES or an unanswered
+ * read can still hide a holder.
+ */
+export function provenVanished(pid: number, startTicks: number | undefined): boolean {
+  let stat: string
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException).code === "ENOENT"
+  }
+  if (startTicks === undefined) return false
+  const comm = stat.lastIndexOf(")")
+  if (comm < 0) return false
+  // /proc/<pid>/stat after the command name starts at field 3: state, then starttime at field 22.
+  const fields = stat
+    .slice(comm + 2)
+    .trim()
+    .split(/\s+/)
+  const state = fields[0]
+  if (state === "Z" || state === "X" || state === "x") return true
+  const born = Number(fields[19])
+  return Number.isSafeInteger(born) ? born !== startTicks : false
+}
+
+/**
+ * A source recorded as MISSING with ENOENT is evidence of absence, not blindness (@dev/5's reproduction,
+ * 37533): the entry or the descriptors went away between the walk's enumerate and read. Measured on a
+ * live `.bun-wrapped` wrapper whose descriptors EXEC closed: the process answered, its fd directory
+ * listed entries that had already gone. A live process is re-read here, and a descriptor that now names
+ * a path inside the environment is a holder, so this never waves one through.
+ */
+function missingMeansAbsent(pid: number, environment: string): boolean {
+  let names: string[]
+  try {
+    names = readdirSync(`/proc/${pid}/fd`)
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException).code === "ENOENT"
+  }
+  let target: string
+  try {
+    target = realpathSync(environment)
+  } catch {
+    return false
+  }
+  for (const name of names) {
+    let link: string
+    try {
+      link = readlinkSync(`/proc/${pid}/fd/${name}`)
+    } catch {
+      continue
+    }
+    if (!isAbsolute(link)) continue
+    try {
+      if (isStrictlyInside(realpathSync(link), target)) return false
+    } catch {
+      continue
+    }
+  }
+  return true
+}
 
 /**
  * A process holding a file open inside the environment is work in flight even when its cwd is
@@ -212,6 +283,8 @@ export async function admitEnvironmentClose(
   let snapshot: ProcessCwdProjection
   const exempt = new Set<number>([process.pid])
   let descriptors: readonly EnvironmentFdRow[] = []
+  let fdGapRefusal: string | undefined
+  let provedGone = 0
   let ancestryAvailable = false
   let unreadableAncestor: number | undefined
   if (process.platform === "linux") {
@@ -227,18 +300,71 @@ export async function admitEnvironmentClose(
       : censusSource())
     // The open-file question is answered from this same census, so a close never pays a second walk.
     // A row's fd source that could not be read is named by the census coverage, never read as "no holder".
+    // The walk enumerates before it reads, so a short-lived process leaves an unreadable row behind; one
+    // proved gone is an exit, not a gap (@dev/5's reproduction, 37533).
+    const gapSource = (source: { availability: string } | undefined): boolean =>
+      source !== undefined && !["readable", "notApplicable", "exited"].includes(source.availability)
+    // An ENOENT "missing" row is proved absent (gone, zombie, reused pid, or descriptors that closed)
+    // and never a holder; a denial, an unanswered read or an ambiguous one stays a gap.
+    // Only an ENOENT "missing" is evidence of absence. A denial or an unanswered read is blindness and
+    // keeps the delegation split exactly as it was (@cto 56f071c7).
+    const missingAbsent = (pid: number, issues: readonly Readonly<{ reason: string; code?: string }>[]): boolean =>
+      issues.length > 0 &&
+      issues.every((issue) => issue.reason === "missing" && issue.code === "ENOENT") &&
+      missingMeansAbsent(pid, path)
+    const vanishedPids = new Set(
+      census.rows
+        .filter((row) => gapSource(row.sources.cwd) || gapSource(row.sources.fd))
+        .filter((row) => {
+          const issues = [
+            ...(gapSource(row.sources.cwd) ? (row.sources.cwd?.issues ?? []) : []),
+            ...(gapSource(row.sources.fd) ? (row.sources.fd?.issues ?? []) : []),
+          ]
+          // A denial is blindness even when its pid has gone since: only an ENOENT row is absence.
+          if (issues.length === 0) return false
+          if (!issues.every((issue) => issue.reason === "missing" && issue.code === "ENOENT")) return false
+          return provenVanished(row.pid, row.startTicks) || missingMeansAbsent(row.pid, path)
+        })
+        .map((row) => row.pid),
+    )
+    const unreadableByPid = new Map((census.coverage.unreadable ?? []).map((entry) => [entry.pid, entry]))
+    const knownAbsent = (entry: { pid: number; issues: readonly Readonly<{ reason: string; code?: string }>[] }) =>
+      vanishedPids.has(entry.pid) || missingAbsent(entry.pid, entry.issues)
+    provedGone = vanishedPids.size
     descriptors = census.rows.flatMap((row) => {
       const fd = row.sources.fd
       if (fd?.availability !== "readable" || fd.value === undefined) return []
       return fd.value.flatMap((descriptor) => [{ pid: row.pid, name: descriptor.name, target: descriptor.target }])
     })
+    // An fd source that could not be read is a GAP, never "this process holds nothing" (@cto 37455-B):
+    // the same rule the cwd coverage already follows, so a denial refuses or delegates by name.
+    const fdGaps = census.rows.flatMap((row) => {
+      const fd = row.sources.fd
+      if (fd === undefined) return []
+      if (fd.availability === "readable" || fd.availability === "notApplicable" || fd.availability === "exited") {
+        return []
+      }
+      if (vanishedPids.has(row.pid)) return []
+      // The coverage entry carries the argv read for a denied identity, which is the only material
+      // clearedByIdentity can recognise a systemd or ssh-agent denial by.
+      const identity = unreadableByPid.get(row.pid)
+      return [identity ?? { pid: row.pid, uid: row.uid ?? -1, comm: row.comm, denied: [], issues: fd.issues }]
+    })
+    const unclearedFd = fdGaps.filter((entry) => clearedByIdentity(entry) === undefined)
+    if (unclearedFd.length > 0) {
+      fdGapRefusal = `same-UID process fd census proc could not read ${unclearedFd.map(fdGapLabel).join(", ")}; a holder among them cannot be ruled out`
+    }
     snapshot = {
       rows: census.rows.flatMap((row) => {
         const cwd = row.sources.cwd
         return cwd?.availability === "readable" && cwd.value !== undefined ? [{ pid: row.pid, cwd: cwd.value }] : []
       }),
-      complete: census.coverage.complete,
-      unreadable: census.coverage.unreadable ?? [],
+      complete:
+        census.coverage.complete ||
+        // A census with NO unreadable rows and an incomplete flag is the caller's own limit, not absence.
+        ((census.coverage.unreadable ?? []).length > 0 &&
+          (census.coverage.unreadable ?? []).every((entry) => knownAbsent(entry))),
+      unreadable: (census.coverage.unreadable ?? []).filter((entry) => !knownAbsent(entry)),
       mechanism: "proc",
     }
     const rows = new Map(census.rows.map((row) => [row.pid, row]))
@@ -264,30 +390,31 @@ export async function admitEnvironmentClose(
   const censusElapsedMs = Date.now() - censusStartedAt
   const coverage = processCwdCoverage(snapshot)
   io.stderr(
-    `yrd: env close ${snapshot.mechanism === "proc" ? "same-UID holders inspected; other-UID holders are not inspectable" : "lsof cwd holders inspected; UID scope and ancestry are unproven"}; exempt PIDs: ${[...exempt].join(", ")}; identity-cleared unreadable PIDs: ${coverage.cleared.length === 0 ? "none" : coverage.cleared.join(", ")}. This scan is non-atomic: a process can enter after the check.\n`,
+    `yrd: env close ${snapshot.mechanism === "proc" ? "same-UID holders inspected; other-UID holders are not inspectable" : "lsof cwd holders inspected; UID scope and ancestry are unproven"}; exempt PIDs: ${[...exempt].join(", ")}; identity-cleared unreadable PIDs: ${coverage.cleared.length === 0 ? "none" : coverage.cleared.join(", ")}${provedGone === 0 ? "" : `; proved gone during the walk: ${provedGone} PID(s), not holders`}. This scan is non-atomic: a process can enter after the check.\n`,
   )
   const holder = environmentCwdHolder(path, snapshot, exempt)
   // A readable holder is evidence whatever the coverage says; the delegation split exists for the case
   // where no holder can be named (@cto 37455-B, 2026-11-21).
   const fdHolder = environmentFdHolder(path, descriptors, exempt)
-  if (coverage.refusal !== undefined) {
+  const censusRefusal = [coverage.refusal, fdGapRefusal].filter((part): part is string => part !== undefined).join("; ")
+  if (censusRefusal !== "") {
     // A READABLE holder inside the path is a refusal, exactly as before: the
     // caller knows the pid and the cwd and can name them. Incomplete coverage
     // with NO readable holder is the case this invocation cannot decide, and it
     // is delegated rather than guessed either way.
     if (holder !== undefined) {
       throw new Error(
-        `${coverage.refusal}; process ${holder.pid} has CWD ${holder.cwd}; environment ${path} was preserved`,
+        `${censusRefusal}; process ${holder.pid} has CWD ${holder.cwd}; environment ${path} was preserved`,
       )
     }
     if (fdHolder !== undefined) {
       throw new Error(
-        `${coverage.refusal}; process ${fdHolder.pid} holds ${fdHolder.target} open; environment ${path} was preserved`,
+        `${censusRefusal}; process ${fdHolder.pid} holds ${fdHolder.target} open; environment ${path} was preserved`,
       )
     }
     return {
       kind: "needs-delegation",
-      refusal: coverage.refusal,
+      refusal: censusRefusal,
       census: {
         mechanism: snapshot.mechanism,
         complete: snapshot.complete,
