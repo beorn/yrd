@@ -107,6 +107,44 @@ export function environmentCwdHolder(
   })
 }
 
+/** One open descriptor from the same census that answered the cwd question. */
+export type EnvironmentFdRow = Readonly<{ pid: number; name: string; target: string }>
+
+/**
+ * A process holding a file open inside the environment is work in flight even when its cwd is
+ * elsewhere (@cto 37455-B, 2026-11-21). Measured before this existed: a writer with cwd /tmp and a
+ * read-write descriptor on a file under the tree did not stop the close, and its descriptor then
+ * named a deleted inode under .trash. Read from the admission's own census, never a second scan.
+ */
+export function environmentFdHolder(
+  path: string,
+  descriptors: readonly EnvironmentFdRow[],
+  exempt: ReadonlySet<number> = new Set(),
+) {
+  let target: string
+  try {
+    target = realpathSync(path)
+  } catch (cause) {
+    throw new Error(
+      `environment ${path} cannot resolve its open-file containment target; environment was preserved; inspect its path before retrying`,
+      { cause },
+    )
+  }
+  return descriptors.find(({ pid, target: fdTarget }) => {
+    if (exempt.has(pid)) return false
+    // A descriptor names pipes, sockets and anon inodes too; only an absolute path can be inside a tree.
+    if (!isAbsolute(fdTarget)) return false
+    let physical: string
+    try {
+      physical = realpathSync(fdTarget)
+    } catch {
+      // A deleted entry says so in /proc and a vanished path cannot be a holder any more.
+      return false
+    }
+    return isStrictlyInside(physical, target)
+  })
+}
+
 /** The census facts one admission read, named so a refusal can carry them to a capable context. */
 export type CloseCensusReceipt = Readonly<{
   mechanism: string
@@ -173,6 +211,7 @@ export async function admitEnvironmentClose(
   const observedAt = new Date(censusStartedAt).toISOString()
   let snapshot: ProcessCwdProjection
   const exempt = new Set<number>([process.pid])
+  let descriptors: readonly EnvironmentFdRow[] = []
   let ancestryAvailable = false
   let unreadableAncestor: number | undefined
   if (process.platform === "linux") {
@@ -181,11 +220,18 @@ export async function admitEnvironmentClose(
     const census = await (censusSource === undefined
       ? inspectProcessCensus({
           scope: "same-uid",
-          sources: ["cwd"],
+          sources: ["cwd", "fd"],
           deadlineMs,
           ...(budget === undefined ? {} : { signal: budget.signal }),
         })
       : censusSource())
+    // The open-file question is answered from this same census, so a close never pays a second walk.
+    // A row's fd source that could not be read is named by the census coverage, never read as "no holder".
+    descriptors = census.rows.flatMap((row) => {
+      const fd = row.sources.fd
+      if (fd?.availability !== "readable" || fd.value === undefined) return []
+      return fd.value.flatMap((descriptor) => [{ pid: row.pid, name: descriptor.name, target: descriptor.target }])
+    })
     snapshot = {
       rows: census.rows.flatMap((row) => {
         const cwd = row.sources.cwd
@@ -221,6 +267,9 @@ export async function admitEnvironmentClose(
     `yrd: env close ${snapshot.mechanism === "proc" ? "same-UID holders inspected; other-UID holders are not inspectable" : "lsof cwd holders inspected; UID scope and ancestry are unproven"}; exempt PIDs: ${[...exempt].join(", ")}; identity-cleared unreadable PIDs: ${coverage.cleared.length === 0 ? "none" : coverage.cleared.join(", ")}. This scan is non-atomic: a process can enter after the check.\n`,
   )
   const holder = environmentCwdHolder(path, snapshot, exempt)
+  // A readable holder is evidence whatever the coverage says; the delegation split exists for the case
+  // where no holder can be named (@cto 37455-B, 2026-11-21).
+  const fdHolder = environmentFdHolder(path, descriptors, exempt)
   if (coverage.refusal !== undefined) {
     // A READABLE holder inside the path is a refusal, exactly as before: the
     // caller knows the pid and the cwd and can name them. Incomplete coverage
@@ -229,6 +278,11 @@ export async function admitEnvironmentClose(
     if (holder !== undefined) {
       throw new Error(
         `${coverage.refusal}; process ${holder.pid} has CWD ${holder.cwd}; environment ${path} was preserved`,
+      )
+    }
+    if (fdHolder !== undefined) {
+      throw new Error(
+        `${coverage.refusal}; process ${fdHolder.pid} holds ${fdHolder.target} open; environment ${path} was preserved`,
       )
     }
     return {
@@ -257,6 +311,11 @@ export async function admitEnvironmentClose(
   if (holder !== undefined) {
     throw new Error(
       `process ${holder.pid} has CWD ${holder.cwd}; environment ${path} was preserved; wait for its owner to leave before retrying`,
+    )
+  }
+  if (fdHolder !== undefined) {
+    throw new Error(
+      `process ${fdHolder.pid} holds ${fdHolder.target} open; environment ${path} was preserved; wait for its owner to leave before retrying`,
     )
   }
   return { kind: "admitted" }
