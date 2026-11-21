@@ -42,6 +42,7 @@ import {
   RETENTION_JOURNAL_MAX_BYTES,
   ROUND_COMPRESSION_BYTES,
   ROUND_COMPRESSION_FILES,
+  ROUND_COMPRESSION_SLOW_MS,
   ROUND_COMPRESSION_UNITS,
   ROUND_OUTPUT_WINDOW_MS,
   RETENTION_JUDGED_SPACING_MS,
@@ -1070,6 +1071,74 @@ describe("compression work is bounded per round and later rounds progress (34923
     expect(restarted?.compression).toMatchObject({ compressed: 0, deferred: 2, failures: [] })
   })
 
+  // Live 2026-11-21 (37402, @cto ec815fba GO): passes examined 64 units and the service restarted every 30-90 minutes,
+  // so a fresh memory never finished walking ~7,900 candidates and `deferred` saw-toothed at 6.7k-7.9k for six hours.
+  describe("a fresh service walks the candidates between restarts; deferred is only what is still owed (37402)", () => {
+    const lastRow = (workdir: string): Record<string, unknown> => {
+      const rows = readFileSync(join(workdir, RETENTION_JOURNAL), "utf8").trim().split("\n")
+      return JSON.parse(rows[rows.length - 1] ?? "{}") as Record<string, unknown>
+    }
+
+    it("examines a 200-round backlog in one pass of a fresh service", async () => {
+      const { workdir, logs } = tree("gz-units-walk")
+      const files = Array.from({ length: 200 }, (_, index) => {
+        const log = finishedRound(logs, new Date(ago(3).getTime() + index * 60_000))
+        return output(join(logs, log.id, "git", "1.stdout.bin"), body(log.id, 300))
+      })
+      finishedRound(logs, ago(0.5))
+      const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+      expect(result?.compression).toMatchObject({ compressed: 200, deferred: 0, failures: [] })
+      for (const path of files) gone(path)
+    })
+
+    it("names a pass slower than ROUND_COMPRESSION_SLOW_MS in its row, and only that pass", async () => {
+      const { workdir, logs } = tree("gz-slow-pass")
+      const log = finishedRound(logs, ago(2))
+      output(join(logs, log.id, "git", "1.stdout.bin"), body(log.id, 300))
+      finishedRound(logs, ago(0.5))
+      let tick = 0
+      const slow = await sweepRoundOutputInRound({
+        workdir,
+        now: NOW,
+        report: () => {},
+        clock: () => (tick += ROUND_COMPRESSION_SLOW_MS + 1000),
+      })
+      const elapsedMs = ROUND_COMPRESSION_SLOW_MS + 1000
+      expect(slow?.compression?.slow).toEqual({ elapsedMs, boundMs: ROUND_COMPRESSION_SLOW_MS })
+      expect(lastRow(workdir).compression).toMatchObject({ slow: { elapsedMs, boundMs: ROUND_COMPRESSION_SLOW_MS } })
+      const second = finishedRound(logs, ago(1.5))
+      output(join(logs, second.id, "git", "1.stdout.bin"), body(second.id, 300))
+      const fast = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {}, clock: () => 0 })
+      expect(fast?.compression?.slow).toBeUndefined()
+      expect(lastRow(workdir).compression).not.toHaveProperty("slow")
+    })
+
+    it("counts each unproven candidate apart from deferred, by its reason, in the result and the row", async () => {
+      const { workdir, logs, checks } = tree("gz-unproven")
+      // A journal that names no writer pid.
+      const noPid = unfinishedRound(logs, ago(3))
+      output(join(logs, noPid.id, "git", "1.stdout.bin"), body(noPid.id, 300))
+      // Round output under logs with no journal: its header cannot be read (live: 466 of the 11-21 samples).
+      const orphan = round(new Date(ago(3).getTime() + 60_000))
+      output(join(logs, orphan, "git", "1.stdout.bin"), body(orphan, 300))
+      // A check round under checks that no run journal names (live: 143).
+      const unnamed = round(new Date(ago(3).getTime() + 180_000))
+      output(join(checks, "task", `unnamed@${"a".repeat(40)}`, unnamed, "git", "1.stdout.bin"), body(unnamed, 300))
+      // A journal already gzipped with no projection: its header cannot be read.
+      const zipped = unfinishedRound(logs, new Date(ago(3).getTime() + 120_000))
+      writeFileSync(`${zipped.path}.gz`, gzipSync(readFileSync(zipped.path)))
+      safeRemoveSync(zipped.path, { within: logs, allowedRoots: [logs] })
+      output(join(logs, zipped.id, "git", "1.stdout.bin"), body(zipped.id, 300))
+      finishedRound(logs, ago(0.5))
+      const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+      const byReason = { "no-writer-pid": 1, "no-run-journal": 1, "journal-header-unreadable": 2 }
+      expect(result?.compression).toMatchObject({ compressed: 0, deferred: 0, unproven: 4, unprovenByReason: byReason })
+      expect(lastRow(workdir).compression).toMatchObject({ unproven: 4, unprovenByReason: byReason })
+      // Still named, one by one, as before.
+      expect(skipReasons(result).filter((line) => line.includes("not proven finished"))).toHaveLength(4)
+    })
+  })
+
   // Live 2026-11-18 (34923 row 6, @cto 2023): 41 passes converted nothing, because ~59k older journals that cannot be
   // proven finished took every unit, and the service's memory of them ends at each restart. Rounds come first.
   it("reaches a completed round in a fresh lifetime past more than one budget of older unprovable journals", async () => {
@@ -1114,8 +1183,9 @@ describe("compression work is bounded per round and later rounds progress (34923
       // Work-conserving: with few rounds, the journals beyond their share fill the pass's units after them.
       const manyJournals = Array.from({ length: 100 }, (_, index) => candidate("journal", index))
       const fewRounds = compressionVisitOrder([...manyJournals, ...rounds.slice(0, 10)], new Set(), NOW)
-      // 16 journals, the 10 rounds, then 38 more journals: 64 units, none left idle.
-      expect(fewRounds.slice(0, ROUND_COMPRESSION_UNITS).filter((entry) => entry.kind === "journal")).toHaveLength(54)
+      // 16 journals, the 10 rounds, then the other journals: a pass's units, none left idle while candidates remain.
+      const units = Math.min(ROUND_COMPRESSION_UNITS, fewRounds.length)
+      expect(fewRounds.slice(0, units).filter((entry) => entry.kind === "journal")).toHaveLength(units - 10)
     })
 
     it("leads each kind with its newest candidates, repeats for a fixed clock, and moves the ring's start with it", () => {
@@ -1152,9 +1222,11 @@ describe("compression work is bounded per round and later rounds progress (34923
       }
       throw new Error(`not every file converted within ${String(options.maxPasses)} passes`)
     }
+    // A minute apart from ten days back: 3 x 1024 rounds span ~2.1 days, all past the 24-hour line and inside the
+    // 14-day window (37402; from three days back the newest third was too young to be eligible at all).
     function backlog(logs: string, count: number): string[] {
       return Array.from({ length: count }, (_, index) => {
-        const log = finishedRound(logs, new Date(ago(3).getTime() + index * 60_000))
+        const log = finishedRound(logs, new Date(ago(10).getTime() + index * 60_000))
         return output(join(logs, log.id, "git", "1.stdout.bin"), body(log.id, 300))
       })
     }

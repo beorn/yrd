@@ -132,8 +132,22 @@ export const ROUND_COMPRESSION_FILES = 1024
  * (34923 ruling 4). Examining a round lists and lstats its ~1,400 entries
  * (measured), which costs milliseconds; this bounds the walk when a restarted
  * service re-examines rounds it already finished.
+ *
+ * 1024, not 64 (37402, @cto ec815fba amending 34923 ruling 4): hh-dev~main held
+ * ~7,900 candidates and its service restarted every 30-90 minutes, so at 64 a
+ * pass a fresh memory needed ~125 passes (~10 h) and never finished the walk;
+ * `deferred` saw-toothed at 6.7k-7.9k while the file and byte bounds were never
+ * reached (largest pass 48 MB, 144 files). At 1024 the walk takes ~8 passes.
+ * {@link ROUND_COMPRESSION_SLOW_MS} names a pass this makes slow.
  */
-export const ROUND_COMPRESSION_UNITS = 64
+export const ROUND_COMPRESSION_UNITS = 1024
+
+/**
+ * A compression pass longer than this is named in its row (`slow`), so the next
+ * limit shows in the ledger by name instead of as a saw-tooth (37402, @cto ec815fba).
+ * A report, never a bound: the pass is not cut short.
+ */
+export const ROUND_COMPRESSION_SLOW_MS = 5_000
 
 /**
  * The run journals' share of a pass's units (journals and the sweep's leftover temps of them), examined first
@@ -236,17 +250,43 @@ export type CompressionSkip = Readonly<{ path: string; reason: string }>
  * through gzip and written, candidates left for a later round by the bound,
  * candidates it would not touch and why, and failures. Both lists are bounded
  * like the removal row; the omitted counts keep the rest visible.
+ *
+ * `deferred` is candidates this pass did not reach because a bound ended it:
+ * work still owed. `unproven` is candidates it examined and could not prove
+ * finished, counted by {@link UnprovenReason} (37402) and still named one by one
+ * in `skipped`. Compression never touches an unproven round: it stays
+ * uncompressed until the 14-day age rule removes it, with holds respected. Do
+ * not lower this count by deleting rounds; it reports evidence Yrd lacks.
  */
 export type RetentionCompression = Readonly<{
   compressed: number
   bytesIn: number
   bytesOut: number
   deferred: number
+  unproven: number
+  unprovenByReason: Readonly<Partial<Record<UnprovenReason, number>>>
   skipped: readonly CompressionSkip[]
   skippedOmitted: number
   failures: readonly RetentionFailure[]
   failuresOmitted: number
+  /** Present only when the pass took longer than {@link ROUND_COMPRESSION_SLOW_MS}. */
+  slow?: Readonly<{ elapsedMs: number; boundMs: number }>
 }>
+
+/**
+ * Why a candidate could not be proven finished (37402): no journal names its
+ * round; its journal header cannot be read (as when the journal is gzipped with
+ * no projection); its projection cannot be read; its header names no writer pid;
+ * the writer is this process; the writer pid is present; or it cannot be judged.
+ */
+export type UnprovenReason =
+  | "no-run-journal"
+  | "journal-header-unreadable"
+  | "projection-unreadable"
+  | "no-writer-pid"
+  | "writer-is-this-process"
+  | "writer-present"
+  | "writer-unjudgeable"
 
 /** One round-output directory a sweep could not remove, with the error it raised. */
 export type RetentionFailure = Readonly<{ path: string; name: string; error: string }>
@@ -788,6 +828,8 @@ type CompressionPass = {
   bytesIn: number
   bytesOut: number
   deferred: number
+  /** Candidates examined and not proven finished, by reason (37402). */
+  unproven: Partial<Record<UnprovenReason, number>>
   skipped: CompressionSkip[]
   failures: RetentionFailure[]
 }
@@ -812,6 +854,8 @@ const NO_COMPRESSION: RetentionCompression = {
   bytesIn: 0,
   bytesOut: 0,
   deferred: 0,
+  unproven: 0,
+  unprovenByReason: {},
   skipped: [],
   skippedOmitted: 0,
   failures: [],
@@ -824,6 +868,12 @@ function message(error: unknown): string {
 
 function skip(pass: CompressionPass, path: string, reason: string): void {
   pass.skipped.push({ path, reason })
+}
+
+/** A candidate not proven finished: named like any skip, and counted by its reason (37402). */
+function unproven(pass: CompressionPass, path: string, proof: Readonly<{ cause: UnprovenReason; why: string }>): void {
+  skip(pass, path, "not proven finished: " + proof.why)
+  pass.unproven[proof.cause] = (pass.unproven[proof.cause] ?? 0) + 1
 }
 
 function fail(pass: CompressionPass, path: string, error: string): void {
@@ -913,7 +963,9 @@ function firstRecord(path: string): Readonly<Record<string, unknown> & { kind: s
   }
 }
 
-type FinishedProof = Readonly<{ proven: true; projection: boolean }> | Readonly<{ proven: false; why: string }>
+type FinishedProof =
+  | Readonly<{ proven: true; projection: boolean }>
+  | Readonly<{ proven: false; cause: UnprovenReason; why: string }>
 
 /**
  * Whether round `run`, journaled in `dir`, has FINISHED, from the evidence Yrd
@@ -938,7 +990,11 @@ function roundFinished(dir: string, run: string): FinishedProof {
   try {
     projection = readJournalProjection(dir, run, { detail: "omit" })
   } catch (cause) {
-    return { proven: false, why: `its projection in ${dir} could not be read: ${message(cause)}` }
+    return {
+      proven: false,
+      cause: "projection-unreadable",
+      why: `its projection in ${dir} could not be read: ${message(cause)}`,
+    }
   }
   if (projection.kind === "projection") return { proven: true, projection: true }
   const missing = `no valid projection (${projection.fallback.reason})`
@@ -946,24 +1002,41 @@ function roundFinished(dir: string, run: string): FinishedProof {
   try {
     header = firstRecord(join(dir, `${run}.jsonl`))
   } catch (cause) {
-    return { proven: false, why: `${missing} and its journal header could not be read: ${message(cause)}` }
+    return {
+      proven: false,
+      cause: "journal-header-unreadable",
+      why: `${missing} and its journal header could not be read: ${message(cause)}`,
+    }
   }
   const pid = header?.kind === "run" ? header.pid : undefined
   if (typeof pid !== "number") {
-    return { proven: false, why: `${missing} and its journal names no writer pid to judge it by` }
+    return {
+      proven: false,
+      cause: "no-writer-pid",
+      why: `${missing} and its journal names no writer pid to judge it by`,
+    }
   }
   if (pid === process.pid) {
-    return { proven: false, why: `${missing} and its writer is this process, which may still be writing it` }
+    return {
+      proven: false,
+      cause: "writer-is-this-process",
+      why: `${missing} and its writer is this process, which may still be writing it`,
+    }
   }
   let presence: "present" | "absent"
   try {
     presence = pidPresence(pid)
   } catch (cause) {
-    return { proven: false, why: `${missing} and its writer PID ${String(pid)} cannot be judged: ${message(cause)}` }
+    return {
+      proven: false,
+      cause: "writer-unjudgeable",
+      why: `${missing} and its writer PID ${String(pid)} cannot be judged: ${message(cause)}`,
+    }
   }
   if (presence === "present") {
     return {
       proven: false,
+      cause: "writer-present",
       why: `${missing} and its writer PID ${String(pid)} is present, so the round may still be finishing`,
     }
   }
@@ -981,7 +1054,7 @@ function roundFinished(dir: string, run: string): FinishedProof {
 function roundJournalDir(
   candidate: CompressionCandidate,
   logs: string,
-): Readonly<{ dir: string }> | Readonly<{ why: string }> | undefined {
+): Readonly<{ dir: string }> | Readonly<{ cause: "no-run-journal"; why: string }> | undefined {
   const parts = relative(candidate.within, candidate.path).split(sep)
   if (candidate.within === logs) {
     if (parts.length === 1) return { dir: logs }
@@ -994,7 +1067,10 @@ function roundJournalDir(
     )
     if (held) return { dir }
   }
-  return { why: `no run journal names round ${candidate.run} in ${logs} or ${join(logs, "check")}` }
+  return {
+    cause: "no-run-journal",
+    why: `no run journal names round ${candidate.run} in ${logs} or ${join(logs, "check")}`,
+  }
 }
 
 /** A round directory's output files a reader resolves, and the sweep's own leftover temps, oldest name order. */
@@ -1305,7 +1381,7 @@ async function compressCandidate(
     }
     const proof = roundFinished(context.logs, candidate.run)
     if (!proof.proven) {
-      skip(pass, candidate.path, `not proven finished: ${proof.why}`)
+      unproven(pass, candidate.path, proof)
       return true
     }
     const outcome = await compressFile(candidate.path, candidate.within, pass, new Map())
@@ -1321,7 +1397,7 @@ async function compressCandidate(
     const journal = roundJournalDir(candidate, context.logs)
     if (journal === undefined) return true
     if ("why" in journal) {
-      skip(pass, candidate.path, `not proven finished: ${journal.why}`)
+      unproven(pass, candidate.path, journal)
       return true
     }
     if (journal.dir === context.logs && candidate.run === context.newestJournal) {
@@ -1330,7 +1406,7 @@ async function compressCandidate(
     }
     const proof = roundFinished(journal.dir, candidate.run)
     if (!proof.proven) {
-      skip(pass, candidate.path, `not proven finished: ${proof.why}`)
+      unproven(pass, candidate.path, proof)
       return true
     }
     listing = roundOutput(candidate.path)
@@ -1394,8 +1470,16 @@ function refreshProjections(logs: string, runs: readonly string[], now: Date, pa
  * a restart examines them afresh. It only ever holds current candidates.
  */
 async function compressRetainedOutput(
-  input: Readonly<{ logs: string; now: Date; selection: CompressionCandidates; settled: Set<string> }>,
+  input: Readonly<{
+    logs: string
+    now: Date
+    selection: CompressionCandidates
+    settled: Set<string>
+    /** Milliseconds on a monotonic clock, for the slow-pass report (37402); a test passes its own. */
+    clock: () => number
+  }>,
 ): Promise<RetentionCompression> {
+  const startedMs = input.clock()
   const pass: CompressionPass = {
     bytes: 0,
     files: 0,
@@ -1404,6 +1488,7 @@ async function compressRetainedOutput(
     bytesIn: 0,
     bytesOut: 0,
     deferred: 0,
+    unproven: {},
     skipped: [],
     failures: [],
   }
@@ -1431,15 +1516,21 @@ async function compressRetainedOutput(
   if (refresh.length > 0) refreshProjections(input.logs, refresh, input.now, pass)
   const skipped = pass.skipped.slice(0, ROUND_REMOVAL_BATCH)
   const failures = pass.failures.slice(0, ROUND_REMOVAL_BATCH)
+  const elapsedMs = input.clock() - startedMs
   return {
     compressed: pass.compressed,
     bytesIn: pass.bytesIn,
     bytesOut: pass.bytesOut,
     deferred: pass.deferred,
+    unproven: Object.values(pass.unproven).reduce((sum, count) => sum + count, 0),
+    unprovenByReason: pass.unproven,
     skipped,
     skippedOmitted: pass.skipped.length - skipped.length,
     failures,
     failuresOmitted: pass.failures.length - failures.length,
+    ...(elapsedMs > ROUND_COMPRESSION_SLOW_MS
+      ? { slow: { elapsedMs: Math.round(elapsedMs), boundMs: ROUND_COMPRESSION_SLOW_MS } }
+      : {}),
   }
 }
 
@@ -1448,6 +1539,7 @@ function compressionWorthNaming(compression: RetentionCompression | undefined): 
   return (
     compression !== undefined &&
     (compression.compressed > 0 ||
+      compression.slow !== undefined ||
       compression.skipped.length > 0 ||
       compression.skippedOmitted > 0 ||
       compression.failures.length > 0 ||
@@ -1504,6 +1596,11 @@ export function retentionObservation(result: RetentionResult, input: Readonly<{ 
             bytesIn: result.compression.bytesIn,
             bytesOut: result.compression.bytesOut,
             deferred: result.compression.deferred,
+            // 37402: examined and not proven finished, by reason; apart from `deferred`, which is work still owed.
+            ...(result.compression.unproven === 0
+              ? {}
+              : { unproven: result.compression.unproven, unprovenByReason: result.compression.unprovenByReason }),
+            ...(result.compression.slow === undefined ? {} : { slow: result.compression.slow }),
             ...(result.compression.skipped.length === 0 ? {} : { skipped: result.compression.skipped }),
             ...(result.compression.skippedOmitted === 0 ? {} : { skippedOmitted: result.compression.skippedOmitted }),
             ...(result.compression.failures.length === 0 ? {} : { failures: result.compression.failures }),
@@ -1655,6 +1752,8 @@ export async function sweepRoundOutputInRound(
     now: Date
     report?: (line: string) => void
     settled?: Set<string>
+    /** Milliseconds on a monotonic clock for the slow-pass report (37402); `performance.now` when absent. */
+    clock?: () => number
     /** The target's declared holds judge (34952); absent, the sweep runs every round as it always has. */
     holds?: HoldsJudge
     /** The service's memory of its last judged pass; a judged pass runs at most once per spacing. */
@@ -1722,6 +1821,7 @@ export async function sweepRoundOutputInRound(
       now: input.now,
       selection: result.compressible ?? { candidates: [] },
       settled: input.settled ?? new Set(),
+      clock: input.clock ?? (() => performance.now()),
     })
   } catch (cause) {
     // Every step inside reports its own failure; this is the pass itself breaking. Still a result, never a throw.
