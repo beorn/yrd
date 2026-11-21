@@ -10,7 +10,12 @@ import { tmpdir } from "node:os"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
-import { createPostMerge, readPostMergeIssueDiagnostics } from "../src/post-merge.ts"
+import {
+  chargedBranches,
+  createPostMerge,
+  POST_MERGE_ATTEMPTS,
+  readPostMergeIssueDiagnostics,
+} from "../src/post-merge.ts"
 import { coreQueueCommand, readEventListing } from "../src/queue-core-commands.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { Conflict, openEvents } from "../../yrd-queue-core/src/git.ts"
@@ -1633,10 +1638,14 @@ it.each(["recorded", "provider-fails", "undeclared"] as const)(
     }
     const withIssue = (await readStatus(store, "main", "task/with-issue")).merge!
     const noIssue = (await readStatus(store, "main", "task/no-issue")).merge!
-    // One provider call, for the change that names an issue: its value as held, kind merged, the replay key.
-    expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual([
-      [issue, "merged", `${remote}@${withIssue}`, "task/with-issue merged", `yrd-merged-${withIssue}`].join("\t"),
-    ])
+    // Provider calls only for the change that names an issue: its value as held, kind merged, the replay key. A failed
+    // write rides the next attempt under the same replay key (37513), at most POST_MERGE_ATTEMPTS times.
+    const call = [issue, "merged", `${remote}@${withIssue}`, "task/with-issue merged", `yrd-merged-${withIssue}`].join(
+      "\t",
+    )
+    const called = readFileSync(calls, "utf8").trim().split("\n")
+    expect([...new Set(called)]).toEqual([call])
+    expect(called.length).toBeLessThanOrEqual(mode === "provider-fails" ? POST_MERGE_ATTEMPTS : 1)
     const actions = eventActions()
     expect(actions).toContainEqual(
       expect.objectContaining({
@@ -1933,3 +1942,79 @@ it("never writes an earlier event whose attempt did not complete before the bran
   expect(callLines(queue.calls)).toEqual([mergedCall(queue.remote, second)])
   expect(eventActionsIn(queue.workdir)).toContainEqual(notRewritten(first!))
 }, 60000)
+/**
+ * @failure A failed post-merge issue update is dropped: later attempts carry only their own merge, so the failed
+ *   branch's issue stays open with its code on main until the next service restart's catch-up (77 min, 37513).
+ * @level l2 @consumer Yrd post-merge issue close carry-forward (37513, @cto 68bee3e1) @testonly none
+ */
+it("carries a failed attempt's branches into the next attempt, and names them after the third failure", async () => {
+  const root = world()
+  const reports: string[] = []
+  const abandoned: Array<Readonly<{ branch: string; attempts: number; reason: string; evidence: string }>> = []
+  const fail = ["sh", "-c", "echo daemon timeout >&2; exit 1"]
+  const pass = ["sh", "-c", "printf ok"]
+  await using runner = createPostMerge({
+    workdir: root,
+    cwd: root,
+    cleanup: async () => {},
+    report: (message) => reports.push(message),
+    abandoned: async (_context, given) => {
+      abandoned.push(...given)
+    },
+  })
+  const attempts = () =>
+    readdirSync(join(root, "post-merge"))
+      .filter((name) => name.endsWith(".json"))
+      .sort()
+      .map(
+        (name) =>
+          JSON.parse(readFileSync(join(root, "post-merge", name), "utf8")) as Attempt & {
+            merged: string[]
+            bases: string[]
+          },
+      )
+  const settledCount = async (count: number) =>
+    vi.waitFor(() => expect(attempts().filter((a) => a.status !== "running")).toHaveLength(count), { timeout: 10000 })
+
+  // Attempt 1 fails; attempt 2 is a later round's own merge and carries the failed branch with it.
+  runner.nudge({ ...context, target: "r1", base: "b1", merged: ["task/one"], update: fail })
+  await settledCount(1)
+  runner.nudge({ ...context, target: "r2", base: "b2", merged: ["task/two"], update: fail })
+  await settledCount(2)
+  expect(attempts()[1]).toMatchObject({ merged: ["task/one", "task/two"], bases: ["b1", "b2"] })
+  // An idle round still carries what failed, and asks for the update even when the round itself owes none.
+  runner.nudge({ ...context, target: "r3", base: "b3", merged: [], update: fail, updateDue: false })
+  await settledCount(3)
+  expect(attempts()[2]).toMatchObject({ merged: ["task/one", "task/two"], status: "failed" })
+  // task/one failed three times: named and handed on, never carried again. task/two has failed twice.
+  await vi.waitFor(() => expect(abandoned.map((a) => a.branch)).toEqual(["task/one"]), { timeout: 10000 })
+  expect(abandoned[0]).toMatchObject({ attempts: 3, evidence: expect.stringMatching(/post-merge\/.*\.json$/) })
+  expect(abandoned[0]!.reason).toContain("exit 1")
+  expect(reports.some((line) => line.includes("task/one") && line.includes("3 attempts"))).toBe(true)
+  runner.nudge({ ...context, target: "r4", base: "b4", merged: ["task/three"], update: pass })
+  await settledCount(4)
+  // task/one's round base left with it: a carried branch keeps only its own round's base (@dev/4).
+  expect(attempts()[3]).toMatchObject({ merged: ["task/two", "task/three"], bases: ["b2", "b4"], status: "succeeded" })
+  // A success settles what it carried: the next attempt carries nothing old.
+  runner.nudge({ ...context, target: "r5", base: "b5", merged: ["task/four"], update: pass })
+  await settledCount(5)
+  expect(attempts()[4]).toMatchObject({ merged: ["task/four"], bases: ["b5"] })
+  expect(abandoned.map((a) => a.branch)).toEqual(["task/one"])
+})
+
+/** @failure One branch's failed close charges every branch in the attempt, so a settled branch is retried and can be
+ *   given up on for another's fault; or a failure that names no branch carries none (37513, @dev/4). @level l1
+ *   @consumer Yrd post-merge carry-forward attribution @testonly none */
+it("charges a failed attempt to the branch its failure names, and to every branch when it names none", () => {
+  const merged = ["task/real", "task/ghost"]
+  const closeFailed = [
+    { branch: "task/real", status: "failed" },
+    { branch: "task/ghost", status: "fulfilled" },
+  ]
+  expect(chargedBranches(merged, closeFailed, false)).toEqual(["task/real"])
+  // The update failed too: that names nobody, so both branches are charged.
+  expect(chargedBranches(merged, closeFailed, true)).toEqual(merged)
+  // A failed attempt whose rows name no branch of its own still charges every branch it carried.
+  expect(chargedBranches(merged, [{ branch: "task/elsewhere", status: "failed" }], false)).toEqual(merged)
+  expect(chargedBranches(merged, [], false)).toEqual(merged)
+})

@@ -286,6 +286,7 @@ export {
   dispatchNotifications,
   notifyEnvRetired,
   notifyOutsideRound,
+  notifyPostMergeAbandoned,
   notifyRetiredRoot,
   overrideNotice,
 } from "./with-notify.ts"
@@ -295,6 +296,7 @@ export type {
   NotifyRecord,
   OutsideRound,
   OverrideNotice,
+  PostMergeAbandonedNotice,
   RetiredRootNotice,
 } from "./with-notify.ts"
 

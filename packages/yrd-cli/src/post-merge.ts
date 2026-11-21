@@ -29,6 +29,42 @@ import { runIssuesVerb } from "./issues/run.ts"
 // margin. This is a bounded attempt, not a claim about worst-case workloads.
 const UPDATE_TIMEOUT_MS = 120_000
 
+/**
+ * How many attempts one merged branch's post-merge issue update gets (37513, @cto 68bee3e1). A failed attempt's
+ * branches ride the service's next attempt instead of waiting for a restart's catch-up; after this many failures the
+ * service stops carrying the branch and names it to `abandoned`, so a person reruns the close.
+ */
+export const POST_MERGE_ATTEMPTS = 3
+
+/** A merged branch the service stopped carrying: its attempts, the last failure, and that attempt's record. */
+export type AbandonedPostMerge = Readonly<{ branch: string; attempts: number; reason: string; evidence: string }>
+
+/** What one attempt left owed: the branches its failure is charged to, and why. Empty when it settled. */
+type AttemptOutcome = Readonly<{ failed: readonly string[]; reason: string; evidence: string }>
+
+const failingStatus = (status: unknown): boolean =>
+  status === "failed" || status === "unavailable" || status === "record-failed"
+
+/**
+ * The merged branches a failed attempt is charged to (37513). A failing action that names one of the attempt's
+ * branches charges that branch alone; a failure that names none (`whole`: the update, an event write with no branch
+ * row, the attempt itself), or a failed attempt whose actions name no branch of its own, charges every branch.
+ */
+export function chargedBranches(
+  merged: readonly string[],
+  actions: ReadonlyArray<Readonly<{ status?: unknown; branch?: unknown }>>,
+  whole: boolean,
+): readonly string[] {
+  if (whole) return merged
+  const named = new Set(
+    actions
+      .filter(({ status }) => failingStatus(status))
+      .map(({ branch }) => branch)
+      .filter((branch): branch is string => typeof branch === "string" && merged.includes(branch)),
+  )
+  return named.size === 0 ? merged : merged.filter((branch) => named.has(branch))
+}
+
 type Context = Readonly<{
   code: string
   config: string
@@ -637,6 +673,8 @@ export function createPostMerge<C extends Context>(
     report: (message: string) => void
     git?: GitRunner
     store?: QueueLocation
+    /** Told the branches given up on after {@link POST_MERGE_ATTEMPTS} failures; a throw here is reported, never raised. */
+    abandoned?: (context: C, abandoned: readonly AbandonedPostMerge[]) => Promise<void>
   }>,
 ) {
   const directory = join(options.workdir, "post-merge")
@@ -680,6 +718,16 @@ export function createPostMerge<C extends Context>(
   const process = createProcess({ cwd: options.cwd, env: options.env })
   /** The next attempt's context, and the base of every round coalesced into it: the attempt resolves the earliest. */
   let pending: Readonly<{ context: C; bases: ReadonlyArray<string | undefined> }> | undefined
+  /** A failed attempt's branches, waiting for the next nudge (37513); folded into `pending` as soon as one exists. */
+  let carried: Readonly<{ context: C; bases: ReadonlyArray<string | undefined> }> | undefined
+  /** Failed attempts per merged branch since its last settled one (37513). */
+  const failures = new Map<string, number>()
+  /**
+   * The base of the round that last delivered each branch still owed (37513). A carried branch takes only its own
+   * round's base, so a branch that settled never keeps an early base live, which would stop recordMergedEvents
+   * skipping an earlier delivery of a branch merged again (@dev/4).
+   */
+  const baseOf = new Map<string, string | undefined>()
   let active: Promise<void> | undefined
   let cleanupPending: C | undefined
   let cleanupActive: Promise<void> | undefined
@@ -695,6 +743,13 @@ export function createPostMerge<C extends Context>(
   // The existing service stays resident: keep only its last validated snapshot across sequential attempts.
   let completedQueue: Readonly<{ branch: string; value: EventQueue }> | undefined
   const dropPending = (): void => {
+    if (carried !== undefined) {
+      options.report(
+        JSON.stringify(carried.context.merged) +
+          ": failed post-merge issue updates dropped during shutdown; the next service's startup catch-up retries them",
+      )
+      carried = undefined
+    }
     if (pending === undefined) return
     options.report(
       JSON.stringify(pending.context.merged) +
@@ -787,7 +842,7 @@ export function createPostMerge<C extends Context>(
       return { actions: [], failed: true }
     }
   }
-  const attempt = async (context: C, bases: ReadonlyArray<string | undefined>): Promise<void> => {
+  const attempt = async (context: C, bases: ReadonlyArray<string | undefined>): Promise<AttemptOutcome> => {
     const id = new Date().toISOString().replaceAll(":", "-") + "-" + randomUUID()
     const path = join(directory, id + ".json")
     const stdout = join(directory, id + ".stdout.log")
@@ -810,11 +865,17 @@ export function createPostMerge<C extends Context>(
         context.update === undefined ? "no issuesProvider.update declared" : "no provider update due for idle round",
     }
     let eventsFailed = false
+    /** Set when the failure names no branch: the update itself, or the attempt as a whole (37513). */
+    let failedWhole = false
     try {
       // Before the update and the close, so an issue reads merged, then closed. Never needs --project-root.
       const events = await mergedEvents(context, bases)
       issueActions = events.actions
       eventsFailed = events.failed
+      // An event write that failed without a branch row names nobody, so it is charged to every branch (@dev/4).
+      if (events.failed && !events.actions.some(({ status, branch }) => failingStatus(status) && typeof branch === "string")) {
+        failedWhole = true
+      }
       try {
         if (context.update !== undefined && context.updateDue !== false) {
           const result = await process.run({
@@ -846,6 +907,7 @@ export function createPostMerge<C extends Context>(
             escapedDescendant: result.escapedDescendant,
           }
           if (failed) {
+            failedWhole = true
             options.report(
               "issuesProvider.update " +
                 JSON.stringify(context.update) +
@@ -862,6 +924,7 @@ export function createPostMerge<C extends Context>(
         }
       } catch (error) {
         settled = { status: "unavailable", reason: String(error) }
+        failedWhole = true
         options.report(
           "issuesProvider.update " + JSON.stringify(context.update) + " unavailable: " + String(error) + "; " + stderr,
         )
@@ -912,6 +975,7 @@ export function createPostMerge<C extends Context>(
       if (eventsFailed) settled = { ...settled, status: "failed" }
     } catch (error) {
       const reason = "post-merge issue close attempt unavailable: " + String(error)
+      failedWhole = true
       settled = { status: "unavailable", reason }
       options.report(reason)
     } finally {
@@ -925,12 +989,92 @@ export function createPostMerge<C extends Context>(
       // next provider. The separate cleanup lifetime still owns serial drain.
       scheduleCleanup(context)
     }
+    if (settled.status !== "failed" && settled.status !== "unavailable") {
+      return { failed: [], reason: "", evidence: path }
+    }
+    const diagnostic = issueActions.find((action) => failingStatus(action.status) && "diagnostic" in action)
+    const reason = [
+      String(settled.status),
+      ...(typeof settled.exitCode === "number" ? ["exit " + String(settled.exitCode)] : []),
+      ...(typeof settled.signal === "string" ? ["signal " + settled.signal] : []),
+      ...(settled.timedOut === true ? ["timed out"] : []),
+      ...(typeof settled.reason === "string" ? [settled.reason] : []),
+      ...(diagnostic !== undefined && "diagnostic" in diagnostic ? [String(diagnostic.diagnostic)] : []),
+    ].join(", ")
+    return { failed: chargedBranches(context.merged, issueActions, failedWhole), reason, evidence: path }
+  }
+  /** Fold the carried branches into `pending`, whose newer context wins every field but `merged` and `updateDue`. */
+  const foldCarried = (): void => {
+    if (carried === undefined) return
+    pending =
+      pending === undefined
+        ? carried
+        : { context: coalesce(carried.context, pending.context), bases: [...carried.bases, ...pending.bases] }
+    carried = undefined
+  }
+  /** Carry what an attempt left owed into the next attempt, or name it after the last allowed failure (37513). */
+  const settle = async (next: NonNullable<typeof pending>, outcome: AttemptOutcome): Promise<void> => {
+    // A reload's abort fails its in-flight attempt on purpose; the next service's startup catch-up owns it.
+    if (options.stop?.aborted) return
+    for (const branch of next.context.merged) {
+      if (outcome.failed.includes(branch)) continue
+      failures.delete(branch)
+      baseOf.delete(branch)
+    }
+    const again: string[] = []
+    const given: AbandonedPostMerge[] = []
+    for (const branch of outcome.failed) {
+      const count = (failures.get(branch) ?? 0) + 1
+      if (count < POST_MERGE_ATTEMPTS) {
+        failures.set(branch, count)
+        again.push(branch)
+      } else {
+        failures.delete(branch)
+        baseOf.delete(branch)
+        given.push({ branch, attempts: count, reason: outcome.reason, evidence: outcome.evidence })
+      }
+    }
+    if (again.length > 0) {
+      const bases = [...new Set(again.map((branch) => baseOf.get(branch)))]
+      const owed = { context: { ...next.context, merged: again, updateDue: true }, bases }
+      carried =
+        carried === undefined
+          ? owed
+          : { context: coalesce(carried.context, owed.context), bases: [...carried.bases, ...owed.bases] }
+      if (pending !== undefined) foldCarried()
+    }
+    if (given.length === 0) return
+    for (const each of given) {
+      options.report(
+        "post-merge issue update for " +
+          each.branch +
+          " failed " +
+          String(each.attempts) +
+          " attempts and is no longer carried: " +
+          each.reason +
+          "; evidence " +
+          each.evidence +
+          "; its issue stays open until its close is rerun",
+      )
+    }
+    // A reload's stop wins over the hand-off: the line above already names each branch.
+    if (options.stop?.aborted) return
+    try {
+      await options.abandoned?.(next.context, given)
+    } catch (error) {
+      options.report(
+        "could not hand on the abandoned post-merge updates for " +
+          JSON.stringify(given.map(({ branch }) => branch)) +
+          ": " +
+          String(error),
+      )
+    }
   }
   const pump = async (): Promise<void> => {
     while (pending !== undefined && !options.stop?.aborted) {
       const next = pending
       pending = undefined
-      await attempt(next.context, next.bases)
+      await settle(next, await attempt(next.context, next.bases))
     }
     if (options.stop?.aborted) dropPending()
   }
@@ -944,6 +1088,11 @@ export function createPostMerge<C extends Context>(
   }
   const nudge = (context: C): void => {
     if (closing) return
+    for (const branch of context.merged) {
+      baseOf.set(branch, context.base)
+      failures.delete(branch)
+    }
+    foldCarried()
     // Coalescing keeps the newest round's context; its bases keep every round's, so no delivery is skipped (#31194).
     pending = { context: coalesce(pending?.context, context), bases: [...(pending?.bases ?? []), context.base] }
     if (active !== undefined) return
