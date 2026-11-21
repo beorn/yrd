@@ -623,9 +623,9 @@ describe("a run's journal, read back", () => {
     log.finish()
     const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
     const parsed = JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>
-    // Fold 4 is one newer than this writer's fold: in a rolling landing the
+    // Fold 5 is one newer than this writer's fold: in a rolling landing the
     // newer process owns this artifact, and no read may rewrite it.
-    writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 4 }))
+    writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 5 }))
     const before = fs.readFileSync(artifact, "utf8")
     const journals = readJournals(dir, { now: at })
     expect(journals.fallbacks).toMatchObject({ count: 1, reasons: [{ reason: "incompatible", count: 1 }] })
@@ -684,7 +684,7 @@ describe("a run's journal, read back", () => {
     // the reader names it "partial" on shape before it ever orders versions,
     // but the declared fold still owns it — no read may downgrade it.
     const { runnerRecords: _dropped, ...rest } = parsed
-    writeFileSync(artifact, JSON.stringify({ ...rest, fold: 4 }))
+    writeFileSync(artifact, JSON.stringify({ ...rest, fold: 5 }))
     const before = fs.readFileSync(artifact, "utf8")
     const journals = readJournals(dir, { now: at })
     expect(journals.fallbacks).toMatchObject({ count: 1, reasons: [{ reason: "partial", count: 1 }] })
@@ -731,7 +731,7 @@ describe("a run's journal, read back", () => {
       reasons: [{ reason: "incompatible", count: 1 }],
       persisted: 1,
     })
-    expect((JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>).fold).toBe(3)
+    expect((JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>).fold).toBe(4)
     const second = readJournals(dir, { now: at })
     expect(second.fallbacks).toBeUndefined()
   })
@@ -850,7 +850,7 @@ describe("a run's journal, read back", () => {
         writeFileSync(artifact, JSON.stringify({ ...parsed, schema: 3 }))
         break
       case "new-fold":
-        writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 4 }))
+        writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 5 }))
         break
       case "old-fold":
         writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 2 }))
@@ -2127,5 +2127,33 @@ describe("a branch retirement is custody, not a run of the merged change (37491)
     const rows = watchRows([merged], { journals, perRun: true })
     expect(rows).toHaveLength(1)
     expect(rows[0]?.row).toMatchObject({ at: mergedAt, endedAt: mergedAt, merge: "e".repeat(40), run: mergeRun })
+  })
+
+  it("reads past a fold-3 projection that a pre-37491 reader saved with the retirement as a run", () => {
+    // The live queue's journals carry projections written before this fix; trusting them would keep every
+    // re-stamped row exactly as it was. The fold bump makes them older artifacts, which a read rebuilds.
+    const dir = join(scratch("projection-retirement-fold"), "logs")
+    const log = openLog(dir, () => retiredAt)
+    log.write({ kind: "run", command: "author release", target: "main" } as never)
+    log.write(retirement as never)
+    log.finish()
+    const run = log.id
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    const parsed = JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>
+    const minted = {
+      at: retiredAt.toISOString(),
+      branch,
+      checks: [],
+      head,
+      id: run,
+      startedAt: retiredAt.toISOString(),
+    }
+    writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 3, runs: [minted] }))
+    // One-shot `yrd list` reads with detail "omit", which takes runs straight from a projection whose fold matches
+    // (queue-core-commands journalsFor). A fold-3 artifact no longer matches, so the read re-folds the raw journal,
+    // which skips the retirement. This header is a command journal, so the artifact is read raw rather than
+    // rewritten, and no fallback is reported for it (30401).
+    const journals = readJournals(dir, { now: retiredAt, sinceMs: allWindow, detail: "omit" })
+    expect(journals.runs.get(journalKey(branch, head))).toBeUndefined()
   })
 })

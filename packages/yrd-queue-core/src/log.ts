@@ -801,7 +801,8 @@ const journalFileCache = new Map<
 // Change the fold identity whenever JournalRun or runner interpretation changes.
 // Exact equality is required: an older fold cannot recognize a newer artifact.
 const JOURNAL_PROJECTION_SCHEMA = 2
-const JOURNAL_PROJECTION_FOLD = 3
+// 4 (37491): a local-branch-retirement record no longer mints a change run; fold-3 artifacts carry that run.
+const JOURNAL_PROJECTION_FOLD = 4
 
 type JournalSource = Readonly<{
   run: string
