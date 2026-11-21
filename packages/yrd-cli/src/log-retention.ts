@@ -275,6 +275,11 @@ export type RetentionResult = Readonly<{
   held?: readonly HeldOutput[]
   /** The target's holds judge could not answer (34952): the whole pass was kept, and this says why. */
   holdsFailure?: string
+  /**
+   * Environment directories past the window kept whole because a round inside is still young (#37419). They are
+   * not in `remaining`, so without this a row reads "remaining 0" while expired rounds stay on disk.
+   */
+  withheld?: readonly string[]
 }>
 
 /** One candidate the target still holds, with the judge's proof. */
@@ -1485,6 +1490,10 @@ export function retentionObservation(result: RetentionResult, input: Readonly<{ 
       ? {}
       : { held: result.held.length, heldSample: result.held.slice(0, 8) }),
     ...(result.holdsFailure === undefined ? {} : { holdsFailure: result.holdsFailure }),
+    // #37419: what a young round's environment kept past the window, counted and sampled like `held`.
+    ...(result.withheld === undefined || result.withheld.length === 0
+      ? {}
+      : { withheld: result.withheld.length, withheldSample: result.withheld.slice(0, 8) }),
     // The round sweep's compression pass (34923): what it converted, the bytes
     // in and out, what the bound left for a later round, and every candidate it
     // named or failed on — bounded like `failures`.

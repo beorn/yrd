@@ -438,6 +438,36 @@ describe("retention against a root OUTSIDE tmpdir (R1: allowedRoots)", () => {
   })
 })
 
+describe("a withheld environment is counted in the row, never a silent remaining 0 (#37419)", () => {
+  it("names how many expired rounds a young round's environment withheld, with a bounded sample", () => {
+    const withheld = Array.from({ length: 10 }, (_, index) => `/x/logs/environments/env-${index}`)
+    const observation = retentionObservation(
+      {
+        windowMs: ROUND_OUTPUT_WINDOW_MS,
+        removed: [],
+        failures: [],
+        failuresOmitted: 0,
+        remaining: [],
+        missing: [],
+        withheld,
+      },
+      { at: NOW },
+    )
+    expect(observation.remaining).toBe(0)
+    expect(observation.withheld).toBe(10)
+    expect(observation.withheldSample).toEqual(withheld.slice(0, 8))
+  })
+
+  it("writes no withheld fields when nothing was withheld", () => {
+    const observation = retentionObservation(
+      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], failuresOmitted: 0, remaining: [], missing: [] },
+      { at: NOW },
+    )
+    expect("withheld" in observation).toBe(false)
+    expect("withheldSample" in observation).toBe(false)
+  })
+})
+
 describe("an absent optional root is named in the row, never a healthy zero (F2)", () => {
   it("names the absent optional root in the observation row the prune writes", () => {
     const missing = "/x/checks"
