@@ -44,7 +44,12 @@ import { createProcess } from "@yrd/process"
 import { readBranchProtections } from "../src/branch-retirement.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
 import * as publicCli from "../src/index.ts"
-import { admitEnvironmentClose, assertNoLiveEnvironmentUse, environmentCwdHolder } from "../src/env-close-holders.ts"
+import {
+  admitEnvironmentClose,
+  assertNoLiveEnvironmentUse,
+  environmentCwdHolder,
+  environmentFdHolder,
+} from "../src/env-close-holders.ts"
 import {
   CloseRequestAlreadyStandsError,
   closeRequestFile,
@@ -2961,7 +2966,7 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     await Reflect.apply(admitEnvironmentClose, undefined, [w.work, run.io, undefined, budget])
     expect(processCensus).toHaveBeenLastCalledWith({
       scope: "same-uid",
-      sources: ["cwd"],
+      sources: ["cwd", "fd"],
       deadlineMs: 37,
       signal: abort.signal,
     })
@@ -2971,6 +2976,98 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       abort.signal.reason,
     )
     expect(processCensus).not.toHaveBeenCalled()
+  })
+
+  /**
+   * @failure 37455-B (@cto 2026-11-21): measured on the real binary, a process with cwd /tmp and a
+   *          read-write descriptor on a file under the environment did not stop the close; the
+   *          environment was removed and the descriptor then named a deleted inode under .trash.
+   * @level   l1 (injected census at the existing process-census boundary)
+   * @consumer close admission, both direct close and the queue's close lifecycle
+   */
+  it("refuses a close when a process holds a file open inside the environment", async () => {
+    const w = await world(":")
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const observed = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+    const held = join(path, "held-by-open-descriptor.txt")
+    // The admission reads live descriptor targets, so the file it names must exist at close time.
+    writeFileSync(held, "x")
+    const io = capture(w.work)
+    const admission = admitEnvironmentClose(path, io.io, async () => ({
+      rows: [
+        ...observed.rows,
+        // A holder with its cwd elsewhere: only the fd source carries the evidence.
+        {
+          pid: 4_000_001,
+          sources: {
+            fd: { availability: "readable", value: [{ name: "9", target: held }], issues: [] },
+          },
+          issues: [],
+        } as unknown as (typeof observed.rows)[number],
+      ],
+      coverage: observed.coverage,
+    }))
+    await expect(admission).rejects.toThrow(
+      `process 4000001 holds ${held} open; environment ${path} was preserved; wait for its owner to leave before retrying`,
+    )
+    expect(existsSync(path)).toBe(true)
+  })
+
+  /**
+   * @failure 37455-B: the fd arm must not refuse a descriptor that is outside the tree, and must not
+   *          read a pipe, socket or deleted entry as a holder.
+   * @level   l0 (pure helper)
+   * @consumer close admission's fd projection
+   */
+  it("names only descriptors that resolve inside the environment", () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-fd-holder-"))
+    const tree = join(root, "env-tree")
+    const inner = join(tree, "dir", "file")
+    mkdirSync(join(tree, "dir"), { recursive: true })
+    writeFileSync(inner, "x")
+    const outside = join(mkdtempSync(join(tmpdir(), "yrd-fd-outside-")), "file")
+    writeFileSync(outside, "x")
+    expect(environmentFdHolder(tree, [{ pid: 7, name: "3", target: inner }])).toEqual({
+      pid: 7,
+      name: "3",
+      target: inner,
+    })
+    expect(environmentFdHolder(tree, [{ pid: 8, name: "3", target: outside }])).toBeUndefined()
+    expect(environmentFdHolder(tree, [{ pid: 9, name: "3", target: "socket:[12345]" }])).toBeUndefined()
+    expect(environmentFdHolder(tree, [{ pid: 10, name: "3", target: `${inner} (deleted)` }])).toBeUndefined()
+    expect(environmentFdHolder(tree, [{ pid: 11, name: "3", target: inner }], new Set([11]))).toBeUndefined()
+  })
+
+  /**
+   * @failure 37455-B: an incomplete census delegated the close before the fd evidence was read, so a
+   *          holder the census COULD name was treated as unknown and handed to the queue round.
+   * @level   l1 (injected denied census plus a readable fd holder)
+   * @consumer close admission's delegation split
+   */
+  it("refuses by name when an incomplete census still names an open-file holder", async () => {
+    const w = await world(":")
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const observed = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+    const held = join(path, "held-while-uncertified.txt")
+    writeFileSync(held, "x")
+    const io = capture(w.work)
+    const admission = admitEnvironmentClose(path, io.io, async () => ({
+      rows: [
+        ...observed.rows,
+        {
+          pid: 4_000_002,
+          sources: { fd: { availability: "readable", value: [{ name: "4", target: held }], issues: [] } },
+          issues: [],
+        } as unknown as (typeof observed.rows)[number],
+      ],
+      coverage: {
+        ...observed.coverage,
+        complete: false,
+        unreadable: [unreadableDenial(["/usr/lib/systemd/systemd", "--user"])],
+      },
+    }))
+    await expect(admission).rejects.toThrow(`process 4000002 holds ${held} open; environment ${path} was preserved`)
+    expect(existsSync(path)).toBe(true)
   })
 
   // Public close execution is a production seam: old reporting and private census-injection tests cannot prove it.
