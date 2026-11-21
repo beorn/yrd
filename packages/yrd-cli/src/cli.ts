@@ -1735,6 +1735,7 @@ function buildProgram(
 
   // `env` is the printed name; `bay` is today's word, kept as its alias.
   const env_ = program.command("env").alias("bay").description("an environment for one branch")
+  const environmentIO = { ...io, commandEnv: env }
   env_.helpCommand(false)
   env_
     .command("open [commit]")
@@ -1760,7 +1761,7 @@ function buildProgram(
       setExit(
         await openEnvironment(
           { ...options, ...(commit === undefined ? {} : { commit }) } as Parameters<typeof openEnvironment>[0],
-          io,
+          environmentIO,
         ),
       ),
     )
@@ -1768,7 +1769,9 @@ function buildProgram(
     .command("list", { isDefault: true })
     .description("the environments this repository holds")
     .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await listEnvironments(options as Parameters<typeof listEnvironments>[0], io)))
+    .action(async (options) =>
+      setExit(await listEnvironments(options as Parameters<typeof listEnvironments>[0], environmentIO)),
+    )
   env_
     .command("retained")
     .description(
@@ -1812,7 +1815,7 @@ function buildProgram(
       [],
     )
     .action(async (options) =>
-      setExit(await retainedEnvironments(options as Parameters<typeof retainedEnvironments>[0], io)),
+      setExit(await retainedEnvironments(options as Parameters<typeof retainedEnvironments>[0], environmentIO)),
     )
 
   env_
@@ -1848,7 +1851,7 @@ function buildProgram(
     )
     .option("--dry-run", "preview admission and intended preservation/teardown without changing refs or files")
     .option("--json", "emit stable JSON")
-    .action(async (path, options) => setExit(await closeEnvironment(path, options, io)))
+    .action(async (path, options) => setExit(await closeEnvironment(path, options, environmentIO)))
   env_
     .command("bind <path>")
     .description(
@@ -1871,7 +1874,7 @@ function buildProgram(
         "the branch had already moved.",
     )
     .action(async (path, options) =>
-      setExit(await bindEnvironment(path, options as Parameters<typeof bindEnvironment>[1], io)),
+      setExit(await bindEnvironment(path, options as Parameters<typeof bindEnvironment>[1], environmentIO)),
     )
 
   const mirror = program

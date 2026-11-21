@@ -172,6 +172,21 @@ describe("yrd queue run workdir precedence", () => {
       expect(records).not.toHaveLength(0)
     },
   )
+
+  it("uses the queue override when listing environments", async () => {
+    const w = await world()
+    const root = dirname(w.work)
+    const configured = join(root, "configured")
+    const isolated = join(root, "isolated")
+    await w.git(["config", "yrd.workdir", configured])
+    const run = capture(w.work)
+    const exit = await runYrdProcess([process.execPath, "yrd", "--workdir", isolated, "env", "list"], run.io)
+
+    expect(exit).toBe(0)
+    const address = parseQueueAddress(`${join(root, "remote.git")}#main`)
+    expect(run.stdout()).toContain(join(queueRoot(isolated, address), "environments"))
+    expect(run.stdout()).not.toContain(configured)
+  })
 })
 
 describe("yrd check judges HEAD, never the invoking tree", () => {
