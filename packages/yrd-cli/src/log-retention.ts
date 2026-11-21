@@ -137,10 +137,16 @@ export const ROUND_COMPRESSION_FILES = 1024
  * ~7,900 candidates and its service restarted every 30-90 minutes, so at 64 a
  * pass a fresh memory needed ~125 passes (~10 h) and never finished the walk;
  * `deferred` saw-toothed at 6.7k-7.9k while the file and byte bounds were never
- * reached (largest pass 48 MB, 144 files). At 1024 the walk takes ~8 passes.
+ * reached (largest pass 48 MB, 144 files).
+ *
+ * 2048, not 1024 (37402, @cto 340938a3): live after 5f331c02, passes ran 4-5
+ * minutes apart, so a 29-minute gap between restarts held 7 passes; the walk
+ * needed ~8 and the 16:40Z restart came at 1,883 left. No pass was slow. At 2048
+ * the walk takes ~4 passes. A per-pass time budget replaces this count next
+ * (37402 follow-up); a third miss goes there, never to a larger count.
  * {@link ROUND_COMPRESSION_SLOW_MS} names a pass this makes slow.
  */
-export const ROUND_COMPRESSION_UNITS = 1024
+export const ROUND_COMPRESSION_UNITS = 2048
 
 /**
  * A compression pass longer than this is named in its row (`slow`), so the next
