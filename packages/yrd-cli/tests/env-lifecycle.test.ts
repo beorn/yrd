@@ -8,10 +8,12 @@
 
 import {
   chmodSync,
+  closeSync,
   cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -49,6 +51,7 @@ import {
   assertNoLiveEnvironmentUse,
   environmentCwdHolder,
   environmentFdHolder,
+  provenVanished,
 } from "../src/env-close-holders.ts"
 import {
   CloseRequestAlreadyStandsError,
@@ -3010,6 +3013,117 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     await expect(admission).rejects.toThrow(
       `process 4000001 holds ${held} open; environment ${path} was preserved; wait for its owner to leave before retrying`,
     )
+    expect(existsSync(path)).toBe(true)
+  })
+
+  /**
+   * @failure 37455-B (@cto 08:09 note 56f071c7): an unreadable same-UID fd must keep the environment,
+   *          refused or delegated BY NAME, never admitted - the same rule the cwd coverage follows.
+   * @level   l1 (injected denied fd source on a complete cwd census)
+   * @consumer close admission, direct close and the queue lifecycle
+   */
+  it.runIf(process.platform === "linux")("never admits a close while a same-UID fd source is unreadable", async () => {
+    const w = await world(":")
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const observed = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+    const uid = process.getuid?.()
+    const deniedFd = (pid: number, comm: string) =>
+      ({
+        pid,
+        uid,
+        comm,
+        sources: {
+          fd: {
+            availability: "denied",
+            value: [],
+            issues: [{ source: "fd", resource: "fd", reason: "denied", code: "EACCES" }],
+          },
+        },
+        issues: [],
+      }) as unknown as (typeof observed.rows)[number]
+    const io = capture(w.work)
+    const admission = await admitEnvironmentClose(path, io.io, async () => ({
+      rows: [...observed.rows, deniedFd(4_000_003, "bun")],
+      coverage: observed.coverage,
+    }))
+    expect(admission.kind).toBe("needs-delegation")
+    if (admission.kind !== "needs-delegation") throw new Error("an unreadable fd must never admit")
+    expect(admission.refusal).toContain("pid 4000003 bun (EACCES)")
+    expect(existsSync(path)).toBe(true)
+
+    // The identity clearing the cwd coverage already owns applies here too: a denial is evidence, not a gap.
+    const cleared = await admitEnvironmentClose(path, io.io, async () => ({
+      rows: [...observed.rows, deniedFd(4_000_004, "sshd-session")],
+      coverage: observed.coverage,
+    }))
+    expect(cleared).toEqual({ kind: "admitted" })
+  })
+
+  /**
+   * @failure 37533 (@dev/5's reproduction): the fd walk lengthened the census, short-lived processes
+   *          exited mid-read, and their ENOENT rows counted as unreadable - so every close refused.
+   *          A row proved gone by re-stat is an exit, never a holder; a live pid keeps its gap.
+   * @level   l1 (injected vanished row and a real re-stat)
+   * @consumer close admission, both callers
+   */
+  it.runIf(process.platform === "linux")("treats a process proved gone mid-walk as an exit, not a holder", async () => {
+    expect(provenVanished(4_000_009, undefined)).toBe(true)
+    expect(provenVanished(process.pid, undefined)).toBe(false)
+    const w = await world(":")
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const observed = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+    const io = capture(w.work)
+    const gone = (pid: number) =>
+      ({
+        pid,
+        uid: process.getuid?.(),
+        comm: ".bun-wrapped",
+        denied: [],
+        issues: [{ source: "cwd", resource: "cwd", reason: "missing", code: "ENOENT" }],
+      }) as unknown as typeof observed.coverage.unreadable extends readonly (infer T)[] ? T : never
+    const rows = (pid: number) =>
+      [
+        ...observed.rows,
+        {
+          pid,
+          uid: process.getuid?.(),
+          comm: ".bun-wrapped",
+          startTicks: 1,
+          sources: {
+            cwd: {
+              availability: "missing",
+              value: undefined,
+              issues: [{ source: "cwd", resource: "cwd", reason: "missing", code: "ENOENT" }],
+            },
+            fd: {
+              availability: "missing",
+              value: [],
+              issues: [{ source: "fd", resource: "fd", reason: "missing", code: "ENOENT" }],
+            },
+          },
+          issues: [],
+        },
+      ] as (typeof observed.rows)[number][]
+    const admitted = await admitEnvironmentClose(path, io.io, async () => ({
+      rows: rows(4_000_009),
+      coverage: { ...observed.coverage, complete: false, unreadable: [gone(4_000_009)] },
+    }))
+    expect(admitted).toEqual({ kind: "admitted" })
+
+    // The safety control: a live process whose fresh fd read SHOWS a descriptor inside the tree keeps its
+    // gap, so an ENOENT row never becomes a blanket pass.
+    const held = join(path, "held-by-this-test.txt")
+    writeFileSync(held, "x")
+    const handle = openSync(held, "r")
+    try {
+      const live = await admitEnvironmentClose(path, io.io, async () => ({
+        rows: observed.rows,
+        coverage: { ...observed.coverage, complete: false, unreadable: [gone(process.pid)] },
+      }))
+      expect(live.kind).toBe("needs-delegation")
+    } finally {
+      closeSync(handle)
+    }
     expect(existsSync(path)).toBe(true)
   })
 
