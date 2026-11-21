@@ -801,7 +801,8 @@ const journalFileCache = new Map<
 // Change the fold identity whenever JournalRun or runner interpretation changes.
 // Exact equality is required: an older fold cannot recognize a newer artifact.
 const JOURNAL_PROJECTION_SCHEMA = 2
-const JOURNAL_PROJECTION_FOLD = 3
+// 4 (37491): a local-branch-retirement record no longer mints a change run; fold-3 artifacts carry that run.
+const JOURNAL_PROJECTION_FOLD = 4
 
 type JournalSource = Readonly<{
   run: string
@@ -1905,6 +1906,10 @@ function runsIn(
     // attempt. Keep the original records for the runner, without minting a
     // change run (or moving its decision time) from a notice alone.
     if (record.kind === "message") continue
+    // A retirement records custody of an ended change's branch, never another attempt (as the fold's `retained`
+    // does). Minted as a run, a `yrd env close` days later gave the merged row its time and run with no endedAt or
+    // merge, and the briefing counted 247.7 h of submit-to-merge for a two-minute merge (37491).
+    if (record.kind === "local-branch-retirement") continue
     const { branch, head } = record
     if (typeof branch !== "string" || typeof head !== "string") continue
     const at = new Date(record.at)
