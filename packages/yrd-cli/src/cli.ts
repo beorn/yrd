@@ -46,6 +46,7 @@ import {
   runIndexPath,
   runIndexRef,
   RUN_INDEX_CODES,
+  unreadableQueueHealthDocument,
   yrdQueueRunnerDeclarations,
 } from "@yrd/queue-core"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
@@ -1042,7 +1043,50 @@ function buildProgram(
         queue?: string
         projectRoot?: string
       }
-      const location = await resolveQueueLocation(cwd(), queue, env)
+      // A service that cannot read its own queue clone has no loop to write its
+      // health, and the document on disk is the LAST service's: it would keep
+      // reading `healthy` with `publication: fresh` while nothing runs (33946).
+      // The page is written here, naming the Git failure, before the exit 2 that
+      // keeps this service off Hab's relaunch allowlist.
+      let upWorkdir: string | undefined
+      let location: Awaited<ReturnType<typeof resolveQueueLocation>>
+      try {
+        location = await resolveQueueLocation(cwd(), queue, env, "queue", (workdir) => {
+          upWorkdir = workdir
+        })
+      } catch (error) {
+        if (upWorkdir === undefined) {
+          // No queue root was named before the failure, so there is nowhere a page
+          // could stand. Say that, rather than let the exit read as if one had run.
+          io.stderr(
+            "yrd: no queue root was resolved, so no health document was written; the failure above names the cause\n",
+          )
+        }
+        if (upWorkdir !== undefined) {
+          const reason = error instanceof Error ? error.message : String(error)
+          const workdir = upWorkdir
+          try {
+            const health = await import("./queue-health.ts")
+            health.writeQueueHealth(
+              workdir,
+              unreadableQueueHealthDocument(health.SERVICE, {
+                reason,
+                at: new Date().toISOString(),
+                workdir,
+              }),
+            )
+          } catch (writeError) {
+            // Never silent: the page could not be written, so say where it would
+            // have gone and why it did not.
+            io.stderr(
+              `yrd: could not write the unreadable-queue health document to ${workdir}: ${
+                writeError instanceof Error ? writeError.message : String(writeError)
+              }}\n`,
+            )
+          }
+        }
+        throw error
+      }
       const taken = await coreQueueCommand(
         location.repo,
         io,
