@@ -110,15 +110,21 @@ export const JOURNAL_COMPRESS_AFTER_MS = 7 * 24 * 60 * 60 * 1000
  * 1-7 day backlog in about a day. gzip (level 6) streamed 129 MB/s there, so
  * the bound costs well under a second of zlib's thread pool per round; one file
  * larger than the whole bound is taken alone, so it is never starved.
+ *
+ * Raised 4x by #37402. Measured on the hh-dev queue 2026-11-19 18:00 to 11-21 08:00 (474 passes): the byte bound
+ * ended 403 of them, at 62.8 MB a pass and 12.5 passes an hour (the 34952 judged spacing, not one pass a round),
+ * about 18.8 GB a day, while the queue wrote about 22.7 GB of round output a day, so 60,920 units stayed deferred
+ * and grew. 256 MiB is about 75 GB a day, over 3x that intake, for about 2 s of gzip a pass.
  */
-export const ROUND_COMPRESSION_BYTES = 64 * 1024 * 1024
+export const ROUND_COMPRESSION_BYTES = 256 * 1024 * 1024
 
 /**
  * Files one round's sweep converts (34923 ruling 4). A round holds ~56 class
  * files of a block or more (2,224 in 40 measured rounds); each conversion costs
- * two fsyncs, a link and a removely removal, so 256 is ~4x one round's output.
+ * two fsyncs, a link and a removely removal, so 256 was ~4x one round's output. Raised 4x with the byte bound by
+ * #37402, so the file bound (it ended 99 of 474 measured passes) does not become the one that keeps up too slowly.
  */
-export const ROUND_COMPRESSION_FILES = 256
+export const ROUND_COMPRESSION_FILES = 1024
 
 /**
  * Candidates — round directories or journals — one round's sweep examines
