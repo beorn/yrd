@@ -100,6 +100,65 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
 const ALL_READS = { view: provider("json", "<key>"), list: provider("json") }
 
 describe("yrd issues", () => {
+  // @failure A page request is silently replaced by the flat list or dropped by the declaration.
+  // @level l2 @consumer 35144 finite provider paging; existing flat list accepts no operands.
+  it("runs one finite page through a declared read while preserving the flat list", async () => {
+    const request = JSON.stringify({
+      binding: "workspace-a/native",
+      population: "all-beads",
+      generation: "first",
+      limit: 2,
+    })
+    const root = project({
+      "issues.yml": declare({ ...ALL_READS, "list-page": provider("json", "<page>") }),
+    })
+    const page = await yrd(root, "issues", "list-page", request)
+    expect(page.exitCode, page.stderr).toBe(0)
+    expect(envelopeOf(page)).toMatchObject({ verb: "list-page", result: { argv: [request] } })
+    const flat = await yrd(root, "issues", "list")
+    expect(flat.exitCode, flat.stderr).toBe(0)
+    expect(envelopeOf(flat)).toMatchObject({ verb: "list", result: { argv: [] } })
+    const legacy = project({ "issues.yml": declare(ALL_READS) })
+    const unsupported = await yrd(legacy, "issues", "list-page", request)
+    expect(unsupported.exitCode).toBe(1)
+    expect(unsupported.stderr).toContain("yrd-issues-verb-unsupported")
+    const invalid = await yrd(root, "issues", "list-page", "[]")
+    expect(invalid.exitCode).toBe(2)
+    expect(invalid.stderr).toContain("<page>")
+    const missingOperand = project({ "issues.yml": declare({ "list-page": provider("json") }) })
+    const missing = await yrd(missingOperand, "issues", "list-page", request)
+    expect(missing.exitCode).toBe(1)
+    expect(missing.stderr).toContain("lacks <page>")
+  })
+
+  // @failure Guarded assign drops an expected owner/requester or launches a provider lacking the declared capability.
+  // @level l2 @consumer 35144 Hightea source assignment; existing write tests only carry the replay id.
+  it("forwards guarded assign operands only to a provider declaring both placeholders", async () => {
+    const root = project({
+      "issues.yml": declare({ assign: provider("json", "<key>", "<seat>", "<expected-owner>", "<requester>", "<id>") }),
+    })
+    const requester = JSON.stringify({ authority: "hightea:workspace-a", subject: "member-a" })
+    const args = ["issues", "assign", "key", "@dev/4", "--id", "intent"]
+    for (const expectedOwner of ["null", JSON.stringify("@dev/3")]) {
+      const ran = await yrd(root, ...args, "--expected-owner", expectedOwner, "--requested-by", requester)
+      expect(ran.exitCode, ran.stderr).toBe(0)
+      expect(envelopeOf(ran).result).toEqual({ argv: ["key", "@dev/4", expectedOwner, requester, "intent"] })
+    }
+    const missing = await yrd(root, ...args)
+    expect(missing.exitCode).toBe(2)
+    expect(missing.stderr).toContain("<expected-owner>")
+    const malformed = await yrd(root, ...args, "--expected-owner", "false", "--requested-by", requester)
+    expect(malformed.exitCode).toBe(2)
+    expect(malformed.stderr).toContain("--expected-owner")
+    const legacy = project({ "issues.yml": declare({ assign: provider("json", "<key>", "<seat>", "<id>") }) })
+    const unused = await yrd(legacy, ...args, "--expected-owner", "null")
+    expect(unused.exitCode).toBe(1)
+    expect(unused.stderr).toContain("yrd-issues-verb-unsupported")
+    const unguarded = await yrd(legacy, ...args)
+    expect(unguarded.exitCode, unguarded.stderr).toBe(0)
+    expect(envelopeOf(unguarded).result).toEqual({ argv: ["key", "@dev/4", "intent"] })
+  })
+
   // CTO 6ef56c77: the provider owns key grammar; both input and returned identities stay opaque here.
   it("resolve preserves the raw operand and opaque provider keys without a replay id", async () => {
     const raw = " -one.md, two / 三\nnext "

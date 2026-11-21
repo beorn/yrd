@@ -80,6 +80,7 @@ import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { legendLines } from "./watch-words.ts"
 import {
   ISSUES_CLOSE_REASONS,
+  ISSUES_CODES,
   ISSUES_DECLARATION_PATH,
   ISSUES_EVENT_KINDS,
   ISSUES_VERBS,
@@ -1924,12 +1925,35 @@ function buildProgram(
       .option("--timeout-ms <n>", "kill the provider after this many milliseconds (yrd-issues-provider-timed-out)", int)
     // NO OPTION IS ACCEPTED AND IGNORED: a read takes no replay key, so --id is refused on it.
     if (write) command.option("--id <id>", "the event's replay key; required, the provider dedupes on it")
+    if (verb === "list-page") command.description("read a finite page using the provider's JSON page request")
+    if (verb === "assign") {
+      command
+        .option("--expected-owner <json>", "owner observed before assignment, as a JSON string or null")
+        .option("--requested-by <json>", "requester audit identity as a JSON object with authority and subject")
+    }
     command.action(async (...received: unknown[]) => {
       const args = received.slice(0, operands.length) as string[]
-      const options = received[operands.length] as Readonly<{ projectRoot?: string; id?: string; timeoutMs?: number }>
+      const options = received[operands.length] as Readonly<{
+        projectRoot?: string
+        id?: string
+        timeoutMs?: number
+        expectedOwner?: string
+        requestedBy?: string
+      }>
       if (options.projectRoot === undefined) unaddressedRepository(cwd())
-      const { runIssuesVerb } = await import("./issues/run.ts")
+      const { parseIssuesAssignmentAudit, runIssuesVerb } = await import("./issues/run.ts")
+      let assignmentAudit: ReturnType<typeof parseIssuesAssignmentAudit>
+      try {
+        assignmentAudit = parseIssuesAssignmentAudit(options.expectedOwner, options.requestedBy)
+      } catch (error) {
+        io.stderr(
+          `yrd issues: ${ISSUES_CODES.badArguments}: ${verb}: ${error instanceof Error ? error.message : String(error)}\n`,
+        )
+        setExit(2)
+        return
+      }
       const outcome = await runIssuesVerb({
+        ...assignmentAudit,
         verb,
         args,
         cwd: cwd(),
