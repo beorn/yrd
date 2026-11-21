@@ -1089,7 +1089,9 @@ export function createPostMerge<C extends Context>(
   const nudge = (context: C): void => {
     if (closing) return
     for (const branch of context.merged) {
-      baseOf.set(branch, context.base)
+      // A branch still owed keeps its earlier round's base: that base precedes both deliveries, so a re-merge
+      // during an outage does not skip the earlier delivery's merged event (@dev/4 GO 546f9f23).
+      if (!baseOf.has(branch)) baseOf.set(branch, context.base)
       failures.delete(branch)
     }
     foldCarried()

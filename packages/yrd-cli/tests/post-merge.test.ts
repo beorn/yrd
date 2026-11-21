@@ -2002,6 +2002,46 @@ it("carries a failed attempt's branches into the next attempt, and names them af
   expect(abandoned.map((a) => a.branch)).toEqual(["task/one"])
 })
 
+/**
+ * @failure A branch still owed merges again while the provider is down. Its carry then keeps only the re-merge's
+ *   base, the earlier delivery's merge is an ancestor of that base, and its merged event is skipped for good (37513,
+ *   @dev/4 GO 546f9f23). A fresh merge also starts the branch's failure count over.
+ * @level l2 @consumer Yrd post-merge carry-forward bases (37513) @testonly none
+ */
+it("keeps a still-owed branch's earlier round base when it merges again, and starts its count over", async () => {
+  const root = world()
+  const abandoned: string[] = []
+  const fail = ["sh", "-c", "echo daemon timeout >&2; exit 1"]
+  await using runner = createPostMerge({
+    workdir: root,
+    cwd: root,
+    cleanup: async () => {},
+    report: () => {},
+    abandoned: async (_context, given) => {
+      abandoned.push(...given.map(({ branch }) => branch))
+    },
+  })
+  const attempts = () =>
+    readdirSync(join(root, "post-merge"))
+      .filter((name) => name.endsWith(".json"))
+      .sort()
+      .map((name) => JSON.parse(readFileSync(join(root, "post-merge", name), "utf8")) as Attempt & { bases: string[] })
+  const settledCount = async (count: number) =>
+    vi.waitFor(() => expect(attempts().filter((a) => a.status !== "running")).toHaveLength(count), { timeout: 10000 })
+
+  runner.nudge({ ...context, target: "r1", base: "b1", merged: ["task/one"], update: fail })
+  await settledCount(1)
+  // task/one merges again while its first delivery is still owed.
+  runner.nudge({ ...context, target: "r2", base: "b2", merged: ["task/one"], update: fail })
+  await settledCount(2)
+  runner.nudge({ ...context, target: "r3", base: "b3", merged: [], update: fail, updateDue: false })
+  await settledCount(3)
+  // The carry still holds b1, which precedes both deliveries.
+  expect(attempts()[2]).toMatchObject({ merged: ["task/one"], bases: ["b1", "b3"], status: "failed" })
+  // Three failed attempts, but the re-merge started the count over: two since it, so not yet given up.
+  expect(abandoned).toEqual([])
+})
+
 /** @failure One branch's failed close charges every branch in the attempt, so a settled branch is retried and can be
  *   given up on for another's fault; or a failure that names no branch carries none (37513, @dev/4). @level l1
  *   @consumer Yrd post-merge carry-forward attribution @testonly none */
