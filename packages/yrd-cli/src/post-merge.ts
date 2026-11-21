@@ -42,6 +42,29 @@ export type AbandonedPostMerge = Readonly<{ branch: string; attempts: number; re
 /** What one attempt left owed: the branches its failure is charged to, and why. Empty when it settled. */
 type AttemptOutcome = Readonly<{ failed: readonly string[]; reason: string; evidence: string }>
 
+const failingStatus = (status: unknown): boolean =>
+  status === "failed" || status === "unavailable" || status === "record-failed"
+
+/**
+ * The merged branches a failed attempt is charged to (37513). A failing action that names one of the attempt's
+ * branches charges that branch alone; a failure that names none (`whole`: the update, an event write with no branch
+ * row, the attempt itself), or a failed attempt whose actions name no branch of its own, charges every branch.
+ */
+export function chargedBranches(
+  merged: readonly string[],
+  actions: ReadonlyArray<Readonly<{ status?: unknown; branch?: unknown }>>,
+  whole: boolean,
+): readonly string[] {
+  if (whole) return merged
+  const named = new Set(
+    actions
+      .filter(({ status }) => failingStatus(status))
+      .map(({ branch }) => branch)
+      .filter((branch): branch is string => typeof branch === "string" && merged.includes(branch)),
+  )
+  return named.size === 0 ? merged : merged.filter((branch) => named.has(branch))
+}
+
 type Context = Readonly<{
   code: string
   config: string
@@ -699,6 +722,12 @@ export function createPostMerge<C extends Context>(
   let carried: Readonly<{ context: C; bases: ReadonlyArray<string | undefined> }> | undefined
   /** Failed attempts per merged branch since its last settled one (37513). */
   const failures = new Map<string, number>()
+  /**
+   * The base of the round that last delivered each branch still owed (37513). A carried branch takes only its own
+   * round's base, so a branch that settled never keeps an early base live, which would stop recordMergedEvents
+   * skipping an earlier delivery of a branch merged again (@dev/4).
+   */
+  const baseOf = new Map<string, string | undefined>()
   let active: Promise<void> | undefined
   let cleanupPending: C | undefined
   let cleanupActive: Promise<void> | undefined
@@ -843,6 +872,10 @@ export function createPostMerge<C extends Context>(
       const events = await mergedEvents(context, bases)
       issueActions = events.actions
       eventsFailed = events.failed
+      // An event write that failed without a branch row names nobody, so it is charged to every branch (@dev/4).
+      if (events.failed && !events.actions.some(({ status, branch }) => failingStatus(status) && typeof branch === "string")) {
+        failedWhole = true
+      }
       try {
         if (context.update !== undefined && context.updateDue !== false) {
           const result = await process.run({
@@ -959,18 +992,7 @@ export function createPostMerge<C extends Context>(
     if (settled.status !== "failed" && settled.status !== "unavailable") {
       return { failed: [], reason: "", evidence: path }
     }
-    // A close that names its branch charges that branch alone; an update, an event write or an attempt that failed
-    // whole names none, so every branch it carried is charged and carried again.
-    const failing = issueActions.filter(
-      ({ status }) => status === "failed" || status === "unavailable" || status === "record-failed",
-    )
-    const named = new Set(
-      failing
-        .map(({ branch }) => branch)
-        .filter((branch): branch is string => typeof branch === "string" && context.merged.includes(branch)),
-    )
-    const whole = failedWhole || named.size === 0
-    const diagnostic = failing.find((action) => "diagnostic" in action)
+    const diagnostic = issueActions.find((action) => failingStatus(action.status) && "diagnostic" in action)
     const reason = [
       String(settled.status),
       ...(typeof settled.exitCode === "number" ? ["exit " + String(settled.exitCode)] : []),
@@ -979,7 +1001,7 @@ export function createPostMerge<C extends Context>(
       ...(typeof settled.reason === "string" ? [settled.reason] : []),
       ...(diagnostic !== undefined && "diagnostic" in diagnostic ? [String(diagnostic.diagnostic)] : []),
     ].join(", ")
-    return { failed: whole ? context.merged : [...named], reason, evidence: path }
+    return { failed: chargedBranches(context.merged, issueActions, failedWhole), reason, evidence: path }
   }
   /** Fold the carried branches into `pending`, whose newer context wins every field but `merged` and `updateDue`. */
   const foldCarried = (): void => {
@@ -994,7 +1016,11 @@ export function createPostMerge<C extends Context>(
   const settle = async (next: NonNullable<typeof pending>, outcome: AttemptOutcome): Promise<void> => {
     // A reload's abort fails its in-flight attempt on purpose; the next service's startup catch-up owns it.
     if (options.stop?.aborted) return
-    for (const branch of next.context.merged) if (!outcome.failed.includes(branch)) failures.delete(branch)
+    for (const branch of next.context.merged) {
+      if (outcome.failed.includes(branch)) continue
+      failures.delete(branch)
+      baseOf.delete(branch)
+    }
     const again: string[] = []
     const given: AbandonedPostMerge[] = []
     for (const branch of outcome.failed) {
@@ -1004,11 +1030,13 @@ export function createPostMerge<C extends Context>(
         again.push(branch)
       } else {
         failures.delete(branch)
+        baseOf.delete(branch)
         given.push({ branch, attempts: count, reason: outcome.reason, evidence: outcome.evidence })
       }
     }
     if (again.length > 0) {
-      const owed = { context: { ...next.context, merged: again, updateDue: true }, bases: next.bases }
+      const bases = [...new Set(again.map((branch) => baseOf.get(branch)))]
+      const owed = { context: { ...next.context, merged: again, updateDue: true }, bases }
       carried =
         carried === undefined
           ? owed
@@ -1029,6 +1057,8 @@ export function createPostMerge<C extends Context>(
           "; its issue stays open until its close is rerun",
       )
     }
+    // A reload's stop wins over the hand-off: the line above already names each branch.
+    if (options.stop?.aborted) return
     try {
       await options.abandoned?.(next.context, given)
     } catch (error) {
@@ -1058,6 +1088,10 @@ export function createPostMerge<C extends Context>(
   }
   const nudge = (context: C): void => {
     if (closing) return
+    for (const branch of context.merged) {
+      baseOf.set(branch, context.base)
+      failures.delete(branch)
+    }
     foldCarried()
     // Coalescing keeps the newest round's context; its bases keep every round's, so no delivery is skipped (#31194).
     pending = { context: coalesce(pending?.context, context), bases: [...(pending?.bases ?? []), context.base] }
