@@ -1905,6 +1905,10 @@ function runsIn(
     // attempt. Keep the original records for the runner, without minting a
     // change run (or moving its decision time) from a notice alone.
     if (record.kind === "message") continue
+    // A retirement records custody of an ended change's branch, never another attempt (as the fold's `retained`
+    // does). Minted as a run, a `yrd env close` days later gave the merged row its time and run with no endedAt or
+    // merge, and the briefing counted 247.7 h of submit-to-merge for a two-minute merge (37491).
+    if (record.kind === "local-branch-retirement") continue
     const { branch, head } = record
     if (typeof branch !== "string" || typeof head !== "string") continue
     const at = new Date(record.at)

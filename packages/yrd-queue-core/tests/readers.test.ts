@@ -2075,3 +2075,57 @@ describe("a gzip-retained journal (34923)", () => {
     expect(read.absent).toContain("missing")
   })
 })
+
+/**
+ * @failure 37491: a later `yrd env close` wrote a `local-branch-retirement` custody record for a change merged ten
+ * days earlier. The journal read minted it as a run of that change, and the per-run join then gave the merged row the
+ * retirement's time and run with no endedAt or merge, so the briefing counted 247.7 h of submit-to-merge for a change
+ * that merged in two minutes.
+ * @level l2 @consumer `yrd list --all --json`'s per-run rows, read by the briefing's submit-to-merge latency.
+ */
+describe("a branch retirement is custody, not a run of the merged change (37491)", () => {
+  const branch = "task/33337"
+  const head = "d".repeat(40)
+  const mergedAt = new Date("2026-11-11T04:29:48.000Z")
+  const retiredAt = new Date("2026-11-21T12:09:21.558Z")
+  const retirement = {
+    kind: "local-branch-retirement",
+    repo: "root",
+    branch,
+    head,
+    actor: "@dev/9",
+    owner: "@dev/17",
+    issue: "33337",
+    reason: "merged",
+    outcome: "retired",
+  }
+  // `yrd list --all` reads the last seven days of journals (FULL_READ_RUNS_MS).
+  const allWindow = 7 * 24 * 60 * 60 * 1000
+
+  it("mints no run from a retirement record alone, as when the merge run aged out of the read window", () => {
+    const { dir } = journalDir([retirement], retiredAt)
+    expect(readJournals(dir, { now: retiredAt, sinceMs: allWindow }).runs.get(journalKey(branch, head))).toBeUndefined()
+  })
+
+  it("keeps the merged row's merge time, run and commit when a retirement run follows its merge run", () => {
+    // Inside the seven-day read window, both runs are read: the retirement must still not join as a run.
+    const closedAt = new Date("2026-11-12T09:00:00.000Z")
+    const { dir, run: mergeRun } = journalDir([{ branch, decision: "merged", head, kind: "change" }], mergedAt)
+    openLog(dir, () => closedAt).write(retirement as never)
+    const journals = readJournals(dir, { now: closedAt, sinceMs: allWindow })
+    expect(journals.runs.get(journalKey(branch, head))?.map((run) => run.id)).toEqual([mergeRun])
+    const merged: Row = {
+      branch,
+      head,
+      since: new Date("2026-11-11T04:28:05.043Z"),
+      state: "merged",
+      at: mergedAt,
+      endedAt: mergedAt,
+      merge: "e".repeat(40),
+      run: mergeRun,
+    }
+    const rows = watchRows([merged], { journals, perRun: true })
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.row).toMatchObject({ at: mergedAt, endedAt: mergedAt, merge: "e".repeat(40), run: mergeRun })
+  })
+})
