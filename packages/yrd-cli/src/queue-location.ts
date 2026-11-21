@@ -129,10 +129,25 @@ export async function originHead(git: Git, remote = "origin"): Promise<string> {
   return remoteHead(git, remote)
 }
 
-export async function hostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git: Git): Promise<string> {
+type WorkdirSource = "YRD_WORKDIR" | "yrd.workdir" | "default"
+
+async function resolveHostWorkdir(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  git: Git,
+): Promise<Readonly<{ root: string; source: WorkdirSource }>> {
+  const override = env.YRD_WORKDIR
+  if (override !== undefined) {
+    if (override.trim() === "") throw new Error("YRD_WORKDIR must name a directory")
+    return { root: resolve(cwd, override), source: "YRD_WORKDIR" }
+  }
   const declared = await configValue(git, "yrd.workdir")
-  if (declared !== undefined) return resolve(repositoryHere(cwd) ?? cwd, declared)
-  return join(env.XDG_STATE_HOME ?? join(env.HOME ?? homedir(), ".local", "state"), "yrd")
+  if (declared !== undefined) return { root: resolve(repositoryHere(cwd) ?? cwd, declared), source: "yrd.workdir" }
+  return { root: join(env.XDG_STATE_HOME ?? join(env.HOME ?? homedir(), ".local", "state"), "yrd"), source: "default" }
+}
+
+export async function hostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git: Git): Promise<string> {
+  return (await resolveHostWorkdir(cwd, env, git)).root
 }
 
 /**
@@ -253,6 +268,7 @@ export async function resolveQueueLocation(
   value: string | undefined,
   env: NodeJS.ProcessEnv,
   context: "queue" | "reader" | "submit" = "queue",
+  reportWorkdir?: (workdir: string, source: WorkdirSource) => void,
 ): Promise<QueueLocation> {
   const addressed =
     value !== undefined &&
@@ -292,8 +308,9 @@ export async function resolveQueueLocation(
     }
     address = parseQueueAddress(selected)
   }
-  const host = await hostWorkdir(cwd, env, git)
+  const { root: host, source } = await resolveHostWorkdir(cwd, env, git)
   const workdir = queueRoot(host, address)
+  reportWorkdir?.(workdir, source)
   if (inside !== undefined && (context === "submit" || (context === "reader" && !addressed))) {
     return {
       address,

@@ -17,9 +17,11 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { afterAll, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
 import { readJournals, type Git, type LogRecord } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
+import { parseQueueAddress, queueRoot } from "../src/address.ts"
+import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { workdirOf } from "../src/workdir.ts"
@@ -117,6 +119,59 @@ describe("the queue workdir is git configuration, never a declaration key", () =
     const common = (await w.git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
     expect(existsSync(join(common, "yrd"))).toBe(false)
   })
+})
+
+describe("yrd queue run workdir precedence", () => {
+  afterEach(() => vi.unstubAllEnvs())
+
+  // A successful round has a queue-owned clone. At the notice that directory
+  // must still be absent, and the other possible hosts must never be touched.
+  it.each(["--workdir", "YRD_WORKDIR", "yrd.workdir", "default"] as const)(
+    "reports the workdir selected by %s before preparing the queue",
+    async (source) => {
+      const w = await world()
+      const root = dirname(w.work)
+      const stateHome = join(root, "state")
+      const hosts = {
+        "--workdir": join(root, "flag"),
+        YRD_WORKDIR: join(root, "env"),
+        "yrd.workdir": join(root, "configured"),
+        default: join(stateHome, "yrd"),
+      }
+      if (source !== "default") await w.git(["config", "yrd.workdir", hosts["yrd.workdir"]])
+      vi.stubEnv("GIT_CONFIG_GLOBAL", join(root, "no-global-config"))
+      vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1")
+      vi.stubEnv("XDG_STATE_HOME", stateHome)
+      vi.stubEnv("YRD_WORKDIR", source === "--workdir" || source === "YRD_WORKDIR" ? hosts.YRD_WORKDIR : undefined)
+      const args = source === "--workdir" ? ["--workdir", hosts["--workdir"]] : []
+      const expected = queueRoot(hosts[source], parseQueueAddress(`${join(root, "remote.git")}#main`))
+      const notice = `yrd queue run: workdir ${expected} (from ${source})`
+      let existedAtNotice: boolean | undefined
+      const run = capture(w.work)
+      let stderr = ""
+      const exit = await runYrdProcess([process.execPath, "yrd", ...args, "queue", "run", "--json"], {
+        ...run.io,
+        stderr: (text) => {
+          stderr += text
+          if (text.includes(notice)) existedAtNotice = existsSync(expected)
+        },
+      })
+
+      expect(exit, stderr).toBe(0)
+      expect(stderr).toContain(notice)
+      expect(existedAtNotice).toBe(false)
+      expect(existsSync(join(expected, "repo", ".git", "HEAD"))).toBe(true)
+      for (const host of Object.values(hosts)) {
+        if (host !== hosts[source]) expect(existsSync(host), host).toBe(false)
+      }
+      const records = run
+        .stdout()
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as LogRecord)
+      expect(records).not.toHaveLength(0)
+    },
+  )
 })
 
 describe("yrd check judges HEAD, never the invoking tree", () => {
