@@ -16,17 +16,7 @@
 import { shellQuote } from "git-super/shell-command"
 import { inspectCheckoutGitMetadata } from "git-super"
 import { readCommitPath } from "git-super/commit-graph"
-import {
-  existsSync,
-  appendFileSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  renameSync,
-  statSync,
-  writeFileSync,
-} from "node:fs"
+import { existsSync, appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { hostname, tmpdir } from "node:os"
 import { dirname, isAbsolute, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
@@ -273,7 +263,7 @@ import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import { formatQueueStats, parseSince, queueStats, type SinceOrigin, type StatsBy } from "./queue-stats.ts"
 import { formatQueueLs, queueLs, filterLsRows, LS_FILTER_FIELDS } from "./queue-ls.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
-import { SERVICE } from "./queue-health.ts"
+import { SERVICE, writeQueueHealth } from "./queue-health.ts"
 
 const START_SERVICE_COMMAND = `hab up ${SERVICE}`
 const CHECK_SERVICE_COMMAND = `hab ps ${SERVICE}`
@@ -3496,18 +3486,9 @@ export async function coreQueueCommand(
       /** The one atomic write, shared by the heartbeat's documents and the graceful stop's last one. */
       const persistHealth = (written: QueueHealthDocument): void => {
         try {
-          // ATOMIC, and the reason is a page nobody should ever have got:
-          // `writeFileSync` truncates before it writes, so a probe landing in
-          // that window reads an EMPTY file, which parses as unreadable, which
-          // becomes `unknown`, which habd pages as health-not-measured. The
-          // probe runs on the supervisor's own tick, so the window is hit by
-          // chance and the page names a defect that does not exist. Same
-          // directory, so the rename is a rename and not a copy (@cto
-          // 2026-09-11).
-          const path = join(workdir, QUEUE_HEALTH_DOCUMENT)
-          const staging = `${path}.${String(process.pid)}.tmp`
-          writeFileSync(staging, `${JSON.stringify(written, undefined, 2)}\n`)
-          renameSync(staging, path)
+          // ONE writer for the document, atomic for the reason stated there; this
+          // service and the start failure that has no loop share it.
+          writeQueueHealth(workdir, written)
         } catch (error) {
           log?.warn?.(
             `could not write the service health document to ${join(workdir, QUEUE_HEALTH_DOCUMENT)}: ${

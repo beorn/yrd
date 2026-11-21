@@ -8,7 +8,7 @@
  * reader it owns (@i/4-supervision/24523 D1).
  */
 
-import { readFileSync } from "node:fs"
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 import {
@@ -35,6 +35,26 @@ export const SERVICE = "yrd"
 
 /** Bound on the text an `unknown` document quotes back to an operator. */
 const MAX_OBSERVED = 2_000
+
+/**
+ * Write the document a probe later reads, ATOMICALLY and in one place: the
+ * loop's every tick goes through here, and so does the start failure that has
+ * no loop to run (`queue up` cannot read its own clone).
+ *
+ * ATOMIC, and the reason is a page nobody should ever have got: `writeFileSync`
+ * truncates before it writes, so a probe landing in that window reads an EMPTY
+ * file, which parses as unreadable, which becomes `unknown`, which habd pages as
+ * health-not-measured. The probe runs on the supervisor's own tick, so the
+ * window is hit by chance and the page names a defect that does not exist. Same
+ * directory, so the rename is a rename and not a copy (@cto 2026-09-11).
+ */
+export function writeQueueHealth(workdir: string, document: QueueHealthDocument): void {
+  const path = join(workdir, QUEUE_HEALTH_DOCUMENT)
+  const staging = `${path}.${String(process.pid)}.tmp`
+  mkdirSync(workdir, { recursive: true })
+  writeFileSync(staging, `${JSON.stringify(document, undefined, 2)}\n`)
+  renameSync(staging, path)
+}
 
 /**
  * Read the stored document, or say — typed — why there is none to read.

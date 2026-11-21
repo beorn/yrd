@@ -742,6 +742,47 @@ export type ServiceExitFact = Readonly<{
   signal?: string
 }>
 
+/**
+ * The service could not read its own queue clone at all: a corrupt or empty
+ * object, an unreadable ref, an object store it cannot open. No round can run,
+ * so this is written where the loop would otherwise never reach its first
+ * document — and the last document on disk would keep saying `healthy`.
+ *
+ * That is the incident this exists for (33946): a zero-byte loose object in the
+ * mirror, a `service-health.json` reading `state: healthy` with
+ * `publication: fresh at …`, and a queue nobody was told was down.
+ *
+ * `unhealthy`, never `absent`: nothing was measured, and no measurement is not
+ * a healthy one. The probe ladder maps this to exit 2, so the supervisor pages
+ * and the page names the Git failure it read. `verdict: stopped` is the truth
+ * about the process — it exits 2, which the declared service keeps off its
+ * relaunch allowlist. No deadline is written: nothing will restate this
+ * document, so one would only turn the page into a vaguer `queue-round-overdue`.
+ */
+export function unreadableQueueHealthDocument(
+  service: string,
+  fact: Readonly<{ reason: string; at: string; workdir: string }>,
+): QueueHealthDocument {
+  return {
+    schema: QUEUE_HEALTH_SCHEMA,
+    service,
+    state: "unhealthy",
+    verdict: { kind: "stopped" },
+    error: {
+      code: "queue-mirror-unreadable",
+      cause: `the service could not read its queue clone at ${fact.workdir}: ${fact.reason}`,
+      resolution: [
+        `Repair the queue clone the reason above names — an empty or corrupt object is removed and refetched — then start the service again: the next start writes its own first document and clears this page.`,
+        "No change is held: not one round ran, so this is not the line's stop and nothing here waits on a merge, a withdrawal or a resume.",
+      ],
+    },
+    facts: {
+      why: `the service could not start: ${fact.reason}`,
+      serviceStarted: { reason: "queue-unreadable", since: fact.at },
+    },
+  }
+}
+
 /** The last health document for a terminal exit whose cause the service knows. */
 export function exitedHealthDocument(service: string, serviceExited: ServiceExitFact): QueueHealthDocument {
   return {

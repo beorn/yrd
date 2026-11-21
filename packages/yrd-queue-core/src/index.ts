@@ -311,6 +311,7 @@ export {
   queueHealthExitCode,
   gracefulStopHealthDocument,
   exitedHealthDocument,
+  unreadableQueueHealthDocument,
   relaunchStalledHealthDocument,
   ROUND_BUDGET_MS,
   ROUND_LOCK,

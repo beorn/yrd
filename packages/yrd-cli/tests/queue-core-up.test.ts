@@ -59,6 +59,7 @@ import {
   runnerRef,
   roundBoundMs,
   QUEUE_HEALTH_DOCUMENT,
+  queueHealthExitCode,
   readConfig,
   readEventQueue,
   readEventOps,
@@ -10384,5 +10385,66 @@ describe("yrd queue run --tier long", () => {
     } finally {
       census.mockRestore()
     }
+  }, 120_000)
+})
+
+/**
+ * A queue clone whose object store cannot be read (33946): every loose object
+ * emptied, which is the incident's zero-byte `d952d609`, and the packs removed,
+ * so the outcome does not depend on whether this clone happened to hold its
+ * objects loose or packed. Both are corruptions of the mirror's own store, not
+ * of the remote it reads.
+ */
+function unreadableObjectStore(repo: string): void {
+  const objects = join(repo, ".git", "objects")
+  for (const shared of readdirSync(objects)) {
+    if (!/^[0-9a-f]{2}$/u.test(shared)) continue
+    for (const name of readdirSync(join(objects, shared))) {
+      const path = join(objects, shared, name)
+      chmodSync(path, 0o644)
+      writeFileSync(path, "")
+    }
+  }
+  const pack = join(objects, "pack")
+  if (!existsSync(pack)) return
+  for (const name of readdirSync(pack)) {
+    if (/\.(pack|idx)$/u.test(name)) unlinkSync(join(pack, name))
+  }
+}
+
+describe("a service that cannot read its own queue clone pages instead of leaving the last healthy document (33946)", () => {
+  /**
+   * The reboot incident's Yrd arm: the mirror held a zero-byte object, this
+   * service could not even resolve its own clone, and the document on disk was
+   * the PREVIOUS service's — `state: healthy`, `publication: fresh at …` — so
+   * nothing was told the queue was down. The failure happens in
+   * `resolveQueueLocation`, before the loop that writes health ever runs, which
+   * is why the page is written there rather than by a round.
+   */
+  it("writes an unhealthy document naming the Git failure, and the declared probe answers 2", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    // The CLI's own resolution creates the queue-owned clone the service serves;
+    // the corruption is applied to the clone, never to the remote.
+    const location = await resolveQueueLocation(w.work, "main", process.env)
+    unreadableObjectStore(location.repo)
+    const run = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "up", "--queue", "main", "--json"], run.io), run.stderr()).toBe(
+      2,
+    )
+    const document = parseQueueHealthDocument(readFileSync(join(location.workdir, QUEUE_HEALTH_DOCUMENT), "utf8"))
+    const why = JSON.stringify(document)
+    expect(document?.service, why).toBe("yrd")
+    expect(document?.state, why).toBe("unhealthy")
+    expect(document?.verdict, why).toEqual({ kind: "stopped" })
+    expect(document?.error?.code, why).toBe("queue-mirror-unreadable")
+    expect(document?.error?.cause, why).toContain(location.workdir)
+    expect(document?.facts?.why, why).toBeTypeOf("string")
+    expect(document?.error?.resolution.length ?? 0, why).toBeGreaterThan(0)
+    // The same document and the same ladder the declared probe reads: exit 2 is
+    // what the supervisor pages on, so the page and the command agree.
+    expect(queueHealthExitCode(document?.state ?? "unknown")).toBe(2)
+    // Nothing is held: no round ran, so this is not the line's stop.
+    expect(document?.facts?.stopped).toBeUndefined()
   }, 120_000)
 })
