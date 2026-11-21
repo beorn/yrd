@@ -2180,7 +2180,7 @@ export type AuthorReleaseResult =
 export async function prepareAuthorRelease(
   checkout: string,
   io: YrdCliIO,
-  options: Readonly<{ process?: Pick<Process, "run">; budget?: CloseExecutionBudget }> = {},
+  options: Readonly<{ process?: Pick<Process, "run">; budget?: CloseExecutionBudget; workdir?: string }> = {},
 ): Promise<AuthorReleaseResult> {
   const reads: string[] = []
   try {
@@ -2217,7 +2217,7 @@ export async function prepareAuthorRelease(
     }
     const config = await readConfig(treeGit, author.head, { branch: "HEAD", remote: "origin" })
     reads.push(`queue workdir and merged history: ${primary.path} branch ${author.branch}`)
-    const workdir = await workdirOf(git, { cwd: primary.path })
+    const workdir = options.workdir ?? (await workdirOf(git, { cwd: primary.path }))
     return await captureAuthorRelease({
       repo: primary.path,
       git,

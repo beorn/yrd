@@ -1215,7 +1215,7 @@ export async function coreQueueCommand(
       }
     }
   }
-  const workdir = options.workdir ?? (await workdirOf(git))
+  const workdir = options.workdir ?? (await workdirOf(git, { env }))
   const cleanupEnvironments = createEnvironmentCleanup()
   mkdirSync(workdir, { recursive: true })
   // One generic temp root, resolved here and carried down (27721). The queue core never re-derives it: a

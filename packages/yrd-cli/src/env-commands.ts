@@ -201,7 +201,7 @@ export type EnvRow = Readonly<{
  * guessing `main` when the repository never said so is the silent default
  * this whole design refuses.
  */
-type EnvironmentCommandIO = YrdCliIO & Readonly<{ commandEnv?: NodeJS.ProcessEnv }>
+type EnvironmentCommandIO = YrdCliIO & Readonly<{ commandEnv?: NodeJS.ProcessEnv; workdir?: string }>
 
 function requireRepository(io: YrdCliIO): string {
   const cwd = io.cwd
@@ -2410,7 +2410,7 @@ export async function closeEnvironment(
         }
   const selection = await resolveGitSelection(root, { process })
   const git = gitIn(root, process, selection)
-  const workdir = resolve(root, await workdirOf(git, { cwd: root, env: io.commandEnv }))
+  const workdir = io.workdir ?? resolve(root, await workdirOf(git, { cwd: root, env: io.commandEnv }))
   const roots = [baysRootOf(root), legacyBaysRoot(root), join(workdir, "environments")]
   // 28991: a relative `--retain` — a mistyped flag like `--retain --json` is the
   // observed shape — resolved against the caller's cwd and made git-super write a
@@ -2822,7 +2822,11 @@ export async function closeEnvironment(
   // the ordinary clean close with no preservation ref.
   const retirement =
     preservedRefs.length === 0
-      ? await prepareAuthorRelease(path, io, { process, ...(context === undefined ? {} : { budget: context.budget }) })
+      ? await prepareAuthorRelease(path, io, {
+          process,
+          workdir,
+          ...(context === undefined ? {} : { budget: context.budget }),
+        })
       : undefined
   if (retirement?.kind === "unreadable") {
     io.stderr(`yrd: ${retirement.reason}; read ${retirement.reads.join("; ")}; close continues\n`)

@@ -678,6 +678,7 @@ async function consumeCloseRequests(
         {
           ...io,
           cwd: registry,
+          workdir,
           stdout: (text) => {
             output += text
           },
@@ -1883,6 +1884,7 @@ async function cleanupEnvironments(
         {
           ...io,
           cwd: registry,
+          workdir,
           stdout: (text) => {
             output += text
           },
