@@ -86,6 +86,14 @@ describe("27098: the queue's frozen git-super selection", () => {
     )
   })
 
+  // 37550 (@dev/11 via @chief 317ff2c8): a seat that ran the bare bin (`@in -- yrd env close <path>`) was told to use
+  // tools/yrd-runtime.mjs, a path it does not type. The refusal names the command that works and why the bare one fails.
+  it("names the working command when a bare yrd bin was run", () => {
+    expect(() => requireFrozenGitSuper({}, "git-super push")).toThrow(
+      /run Yrd as `@in -- bun yrd <same arguments>`.*node_modules\/\.bin\/yrd.*is not a launcher/u,
+    )
+  })
+
   it("appends the queue's hooks configuration after any inherited entries", () => {
     const composed = withGitConfig({ GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "a", GIT_CONFIG_VALUE_0: "1" }, [
       "core.hooksPath=/queue/hooks-disabled",
