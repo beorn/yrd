@@ -608,7 +608,7 @@ export type CoreQueueCommand =
       /** Include unsubmitted branch heads on event queues. */
       drafts?: boolean
     }>
-  | Readonly<{ command: "show"; branch?: string; all?: boolean; markdown?: boolean }>
+  | Readonly<{ command: "show"; branch?: string; all?: boolean; markdown?: boolean; compact?: boolean }>
   | Readonly<{
       command: "stats"
       /** `3h`, an instant, or a commit: rows decided before it and refs whose tip is older are outside the window. */
@@ -5652,6 +5652,10 @@ export async function coreQueueCommand(
       return 0
     }
     case "show": {
+      if (request.compact === true && (request.all !== true || options.json !== true || request.branch !== undefined)) {
+        io.stderr("yrd: queue show --compact requires --all --json without a branch\n")
+        return 2
+      }
       if (request.all === true && request.branch !== undefined) {
         io.stderr("yrd: queue show --all cannot take a branch\n")
         return 2
@@ -5674,6 +5678,7 @@ export async function coreQueueCommand(
           onIssueDiagnosticsUnavailable: (message) => io.stderr("yrd: " + message + "\n"),
           all: true,
           directHistory: request.all === true,
+          ...(request.compact === true ? { skipJournals: true } : {}),
           ...(request.all === true ? {} : { branch: request.branch }),
         })
         if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") {
@@ -5724,6 +5729,30 @@ export async function coreQueueCommand(
                 .map((row) => ({ ...row, queue: config.target.branch, events: [] }))
             : []
         const histories = [...changeHistories, ...directHistories]
+        const scope =
+          request.all === true
+            ? `Read all event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and ${archivedChangesPrefix(config.target.branch)}, and direct target commits at ${config.target.remote}; draft branches are outside this reading.`
+            : `Read ${changesRef(config.target.branch, request.branch as string)} and ${archivedChangesPrefix(config.target.branch)}${request.branch as string} at ${config.target.remote}; draft branches are outside this reading.`
+        if (request.compact === true) {
+          emit(
+            io,
+            true,
+            {
+              ...statusFact(),
+              queue: name,
+              stopped: stopFact(reading.pause),
+              detail: "compact",
+              changes: histories.map(({ events, ...history }) => ({
+                ...history,
+                events: events.map(({ id }) => ({ id })),
+              })),
+              observation: reading.observation,
+              scope: `${scope} Event IDs are included; check views and run journals were not read.`,
+            },
+            "",
+          )
+          return 0
+        }
         // The read is the issues interface's `view` at --project-root; issuesProvider.read is no longer consulted,
         // and a declaration in force that still holds it is told out loud (@cto 6a06588f).
         if (config.issuesProvider?.read !== undefined) {
@@ -5735,10 +5764,6 @@ export async function coreQueueCommand(
             `yrd: .yrd.yml issuesProvider.read: retired and ignored; delete this key. The issue display reads issues.yml's view. ${issueInspection}\n`,
           )
         }
-        const scope =
-          request.all === true
-            ? `Read all event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and ${archivedChangesPrefix(config.target.branch)}, and direct target commits at ${config.target.remote}; draft branches are outside this reading.`
-            : `Read ${changesRef(config.target.branch, request.branch as string)} and ${archivedChangesPrefix(config.target.branch)}${request.branch as string} at ${config.target.remote}; draft branches are outside this reading.`
         const views = new Map<Row, Readonly<{ checks: readonly CheckView[]; note?: string }>>()
         for (const history of histories) {
           const run = reading.journals.runs.get(journalKey(history.branch, history.head))?.[0]
@@ -7590,6 +7615,8 @@ type EventListingOptions = Readonly<{
   branch?: string
   /** One-shot list omits command detail; watch and show keep eager detail. */
   journalDetail?: "include" | "omit"
+  /** Compact history uses only the event chains and their IDs. */
+  skipJournals?: boolean
   /** How far back an unwindowed read reads run journals; absent, {@link FULL_READ_RUNS_MS}. */
   journalSinceMs?: number
 }>
@@ -7645,7 +7672,7 @@ export async function readEventListing(
   const changePrefix = `${queuePrefix}changes/`
   const coldPrefix = archivedChangesPrefix(config.target.branch)
   const recent = options.all === true || options.branch !== undefined ? undefined : options.recent
-  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#recent:${recent !== undefined}#directHistory:${options.directHistory === true}#drafts:${options.drafts === true}#branch:${JSON.stringify(options.branch)}#journalDetail:${options.journalDetail ?? "include"}`
+  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#recent:${recent !== undefined}#directHistory:${options.directHistory === true}#drafts:${options.drafts === true}#branch:${JSON.stringify(options.branch)}#journalDetail:${options.skipJournals === true ? "skip" : (options.journalDetail ?? "include")}`
   const cache = eventListingCaches.get(cacheKey)
   const nowMs =
     typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : Date.now()
@@ -7665,6 +7692,9 @@ export async function readEventListing(
   ): Promise<Journals<JournalSummary>> => {
     const detail = options.journalDetail ?? "include"
     const dir = join(workdir, "logs")
+    if (options.skipJournals === true) {
+      return { dir, absent: "Compact history did not read run journals", malformed: [], runs: new Map() }
+    }
     const read = (runTerminal?: (id: string) => boolean): Journals<JournalSummary> => {
       const judged = runTerminal === undefined ? {} : { runTerminal }
       const listed = new Set(rows.map((row) => row.branch))

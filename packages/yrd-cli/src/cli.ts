@@ -1371,6 +1371,7 @@ function buildProgram(
     .description("the branch's changes, each check's result and log")
     .option("--markdown", "emit one complete event history of at most 50 events as Markdown")
     .option("--all", "all branches and their change segments as JSON")
+    .option("--compact", "with --all --json, read every segment and event ID without checks or journals")
     .option("--json", "emit stable JSON")
     .option("--fresh", "ask the remote instead of the queue-owned local status store")
     .option("--queue <value>", QUEUE_HELP)
@@ -1380,8 +1381,9 @@ function buildProgram(
         "(yrd issues view, killed at 10 s); --all and an absent root make no issue reads",
     )
     .action(async (branch, options) => {
-      const { all, json, queue, fresh, projectRoot, markdown } = options as {
+      const { all, compact, json, queue, fresh, projectRoot, markdown } = options as {
         all?: boolean
+        compact?: boolean
         json?: boolean
         queue?: string
         fresh?: boolean
@@ -1395,6 +1397,7 @@ function buildProgram(
         {
           command: "show",
           ...(markdown === true ? { markdown } : {}),
+          ...(compact === true ? { compact } : {}),
           ...(branch === undefined ? {} : { branch: branch as string }),
           ...(all === true ? { all } : {}),
         },

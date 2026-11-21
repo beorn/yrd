@@ -915,7 +915,14 @@ describe("a queue is the selected origin branch carrying config", () => {
     const bulk = capture(repo)
     expect(await coreQueueCommand(repo, bulk.io, { command: "show", all: true }, { json: true, queue: "main" })).toBe(0)
     const allHistory = (
-      JSON.parse(bulk.stdout()) as { changes: readonly { branch: string; events: readonly { type: string }[] }[] }
+      JSON.parse(bulk.stdout()) as {
+        changes: readonly {
+          branch: string
+          checks?: unknown
+          checksNote?: string
+          events: readonly { id: string; type: string }[]
+        }[]
+      }
     ).changes
     expect(allHistory.filter((row) => row.branch === branch)).toEqual(history)
     const cliBulk = capture(repo)
@@ -927,6 +934,23 @@ describe("a queue is the selected origin branch carrying config", () => {
         (row) => row.branch === branch,
       ),
     ).toEqual(history)
+    const compact = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "queue", "show", "--all", "--json", "--compact", "--fresh", "--queue", "main"],
+        compact.io,
+      ),
+      compact.stderr(),
+    ).toBe(0)
+    const compactHistory = JSON.parse(compact.stdout()) as { changes: readonly unknown[] }
+    expect(compactHistory).toMatchObject({ detail: "compact", stopped: null })
+    expect(compactHistory).not.toHaveProperty("journal")
+    expect(compactHistory.changes).toEqual(
+      allHistory.map(({ checks: _checks, checksNote: _checksNote, events, ...row }) => ({
+        ...row,
+        events: events.map(({ id }) => ({ id })),
+      })),
+    )
     expect(
       allHistory.filter((row) => row.branch === branch).map((row) => row.events.map((event) => event.type)),
     ).toEqual([
