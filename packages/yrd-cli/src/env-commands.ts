@@ -201,6 +201,8 @@ export type EnvRow = Readonly<{
  * guessing `main` when the repository never said so is the silent default
  * this whole design refuses.
  */
+type EnvironmentCommandIO = YrdCliIO & Readonly<{ commandEnv?: NodeJS.ProcessEnv; workdir?: string }>
+
 function requireRepository(io: YrdCliIO): string {
   const cwd = io.cwd
   const root = findRepository(cwd)
@@ -751,7 +753,7 @@ function announceBinding(io: YrdCliIO, branch: string, issue: string, verb: "ope
  * `yrd env open` — open an environment for one branch and keep it. Prints its
  * path on stdout, which is what a caller `cd`s into.
  */
-export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+export async function openEnvironment(options: EnvOpenOptions, io: EnvironmentCommandIO): Promise<YrdCliExitCode> {
   const root = requireRepository(io)
   const selection = await resolveGitSelection(root)
   if (options.hold !== undefined && options.hold.trim() === "") {
@@ -847,7 +849,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   // environment's freshWorktree reads the declaration itself.
   let provisioned: { path: string; headSha: string; baseSha: string; adoption: ProvisionedBay["adoption"] | "detached" }
   if (branch === undefined) {
-    const environments = join(resolve(root, await workdirOf(git)), "environments")
+    const environments = join(resolve(root, await workdirOf(git, { cwd: root, env: io.commandEnv })), "environments")
     const path = resolve(environments, name)
     if (!path.startsWith(`${environments}/`)) throw new Error(`environment name '${name}' escapes ${environments}`)
     mkdirSync(environments, { recursive: true })
@@ -969,7 +971,13 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   const tree = await checkedTree(path, baseSha, process)
   const setup = config?.setup
   if (setup !== undefined) {
-    const artifacts = join(resolve(root, await workdirOf(git)), "logs", "environments", name, runId())
+    const artifacts = join(
+      resolve(root, await workdirOf(git, { cwd: root, env: io.commandEnv })),
+      "logs",
+      "environments",
+      name,
+      runId(),
+    )
     try {
       await runSetup({
         cwd: path,
@@ -1119,7 +1127,7 @@ export type EnvRetainedOptions = Readonly<{
 const RETAINED_BATCH_TIMEOUT_MS = 1_200_000
 
 /** 34787: `env retained --discard <entry>`; the batch selectors never mix with it. */
-async function discardRetained(options: EnvRetainedOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+async function discardRetained(options: EnvRetainedOptions, io: EnvironmentCommandIO): Promise<YrdCliExitCode> {
   if (options.retireExpired === true || (options.entry?.length ?? 0) > 0 || options.limit !== undefined) {
     throw new Error(
       "--discard names one entry and never joins --retire-expired, --entry or --limit; nothing was discarded",
@@ -1129,7 +1137,7 @@ async function discardRetained(options: EnvRetainedOptions, io: YrdCliIO): Promi
   const selection = await resolveGitSelection(root)
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process, selection)
-  const workdir = await workdirOf(git)
+  const workdir = await workdirOf(git, { cwd: root, env: io.commandEnv })
   const retentionRoot =
     options.retain === undefined ? join(workdir, "retained-modules") : resolve(io.cwd, options.retain)
   const superGit = gitIn(root, process, selection, {
@@ -1266,7 +1274,10 @@ async function planLargestExpired(
  * legacy, malformed and manifest-less, read from manifests with no size walk. --retire-expired selects a batch;
  * it is a dry run unless --apply is explicit. The existing Git transport owns frozen-binary selection and killing.
  */
-export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+export async function retainedEnvironments(
+  options: EnvRetainedOptions,
+  io: EnvironmentCommandIO,
+): Promise<YrdCliExitCode> {
   if (options.discard !== undefined) return discardRetained(options, io)
   if (options.reason !== undefined) {
     throw new Error("--reason belongs to --discard <entry>; no retained stores were touched")
@@ -1298,7 +1309,9 @@ export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdC
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process, selection)
   const retentionRoot =
-    options.retain === undefined ? join(await workdirOf(git), "retained-modules") : resolve(io.cwd, options.retain)
+    options.retain === undefined
+      ? join(await workdirOf(git, { cwd: root, env: io.commandEnv }), "retained-modules")
+      : resolve(io.cwd, options.retain)
   const census = censusRetainedStores(retentionRoot, Date.now())
   if (options.retireExpired === true) {
     // #35047: a TERM, INT or HUP to this CLI closes its Process owner before the process dies of the signal, so the
@@ -1422,12 +1435,12 @@ export async function retainedEnvironments(options: EnvRetainedOptions, io: YrdC
 }
 
 /** `yrd env list` — the environments this repository holds, as git holds them. */
-export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+export async function listEnvironments(options: EnvListOptions, io: EnvironmentCommandIO): Promise<YrdCliExitCode> {
   const root = requireRepository(io)
   const selection = await resolveGitSelection(root)
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process, selection)
-  const { roots, rows } = await environmentInventory(root, git, await workdirOf(git))
+  const { roots, rows } = await environmentInventory(root, git, await workdirOf(git, { cwd: root, env: io.commandEnv }))
   if (options.json === true) {
     io.stdout(`${JSON.stringify({ environments: rows })}\n`)
     return 0
@@ -2276,7 +2289,11 @@ export type EnvBindOptions = Readonly<{ issue?: string; dryRun?: boolean; json?:
  * Only this repository's branch moves; a component's binding is its own. `--dry-run` makes the same decision
  * and writes nothing.
  */
-export async function bindEnvironment(operand: string, options: EnvBindOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+export async function bindEnvironment(
+  operand: string,
+  options: EnvBindOptions,
+  io: EnvironmentCommandIO,
+): Promise<YrdCliExitCode> {
   const issue = options.issue
   if (issue === undefined) {
     throw new Error(`yrd env bind ${operand} needs --issue <ref>: the issue whose Refs commit binds the branch`)
@@ -2285,7 +2302,7 @@ export async function bindEnvironment(operand: string, options: EnvBindOptions, 
   await using process = createProcess({ cwd: root })
   const selection = await resolveGitSelection(root, { process })
   const git = gitIn(root, process, selection)
-  const workdir = resolve(root, await workdirOf(git))
+  const workdir = resolve(root, await workdirOf(git, { cwd: root, env: io.commandEnv }))
   const roots = [baysRootOf(root), legacyBaysRoot(root), join(workdir, "environments")]
   const { path } = await resolveEnvironmentOperand(operand, io, git, root, roots, "bind")
   const treeGit = gitIn(path, process, selection)
@@ -2353,7 +2370,7 @@ export async function bindEnvironment(operand: string, options: EnvBindOptions, 
 export async function closeEnvironment(
   operand: string,
   options: EnvCloseOptions,
-  io: YrdCliIO,
+  io: EnvironmentCommandIO,
   /** test-only seam (28120): production callers never pass it; the default is the real same-UID census. */
   censusSource?: () => Promise<ProcessCensus<"same-uid">>,
   /**
@@ -2393,7 +2410,7 @@ export async function closeEnvironment(
         }
   const selection = await resolveGitSelection(root, { process })
   const git = gitIn(root, process, selection)
-  const workdir = resolve(root, await workdirOf(git))
+  const workdir = io.workdir ?? resolve(root, await workdirOf(git, { cwd: root, env: io.commandEnv }))
   const roots = [baysRootOf(root), legacyBaysRoot(root), join(workdir, "environments")]
   // 28991: a relative `--retain` — a mistyped flag like `--retain --json` is the
   // observed shape — resolved against the caller's cwd and made git-super write a
@@ -2805,7 +2822,11 @@ export async function closeEnvironment(
   // the ordinary clean close with no preservation ref.
   const retirement =
     preservedRefs.length === 0
-      ? await prepareAuthorRelease(path, io, { process, ...(context === undefined ? {} : { budget: context.budget }) })
+      ? await prepareAuthorRelease(path, io, {
+          process,
+          workdir,
+          ...(context === undefined ? {} : { budget: context.budget }),
+        })
       : undefined
   if (retirement?.kind === "unreadable") {
     io.stderr(`yrd: ${retirement.reason}; read ${retirement.reads.join("; ")}; close continues\n`)

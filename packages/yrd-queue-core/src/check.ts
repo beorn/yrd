@@ -68,6 +68,8 @@ export type CheckSpec = Readonly<{
   scripts?: readonly string[]
   /** Opt in to the queue-provided, immutable program root for this check. */
   programRoot?: true
+  /** Directories the manual check and shared setup can run without. */
+  omitCheckoutDirectories?: readonly string[]
 }>
 
 export const DEFAULT_CHECK_BOUND_MS = 30 * 60 * 1000

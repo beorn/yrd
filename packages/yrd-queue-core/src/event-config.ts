@@ -38,6 +38,8 @@ const CHECK_KEYS = new Set([
   "long",
   "programRoot",
   "scripts",
+  // This is interpreted by manual check execution. Event-runner checkouts stay full.
+  "omitCheckoutDirectories",
 ])
 
 function unsupported(action: EventQueueConfigAction, feature: string, detail = ""): never {

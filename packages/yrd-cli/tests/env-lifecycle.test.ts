@@ -662,6 +662,9 @@ it.each(["released", "notified", "reopened", "resubmitted", "held", "advanced", 
   "retries a held merged author branch after native close: %s",
   async (mode) => {
     const w = await world(":")
+    const configuredWorkdir = join(dirname(w.work), "configured-queue")
+    const closeWorkdir = join(dirname(w.work), "isolated-close")
+    if (mode === "released") await w.git(["config", "yrd.workdir", configuredWorkdir])
     await birthEventQueue(w.work, "main", { localStore: false })
     const opened = capture(w.work)
     expect(
@@ -757,7 +760,18 @@ it.each(["released", "notified", "reopened", "resubmitted", "held", "advanced", 
             acquisitionsBeforeRetirement = branchHistoryAcquisitions
             queueValidationsBeforeRetirement = queueValidations
           })
-        : await runYrdProcess(["bun", "yrd", "env", "close", author, "--json"], closed.io)
+        : await runYrdProcess(
+            [
+              "bun",
+              "yrd",
+              ...(mode === "released" ? ["--workdir", closeWorkdir] : []),
+              "env",
+              "close",
+              author,
+              "--json",
+            ],
+            closed.io,
+          )
     if (mode === "notified" || mode === "reopened" || mode === "resubmitted") {
       expect(queueValidations - queueValidationsBeforeRetirement).toBe(mode === "notified" ? 3 : 1)
       expect(branchHistoryAcquisitions - acquisitionsBeforeRetirement).toBe(mode === "notified" ? 3 : 1)
@@ -776,6 +790,19 @@ it.each(["released", "notified", "reopened", "resubmitted", "held", "advanced", 
     const archives = (await w.git(["for-each-ref", "--format=%(objectname)", "refs/archive/"])).trim().split("\n")
     // A released merged root author is removed with no archive ref (30683); the other modes never archive.
     expect(archives).not.toContain(head)
+    if (mode === "released") {
+      expect(new Set(readdirSync(journals))).toEqual(beforeClose)
+      const isolatedJournals = join(closeWorkdir, relative(configuredWorkdir, journals))
+      const records = readdirSync(isolatedJournals)
+        .filter((file) => file.endsWith(".jsonl"))
+        .flatMap((file) =>
+          readFileSync(join(isolatedJournals, file), "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line) as { kind: string }),
+        )
+      expect(records).toContainEqual(expect.objectContaining({ kind: "local-branch-retirement" }))
+    }
     if (mode === "failed") {
       const records = readdirSync(journals)
         .filter((file) => file.endsWith(".jsonl") && !beforeClose.has(file))

@@ -678,6 +678,7 @@ async function consumeCloseRequests(
         {
           ...io,
           cwd: registry,
+          workdir,
           stdout: (text) => {
             output += text
           },
@@ -1214,13 +1215,19 @@ async function proveEnvironmentRemovable(input: {
  * read never fails the close or the round: an error or a timeout reads "unknown", never 0 (@cto 1a7a3153
  * condition 6).
  */
-async function environmentBytes(path: string): Promise<number | "unknown"> {
+export async function environmentBytes(
+  path: string,
+  unavailable?: (reason: string) => void,
+): Promise<number | "unknown"> {
   const deadline = Date.now() + SIZE_READ_TIMEOUT_MS
   try {
     let bytes = 0
     const pending = [path]
     for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
-      if (Date.now() > deadline) return "unknown"
+      if (Date.now() > deadline) {
+        unavailable?.(`allocation scan of ${path} exceeded ${SIZE_READ_TIMEOUT_MS} ms`)
+        return "unknown"
+      }
       const stat = await lstat(next)
       // Allocated blocks, as du counts them; a symlink is its own small entry, never followed.
       bytes += stat.blocks * 512
@@ -1228,7 +1235,8 @@ async function environmentBytes(path: string): Promise<number | "unknown"> {
       for (const entry of await readdir(next)) pending.push(join(next, entry))
     }
     return bytes
-  } catch {
+  } catch (error) {
+    unavailable?.(`allocation scan of ${path} failed: ${reasonText(error)}`)
     // silent-fallback-allow: a size is a report, never a gate; "unknown" names that it was not read
     return "unknown"
   }
@@ -1876,6 +1884,7 @@ async function cleanupEnvironments(
         {
           ...io,
           cwd: registry,
+          workdir,
           stdout: (text) => {
             output += text
           },

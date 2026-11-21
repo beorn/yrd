@@ -17,9 +17,11 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { afterAll, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
 import { readJournals, type Git, type LogRecord } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
+import { parseQueueAddress, queueRoot } from "../src/address.ts"
+import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { workdirOf } from "../src/workdir.ts"
@@ -116,6 +118,74 @@ describe("the queue workdir is git configuration, never a declaration key", () =
     expect(existsSync(join(workdir, "checks"))).toBe(true)
     const common = (await w.git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
     expect(existsSync(join(common, "yrd"))).toBe(false)
+  })
+})
+
+describe("yrd queue run workdir precedence", () => {
+  afterEach(() => vi.unstubAllEnvs())
+
+  // A successful round has a queue-owned clone. At the notice that directory
+  // must still be absent, and the other possible hosts must never be touched.
+  it.each(["--workdir", "YRD_WORKDIR", "yrd.workdir", "default"] as const)(
+    "reports the workdir selected by %s before preparing the queue",
+    async (source) => {
+      const w = await world()
+      const root = dirname(w.work)
+      const stateHome = join(root, "state")
+      const hosts = {
+        "--workdir": join(root, "flag"),
+        YRD_WORKDIR: join(root, "env"),
+        "yrd.workdir": join(root, "configured"),
+        default: join(stateHome, "yrd"),
+      }
+      if (source !== "default") await w.git(["config", "yrd.workdir", hosts["yrd.workdir"]])
+      vi.stubEnv("GIT_CONFIG_GLOBAL", join(root, "no-global-config"))
+      vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1")
+      vi.stubEnv("XDG_STATE_HOME", stateHome)
+      vi.stubEnv("YRD_WORKDIR", source === "--workdir" || source === "YRD_WORKDIR" ? hosts.YRD_WORKDIR : undefined)
+      const args = source === "--workdir" ? ["--workdir", hosts["--workdir"]] : []
+      const expected = queueRoot(hosts[source], parseQueueAddress(`${join(root, "remote.git")}#main`))
+      const notice = `yrd queue run: workdir ${expected} (from ${source})`
+      let existedAtNotice: boolean | undefined
+      const run = capture(w.work)
+      let stderr = ""
+      const exit = await runYrdProcess([process.execPath, "yrd", ...args, "queue", "run", "--json"], {
+        ...run.io,
+        stderr: (text) => {
+          stderr += text
+          if (text.includes(notice)) existedAtNotice = existsSync(expected)
+        },
+      })
+
+      expect(exit, stderr).toBe(0)
+      expect(stderr).toContain(notice)
+      expect(existedAtNotice).toBe(false)
+      expect(existsSync(join(expected, "repo", ".git", "HEAD"))).toBe(true)
+      for (const host of Object.values(hosts)) {
+        if (host !== hosts[source]) expect(existsSync(host), host).toBe(false)
+      }
+      const records = run
+        .stdout()
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as LogRecord)
+      expect(records).not.toHaveLength(0)
+    },
+  )
+
+  it("uses the queue override when listing environments", async () => {
+    const w = await world()
+    const root = dirname(w.work)
+    const configured = join(root, "configured")
+    const isolated = join(root, "isolated")
+    await w.git(["config", "yrd.workdir", configured])
+    const run = capture(w.work)
+    const exit = await runYrdProcess([process.execPath, "yrd", "--workdir", isolated, "env", "list"], run.io)
+
+    expect(exit).toBe(0)
+    const address = parseQueueAddress(`${join(root, "remote.git")}#main`)
+    expect(run.stdout()).toContain(join(queueRoot(isolated, address), "environments"))
+    expect(run.stdout()).not.toContain(configured)
   })
 })
 
@@ -224,6 +294,59 @@ describe("yrd check judges HEAD, never the invoking tree", () => {
     // Nothing was materialized for a name that was never going to run.
     expect(existsSync(join(w.workdir, "worktrees"))).toBe(false)
   })
+})
+
+it("materializes the shared allowance of the selected checks and refuses a missing directory at HEAD", async () => {
+  const w = await world(
+    true,
+    [
+      'setup: "test -f retained.txt"',
+      "checks:",
+      "  - eligible:",
+      '      run: "test -f retained.txt"',
+      "      omitCheckoutDirectories: [generated]",
+      "  - needs-full:",
+      '      run: "test -f generated/data.txt"',
+    ].join("\n") + "\n",
+  )
+  mkdirSync(join(w.work, "generated"))
+  writeFileSync(join(w.work, "generated/data.txt"), "omittable\n")
+  writeFileSync(join(w.work, "retained.txt"), "retained\n")
+  await w.git(["add", "generated", "retained.txt"])
+  await w.git(["commit", "--quiet", "-m", "candidate adds the generated directory"])
+
+  const run = async (names: readonly string[]) => {
+    const output = capture(w.work)
+    const exit = await coreQueueCommand(
+      w.work,
+      output.io,
+      { command: "check", names },
+      { workdir: w.workdir, json: true },
+    )
+    expect(exit).toBe(0)
+    return JSON.parse(output.stdout()) as { materializations: Array<{ path: string }> }
+  }
+  const sparse = await run(["eligible"])
+  expect(sparse.materializations).toMatchObject([
+    { mode: "sparse", omittedPaths: ["generated"], omittedTrackedFiles: 1, allocatedBytes: expect.any(Number) },
+  ])
+  const full = await run(["eligible", "needs-full"])
+  expect(full.materializations).toMatchObject([
+    { mode: "full", omittedPaths: [], omittedTrackedFiles: 0, allocatedBytes: expect.any(Number) },
+  ])
+  for (const { path } of [...sparse.materializations, ...full.materializations]) expect(existsSync(path)).toBe(false)
+
+  await w.git(["mv", "generated", "renamed"])
+  await w.git(["commit", "--quiet", "-m", "candidate renames the generated directory"])
+  const head = (await w.git(["rev-parse", "HEAD"])).trim()
+  await expect(
+    coreQueueCommand(
+      w.work,
+      capture(w.work).io,
+      { command: "check", names: ["eligible", "needs-full"] },
+      { workdir: w.workdir, json: true },
+    ),
+  ).rejects.toThrow(`eligible: omitCheckoutDirectories path "generated" not a directory in tree at ${head}`)
 })
 
 /**

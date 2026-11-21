@@ -29,7 +29,7 @@
  */
 
 import { Command as CliCommand, CommanderError, Option, int } from "@silvery/commander"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { drainOutput } from "loggily"
 import {
   activateRunIndex,
@@ -95,7 +95,7 @@ import { componentsHoldingBranch, componentDropHint } from "./branch-retirement.
  * names nobody (ruling @i/10-yrd/24028). */
 const DEFAULT_SUBMITTER_ENV = "YRD_DEFAULT_SUBMITTER"
 
-type GlobalOptions = YrdObservabilityFlags
+type GlobalOptions = YrdObservabilityFlags & Readonly<{ workdir?: string }>
 
 type SubmitOptions = Readonly<{
   json?: boolean
@@ -248,6 +248,7 @@ function buildProgram(
   program.exitOverride()
   program.version(YRD_VERSION, "-V, --version")
   program
+    .option("--workdir <path>", "queue state directory; overrides YRD_WORKDIR and git config yrd.workdir")
     .option("--log-level <level>", "silent, error, warn, info, debug or trace")
     .option("-v, --verbose", "raise the log level; repeat for more", (_value, previous: number) => previous + 1, 0)
     .option("-q, --quiet", "lower the log level; repeat for less", (_value, previous: number) => previous + 1, 0)
@@ -1000,7 +1001,12 @@ function buildProgram(
         }
         stopAtMs = parsed
       }
-      const location = await resolveQueueLocation(cwd(), queue, env)
+      const globalOptions = program.opts() as GlobalOptions
+      const location = await resolveQueueLocation(cwd(), queue, env, "queue", (workdir, source) => {
+        io.stderr(
+          `yrd queue run: workdir ${workdir} (from ${globalOptions.workdir === undefined ? source : "--workdir"})\n`,
+        )
+      })
       const taken = await coreQueueCommand(
         location.repo,
         io,
@@ -1372,6 +1378,7 @@ function buildProgram(
     .description("the branch's changes, each check's result and log")
     .option("--markdown", "emit one complete event history of at most 50 events as Markdown")
     .option("--all", "all branches and their change segments as JSON")
+    .option("--compact", "with --all --json, read every segment and event ID without checks or journals")
     .option("--json", "emit stable JSON")
     .option("--fresh", "ask the remote instead of the queue-owned local status store")
     .option("--queue <value>", QUEUE_HELP)
@@ -1381,8 +1388,9 @@ function buildProgram(
         "(yrd issues view, killed at 10 s); --all and an absent root make no issue reads",
     )
     .action(async (branch, options) => {
-      const { all, json, queue, fresh, projectRoot, markdown } = options as {
+      const { all, compact, json, queue, fresh, projectRoot, markdown } = options as {
         all?: boolean
+        compact?: boolean
         json?: boolean
         queue?: string
         fresh?: boolean
@@ -1396,6 +1404,7 @@ function buildProgram(
         {
           command: "show",
           ...(markdown === true ? { markdown } : {}),
+          ...(compact === true ? { compact } : {}),
           ...(branch === undefined ? {} : { branch: branch as string }),
           ...(all === true ? { all } : {}),
         },
@@ -1727,6 +1736,7 @@ function buildProgram(
 
   // `env` is the printed name; `bay` is today's word, kept as its alias.
   const env_ = program.command("env").alias("bay").description("an environment for one branch")
+  const environmentIO = { ...io, commandEnv: env }
   env_.helpCommand(false)
   env_
     .command("open [commit]")
@@ -1752,7 +1762,7 @@ function buildProgram(
       setExit(
         await openEnvironment(
           { ...options, ...(commit === undefined ? {} : { commit }) } as Parameters<typeof openEnvironment>[0],
-          io,
+          environmentIO,
         ),
       ),
     )
@@ -1760,7 +1770,9 @@ function buildProgram(
     .command("list", { isDefault: true })
     .description("the environments this repository holds")
     .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await listEnvironments(options as Parameters<typeof listEnvironments>[0], io)))
+    .action(async (options) =>
+      setExit(await listEnvironments(options as Parameters<typeof listEnvironments>[0], environmentIO)),
+    )
   env_
     .command("retained")
     .description(
@@ -1804,7 +1816,7 @@ function buildProgram(
       [],
     )
     .action(async (options) =>
-      setExit(await retainedEnvironments(options as Parameters<typeof retainedEnvironments>[0], io)),
+      setExit(await retainedEnvironments(options as Parameters<typeof retainedEnvironments>[0], environmentIO)),
     )
 
   env_
@@ -1840,7 +1852,7 @@ function buildProgram(
     )
     .option("--dry-run", "preview admission and intended preservation/teardown without changing refs or files")
     .option("--json", "emit stable JSON")
-    .action(async (path, options) => setExit(await closeEnvironment(path, options, io)))
+    .action(async (path, options) => setExit(await closeEnvironment(path, options, environmentIO)))
   env_
     .command("bind <path>")
     .description(
@@ -1863,7 +1875,7 @@ function buildProgram(
         "the branch had already moved.",
     )
     .action(async (path, options) =>
-      setExit(await bindEnvironment(path, options as Parameters<typeof bindEnvironment>[1], io)),
+      setExit(await bindEnvironment(path, options as Parameters<typeof bindEnvironment>[1], environmentIO)),
     )
 
   const mirror = program
@@ -2038,7 +2050,7 @@ async function targetHoldsJudge(
 
 export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Promise<YrdCliExitCode> {
   const args = argv.slice(2)
-  const env = process.env
+  const env = { ...process.env }
   const name = "yrd"
   if (args.length === 1 && (args[0] === "-V" || args[0] === "--version")) {
     io.stdout(`${formatYrdRuntimeVersion()}\n`)
@@ -2051,12 +2063,19 @@ export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Prom
   let logger: ReturnType<typeof createYrdLogger> | undefined
   const program = buildProgram(name, io, env, setExit, () => logger)
   try {
-    // The logger is built from the globals BEFORE any action runs, so the
-    // queue's log-record stream is rendered at the level the invocation asked for
-    // and at no other reading of the environment.
+    // Apply invocation settings once, before any command resolves its queue or logger.
     program.hook("preAction", () => {
       if (logger !== undefined) return
-      logger = createYrdLogger(resolveYrdObservability(program.opts() as GlobalOptions, env), (text) => io.stderr(text))
+      const options = program.opts() as GlobalOptions
+      const workdir = options.workdir ?? env.YRD_WORKDIR
+      if (workdir !== undefined) {
+        if (workdir.trim() === "") {
+          const source = options.workdir === undefined ? "YRD_WORKDIR" : "--workdir"
+          throw new Error(`${source} must name a directory`)
+        }
+        env.YRD_WORKDIR = resolve(io.cwd, workdir)
+      }
+      logger = createYrdLogger(resolveYrdObservability(options, env), (text) => io.stderr(text))
     })
     await program.parseAsync([...args], { from: "user" })
     return exit

@@ -28,6 +28,7 @@ yrd queue stats [--since 3h|<time>|<sha>] [--by submitter|branch]
     merged, failed, same-head retries, re-pushed branches, drafts, submit-to-merge latency
 yrd queue show <branch>                             that branch's changes, newest first, each with its events and ending
 yrd queue show --all --json                         every branch's changes in one document
+yrd queue show --all --json --compact               the same segments, event IDs and queue stop, with no check views or journals
 yrd queue archive ...                               move old ended histories to cold storage; see operations.md
 yrd check <name...>                                 run the named checks here, now, in a fresh checkout of HEAD
 yrd env open ([commit] | --bay <name> | --issue <ref>) [--hold [reason]]

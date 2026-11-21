@@ -37,6 +37,8 @@ export type ProgramRootCheck = Readonly<{
   tier?: "normal" | "long"
   /** The event runner owns this check; manual program-root checks omit it. */
   queueRun?: boolean
+  /** Manual check receipt, captured while each prepared checkout still exists. */
+  observeWorktree?: (path: string, role: "program" | "subject") => Promise<void>
 }> &
   Pick<PrepareWorktree, "env" | "process" | "selection" | "gitOptions" | "populateReference" | "plumbing">
 
@@ -315,6 +317,7 @@ export async function programRootCheck(input: ProgramRootCheck): Promise<CheckRe
   let subject: PreparedWorktree | undefined
   try {
     program = await prepareProgramRoot(run, run.targetSha, "target")
+    await run.observeWorktree?.(program.path, "program")
     await witnessTree(run, spec, phase, "program", program.path, targetTree)
     await witnessDeclaredSources(run, spec, phase, "program", program.path, targetSources, targetSources)
 
@@ -327,6 +330,7 @@ export async function programRootCheck(input: ProgramRootCheck): Promise<CheckRe
       if (!(error instanceof SetupFailed) || phase === "base") throw error
       throw new ProgramSubjectSetupFailed(error)
     }
+    await run.observeWorktree?.(subject.path, "subject")
     await witnessTree(run, spec, phase, "subject", subject.path, tree)
     await witnessDeclaredSources(run, spec, phase, "subject", subject.path, subjectSources, targetSources)
     await witnessChangedSubject(run, spec, phase, subject.path, tree)

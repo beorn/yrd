@@ -42,6 +42,28 @@ describe("the queue declaration grammar", () => {
     expect(() => parseConfig(`issuesProvider: {update: ${value}}\n`, SOURCE)).toThrow(/issuesProvider.update/u)
   })
 
+  it("reads checkout directory omissions as literal paths on a named check", () => {
+    const config = parseConfig(
+      "checks:\n  - typecheck:\n      run: bun run typecheck\n      omitCheckoutDirectories: [vendor/term/content/artifacts]\n",
+      SOURCE,
+    )
+    expect(config.checks[0]?.omitCheckoutDirectories).toEqual(["vendor/term/content/artifacts"])
+  })
+
+  it.each(["{path: corpus}", "[12]", "['']", "[/corpus]", "[vendor/../corpus]", "['vendor/term/*']"])(
+    "refuses malformed checkout directory omissions %s",
+    (value) => {
+      expect(() =>
+        parseConfig(
+          `checks:\n  - typecheck:\n      run: bun run typecheck\n      omitCheckoutDirectories: ${value}\n`,
+          SOURCE,
+        ),
+      ).toThrow(
+        /checks\[0\] typecheck: omitCheckoutDirectories: must be a list of literal normalized repository-relative directories/u,
+      )
+    },
+  )
+
   it("reads every supported field and supplies only the declared defaults", () => {
     const config = parseConfig(
       [
