@@ -2977,17 +2977,26 @@ async function judgeDropBranch(
     throw new TypeError(`local retirement ${branch}: expected a full commit oid, received ${JSON.stringify(local.tip)}`)
   }
   const advanced = local?.advanced
-  // The owner's advanced drop follows a cancelled or a merged ending alike (30683, 30999).
+  // The owner's advanced drop follows a cancelled, merged or failed ending alike (30683, 30999, 37360).
   const advancedEnded =
     (state.status === "cancelled" && state.ending?.kind === "cancelled") ||
-    (state.status === "merged" && state.ending?.kind === "merged")
+    (state.status === "merged" && state.ending?.kind === "merged") ||
+    (state.status === "failed" && state.ending?.kind === "failed")
   if (
     advanced !== undefined &&
     (state.commit === undefined || state.commit === local?.tip || !advancedEnded || !request.note?.trim())
   ) {
     throw new Error(
-      `${branch}: an advanced drop needs a cancelled or merged change whose recorded commit differs from ${local?.tip}, and a nonempty --reason`,
+      `${branch}: an advanced drop needs a cancelled, merged or failed change whose recorded commit differs from ${local?.tip}, and a nonempty --reason`,
     )
+  }
+  // A failed change advances only by descent: a rewritten branch past it is a different change (37360, 30683 V1).
+  if (advanced !== undefined && state.status === "failed" && state.commit !== undefined && local !== undefined) {
+    if (!(await isAncestor(gitIn(store.repo, undefined, store.selection), state.commit, local.tip))) {
+      throw new Error(
+        `${branch}@${local.tip}: an advanced drop past a failed change needs its recorded commit ${state.commit} as an ancestor; this is a different change`,
+      )
+    }
   }
   const fetchRefs = store.backend.fetchRefs
   if (fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs for dropped branch commit")

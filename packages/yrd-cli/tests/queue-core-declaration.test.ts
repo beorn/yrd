@@ -3647,6 +3647,80 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect((await git(["rev-parse", `refs/heads/${restored}`])).trim()).toBe(head)
   }, 60_000)
 
+  /** @failure 37360: a FAILED change is an ending, yet the advanced drop accepted only cancelled or merged, so
+   *          --discard of a branch one commit past its failed tip refused with text that said to run --discard.
+   * @level l2 @consumer @chief retiring task/32244-ghostty-prompt-properties, whose change failed a gitlink compose
+   */
+  it.each(["descendant", "non-descendant"] as const)(
+    "discards an advanced branch of a failed change into a dropped event that keeps both tips (37360): %s",
+    async (shape) => {
+      const repo = await world("checks: []\n")
+      const git = gitIn(repo)
+      const branch = `task/37360-failed-${shape}`
+      const base = (await git(["rev-parse", "HEAD"])).trim()
+      await git(["checkout", "--quiet", "-b", "recorded-tip"])
+      await git(["commit", "--quiet", "--allow-empty", "-m", "the submitted change the queue refused"])
+      const recorded = (await git(["rev-parse", "HEAD"])).trim()
+      await git(["checkout", "--quiet", "main"])
+      const queueTip = await createQueue(repo, "main", base, new Date())
+      const store = createEventStore(repo, "origin", git.selection)
+      await (
+        await openEvents({ ...store, ref: changesRef("main", branch), writer: "fixture" })
+      ).append(
+        [
+          changeInput("opened", { queueTip, at: new Date(), commit: recorded, by: "fixture", issue: "@example/37360" }),
+          changeInput("failed", { queueTip, at: new Date(), commit: recorded, reason: "gitlink-compose-refused" }),
+        ],
+        { expect: null },
+      )
+      await git(["checkout", "--quiet", "-b", branch, shape === "descendant" ? recorded : base])
+      await git(["commit", "--quiet", "--allow-empty", "-m", "a commit after the failure"])
+      const head = (await git(["rev-parse", "HEAD"])).trim()
+      await git(["checkout", "--quiet", "main"])
+      const out = capture(repo)
+      const code = await runYrdProcess(
+        [
+          "bun",
+          "yrd",
+          "drop",
+          branch,
+          "--local",
+          "--discard",
+          "--tip",
+          head,
+          "--reason",
+          "superseded; this content will never be submitted",
+          "--submitter",
+          "@dev/4",
+          "--json",
+        ],
+        out.io,
+      )
+      const report = JSON.parse(out.stdout()) as {
+        removed: { branch: string; head: string }[]
+        kept: { reason: string; detail?: string }[]
+      }
+      if (shape === "non-descendant") {
+        expect(code).not.toBe(0)
+        expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
+        expect(report.kept).toEqual([expect.objectContaining({ reason: "advanced" })])
+        expect(report.kept[0]?.detail).toContain(`does not descend from the recorded change tip ${recorded}`)
+        expect(report.kept[0]?.detail).not.toContain("--discard")
+        return
+      }
+      expect(code, `${out.stderr()} ${out.stdout()}`).toBe(0)
+      expect(await git(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).toBe("")
+      expect(report.kept).toEqual([])
+      expect(report.removed).toEqual([expect.objectContaining({ branch, head })])
+      const after = (await readBranchHistory(store, "main", branch)).history
+      expect(after?.events.at(-1)).toMatchObject({
+        type: "cancelled",
+        links: expect.arrayContaining([recorded, head]),
+      })
+    },
+    60_000,
+  )
+
   /** @failure 33188 follow-up: every discard reads as a foreign decision, so a receipt cannot tell an owner's own
    *          withdrawal from one another seat made on its branch.
    * @level l2 @consumer an owner reading the receipt of its own discard
@@ -4515,7 +4589,14 @@ describe("a queue is the selected origin branch carrying config", () => {
         removed: { branch: string; head: string; archiveRef?: string }[]
         kept: { branch: string; head: string; reason: string; detail: string }[]
       }
-      if (mode === "owner" || mode === "queue owner" || mode === "issue legacy archive" || sibling) {
+      // 37360: a failed ending drops like a cancelled one, so the dropped event keeps both commits.
+      if (
+        mode === "owner" ||
+        mode === "queue owner" ||
+        mode === "issue legacy archive" ||
+        mode === "failed" ||
+        sibling
+      ) {
         expect(code, output.stderr()).toBe(0)
         expect(report.removed).toEqual([expect.objectContaining({ branch, head: tip })])
         expect(report.removed[0]).not.toHaveProperty("archiveRef")
