@@ -658,7 +658,9 @@ it.each([
  * @level l3 @consumer yrd env close after a standing author environment survives its landing round
  * Exact young jobs now close at landing (29367); a standing environment preserves the later native-release probe.
  */
-it.each(["released", "notified", "reopened", "resubmitted", "held", "advanced", "failed"] as const)(
+// "inside" (37460): the close runs with the process cwd inside the environment it removes, as `@in <env> -- bun yrd
+// env close <env>` does for a non-dev repo; the retirement after removal must still read its store and retire.
+it.each(["released", "notified", "reopened", "resubmitted", "held", "advanced", "inside", "failed"] as const)(
   "retries a held merged author branch after native close: %s",
   async (mode) => {
     const w = await world(":")
@@ -707,6 +709,16 @@ it.each(["released", "notified", "reopened", "resubmitted", "held", "advanced", 
       processCensus
         .mockResolvedValueOnce(permitted)
         .mockResolvedValueOnce({ ...permitted, coverage: { ...permitted.coverage, complete: false } })
+    }
+    const fromInside = async <T>(work: () => Promise<T>): Promise<T> => {
+      if (mode !== "inside") return await work()
+      const previous = process.cwd()
+      process.chdir(author)
+      try {
+        return await work()
+      } finally {
+        process.chdir(previous)
+      }
     }
     let releaseReads = 0
     let acquisitionsBeforeRetirement = 0
@@ -760,17 +772,19 @@ it.each(["released", "notified", "reopened", "resubmitted", "held", "advanced", 
             acquisitionsBeforeRetirement = branchHistoryAcquisitions
             queueValidationsBeforeRetirement = queueValidations
           })
-        : await runYrdProcess(
-            [
-              "bun",
-              "yrd",
-              ...(mode === "released" ? ["--workdir", closeWorkdir] : []),
-              "env",
-              "close",
-              author,
-              "--json",
-            ],
-            closed.io,
+        : await fromInside(() =>
+            runYrdProcess(
+              [
+                "bun",
+                "yrd",
+                ...(mode === "released" ? ["--workdir", closeWorkdir] : []),
+                "env",
+                "close",
+                author,
+                "--json",
+              ],
+              closed.io,
+            ),
           )
     if (mode === "notified" || mode === "reopened" || mode === "resubmitted") {
       expect(queueValidations - queueValidationsBeforeRetirement).toBe(mode === "notified" ? 3 : 1)
@@ -779,8 +793,12 @@ it.each(["released", "notified", "reopened", "resubmitted", "held", "advanced", 
     expect(exit, closed.stderr()).toBe(mode === "failed" ? 2 : mode === "reopened" || mode === "resubmitted" ? 1 : 0)
     expect(existsSync(author)).toBe(mode === "failed")
     expect((await w.git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe(
-      mode === "released" || mode === "notified" ? "" : expectedHead,
+      mode === "released" || mode === "notified" || mode === "inside" ? "" : expectedHead,
     )
+    if (mode === "inside") {
+      expect(closed.stderr()).not.toContain("Unable to read current working directory")
+      expect(JSON.parse(closed.stdout())).not.toHaveProperty("retirement")
+    }
     if (mode === "notified") {
       expect(closed.stderr()).not.toContain("terminal history changed or reopened before root retirement")
     }
