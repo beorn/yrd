@@ -21,6 +21,11 @@ export const ISSUES_CODES = {
   providerTimedOut: "yrd-issues-provider-timed-out",
   providerStalled: "yrd-issues-provider-stalled",
   environmentUnreadable: "yrd-issues-environment-unreadable",
+  // #37838 (@cto e1873f39): ONE list-page entry may read the provider's bounded pages (`traverse:true` in its own
+  // <page> request), so the read must refuse a set that changed under it and never pass a partial set off as
+  // complete.
+  pageSourceMoved: "yrd-issues-page-source-moved",
+  pageBound: "yrd-issues-page-bound",
 } as const
 
 export type IssuesCode = (typeof ISSUES_CODES)[keyof typeof ISSUES_CODES]

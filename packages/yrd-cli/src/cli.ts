@@ -2012,7 +2012,9 @@ function buildProgram(
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       })
       if (outcome.ok) {
-        io.stdout(`${JSON.stringify(outcome.envelope)}\n`)
+        // #37838 (@cto e1873f39): a `list-page` traversal answers one compact page envelope per line; every other
+        // call answers its one envelope, byte for byte.
+        for (const envelope of outcome.stream ?? [outcome.envelope]) io.stdout(`${JSON.stringify(envelope)}\n`)
         return
       }
       io.stderr(`yrd issues: ${outcome.message}\n`)
