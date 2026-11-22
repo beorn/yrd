@@ -8,7 +8,8 @@
  *   stall  write one stderr line, then sleep 30 s silently (the no-progress lease must kill it)
  *   trace  record the requested key and whether queue output is complete; issue-3 fails
  *   pages  <calls-log> <pages-json> <request>: append the request, answer the page whose token it names
- *   stream <calls-log> <pages-json>: append one call and print every page as one compact JSON line (traverse)
+ *   stream <calls-log> <pages-json> <request>: append the request; print every page as one compact JSON line when
+ *          it says `traverse:true`, otherwise only the first page (what a provider without traversal support does)
  *   count  <calls-log> <stdout bytes>: append one line per call, answer the bytes (one activity read per refresh)
  */
 import { appendFileSync, existsSync, readFileSync } from "node:fs"
@@ -55,11 +56,13 @@ if (mode === "json") {
   appendFileSync(callsLog, "call\n")
   process.stdout.write(bytes)
 } else if (mode === "stream") {
-  const [callsLog, pagesFile] = rest
+  const [callsLog, pagesFile, requestJson] = rest
   if (callsLog === undefined || pagesFile === undefined) throw new Error("stream requires a calls log and a pages file")
-  appendFileSync(callsLog, "call\n")
+  const request = requestJson === undefined ? {} : (JSON.parse(requestJson) as { traverse?: unknown })
+  appendFileSync(callsLog, `${JSON.stringify({ traverse: request.traverse === true })}\n`)
   const pages = JSON.parse(readFileSync(pagesFile, "utf8")) as unknown[]
-  process.stdout.write(`${pages.map((page) => JSON.stringify(page)).join("\n")}\n`)
+  const answer = request.traverse === true ? pages : pages.slice(0, 1)
+  process.stdout.write(`${answer.map((page) => JSON.stringify(page)).join("\n")}\n`)
 } else if (mode === "text") {
   process.stdout.write("this is not json\n")
 } else if (mode === "exit3") {
@@ -74,5 +77,3 @@ if (mode === "json") {
   process.stderr.write(`fake provider: unknown mode ${String(mode)}\n`)
   process.exit(9)
 }
-
-

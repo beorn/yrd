@@ -196,7 +196,7 @@ export function annotateInProgress(
   inputs: InProgressInputs,
   now: number,
 ): InProgressAnnotation {
-  if (verb !== "view" && verb !== "list-page" && verb !== "traverse" && verb !== "list") {
+  if (verb !== "view" && verb !== "list-page" && verb !== "list") {
     return { ok: true, result }
   }
   const open = openHolds(inputs.holds, now)
@@ -221,7 +221,7 @@ export function annotateInProgress(
     return { ok: true, result: { ...result, ...columns(id, ownerOf(result), open, active, activityUnknown) } }
   }
 
-  if (verb === "list-page" || verb === "traverse") {
+  if (verb === "list-page") {
     const page = isRecord(result) ? result : undefined
     const rows = page?.rows
     if (!Array.isArray(rows)) return skip(result)
@@ -240,7 +240,7 @@ export function annotateInProgress(
       }
       annotated.push({ ...entry, row: { ...row, ...columns(id, ownerOf(row), open, active, activityUnknown) } })
     }
-    // A traversing caller must be able to tell an all-unknown read from a clean no-holds page (#37838).
+    // A traversing refresh must be able to tell an all-unknown read from a clean no-holds page (#37838).
     const unknownRows = activityUnknown
       ? annotated.filter((entry) => (entry as { row: { in_progress?: unknown } }).row.in_progress === null).length
       : 0

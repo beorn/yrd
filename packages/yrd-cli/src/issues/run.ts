@@ -47,7 +47,14 @@ export type IssuesEnvelope = Readonly<{
 /** Exit 1: refused or failed with a named cause. Exit 2: the request itself is malformed. */
 export type IssuesFailure = Readonly<{ ok: false; exitCode: 1 | 2; code: IssuesCode; message: string }>
 
-export type IssuesOutcome = Readonly<{ ok: true; envelope: IssuesEnvelope }> | IssuesFailure
+/**
+ * A read answers one envelope. A `list-page` traversal answers one envelope PER PAGE in {@link stream} — the same
+ * page envelope the deployed reader decodes, one compact JSON object per line — and `envelope` is the first page,
+ * so every caller that reads a single answer keeps working unchanged.
+ */
+export type IssuesOutcome =
+  | Readonly<{ ok: true; envelope: IssuesEnvelope; stream?: readonly IssuesEnvelope[] }>
+  | IssuesFailure
 
 type IssuesRequester = Readonly<{ authority: string; subject: string }>
 type IssuesAssignmentAudit = Readonly<{ expectedOwner?: string | null; requestedBy?: IssuesRequester }>
@@ -97,7 +104,7 @@ function fail(exitCode: 1 | 2, code: IssuesCode, subject: string, detail: string
 }
 
 /** The reads whose rows Yrd can complete with its own environments (#37838). */
-const IN_PROGRESS_VERBS: ReadonlySet<string> = new Set(["view", "list-page", "traverse", "list"])
+const IN_PROGRESS_VERBS: ReadonlySet<string> = new Set(["view", "list-page", "list"])
 
 function commandText(argv: readonly string[]): string {
   return argv.map((word) => (word === "" || /[\s"'`$\\]/u.test(word) ? JSON.stringify(word) : word)).join(" ")
@@ -308,41 +315,40 @@ async function repositoryToRead(root: string, env: NodeJS.ProcessEnv): Promise<I
 }
 
 /**
- * #37838 (@cto 8e7cbb99): how many provider pages ONE traversal may read before it refuses. A page limit is the
- * difference between a wrong answer and a read that never ends; the default is generous and the env is the knob.
+ * #37838 (@cto ead63117): how many provider pages ONE `list-page` traversal may read before it refuses. A page
+ * limit is the difference between a wrong answer and a read that never ends: the 256th COMPLETE page answers, an
+ * incomplete 256th refuses. It is internal on purpose — a per-project knob would be a second contract for a bound
+ * the Workboard does not get to choose.
  */
-const TRAVERSE_PAGE_BOUND = 256
+const LIST_PAGE_TRAVERSE_BOUND = 256
 
-function traversePageBound(env: NodeJS.ProcessEnv): number | undefined {
-  const raw = env.YRD_ISSUES_PAGE_BOUND?.trim()
-  if (raw === undefined || raw === "") return TRAVERSE_PAGE_BOUND
-  const parsed = Number(raw)
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
-}
-
-type TraverseWalk = Readonly<{
+type ListPageRead = Readonly<{
   verb: IssuesVerb
   command: string
   declared: readonly string[]
   values: Readonly<Record<string, string>>
-  runDeclared: (argv: readonly string[], command: string) => Promise<Readonly<{ ok: true; stdout: string }> | IssuesFailure>
+  runDeclared: (
+    argv: readonly string[],
+    command: string,
+  ) => Promise<Readonly<{ ok: true; stdout: string }> | IssuesFailure>
   bound: number
 }>
 
 /**
- * Walk the provider's bounded pages as ONE read (@cto 8e7cbb99, @dev/3 7a95653e): every page must describe the
- * same snapshot and journal head as the first, a change refuses the whole read rather than serving two cuts, the
- * page bound refuses instead of returning a partial set, and the result is one page-shaped answer whose `next`
- * is null. Callers that read a single page keep using `list-page`; nothing here restarts.
+ * Read every page of ONE `list-page` request that opts in with `traverse:true` (@cto ead63117, e1873f39). The
+ * provider's own `list-page` argv runs ONCE; every page it streams must describe the same snapshot, journal head,
+ * generation and population as the first, a change refuses the whole read rather than serving two cuts, the page
+ * bound refuses instead of returning a partial set, and the terminal page must say `complete:true` with a count
+ * matching the rows read. Ordinary callers that do not opt in never reach here and get one page, byte for byte.
  *
  * ONE PROCESS, not a token loop. Measured on /hh/pm 2026-11-22: a loop that re-invokes the provider per token
  * read 10 pages in 124 s and then refused — the vault landed, and a token names one revision, so the next
- * continuation was no longer that checkout's tree. A provider that streams its pages from one loaded snapshot
- * (km `traverse`) answers them all; a provider that answers one page in one JSON object still works unchanged.
+ * continuation was no longer that checkout's tree. One provider process streaming from one loaded snapshot read
+ * 22,224 rows in 23 pages in 71 s; a provider that answers one page in one JSON object still works unchanged.
  */
-async function traversePages(
-  input: TraverseWalk,
-): Promise<Readonly<{ ok: true; result: Record<string, unknown> }> | IssuesFailure> {
+async function readListPages(
+  input: ListPageRead,
+): Promise<Readonly<{ ok: true; pages: readonly (Record<string, unknown> & { rows: unknown[] })[] }> | IssuesFailure> {
   const ran = await input.runDeclared(substituteArgv(input.declared, input.values), input.command)
   if (!ran.ok) return ran
   const pages = readPageStream(ran.stdout, input.verb, input.command)
@@ -351,26 +357,33 @@ async function traversePages(
   let rowsRead = 0
   let cursor: string | null = null
   let first: Record<string, unknown> | undefined
-  const rows: unknown[] = []
+  const kept: (Record<string, unknown> & { rows: unknown[] })[] = []
   let complete = false
   for (const page of pages.pages) {
-    const pageRows = page.rows as unknown[]
     if (first === undefined) {
       first = page
-    } else if (page.snapshot !== first.snapshot || page.head !== first.head) {
+    } else {
       const moved =
         page.snapshot !== first.snapshot
           ? `snapshot ${String(first.snapshot)} -> ${String(page.snapshot)}`
-          : `head ${String(first.head)} -> ${String(page.head)}`
-      return fail(
-        1,
-        ISSUES_CODES.pageSourceMoved,
-        `${input.verb} ${input.command}`,
-        `${moved} at page ${pageIndex} after ${rowsRead} rows (last cursor ${String(cursor)}); no rows served, read again for a fresh cut`,
-      )
+          : page.head !== first.head
+            ? `head ${String(first.head)} -> ${String(page.head)}`
+            : page.generation !== first.generation
+              ? `generation ${String(first.generation)} -> ${String(page.generation)}`
+              : page.population !== first.population
+                ? `population ${String(first.population)} -> ${String(page.population)}`
+                : undefined
+      if (moved !== undefined) {
+        return fail(
+          1,
+          ISSUES_CODES.pageSourceMoved,
+          `${input.verb} ${input.command}`,
+          `${moved} at page ${pageIndex} after ${rowsRead} rows (last cursor ${String(cursor)}); no rows served, read again for a fresh cut`,
+        )
+      }
     }
-    rows.push(...pageRows)
-    rowsRead += pageRows.length
+    kept.push(page)
+    rowsRead += page.rows.length
     if (page.complete === true) {
       complete = true
       break
@@ -403,7 +416,17 @@ async function traversePages(
       `the last page (${pageIndex}) is incomplete and the provider sent no page after it; no rows served`,
     )
   }
-  return { ok: true, result: { ...(first as Record<string, unknown>), rows, next: null, complete: true } }
+  const last = kept[kept.length - 1] as Record<string, unknown>
+  if (typeof last.population === "number" && last.population !== rowsRead) {
+    return fail(
+      1,
+      ISSUES_CODES.providerInvalidResult,
+      `${input.verb} ${input.command}`,
+      `the pages read ${rowsRead} rows but the terminal page declares population ${last.population}; no rows served`,
+    )
+  }
+  kept[kept.length - 1] = { ...last, next: null, complete: true, rows: last.rows as unknown[] }
+  return { ok: true, pages: kept }
 }
 
 /**
@@ -417,7 +440,10 @@ function readPageStream(
 ): Readonly<{ pages: readonly (Record<string, unknown> & { rows: unknown[] })[] }> | IssuesFailure {
   const invalid = (detail: string): IssuesFailure =>
     fail(1, ISSUES_CODES.providerInvalidResult, `${verb} ${command}`, detail)
-  const asPage = (value: unknown, index: number): Readonly<{ page: Record<string, unknown> & { rows: unknown[] } }> | Readonly<{ failure: IssuesFailure }> => {
+  const asPage = (
+    value: unknown,
+    index: number,
+  ): Readonly<{ page: Record<string, unknown> & { rows: unknown[] } }> | Readonly<{ failure: IssuesFailure }> => {
     const page = value as Record<string, unknown> | null
     if (page === null || typeof page !== "object" || Array.isArray(page) || !Array.isArray(page.rows)) {
       return { failure: invalid(`page ${index} is not a page object with a rows array`) }
@@ -529,16 +555,6 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
     return fail(1, ISSUES_CODES.unsupported, verb, `${verb} is not declared in ${where} (unsupported)`)
   }
 
-  const bound = verb === "traverse" ? traversePageBound(env) : undefined
-  if (verb === "traverse" && bound === undefined) {
-    return fail(
-      2,
-      ISSUES_CODES.badArguments,
-      verb,
-      `YRD_ISSUES_PAGE_BOUND must be a positive integer, found ${JSON.stringify(env.YRD_ISSUES_PAGE_BOUND)}`,
-    )
-  }
-
   if (verb === "assign") {
     for (const [key, flag] of [
       ["expected-owner", "--expected-owner"],
@@ -620,17 +636,19 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
 
   const command = commandText(declared)
   let parsed: unknown
-  if (verb === "traverse") {
-    const walked = await traversePages({
+  let streamedPages: Record<string, unknown>[] | undefined
+  if (verb === "list-page" && pageRequestTraversal(request.values.page)) {
+    const read = await readListPages({
       verb,
       command,
       declared,
       values: request.values,
       runDeclared,
-      bound: bound ?? 0,
+      bound: LIST_PAGE_TRAVERSE_BOUND,
     })
-    if (!walked.ok) return walked
-    parsed = walked.result
+    if (!read.ok) return read
+    streamedPages = read.pages.map((page) => ({ ...page }))
+    parsed = streamedPages[0]
   } else {
     const ran = await runDeclared(substituteArgv(declared, request.values), command)
     if (!ran.ok) return ran
@@ -696,30 +714,76 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       // A declared source that failed leaves the columns unknown, never idle: an empty set would say "nobody
       // wrote", which is the one thing the failure did not establish (@cto 8e7cbb99).
       const activityUnknown = activityArgv !== undefined && activity === undefined
-      const annotated = annotateInProgress(
-        verb,
-        parsed,
-        activity === undefined ? { holds, ...(activityUnknown ? { activityUnknown } : {}) } : { holds, activity },
-        now,
-      )
-      if (!annotated.ok) {
-        return fail(
-          1,
-          annotated.fault === "environment" ? ISSUES_CODES.environmentUnreadable : ISSUES_CODES.providerInvalidResult,
-          `${verb} ${command}`,
-          annotated.detail,
-        )
+      const inputs =
+        activity === undefined ? { holds, ...(activityUnknown ? { activityUnknown } : {}) } : { holds, activity }
+      const annotateOne = (
+        page: unknown,
+      ): IssuesFailure | Readonly<{ ok: true; page: unknown; unknownRows?: number }> => {
+        const annotated = annotateInProgress(verb, page, inputs, now)
+        if (!annotated.ok) {
+          return fail(
+            1,
+            annotated.fault === "environment" ? ISSUES_CODES.environmentUnreadable : ISSUES_CODES.providerInvalidResult,
+            `${verb} ${command}`,
+            annotated.detail,
+          )
+        }
+        if (annotated.notice !== undefined) writeStderr(annotated.notice)
+        return { ok: true, page: annotated.result, unknownRows: annotated.unknownRows }
       }
-      if (annotated.notice !== undefined) writeStderr(annotated.notice)
-      parsed = annotated.result
-      if (verb === "traverse") {
-        // Always present, so a clean refresh and an all-unknown one have the same shape (0 vs a real count).
-        parsed = { ...(parsed as Record<string, unknown>), activityUnreadRows: annotated.unknownRows ?? 0 }
+      if (streamedPages !== undefined) {
+        // ONE capture for the whole refresh: every page is annotated from the same holds and activity read.
+        const annotated: Record<string, unknown>[] = []
+        let unknownRows = 0
+        for (const page of streamedPages) {
+          const one = annotateOne(page)
+          if (!one.ok) return one
+          unknownRows += one.unknownRows ?? 0
+          annotated.push(one.page as Record<string, unknown>)
+        }
+        // Stated ONCE, on the terminal line: a clean refresh and an all-unknown one answer the same shape (0 vs a
+        // real count), and no page can leave a row that reads idle when the read that would have said otherwise
+        // failed (#37838).
+        const last = annotated[annotated.length - 1] as Record<string, unknown>
+        const meta = isPlainObject(last.meta) ? (last.meta as Record<string, unknown>) : {}
+        annotated[annotated.length - 1] = { ...last, meta: { ...meta, activityUnreadRows: unknownRows } }
+        streamedPages = annotated
+        parsed = annotated[0]
+      } else {
+        const one = annotateOne(parsed)
+        if (!one.ok) return one
+        parsed = one.page
       }
     }
   }
-  return {
-    ok: true,
-    envelope: { declaration: { repository, commit, path: ISSUES_DECLARATION_PATH }, verb, result: parsed },
+  const pin = { repository, commit, path: ISSUES_DECLARATION_PATH } as const
+  if (streamedPages !== undefined) {
+    const envelopes: IssuesEnvelope[] = streamedPages.map((page) => ({ declaration: pin, verb, result: page }))
+    const head = envelopes[0]
+    if (head === undefined) {
+      // The walk refuses an empty answer before it returns, so this is a broken invariant, not a provider's answer.
+      return fail(1, ISSUES_CODES.providerInvalidResult, `${verb} ${command}`, "the traversal read no page")
+    }
+    return { ok: true, envelope: head, stream: envelopes }
+  }
+  return { ok: true, envelope: { declaration: pin, verb, result: parsed } }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/**
+ * #37838 (@cto e1873f39): a `list-page` request opts into one-process traversal by saying `traverse:true` inside
+ * its own `<page>` JSON — no second verb, no new declaration key. `checkRequest` has already refused a `<page>`
+ * that is not a JSON object; anything else here is an ordinary one-page call and stays byte-identical.
+ */
+function pageRequestTraversal(page: string | undefined): boolean {
+  if (page === undefined) return false
+  try {
+    const request: unknown = JSON.parse(page)
+    return isPlainObject(request) && request.traverse === true
+  } catch {
+    return false
   }
 }
