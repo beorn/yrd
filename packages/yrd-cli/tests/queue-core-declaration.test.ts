@@ -8150,6 +8150,63 @@ describe("drop --local --release-checkout", () => {
       spy.mockRestore()
     }
   }, 30_000)
+  /**
+   * @failure A confined caller (luna3's Codex sandbox hides other processes' /proc) gets a refusal listing
+   * every pid it could not read, about 250, read as 250 holders, instead of being told its own census is
+   * blind and that --apply hands the census to the queue's own round (37675, @cto b2776e47 and 564e378a).
+   * @level l2 @consumer releaseRetainedCheckouts callers, including the CLI
+   */
+  it.each([
+    ["most pids unreadable", (readable: number) => readable + 7, true],
+    ["a few pids unreadable", (readable: number) => Math.max(1, Math.floor(readable / 4)), false],
+  ] as const)("37675: %s: the preview names the sandbox only when most pids are unreadable", async (_label, unreadableCount, sandboxed) => {
+    const fixture = await releaseWorld()
+    const actual = await vi.importActual<typeof import("removely")>("removely")
+    const observed = await actual.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2000 })
+    const uid = typeof process.getuid === "function" ? process.getuid() : 0
+    const hidden = Array.from({ length: unreadableCount(observed.rows.length) }, (_, index) => ({
+      pid: 900_000 + index,
+      uid,
+      comm: "hidden",
+      denied: ["cwd"] as const,
+      issues: [{ source: "cwd" as const, resource: "cwd", reason: "denied" as const, code: "EACCES" }],
+    }))
+    const spy = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue({
+      ...observed,
+      coverage: { ...observed.coverage, complete: false, unreadable: hidden },
+    } as never)
+    try {
+      const output = releaseCapture(fixture.repo)
+      const report = await releaseRetainedCheckouts({
+        repo: fixture.repo,
+        git: fixture.git,
+        selection: fixture.git.selection,
+        io: output.io,
+        log: { write: vi.fn() },
+        queue: "main",
+        remote: "origin",
+        sameIssue: async (a, b) => (a === b ? { same: true } : { same: false, resolved: true }),
+        request: { branch: fixture.branch, tip: fixture.tip, issue: "29600", reason: "retain checkout", by: "fixture" },
+      })
+      expect(report.removed).toHaveLength(0)
+      const detail = report.kept[0]?.detail ?? ""
+      expect(detail).toContain("needs-delegation")
+      expect(detail).toContain("pid 900000 hidden (EACCES)")
+      expect(detail).toContain("run with --apply; the queue's own round runs the census")
+      if (sandboxed) {
+        expect(detail).toMatch(
+          new RegExp(`census from a sandboxed caller cannot see /proc: ${hidden.length} of \\d+ same-UID pids unreadable`, "u"),
+        )
+        expect(detail).toContain(`, and ${hidden.length - 5} more)`)
+        expect(detail).not.toContain(`pid ${900_000 + hidden.length - 1} hidden`)
+      } else {
+        expect(detail).not.toContain("census from a sandboxed caller")
+        expect(detail).toContain(`pid ${900_000 + hidden.length - 1} hidden (EACCES)`)
+      }
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
   /** @failure The uncertified hold exits 0, so a caller reads "done" while the branch stays (29772); a queued
    * release must read as queued (4), a re-file must match the standing request, and a store this caller
    * cannot write must fail loud and nonzero with nothing released (@cto c8d7113d tool-surface rows).

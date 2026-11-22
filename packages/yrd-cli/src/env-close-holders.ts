@@ -63,6 +63,9 @@ export async function assertNoLiveEnvironmentUse(
   if (holder !== undefined) throw new Error(`live use: ${holder.reason} (${holder.path})`)
 }
 
+/** How many pids a sandboxed-caller refusal names before it counts the rest. */
+const SANDBOX_NAMED_PIDS = 5
+
 /** Shared admission policy: identity-cleared denials are evidence, an unexplained gap is not. */
 export function processCwdCoverage(snapshot: ProcessCwdProjection) {
   const uncleared = snapshot.unreadable.filter((entry) => clearedByIdentity(entry) === undefined)
@@ -71,9 +74,16 @@ export function processCwdCoverage(snapshot: ProcessCwdProjection) {
     const identity = clearedByIdentity(entry)
     return identity === undefined ? [] : [`${unreadableLabel(entry)} as ${identity}`]
   })
+  // A caller that cannot read most same-UID pids is confined (a sandbox hiding /proc), not surrounded by holders:
+  // say so by name with the count, and name only the first few pids, instead of a wall of every pid it could not
+  // read (37675, @cto b2776e47: luna3's Codex sandbox produced about 250). The pids stay uncleared either way.
+  const seen = snapshot.rows.length + snapshot.unreadable.length
+  const sandboxed = snapshot.mechanism === "proc" && uncleared.length * 2 > seen
   const refusal =
     uncleared.length > 0
-      ? `same-UID process CWD census ${snapshot.mechanism} could not read ${uncleared.map(unreadableLabel).join(", ")}; a holder among them cannot be ruled out`
+      ? sandboxed
+        ? `census from a sandboxed caller cannot see /proc: ${uncleared.length} of ${seen} same-UID pids unreadable (${uncleared.slice(0, SANDBOX_NAMED_PIDS).map(unreadableLabel).join(", ")}${uncleared.length > SANDBOX_NAMED_PIDS ? `, and ${uncleared.length - SANDBOX_NAMED_PIDS} more` : ""}); a holder among them cannot be ruled out`
+        : `same-UID process CWD census ${snapshot.mechanism} could not read ${uncleared.map(unreadableLabel).join(", ")}; a holder among them cannot be ruled out`
       : !snapshot.complete && snapshot.unreadable.length === 0
         ? `same-UID process CWD census ${snapshot.mechanism} incomplete: no readable coverage`
         : undefined
