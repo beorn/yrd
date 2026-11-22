@@ -8,9 +8,9 @@
  * @consumer an agent checking where its submitted change stands in the queue
  * @testonly none
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { changeInput, changesRef, createEventStore, readEventQueue, submit } from "@yrd/queue-core"
 import { openEvents } from "gitomic/events"
@@ -264,7 +264,11 @@ describe("`yrd queue show` and the merge-line position (#29342)", () => {
 
     const absent = await yrd(work, "queue", "show", "--all", "--json")
     expect(absent.exitCode, absent.report).toBe(0)
-    const absentDocument = JSON.parse(absent.stdout) as { schemaVersion: number; execution: Execution; published: unknown }
+    const absentDocument = JSON.parse(absent.stdout) as {
+      schemaVersion: number
+      execution: Execution
+      published: unknown
+    }
     expect(absentDocument.schemaVersion).toBe(2)
     if (absentDocument.execution.local !== false) throw new Error("expected an absent run journal")
     expect(absentDocument.execution.why).toContain("run journal not found at")
@@ -286,6 +290,33 @@ describe("`yrd queue show` and the merge-line position (#29342)", () => {
     if (emptyDocument.execution.local !== true) throw new Error("expected a readable empty journal population")
     expect(emptyDocument.execution.value.runs).toEqual([])
     expect(emptyDocument.execution.value.dir).toContain("logs")
+  })
+
+  // 28522 Acceptance: a portable read needs an EXPLICITLY isolated workdir. A
+  // second checkout is not isolation — the workdir is what the read is keyed by —
+  // and the isolated read must mark its absence while the published facts survive.
+  it("marks absence in an explicitly isolated workdir while the Git facts stay the same", async () => {
+    const work = await queueWithTwoChanges()
+    // A second COPY of the queue state, so the isolated read holds the same clone and
+    // the same refs, and differs only in the journal directory it looks in.
+    const hostWorkdir = join(dirname(work), "queue")
+    const isolated = join(dirname(work), "isolated-workdir")
+    cpSync(hostWorkdir, isolated, { recursive: true })
+    const shared = await yrd(work, "queue", "show", "--all", "--json")
+    const apart = await yrd(work, "queue", "show", "--all", "--json", "--workdir", isolated)
+    expect(apart.exitCode, apart.report).toBe(0)
+    type Document = {
+      published: { changes: readonly { branch: string; head: string; state: string; events: readonly unknown[] }[] }
+      execution: { local: true; value: { dir: string } } | { local: false; why: string }
+    }
+    const sharedDocument = JSON.parse(shared.stdout) as Document
+    const apartDocument = JSON.parse(apart.stdout) as Document
+    // The published rows are the same read: same chains, same endings, same evidence.
+    expect(apartDocument.published.changes).toEqual(sharedDocument.published.changes)
+    // The isolated workdir answers its OWN absence, naming the directory it looked in.
+    if (apartDocument.execution.local !== false) throw new Error("expected the isolated workdir to hold no journal")
+    expect(apartDocument.execution.why).toContain(isolated)
+    expect(apartDocument.execution.why).toContain("run journal not found at")
   })
 
   it("reports list's line position where it reads the line, and none where it reads one branch", async () => {

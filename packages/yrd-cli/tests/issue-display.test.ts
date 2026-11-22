@@ -148,9 +148,9 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
     const project = await issuesProject("json")
     const shown = await yrd(work, "queue", "show", "--all", "--json", "--fresh", "--project-root", project)
     expect(shown.exitCode, shown.report).toBe(0)
-    const history = JSON.parse(shown.stdout) as { changes: readonly { issue: string }[] }
-    expect(history.changes).toHaveLength(5)
-    expect(new Set(history.changes.map((change) => change.issue)).size).toBe(5)
+    const history = JSON.parse(shown.stdout) as { published: { changes: readonly { issue: string }[] } }
+    expect(history.published.changes).toHaveLength(5)
+    expect(new Set(history.published.changes.map((change) => change.issue)).size).toBe(5)
     expect(shown.stderr, shown.report).not.toContain("fake provider:")
     expect(shown.stderr, shown.report).not.toContain("yrd queue show")
     expect(shown.stderr, shown.report).toContain("project root")
@@ -174,8 +174,8 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
         cwd: work,
         stdout(text) {
           stdout += text
-          const history = JSON.parse(stdout) as { changes: readonly unknown[] }
-          if (history.changes.length === 5) writeFileSync(outputMarker, "complete")
+          const history = JSON.parse(stdout) as { published: { changes: readonly unknown[] } }
+          if (history.published.changes.length === 5) writeFileSync(outputMarker, "complete")
         },
         stderr(text) {
           stderr += text
@@ -183,7 +183,7 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
       },
     )
     expect(exitCode, stderr).toBe(0)
-    expect((JSON.parse(stdout) as { changes: readonly unknown[] }).changes).toHaveLength(5)
+    expect((JSON.parse(stdout) as { published: { changes: readonly unknown[] } }).published.changes).toHaveLength(5)
     const observed = readFileSync(starts, "utf8")
       .trim()
       .split("\n")

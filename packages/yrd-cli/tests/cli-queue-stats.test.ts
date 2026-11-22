@@ -53,9 +53,7 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
  * from it, and one branch pushed without a submit (plan E2): the smallest
  * queue with every number the stats command counts.
  */
-async function queueWithOneChangeAndOnePush(
-  options: Readonly<{ journals?: boolean }> = {},
-): Promise<string> {
+async function queueWithOneChangeAndOnePush(options: Readonly<{ journals?: boolean }> = {}): Promise<string> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-stats-"))
   roots.push(root)
   const seed = gitIn(root)
@@ -102,8 +100,8 @@ describe("yrd queue stats through the process entry", () => {
     const work = await queueWithOneChangeAndOnePush()
     const listed = await yrd(work, "queue", "list", "--json")
     expect(listed.exitCode, listed.report).toBe(0)
-    const changes = (JSON.parse(listed.stdout) as { published: { changes: readonly { branch: string }[] } })
-      .published.changes
+    const changes = (JSON.parse(listed.stdout) as { published: { changes: readonly { branch: string }[] } }).published
+      .changes
     const ran = await yrd(work, "queue", "stats", "--json")
     expect(ran.exitCode, ran.report).toBe(0)
     const stats = JSON.parse(ran.stdout) as {

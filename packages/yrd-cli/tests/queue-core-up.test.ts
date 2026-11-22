@@ -251,6 +251,14 @@ function records(run: Capture): readonly Record<string, unknown>[] {
     .map((line) => JSON.parse(line) as Record<string, unknown>)
 }
 
+type ExecutionDocument<T> = { local: true; value: T } | { local: false; why: string }
+
+/** The local execution read, narrowed the way a reader must before using it (#28522). */
+function localExecution<T>(execution: ExecutionDocument<T>): T {
+  if (execution.local !== true) throw new Error(execution.why)
+  return execution.value
+}
+
 /** Every environment-cleanup observation row under one fixture root, wherever its run log landed. */
 function allCleanupRows(root: string, depth = 0): readonly Record<string, unknown>[] {
   if (depth > 12) return []
@@ -4165,8 +4173,10 @@ describe("yrd queue up, the service", () => {
     expect(await queueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const pausedList = records(listedJson)[0]
     expect(pausedList).toMatchObject({
-      changes: [{ branch: "task/one" }],
-      pause: { by: "@chief", kind: "paused", reason: "49 new failures on main" },
+      published: {
+        changes: [{ branch: "task/one" }],
+        pause: { by: "@chief", kind: "paused", reason: "49 new failures on main" },
+      },
     })
 
     const closed = capture(w.work)
@@ -4183,8 +4193,10 @@ describe("yrd queue up, the service", () => {
       0,
     )
     const resumedList = records(listedResumed)[0]
-    expect(resumedList).toMatchObject({ changes: [{ branch: "task/one" }], pause: null })
-    expect(resumedList?.changes).toEqual(pausedList?.changes)
+    expect(resumedList).toMatchObject({ published: { changes: [{ branch: "task/one" }], pause: null } })
+    expect((resumedList?.published as { changes: unknown } | undefined)?.changes).toEqual(
+      (pausedList?.published as { changes: unknown } | undefined)?.changes,
+    )
 
     // A retry on a paused line is accepted too, without changing the selected event.
     const beforeRetry = await w.git(["ls-remote", "--refs", "origin", ref])
@@ -4345,7 +4357,7 @@ describe("yrd queue up, the service", () => {
           env: { ...process.env, XDG_STATE_HOME: join(viewer, "inspection-state") },
         })
         if (operation === "pause") {
-          expect(JSON.parse(inspected)).toMatchObject({ pause: { kind: "paused", reason: "repair" } })
+          expect(JSON.parse(inspected)).toMatchObject({ published: { pause: { kind: "paused", reason: "repair" } } })
         } else {
           expect(JSON.stringify(JSON.parse(inspected))).toContain(JSON.stringify(branch))
           const retried = capture(w.work)
@@ -6301,8 +6313,8 @@ describe("yrd queue list, the table", () => {
     expect(
       await queueCommand(w.work, asJson.io, { command: "list", all: true }, { json: true, workdir: w.workdir }),
     ).toBe(0)
-    const listed = records(asJson)[0] as Readonly<{ changes: readonly Record<string, unknown>[] }>
-    expect(listed.changes).toMatchObject([
+    const listed = records(asJson)[0] as Readonly<{ published: { changes: readonly Record<string, unknown>[] } }>
+    expect(listed.published.changes).toMatchObject([
       { branch: "task/first", state: "queued" },
       { branch: "main", head: direct, reason: sentence, state: "direct" },
     ])
@@ -6429,8 +6441,8 @@ describe("yrd queue show names the queue it read (@i/10-yrd/24050)", () => {
       ),
     ).toBe(0)
 
-    const shown = records(json)[0] as { queue?: unknown; changes: unknown[] }
-    expect(shown.changes).toEqual([])
+    const shown = records(json)[0] as { queue?: unknown; published: { changes: unknown[] } }
+    expect(shown.published.changes).toEqual([])
     expect(typeof shown.queue).toBe("string")
     expect(String(shown.queue)).toContain("main")
     // The same identity on the page as in the JSON, beside the branch it did not find.
@@ -6536,10 +6548,19 @@ describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)",
     // same fixture must show the identical code and cure through `list` too.
     const listed = capture(w.work)
     expect(await queueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
-    const rows = (records(listed)[0] as { changes: readonly Record<string, unknown>[] }).changes
+    const document = records(listed)[0] as {
+      published: { changes: readonly Record<string, unknown>[] }
+      execution: ExecutionDocument<{ runs: readonly Record<string, unknown>[] }>
+    }
+    const rows = document.published.changes
     const row = rows.find((entry) => entry.branch === "task/stuck")
-    expect(row, JSON.stringify(rows)).toMatchObject({ state: "stuck", reason: "yrd-setup-unreachable" })
-    expect(String(row?.result)).toContain(cure)
+    expect(row, JSON.stringify(rows)).toMatchObject({ state: "stuck" })
+    // The code and the cure are the run's recorded incident facts, carried by
+    // execution, never a published row field.
+    const stuckRun = localExecution(document.execution).runs.find((entry) => entry.branch === "task/stuck")
+    const incident = stuckRun?.incident as { code?: string; next?: string } | undefined
+    expect(incident?.code).toBe("yrd-setup-unreachable")
+    expect(String(incident?.next)).toContain(cure)
   })
 })
 
@@ -7164,7 +7185,7 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
 
     const running = capture(w.work)
     expect(await queueCommand(w.work, running.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
-    expect(records(running)[0]).toHaveProperty("stopped", null)
+    expect(records(running)[0]).toHaveProperty("published.stopped", null)
 
     await redeclare(w, `setup: ${fault.command}\n`)
     await w.git(["checkout", "--quiet", "-b", "task/stuck", "main"])
@@ -7182,7 +7203,7 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
 
     const stuck = capture(w.work)
     expect(await queueCommand(w.work, stuck.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
-    const stopped = (records(stuck)[0] as { stopped: Record<string, unknown> }).stopped
+    const stopped = (records(stuck)[0] as { published: { stopped: Record<string, unknown> } }).published.stopped
     expect(stopped).toEqual({ by: "yrd", cause: "stuck", change: `task/stuck@${head}`, since: expect.any(String) })
     expect(Number.isNaN(Date.parse(String(stopped.since)))).toBe(false)
 
@@ -7196,7 +7217,7 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
     )
     const paused = capture(w.work)
     expect(await queueCommand(w.work, paused.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
-    expect((records(paused)[0] as { stopped: unknown }).stopped).toEqual({
+    expect((records(paused)[0] as { published: { stopped: unknown } }).published.stopped).toEqual({
       by: "@chief",
       cause: "operator",
       change: null,
@@ -8435,7 +8456,8 @@ esac
         await queueCommand(w.work, listed.io, { command: "list", all: true }, { json: true, workdir: w.workdir }),
         listed.stderr(),
       ).toBe(0)
-      const diagnostic = JSON.stringify(records(listed)[0]?.journal)
+      const document = records(listed)[0] as { execution: ExecutionDocument<unknown> }
+      const diagnostic = JSON.stringify(localExecution(document.execution))
       expect(diagnostic, "the public queue read must name the damaged record").toContain("leading NUL bytes")
       expect(diagnostic).toContain(firstRun)
       await vi.waitFor(
@@ -9149,13 +9171,25 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
   }
 
   /** The stored reason for the one change in the line, as `queue list` reports it. */
-  async function reasonFor(w: World, branch: string): Promise<Readonly<{ reason?: string; result?: string }>> {
+  async function reasonFor(w: World, branch: string): Promise<Readonly<{ reason?: string; guidance?: string }>> {
     const listed = capture(w.work)
     expect(await queueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
-    const rows = (records(listed)[0] as { changes: readonly Record<string, unknown>[] }).changes
+    const document = records(listed)[0] as {
+      published: { changes: readonly Record<string, unknown>[] }
+      execution: ExecutionDocument<{ runs: readonly Record<string, unknown>[] }>
+    }
+    const rows = document.published.changes
     const row = rows.find((entry) => entry.branch === branch)
     expect(row, JSON.stringify(rows)).toBeDefined()
-    return { reason: row?.reason as string | undefined, result: row?.result as string | undefined }
+    // The recorded guidance is the run's own `next`, carried by execution.
+    const run = localExecution(document.execution).runs.find((entry) => entry.branch === branch)
+    const incident = run?.incident as { code?: string; next?: string } | undefined
+    return {
+      // A run's own code is the stored reason; the published row's prose is
+      // the event fold's fallback when no run recorded one.
+      reason: incident?.code ?? (run?.reason as string | undefined) ?? (row?.reason as string | undefined),
+      guidance: incident?.next,
+    }
   }
 
   async function roundWithSetup(w: World, branch: string, setup: string): Promise<void> {
@@ -9180,8 +9214,8 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
     expect(stored.reason).toBe("yrd-setup-unreachable")
     // And it tells the submitter their change is not the problem, which is the
     // whole point of separating the two reasons.
-    expect(String(stored.result)).toContain("nothing here is the change's fault")
-    expect(String(stored.result)).toContain("http-5xx")
+    expect(String(stored.guidance)).toContain("nothing here is the change's fault")
+    expect(String(stored.guidance)).toContain("http-5xx")
   })
 
   // ROW 3, THE NEGATIVE CONTROL, and the half that matters: a setup failure that
@@ -9194,8 +9228,8 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
     await roundWithSetup(w, "task/real-break", failingSetup(w.workdir, "real-break", line))
     const stored = await reasonFor(w, "task/real-break")
     expect(stored.reason).toBe("yrd-setup-unusable")
-    expect(String(stored.result)).toContain("repair the queue setup")
-    expect(String(stored.result)).not.toContain("nothing here is the change's fault")
+    expect(String(stored.guidance)).toContain("repair the queue setup")
+    expect(String(stored.guidance)).not.toContain("nothing here is the change's fault")
   })
 
   // The distinction yrd already paid for one layer up, asserted here too: a
@@ -9842,9 +9876,9 @@ describe("yrd queue run --tier long", () => {
 
     const listed = capture(w.work)
     expect(await queueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
-    const rows = (records(listed)[0] as { changes: readonly Record<string, unknown>[] }).changes.filter(
-      (r) => r.branch !== "main",
-    )
+    const rows = (
+      records(listed)[0] as { published: { changes: readonly Record<string, unknown>[] } }
+    ).published.changes.filter((r) => r.branch !== "main")
     // Deferred is a queued change with a visible reason in the event model.
     expect(
       rows.map((r) => [r.branch, r.state, String(r.reason).includes("deferred"), r.malformed === undefined]).sort(),
@@ -9864,7 +9898,8 @@ describe("yrd queue run --tier long", () => {
 
     const listedAfter = capture(w.work)
     expect(await queueCommand(w.work, listedAfter.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
-    const rowsAfter = (records(listedAfter)[0] as { changes: readonly Record<string, unknown>[] }).changes
+    const rowsAfter = (records(listedAfter)[0] as { published: { changes: readonly Record<string, unknown>[] } })
+      .published.changes
     const olderRow = rowsAfter.find((r) => r.branch === "task/older")
     const youngerRow = rowsAfter.find((r) => r.branch === "task/younger")
     expect(olderRow?.state).toBe("failed")

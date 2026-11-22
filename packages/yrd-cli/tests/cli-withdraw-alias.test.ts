@@ -90,7 +90,8 @@ function shapeOf(text: string, branch: string): string {
 async function stateOf(work: string, branch: string): Promise<string | undefined> {
   const listed = await yrd(work, "list", "--json", "--fresh")
   expect(listed.exitCode, listed.report).toBe(0)
-  const rows = (JSON.parse(listed.stdout) as { changes: readonly { branch: string; state: string }[] }).changes
+  const rows = (JSON.parse(listed.stdout) as { published: { changes: readonly { branch: string; state: string }[] } })
+    .published.changes
   return rows.find((row) => row.branch === branch)?.state
 }
 

@@ -122,6 +122,22 @@ function renderedSnapshot(): WatchSnapshot | undefined {
   return rendered.snapshot
 }
 
+type ExecutionDocument<T> = { local: true; value: T } | { local: false; why: string }
+type HistoricalRun = Readonly<{
+  id: string
+  branch: string
+  at: string
+  startedAt?: string
+  decision?: string
+  checks: readonly { log?: string }[]
+}>
+
+/** The local execution read, narrowed the way a reader must before using it (#28522). */
+function localExecution<T>(execution: ExecutionDocument<T>): T {
+  if (execution.local !== true) throw new Error(execution.why)
+  return execution.value
+}
+
 /** The detail the pane would open for each row: the loader the command handed it, called as the pane would. */
 async function renderedDetails(snapshot: WatchSnapshot): Promise<readonly ChangeDetail[]> {
   const open = rendered.open
@@ -310,20 +326,21 @@ describe("event queue observation refusals", () => {
     const json = capture(w.work)
     expect(await coreQueueCommand(w.work, json.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const listed = JSON.parse(json.stdout()) as {
-      journal: {
+      execution: ExecutionDocument<{
         fallbacks?: { count: number; reasons: readonly { reason: string; count: number; example: string }[] }
         unread?: number
-      }
-      runner: { projectionFallback?: { run: string; reason: string } }
+      }>
+      localRunner: ExecutionDocument<{ projectionFallbackReport?: { run: string; reason: string } }>
     }
+    const execution = localExecution(listed.execution)
     // ONE counted fact per reason, never one entry per round: the whole point
     // of 28799 is that 3,006 of these are the same sentence.
-    expect(listed.journal.fallbacks).toMatchObject({ count: 1, reasons: [{ reason: "missing", count: 1 }] })
-    expect(listed.journal.fallbacks?.reasons[0]?.example).toContain(`${run}.projection.json`)
+    expect(execution.fallbacks).toMatchObject({ count: 1, reasons: [{ reason: "missing", count: 1 }] })
+    expect(execution.fallbacks?.reasons[0]?.example).toContain(`${run}.projection.json`)
     // The journal read above already persisted the rebuilt projection
     // (28908), so the runner header read later in the same command finds it
     // present; the fallback is named once, in the journal facts.
-    expect(listed.runner.projectionFallback).toBeUndefined()
+    expect(localExecution(listed.localRunner).projectionFallbackReport).toBeUndefined()
     expect(json.stderr()).toBe("")
 
     // The first read rebuilt the facts and persisted the projection (28908),
@@ -367,8 +384,8 @@ describe("event queue observation refusals", () => {
       0,
     )
     const completedDocument = JSON.parse(completed.stdout()) as typeof listed
-    expect(completedDocument.journal.fallbacks).toBeUndefined()
-    expect(completedDocument.runner.projectionFallback).toBeUndefined()
+    expect(localExecution(completedDocument.execution).fallbacks).toBeUndefined()
+    expect(localExecution(completedDocument.localRunner).projectionFallbackReport).toBeUndefined()
   })
 
   // 29994: a run that is still provisioning has not written its projection yet.
@@ -407,7 +424,14 @@ describe("event queue observation refusals", () => {
     }> => {
       const out = capture(w.work)
       expect(await coreQueueCommand(w.work, out.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
-      return (JSON.parse(out.stdout()) as { runner: never }).runner
+      const document = JSON.parse(out.stdout()) as {
+        published: { runner: { state: string } }
+        localRunner: ExecutionDocument<{ projectionFallbackReport?: { run: string; reason: string } }>
+      }
+      return {
+        state: document.published.runner.state,
+        projectionFallback: localExecution(document.localRunner).projectionFallbackReport,
+      }
     }
 
     // An open journal — its closing `remote-calls` row is not written yet — in
@@ -535,11 +559,11 @@ describe("event queue observation refusals", () => {
     const out = capture(w.work)
     expect(await coreQueueCommand(w.work, out.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const listed = JSON.parse(out.stdout()) as {
-      runner: { state: string; published?: { signal: string; claim?: { State: string } } }
+      published: { runner: { state: string; signal: string; claim?: { State: string } } }
     }
-    expect(listed.runner.published?.signal).toBe("fresh")
-    expect(listed.runner.state).toBe(listed.runner.published?.claim?.State)
-    expect(listed.runner.state).not.toBe("provisioning")
+    expect(listed.published.runner.signal).toBe("fresh")
+    expect(listed.published.runner.state).toBe(listed.published.runner.claim?.State)
+    expect(listed.published.runner.state).not.toBe("provisioning")
   })
 
   // AC (28918): a source-changed artifact is repaired ONLY once its round's
@@ -568,9 +592,11 @@ describe("event queue observation refusals", () => {
     const json = capture(w.work)
     expect(await coreQueueCommand(w.work, json.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const listed = JSON.parse(json.stdout()) as {
-      journal: { fallbacks?: { count: number; reasons: readonly { reason: string }[]; persisted?: number } }
+      execution: ExecutionDocument<{
+        fallbacks?: { count: number; reasons: readonly { reason: string }[]; persisted?: number }
+      }>
     }
-    expect(listed.journal.fallbacks).toMatchObject({
+    expect(localExecution(listed.execution).fallbacks).toMatchObject({
       count: 1,
       reasons: [{ reason: "source-changed", count: 1 }],
       persisted: 1,
@@ -580,7 +606,11 @@ describe("event queue observation refusals", () => {
     // One repair per terminal journal: the next read finds the projection present.
     const again = capture(w.work)
     expect(await coreQueueCommand(w.work, again.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
-    expect((JSON.parse(again.stdout()) as { journal: { fallbacks?: unknown } }).journal.fallbacks).toBeUndefined()
+    expect(
+      localExecution(
+        (JSON.parse(again.stdout()) as { execution: ExecutionDocument<{ fallbacks?: unknown }> }).execution,
+      ).fallbacks,
+    ).toBeUndefined()
   })
 
   // 28799 review finding 1: the raw fallback has NO cutoff. An old round can be
@@ -615,15 +645,16 @@ describe("event queue observation refusals", () => {
         await coreQueueCommand(w.work, listing.io, { command: "list", all: true }, { json: true, workdir: w.workdir }),
       ).toBe(0)
       const document = JSON.parse(listing.stdout()) as {
-        changes: { branch: string; state: string }[]
-        journal: { dir: string; unread?: number }
+        published: { changes: { branch: string; state: string }[] }
+        execution: ExecutionDocument<{ dir: string; unread?: number }>
       }
-      const row = document.changes.find(({ branch }) => branch === "task/old-fact")
+      const execution = localExecution(document.execution)
+      const row = document.published.changes.find(({ branch }) => branch === "task/old-fact")
       expect(row).toBeDefined()
-      expect(document.journal.dir).toBe(logs)
+      expect(execution.dir).toBe(logs)
       // Nothing in the window was left unread, and every unprojected round —
       // the change's own among the 256 newer ones — was parsed RAW.
-      expect(document.journal.unread).toBeUndefined()
+      expect(execution.unread).toBeUndefined()
       expect(read.mock.calls.map(([path]) => String(path))).toContain(ownPath)
       expect(newer.filter((path) => read.mock.calls.some(([call]) => String(call) === path))).toHaveLength(256)
       // The fact itself reached the row. A cutoff that reached this round would
@@ -661,12 +692,12 @@ describe("event queue observation refusals", () => {
       const listed = capture(w.work)
       expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
       const document = JSON.parse(listed.stdout()) as {
-        changes: { branch: string; state: string }[]
-        journal: { fallbacks?: unknown }
+        published: { changes: { branch: string; state: string }[] }
+        execution: ExecutionDocument<{ fallbacks?: unknown }>
       }
-      expect(document.changes.filter((row) => row.branch === "task/failure")).toHaveLength(1)
-      expect(document.changes[0]?.state).toBe("failed")
-      expect(document.journal.fallbacks).toBeUndefined()
+      expect(document.published.changes.filter((row) => row.branch === "task/failure")).toHaveLength(1)
+      expect(document.published.changes[0]?.state).toBe("failed")
+      expect(localExecution(document.execution).fallbacks).toBeUndefined()
       const watched = capture(w.work)
       rendered.onWait = async () => {
         if (rendered.load === undefined) throw new Error("watch supplied no refresh loader")
@@ -919,10 +950,12 @@ process.exit(result.exitCode)
             .split("\n")
             .map((line) => JSON.parse(line))
     expect(rounds.at(-1)).toMatchObject({
-      changes: [{ branch, state: movement === "malformed" ? "invalid" : "merged" }],
+      published: { changes: [{ branch, state: movement === "malformed" ? "invalid" : "merged" }] },
     })
     if (movement === "malformed") {
-      expect(rounds.at(-1)).toMatchObject({ changes: [{ ref, diagnostic: expect.stringContaining(ref) }] })
+      expect(rounds.at(-1)).toMatchObject({
+        published: { changes: [{ ref, diagnostic: expect.stringContaining(ref) }] },
+      })
       expect(run.stderr()).toContain("is malformed")
       expect(run.stderr()).toContain("needs Queue:")
     }
@@ -1024,8 +1057,8 @@ process.exit(result.exitCode)
       .stdout()
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line) as { changes: readonly { branch: string; state: string }[] })
-    expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
+      .map((line) => JSON.parse(line) as { published: { changes: readonly { branch: string; state: string }[] } })
+    expect(rounds.at(-1)).toMatchObject({ published: { changes: [{ branch, state: "merged" }] } })
   })
 
   it("local drop retires a landed branch without acquiring a moving unrelated change", async () => {
@@ -1257,8 +1290,8 @@ process.exit(result.exitCode)
       .stdout()
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line) as { changes: readonly { branch: string; state: string }[] })
-    expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
+      .map((line) => JSON.parse(line) as { published: { changes: readonly { branch: string; state: string }[] } })
+    expect(rounds.at(-1)).toMatchObject({ published: { changes: [{ branch, state: "merged" }] } })
   })
 
   it("names a moved queue ref on stderr and reaches the change's ending on the next watch tick", async () => {
@@ -1317,8 +1350,8 @@ process.exit(result.exitCode)
       .stdout()
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line) as { changes: readonly { branch: string; state: string }[] })
-    expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
+      .map((line) => JSON.parse(line) as { published: { changes: readonly { branch: string; state: string }[] } })
+    expect(rounds.at(-1)).toMatchObject({ published: { changes: [{ branch, state: "merged" }] } })
   })
 
   it("keeps ticking when the queue ref moves on every round and ends only through stop", async () => {
@@ -1736,9 +1769,14 @@ describe("what a watch says it looked at", () => {
 
     await coreQueueCommand(w.work, run.io, { command: "list", all: true }, { json: true, workdir: w.workdir })
 
-    const listed = JSON.parse(run.stdout().trim()) as Readonly<{ journal: Readonly<{ dir: string; absent?: string }> }>
-    expect(listed.journal.dir).toBe(join(w.workdir, "logs"))
-    expect(listed.journal.absent).toContain("there is no such directory")
+    const listed = JSON.parse(run.stdout().trim()) as Readonly<{
+      schemaVersion: number
+      execution: ExecutionDocument<unknown>
+    }>
+    // A directory this machine cannot see is local:false naming what it looked
+    // for and where — never a readable empty execution.
+    expect(listed.schemaVersion).toBe(2)
+    expect(listed.execution).toEqual({ local: false, why: `run journal not found at ${join(w.workdir, "logs")}` })
   })
 
   // 24408: one short row from `waiting()` — an incident code with none of its
@@ -1769,15 +1807,23 @@ describe("what a watch says it looked at", () => {
     const json = capture(w.work)
     await coreQueueCommand(w.work, json.io, { command: "list", all: true }, { json: true, workdir: w.workdir })
     const listed = JSON.parse(json.stdout().trim()) as Readonly<{
-      changes: readonly Readonly<{
-        branch: string
-        state: string
-        malformed?: readonly string[]
-        next?: Readonly<{ because: string }>
-      }>[]
-      journal: Readonly<{ malformed?: readonly Readonly<{ run: string; key: string; message: string }>[] }>
+      published: Readonly<{
+        changes: readonly Readonly<{
+          branch: string
+          state: string
+          next?: Readonly<{ because: string }>
+        }>[]
+      }>
+      execution: ExecutionDocument<{
+        malformed?: readonly Readonly<{ run: string; key: string; message: string }>[]
+        coverage?: Readonly<{ malformed?: readonly Readonly<Record<string, unknown>>[] }>
+        runs: readonly Readonly<{ id: string; branch: string; malformed?: readonly string[] }>[]
+      }>
     }>
-    expect(listed.journal.malformed).toEqual([
+    const execution = localExecution(listed.execution)
+    // The raw keyed entry stays in malformed; the selected/outside-filter
+    // verdict is the reader's own note, so it rides in coverage.
+    expect(execution.malformed).toEqual([
       {
         branch: "task/good",
         head,
@@ -1785,21 +1831,30 @@ describe("what a watch says it looked at", () => {
         message: expect.stringContaining("missing subject"),
         reason: "malformed journal row; change identity is known but Run-to-segment linkage is unrecorded",
         run: journal.id,
-        selected: true,
         state: "queued",
       },
     ])
+    expect(execution.coverage?.malformed).toEqual([
+      expect.objectContaining({ key: `task/good@${head}`, selected: true }),
+    ])
     // Counted, not omitted: a listing that hid the defective change would still
     // satisfy every assertion about the defect itself (@cto rider 2).
-    expect(listed.changes.map((change) => change.branch)).toEqual(["task/good", "task/other"])
-    const row = listed.changes.find((change) => change.branch === "task/good")
+    expect(listed.published.changes.map((change) => change.branch)).toEqual(["task/good", "task/other"])
+    const row = listed.published.changes.find((change) => change.branch === "task/good")
     // Its own state, from its own records — the journal defect changes nothing.
     expect(row?.state).toBe("queued")
-    expect(row?.malformed?.[0]).toContain("incomplete incident")
-    expect(row?.malformed?.[0]).toContain("missing subject")
-    expect(row?.next?.because).toContain("missing subject")
-    expect(row?.next?.because).toContain("the row was skipped — fix the writer (26230)")
-    expect(listed.changes.find((change) => change.branch === "task/other")?.malformed).toBeUndefined()
+    // The row's skipped records are this run's journal defect, carried on the run.
+    const defect = execution.runs.find((run) => run.id === journal.id)
+    expect(defect?.malformed?.[0]).toContain("incomplete incident")
+    expect(defect?.malformed?.[0]).toContain("missing subject")
+    // The journal-derived cure is not a published fact: the run carries the
+    // defect, coverage names why it is unlinkable, and the human page above
+    // still says "the row was skipped — fix the writer (26230)".
+    expect(row?.next?.because).toBeUndefined()
+    expect(execution.coverage?.malformed?.[0]?.["reason"]).toContain("Run-to-segment linkage is unrecorded")
+    expect(
+      execution.runs.filter((run) => run.branch === "task/other").every((run) => run.malformed === undefined),
+    ).toBe(true)
     // Narration is stderr's; the product a consumer parses stays on stdout.
     expect(json.stderr()).toBe("")
 
@@ -1813,18 +1868,22 @@ describe("what a watch says it looked at", () => {
       { json: true, workdir: w.workdir },
     )
     const selected = JSON.parse(selectedJson.stdout()) as {
-      changes: readonly { branch: string }[]
-      journal: { absent?: string; malformed?: readonly { key: string }[] }
+      published: { changes: readonly { branch: string }[] }
+      execution: ExecutionDocument<{
+        absent?: string
+        coverage?: Readonly<{ malformed?: readonly { key: string }[] }>
+      }>
     }
-    expect(selected.changes.map((change) => change.branch)).toEqual(["task/other"])
+    const selectedExecution = localExecution(selected.execution)
+    expect(selected.published.changes.map((change) => change.branch)).toEqual(["task/other"])
     expect
-      .soft(selected.journal.malformed ?? [])
+      .soft(selectedExecution.coverage?.malformed ?? [])
       .toEqual([expect.objectContaining({ key: `task/good@${head}`, selected: false })])
-    expect.soft(selected.journal.absent).toMatch(/global.*\b1\b.*malformed/i)
+    expect.soft(selectedExecution.absent).toMatch(/global.*\b1\b.*malformed/i)
     expect
-      .soft(selected.journal.absent)
+      .soft(selectedExecution.absent)
       .toContain(`yrd 'list' '--all' '--json' '--queue' '${join(dirname(w.work), "remote.git")}#main'`)
-    expect.soft(JSON.stringify(selected.journal)).toContain(`task/good@${head}`)
+    expect.soft(JSON.stringify(selectedExecution)).toContain(`task/good@${head}`)
 
     const selectedHuman = capture(w.work)
     await coreQueueCommand(
@@ -1924,11 +1983,16 @@ describe("what a watch says it looked at", () => {
     const firstId = (JSON.parse(first.stdout()) as { run: string }).run
     const before = capture(w.work)
     await coreQueueCommand(w.work, before.io, { command: "list" }, { json: true, workdir: w.workdir })
-    const original = (JSON.parse(before.stdout()) as { changes: Record<string, unknown>[] }).changes.find(
-      (row) => row.branch === "task/history",
-    )!
+    const beforeDocument = JSON.parse(before.stdout()) as {
+      published: { changes: Record<string, unknown>[] }
+      execution: ExecutionDocument<{ runs: readonly HistoricalRun[] }>
+    }
+    const original = beforeDocument.published.changes.find((row) => row["branch"] === "task/history")!
     expect(original.state).toBe("stuck")
-    expect(readFileSync(String(original.log), "utf8")).toBe(
+    const originalRun = localExecution(beforeDocument.execution).runs.find((run) => run.id === firstId)
+    expect(originalRun).toBeDefined()
+    const originalLog = originalRun?.checks.at(-1)?.log
+    expect(readFileSync(String(originalLog), "utf8")).toBe(
       "FIRST_RUN_MISSING \u001b[30m\u001b[45m slow \u001b[49m\u001b[39m\n",
     )
 
@@ -1942,28 +2006,32 @@ describe("what a watch says it looked at", () => {
     const secondId = (JSON.parse(second.stdout()) as { run: string }).run
     const listed = capture(w.work)
     await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })
-    const rows = (JSON.parse(listed.stdout()) as { changes: Record<string, unknown>[] }).changes.filter(
-      (row) => row.branch === "task/history",
-    )
-    expect(rows).toHaveLength(2)
-    const old = rows.find((row) => row.run === firstId)!
-    const latest = rows.find((row) => row.run === secondId)!
-    expect(old, listed.stdout()).toMatchObject({
-      state: "stuck",
-      run: firstId,
-      result: original.result,
-      log: original.log,
-    })
-    expect(latest, listed.stdout()).toMatchObject({ state: "stuck", run: secondId })
+    const listedDocument = JSON.parse(listed.stdout()) as {
+      published: { changes: Record<string, unknown>[] }
+      execution: ExecutionDocument<{ runs: readonly HistoricalRun[] }>
+    }
+    const rows = listedDocument.published.changes.filter((row) => row["branch"] === "task/history")
+    // A published listing names the change once; its runs are the execution read.
+    expect(rows).toHaveLength(1)
+    expect(rows[0], listed.stdout()).toMatchObject({ state: "stuck", run: secondId })
     expect(rows.some((row) => "runResult" in row || "runOf" in row)).toBe(false)
-    expect(old.endedAt).toBe(original.endedAt)
-    expect(readFileSync(String(old.log), "utf8")).toBe(
+    const runs = localExecution(listedDocument.execution).runs.filter((run) => run.branch === "task/history")
+    expect(runs).toHaveLength(2)
+    const old = runs.find((run) => run.id === firstId)!
+    const latest = runs.find((run) => run.id === secondId)!
+    expect(old.decision, listed.stdout()).toBe("stuck")
+    expect(latest.decision, listed.stdout()).toBe("stuck")
+    const oldLog = old.checks.at(-1)?.log
+    const latestLog = latest.checks.at(-1)?.log
+    expect(oldLog).toBe(originalLog)
+    expect(old.at).toBe(originalRun?.at)
+    expect(readFileSync(String(oldLog), "utf8")).toBe(
       "FIRST_RUN_MISSING \u001b[30m\u001b[45m slow \u001b[49m\u001b[39m\n",
     )
     // The newest run judged the change itself, so its artifact is its own and
     // never the run's before it.
-    expect(latest.log).not.toBe(old.log)
-    expect(readFileSync(String(latest.log), "utf8")).toBe("SECOND_RUN_MISSING\n")
+    expect(latestLog).not.toBe(oldLog)
+    expect(readFileSync(String(latestLog), "utf8")).toBe("SECOND_RUN_MISSING\n")
 
     const plain = capture(w.work)
     await coreQueueCommand(w.work, plain.io, { command: "list" }, { workdir: w.workdir })
@@ -2017,9 +2085,9 @@ describe("what a watch says it looked at", () => {
     // what the pane shows is the newest judgement's output. The older run's
     // output is NOT lost: it is in the `--json` rows above, each with its own
     // log, and in that log on disk.
-    expect(details[0]?.checks.map((check) => check.log)).toEqual([latest.log])
-    expect(details[0]?.checks[0]).toMatchObject({ state: "stuck", log: latest.log, output: "SECOND_RUN_MISSING\n" })
-    expect(readFileSync(String(old.log), "utf8")).toContain("FIRST_RUN_MISSING")
+    expect(details[0]?.checks.map((check) => check.log)).toEqual([latestLog])
+    expect(details[0]?.checks[0]).toMatchObject({ state: "stuck", log: latestLog, output: "SECOND_RUN_MISSING\n" })
+    expect(readFileSync(String(oldLog), "utf8")).toContain("FIRST_RUN_MISSING")
   })
 })
 
@@ -2082,9 +2150,9 @@ describe("the drafts a watch reads (24196)", () => {
         .split("\n")
         .some((line) => line.includes("◇ draft") && line.includes("task/here")),
       fetched: await readHere(firstSeen),
-      json: (JSON.parse(json.stdout()) as { changes: readonly { branch: string }[] }).changes.map(
-        (entry) => entry.branch,
-      ),
+      json: (
+        JSON.parse(json.stdout()) as { published: { changes: readonly { branch: string }[] } }
+      ).published.changes.map((entry) => entry.branch),
       queueLine: page.stdout().includes("1 draft (7d), 1 not yet read"),
     }
 
@@ -2164,7 +2232,8 @@ describe("the ending instant the table times a row by (24196)", () => {
       expect(await coreQueueCommand(w.work, json.io, request, { json: true, workdir: w.workdir }), json.stderr()).toBe(
         0,
       )
-      const [row] = (JSON.parse(json.stdout()) as { changes: Record<string, unknown>[] }).changes
+      const [row] = (JSON.parse(json.stdout()) as { published: { changes: Record<string, unknown>[] } }).published
+        .changes
       documents.push({ command: request.command, endingAt: row?.["endingAt"], state: row?.["state"] })
     }
 
@@ -2218,7 +2287,8 @@ describe("a merged event before its journal catches up", () => {
         expect(await coreQueueCommand(w.work, out.io, request, { json: true, workdir: w.workdir }), out.stderr()).toBe(
           0,
         )
-        const [row] = (JSON.parse(out.stdout()) as { changes: Record<string, unknown>[] }).changes
+        const [row] = (JSON.parse(out.stdout()) as { published: { changes: Record<string, unknown>[] } }).published
+          .changes
         documents.push({ command: request.command, run: row?.["run"], merge: row?.["merge"] })
       }
       expect(documents, phase).toEqual([
@@ -2568,12 +2638,18 @@ describe("event-queue runner stages end-to-end into runnerLine and stage strip (
     // Check yrd list --json carries startedAt and log
     const run = capture(w.work)
     expect(await coreQueueCommand(w.work, run.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
-    const json = JSON.parse(run.stdout().trim()) as { changes: readonly Record<string, unknown>[] }
-    const row = json.changes.find((c) => c.branch === "task/all-checks-off")
+    const json = JSON.parse(run.stdout().trim()) as {
+      published: { changes: readonly Record<string, unknown>[] }
+      execution: ExecutionDocument<{ runs: readonly HistoricalRun[] }>
+    }
+    const row = json.published.changes.find((c) => c["branch"] === "task/all-checks-off")
     expect(row).toBeDefined()
     expect(row?.state).toBe("merged")
-    expect(row?.startedAt).toBeDefined()
-    expect(row?.log).toBeDefined()
+    // The check's artifact is a journal fact: the run carries it, the published
+    // change never does (#28522).
+    const executed = localExecution(json.execution).runs.find((entry) => entry.branch === "task/all-checks-off")
+    expect(executed?.startedAt).toBeDefined()
+    expect(executed?.checks.at(-1)?.log).toBeDefined()
 
     // Check journal's result records carry phase "merge"
     const journalName = readdirSync(join(w.workdir, "logs")).find((name) => name.endsWith(".jsonl"))

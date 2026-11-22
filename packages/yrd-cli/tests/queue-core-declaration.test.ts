@@ -92,7 +92,14 @@ vi.mock("removely", async (original) => ({ ...(await original<typeof import("rem
 
 const roots: string[] = []
 type ShownCheckHistory = {
-  changes: { head: string; checksNote?: string; checks?: readonly CheckView[] }[]
+  published: { changes: { head: string; checksNote?: string; checks?: readonly CheckView[] }[] }
+}
+type ExecutionDocument<T> = { local: true; value: T } | { local: false; why: string }
+
+/** The local execution read, narrowed the way a reader must before using it (#28522). */
+function localExecution<T>(execution: ExecutionDocument<T>): T {
+  if (execution.local !== true) throw new Error(execution.why)
+  return execution.value
 }
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
@@ -315,7 +322,9 @@ it("archives through the CLI and retains event and payload objects after fresh c
     await coreQueueCommand(fresh, listed.io, { command: "list", all: true }, { queue: "main", json: true }),
     listed.stderr(),
   ).toBe(0)
-  expect(JSON.parse(listed.stdout())).toMatchObject({ changes: [{ branch, state: "merged", merge: payload }] })
+  expect(JSON.parse(listed.stdout())).toMatchObject({
+    published: { changes: [{ branch, state: "merged", merge: payload }] },
+  })
   const repeat = capture(repo)
   expect(await runYrdProcess([...args, "--dry-run"], repeat.io), repeat.stderr()).toBe(0)
   expect(JSON.parse(repeat.stdout())).toMatchObject({ queue: "main", examined: 0, candidates: [], archived: [] })
@@ -373,7 +382,7 @@ it("reads a fresh queue-owned store without remote Git calls and refreshes once 
     expect(JSON.parse(first.stdout())).toMatchObject({
       source: "local",
       asOf: expect.any(String),
-      changes: [{ branch, state: "merged", merge: target }],
+      published: { changes: [{ branch, state: "merged", merge: target }] },
     })
     expect(readRemoteCalls(firstTrace).verbs.fetch).toBe(1)
 
@@ -389,7 +398,7 @@ it("reads a fresh queue-owned store without remote Git calls and refreshes once 
     expect(await coreQueueCommand(repo, warm.io, { command: "list", all: true }, options), warm.stderr()).toBe(0)
     expect(JSON.parse(warm.stdout())).toMatchObject({
       asOf: acquiredAt,
-      changes: [{ branch, state: "merged", merge: target }],
+      published: { changes: [{ branch, state: "merged", merge: target }] },
     })
     const shown = capture(repo)
     expect(
@@ -499,7 +508,7 @@ it("refreshes local status after an event queue write in the same workdir (25626
   const options = { json: true, queue: "main", workdir, localStatusStore: { path: owned, transport: remote } } as const
   const before = capture(repo)
   expect(await coreQueueCommand(repo, before.io, { command: "list" }, options), before.stderr()).toBe(0)
-  expect(JSON.parse(before.stdout())).toMatchObject({ stopped: null })
+  expect(JSON.parse(before.stdout())).toMatchObject({ published: { stopped: null } })
 
   const paused = capture(repo)
   expect(
@@ -518,7 +527,10 @@ it("refreshes local status after an event queue write in the same workdir (25626
     process.env.GIT_TRACE2_EVENT = trace
     const after = capture(repo)
     expect(await coreQueueCommand(repo, after.io, { command: "list" }, options), after.stderr()).toBe(0)
-    expect(JSON.parse(after.stdout())).toMatchObject({ source: "local", stopped: { by: "@dev/11", cause: "operator" } })
+    expect(JSON.parse(after.stdout())).toMatchObject({
+      source: "local",
+      published: { stopped: { by: "@dev/11", cause: "operator" } },
+    })
     const warm = capture(repo)
     expect(await coreQueueCommand(repo, warm.io, { command: "list" }, options), warm.stderr()).toBe(0)
     expect(readRemoteCalls(trace).verbs).toEqual({ fetch: 1 })
@@ -801,7 +813,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const listed = capture(repo)
     expect(await coreQueueCommand(repo, listed.io, { command: "list" }, { json: true, queue: "main" })).toBe(0)
     expect(JSON.parse(listed.stdout())).toMatchObject({
-      changes: [{ branch: "task/event", head: commit, state: "queued", format: "event" }],
+      published: { changes: [{ branch: "task/event", head: commit, state: "queued", format: "event" }] },
     })
     const table = capture(repo)
     expect(await coreQueueCommand(repo, table.io, { command: "list", terms: ["queued"] }, { queue: "main" })).toBe(0)
@@ -814,7 +826,11 @@ describe("a queue is the selected origin branch carrying config", () => {
       await coreQueueCommand(repo, shown.io, { command: "show", branch: "task/event" }, { json: true, queue: "main" }),
     ).toBe(0)
     expect(JSON.parse(shown.stdout())).toMatchObject({
-      changes: [{ branch: "task/event", head: commit, state: "queued", format: "event", events: [{ type: "opened" }] }],
+      published: {
+        changes: [
+          { branch: "task/event", head: commit, state: "queued", format: "event", events: [{ type: "opened" }] },
+        ],
+      },
     })
     const human = capture(repo)
     expect(await coreQueueCommand(repo, human.io, { command: "show", branch: "task/event" }, { queue: "main" })).toBe(0)
@@ -898,15 +914,18 @@ describe("a queue is the selected origin branch carrying config", () => {
         ),
         output.stderr(),
       ).toBe(0)
-      return (JSON.parse(output.stdout()) as { changes: readonly { branch: string; head: string }[] }).changes
+      return (JSON.parse(output.stdout()) as { published: { changes: readonly { branch: string; head: string }[] } })
+        .published.changes
     }
     expect(new Set((await list(false)).map((row) => row.head))).toEqual(new Set([current]))
     expect(await list(true)).toEqual([expect.objectContaining({ branch, head: current })])
     const shown = capture(repo)
     expect(await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" })).toBe(0)
     const history = (
-      JSON.parse(shown.stdout()) as { changes: readonly { head: string; state: string; merge?: string }[] }
-    ).changes
+      JSON.parse(shown.stdout()) as {
+        published: { changes: readonly { head: string; state: string; merge?: string }[] }
+      }
+    ).published.changes
     expect(history.map(({ head, state, merge }) => [head, state, merge])).toEqual([
       [current, "merged", currentMerge],
       [cancelled, "cancelled", undefined],
@@ -916,23 +935,25 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await coreQueueCommand(repo, bulk.io, { command: "show", all: true }, { json: true, queue: "main" })).toBe(0)
     const allHistory = (
       JSON.parse(bulk.stdout()) as {
-        changes: readonly {
-          branch: string
-          checks?: unknown
-          checksNote?: string
-          events: readonly { id: string; type: string }[]
-        }[]
+        published: {
+          changes: readonly {
+            branch: string
+            checks?: unknown
+            checksNote?: string
+            events: readonly { id: string; type: string }[]
+          }[]
+        }
       }
-    ).changes
+    ).published.changes
     expect(allHistory.filter((row) => row.branch === branch)).toEqual(history)
     const cliBulk = capture(repo)
     expect(
       await runYrdProcess(["bun", "yrd", "queue", "show", "--all", "--json", "--fresh", "--queue", "main"], cliBulk.io),
     ).toBe(0)
     expect(
-      (JSON.parse(cliBulk.stdout()) as { changes: readonly { branch: string }[] }).changes.filter(
-        (row) => row.branch === branch,
-      ),
+      (
+        JSON.parse(cliBulk.stdout()) as { published: { changes: readonly { branch: string }[] } }
+      ).published.changes.filter((row) => row.branch === branch),
     ).toEqual(history)
     const compact = capture(repo)
     expect(
@@ -942,10 +963,16 @@ describe("a queue is the selected origin branch carrying config", () => {
       ),
       compact.stderr(),
     ).toBe(0)
-    const compactHistory = JSON.parse(compact.stdout()) as { changes: readonly unknown[] }
-    expect(compactHistory).toMatchObject({ detail: "compact", stopped: null })
-    expect(compactHistory).not.toHaveProperty("journal")
-    expect(compactHistory.changes).toEqual(
+    const compactHistory = JSON.parse(compact.stdout()) as {
+      detail: string
+      published: { changes: readonly unknown[]; stopped: unknown }
+      execution: { local: boolean; why?: string }
+    }
+    expect(compactHistory).toMatchObject({ detail: "compact", published: { stopped: null } })
+    // Compact history reads event ids only, and says so instead of carrying an
+    // execution slot a reader could mistake for an unread journal.
+    expect(compactHistory.execution).toEqual({ local: false, why: "Compact history did not read run journals" })
+    expect(compactHistory.published.changes).toEqual(
       allHistory.map(({ checks: _checks, checksNote: _checksNote, events, ...row }) => ({
         ...row,
         events: events.map(({ id }) => ({ id })),
@@ -1015,6 +1042,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const paths = new Set(journals.map(({ journal }) => journal.path))
     const read = vi.spyOn(fs, "readFileSync")
     const shown = capture(repo)
+    let touched: readonly string[] = []
     try {
       expect(
         await coreQueueCommand(
@@ -1025,23 +1053,29 @@ describe("a queue is the selected origin branch carrying config", () => {
         ),
         shown.stderr(),
       ).toBe(0)
-      // Observe I/O, so filtering the broad result after reading everything cannot pass.
-      // The one selected journal may be read more than once (the raw rebuild
-      // and the projection write it now persists, 28908); the unrelated
-      // journal must never be touched.
-      const touched = read.mock.calls.map(([path]) => String(path)).filter((path) => paths.has(path))
-      expect(touched.length, shown.stdout()).toBeGreaterThan(0)
-      expect(new Set(touched), shown.stdout()).toEqual(new Set([selected.journal.path]))
+      touched = read.mock.calls.map(([path]) => String(path)).filter((path) => paths.has(path))
     } finally {
       read.mockRestore()
     }
+    // Observe I/O, so filtering the broad result after reading everything cannot pass.
+    // The one selected journal may be read more than once (the raw rebuild
+    // and the projection write it now persists, 28908). The v2 document also
+    // carries this machine's runner facts, which read the newest queue round's
+    // header — never the unrelated change's journal as evidence about a change.
+    expect(touched.length, shown.stdout()).toBeGreaterThan(0)
     const scoped = JSON.parse(shown.stdout()) as {
-      changes: { branch: string; state: string }[]
-      journal: { fallbacks?: { count: number; reasons: readonly { count: number }[] } }
+      published: { changes: { branch: string; state: string }[] }
+      execution: ExecutionDocument<{ fallbacks?: { count: number; reasons: readonly { count: number }[] } }>
+      localRunner: ExecutionDocument<{ latest?: { id: string }; projectionFallback?: { run: string } }>
     }
-    expect(scoped.changes.map(({ branch }) => branch)).toEqual([selected.branch])
-    expect(scoped.changes[0]?.state).toBe("cancelled")
-    expect(scoped.journal.fallbacks).toMatchObject({ count: 1, reasons: [{ count: 1 }] })
+    const runnerRead = localExecution(scoped.localRunner)
+    const runnerRun = runnerRead.projectionFallback?.run ?? runnerRead.latest?.id
+    expect(new Set(touched), shown.stdout()).toEqual(
+      new Set([selected.journal.path, ...(runnerRun === undefined ? [] : [join(logs, `${runnerRun}.jsonl`)])]),
+    )
+    expect(scoped.published.changes.map(({ branch }) => branch)).toEqual([selected.branch])
+    expect(scoped.published.changes[0]?.state).toBe("cancelled")
+    expect(localExecution(scoped.execution).fallbacks).toMatchObject({ count: 1, reasons: [{ count: 1 }] })
     const bulk = capture(repo)
     expect(
       await coreQueueCommand(
@@ -1053,12 +1087,14 @@ describe("a queue is the selected origin branch carrying config", () => {
       bulk.stderr(),
     ).toBe(0)
     const global = JSON.parse(bulk.stdout()) as typeof scoped
-    expect(global.changes.map(({ branch }) => branch).sort()).toEqual(journals.map(({ branch }) => branch).sort())
+    expect(global.published.changes.map(({ branch }) => branch).sort()).toEqual(
+      journals.map(({ branch }) => branch).sort(),
+    )
     // The scoped read above rebuilt the selected journal and persisted its
     // projection (28908), so the bulk read still names only the unrelated
     // journal's fallback — and its own rebuild persists that one too, so a
     // further bulk read names none.
-    expect(global.journal.fallbacks).toMatchObject({ count: 1, reasons: [{ count: 1 }] })
+    expect(localExecution(global.execution).fallbacks).toMatchObject({ count: 1, reasons: [{ count: 1 }] })
     expect(Buffer.byteLength(shown.stdout())).toBeLessThan(Buffer.byteLength(bulk.stdout()))
     const again = capture(repo)
     expect(
@@ -1071,8 +1107,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       again.stderr(),
     ).toBe(0)
     const settled = JSON.parse(again.stdout()) as typeof scoped
-    expect(settled.changes.map(({ branch }) => branch).sort()).toEqual(journals.map(({ branch }) => branch).sort())
-    expect(settled.journal.fallbacks).toBeUndefined()
+    expect(settled.published.changes.map(({ branch }) => branch).sort()).toEqual(
+      journals.map(({ branch }) => branch).sort(),
+    )
+    expect(localExecution(settled.execution).fallbacks).toBeUndefined()
     // Prior assertions guard journal I/O scope, not live warning inspection or historical attribution (29721).
     const guidance = {
       text: "Recorded checkout: /old path; retain this explanation verbatim.\nThe command below is historical.",
@@ -1153,15 +1191,22 @@ describe("a queue is the selected origin branch carrying config", () => {
       const inspected = spawnSync("/bin/sh", ["-c", inspections[0]!.recipe], { cwd: dirname(repo), encoding: "utf8" })
       expect(inspected.status, inspected.stderr).toBe(0)
       const inspectedData = JSON.parse(inspected.stdout) as {
-        changes: { branch: string; diagnostics?: readonly object[] }[]
-        journal: { dir: string }
+        published: { changes: { branch: string }[] }
+        execution: ExecutionDocument<{
+          dir: string
+          runs: readonly { branch: string; diagnostics?: readonly object[] }[]
+        }>
       }
-      expect(inspectedData.journal.dir).toBe(logs)
-      const changes = inspectedData.changes
+      const execution = localExecution(inspectedData.execution)
+      expect(execution.dir).toBe(logs)
+      const changes = inspectedData.published.changes
       expect(changes).toHaveLength(1)
       expect(changes[0]!.branch).toBe(selected.branch)
-      expect(changes[0]!.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining(guidance)]))
-      expect(changes[0]!.diagnostics).toHaveLength(2)
+      // Recorded guidance is a journal fact: it rides on the run, never on the published change.
+      const runs = execution.runs.filter((run) => run.branch === selected.branch)
+      expect(runs).toHaveLength(1)
+      expect(runs[0]!.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining(guidance)]))
+      expect(runs[0]!.diagnostics).toHaveLength(2)
       expect(await remoteGit(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(refs)
       expect(readFileSync(selected.journal.path, "utf8")).toBe(rawJournal)
     }
@@ -1220,8 +1265,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       ),
     ).toBe(0)
     const current = (
-      JSON.parse(listed.stdout()) as { changes: readonly { head: string; duplicates?: readonly unknown[] }[] }
-    ).changes
+      JSON.parse(listed.stdout()) as {
+        published: { changes: readonly { head: string; duplicates?: readonly unknown[] }[] }
+      }
+    ).published.changes
     expect(current).toEqual([expect.objectContaining({ head, duplicates: [expect.any(Object)] })])
     const shown = capture(repo)
     expect(
@@ -1229,9 +1276,9 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).toBe(0)
     const segments = (
       JSON.parse(shown.stdout()) as {
-        changes: readonly { head: string; events: readonly { type: string; id: string }[] }[]
+        published: { changes: readonly { head: string; events: readonly { type: string; id: string }[] }[] }
       }
-    ).changes
+    ).published.changes
     expect(segments.map(({ head: shownHead, events }) => [shownHead, events.map((event) => event.type)])).toEqual([
       [head, ["opened", "merged"]],
       [head, ["opened", "merged"]],
@@ -1253,11 +1300,18 @@ describe("a queue is the selected origin branch carrying config", () => {
         { json: true, queue: queueBranch, workdir },
       ),
     ).toBe(0)
-    const runs = (JSON.parse(historical.stdout()) as { changes: readonly { merge?: string; duplicates: unknown }[] })
-      .changes
+    const historicalDocument = JSON.parse(historical.stdout()) as {
+      published: { changes: readonly { merge?: string; duplicates: unknown }[] }
+      execution: ExecutionDocument<{ runs: readonly { branch: string; merge?: string }[] }>
+    }
+    // One published row per change, whatever the events behind it; each run's
+    // own merge record rides in the execution read (#28522).
+    expect(historicalDocument.published.changes).toHaveLength(1)
+    expect(historicalDocument.published.changes[0]?.duplicates).toEqual(proof)
+    const runs = localExecution(historicalDocument.execution).runs.filter((run) => run.branch === branch)
     expect(runs).toHaveLength(2)
-    expect(runs.map((row) => row.merge)).toEqual([undefined, merge])
-    for (const row of runs) expect(row.duplicates).toEqual(proof)
+    expect(runs.filter((run) => run.merge === merge)).toHaveLength(1)
+    expect(runs.filter((run) => run.merge === undefined)).toHaveLength(1)
     const bulk = capture(repo)
     expect(
       await coreQueueCommand(
@@ -1268,7 +1322,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       ),
     ).toBe(0)
     expect(
-      (JSON.parse(bulk.stdout()) as { changes: readonly { branch: string }[] }).changes.filter(
+      (JSON.parse(bulk.stdout()) as { published: { changes: readonly { branch: string }[] } }).published.changes.filter(
         (row) => row.branch === branch,
       ),
     ).toEqual(segments)
@@ -1372,10 +1426,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       // The accepted routing contract includes the declared backend, not only a filename or formatter callback.
       // Native-only fixture reads would miss a printed inspection that loses the selected root-v1 protocol.
       const inspectedData = JSON.parse(inspected.stdout) as {
-        changes: readonly unknown[]
+        published: { changes: readonly unknown[] }
         observation: { contract: string; outcome: string }
       }
-      expect(inspectedData.changes).toHaveLength(3)
+      expect(inspectedData.published.changes).toHaveLength(3)
       expect(inspectedData.observation).toMatchObject({ contract: "root-v1", outcome: "observed" })
       expect(inspected.stdout).toContain(merge)
       expect(inspected.stdout).toContain(laterMerge)
@@ -1514,16 +1568,18 @@ describe("a queue is the selected origin branch carrying config", () => {
           shown.stderr(),
         ).toBe(0)
         const history = JSON.parse(shown.stdout()) as {
-          changes: { checksNote?: string; checks: { name: string; state: string; spec: { run: string } }[] }[]
+          published: {
+            changes: { checksNote?: string; checks: { name: string; state: string; spec: { run: string } }[] }[]
+          }
         }
-        expect(history.changes).toHaveLength(2)
-        for (const change of history.changes) {
+        expect(history.published.changes).toHaveLength(2)
+        for (const change of history.published.changes) {
           expect(change.checksNote).toBeUndefined()
           expect(change.checks.map((check) => check.name)).toEqual(["unit", "integration"])
           expect(change.checks[0]?.spec.run).toBe("bun run unit")
           expect(change.checks[1]?.state).toBe("not-run")
         }
-        expect(history.changes.map((change) => change.checks[0]?.state)).toEqual(["passed", "failed"])
+        expect(history.published.changes.map((change) => change.checks[0]?.state)).toEqual(["passed", "failed"])
 
         // An active attempt still consumes its journal; only ended segments
         // with this same branch/head must reject the later live observation.
@@ -1544,9 +1600,11 @@ describe("a queue is the selected origin branch carrying config", () => {
           active.stderr(),
         ).toBe(0)
         const activeHistory = JSON.parse(active.stdout()) as ShownCheckHistory
-        expect(activeHistory.changes[0]?.checks?.find((check) => check.name === "integration")?.state).toBe("running")
+        expect(activeHistory.published.changes[0]?.checks?.find((check) => check.name === "integration")?.state).toBe(
+          "running",
+        )
         expect(
-          activeHistory.changes
+          activeHistory.published.changes
             .slice(1)
             .map((change) => change.checks?.find((check) => check.name === "integration")?.state),
         ).toEqual(["not-run", "not-run"])
@@ -1598,8 +1656,8 @@ describe("a queue is the selected origin branch carrying config", () => {
       shown.stderr(),
     ).toBe(0)
     const shownHistory = JSON.parse(shown.stdout()) as ShownCheckHistory
-    expect(shownHistory.changes).toEqual([expect.objectContaining({ checksNote: detail.note })])
-    expect(shownHistory.changes[0]).not.toHaveProperty("checks")
+    expect(shownHistory.published.changes).toEqual([expect.objectContaining({ checksNote: detail.note })])
+    expect(shownHistory.published.changes[0]).not.toHaveProperty("checks")
   }, 15_000)
 
   // @failure Historical Check evidence is mislabeled with today's declaration or its absence is hidden.
@@ -1661,7 +1719,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" }),
         shown.stderr(),
       ).toBe(0)
-      const change = (JSON.parse(shown.stdout()) as ShownCheckHistory).changes[0]
+      const change = (JSON.parse(shown.stdout()) as ShownCheckHistory).published.changes[0]
       expect(change?.checksNote).toContain(
         mode === "absent"
           ? "record names no base"
@@ -1744,7 +1802,9 @@ describe("a queue is the selected origin branch carrying config", () => {
         await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" }),
         shown.stderr(),
       ).toBe(0)
-      const adopted = (JSON.parse(shown.stdout()) as ShownCheckHistory).changes.find((row) => row.head === base)
+      const adopted = (JSON.parse(shown.stdout()) as ShownCheckHistory).published.changes.find(
+        (row) => row.head === base,
+      )
       expect(adopted).toBeDefined()
       if (measured) {
         expect(adopted?.checksNote).toBeUndefined()
@@ -1807,9 +1867,9 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).toBe(0)
     const row = (
       JSON.parse(listed.stdout()) as {
-        changes: readonly { branch: string; diagnostic?: string; diagnosticSummary?: string }[]
+        published: { changes: readonly { branch: string; diagnostic?: string; diagnosticSummary?: string }[] }
       }
-    ).changes.find((candidate) => candidate.branch === branch)
+    ).published.changes.find((candidate) => candidate.branch === branch)
     // A change carrying BOTH kinds: the policy warning folds into `diagnostic`, the revert finding is
     // the one line, and each reaches the listing exactly once.
     expect(row).toMatchObject({
@@ -1858,8 +1918,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       listed.stderr(),
     ).toBe(0)
     const rows = (
-      JSON.parse(listed.stdout()) as { changes: readonly { branch: string; state: string; diagnostic?: string }[] }
-    ).changes
+      JSON.parse(listed.stdout()) as {
+        published: { changes: readonly { branch: string; state: string; diagnostic?: string }[] }
+      }
+    ).published.changes
     expect(rows).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ branch: "task/healthy", state: "queued" }),
@@ -2238,11 +2300,14 @@ describe("a queue is the selected origin branch carrying config", () => {
     const list = async () => {
       const output = capture(repo)
       expect(await coreQueueCommand(repo, output.io, { command: "list" }, { json: true, queue: "main" })).toBe(0)
-      const result = JSON.parse(output.stdout()) as { changes: readonly { branch: string }[]; scope: string }
+      const result = JSON.parse(output.stdout()) as {
+        published: { changes: readonly { branch: string }[] }
+        scope: string
+      }
       expect(result.scope).toContain("Read 0 of 1 retained change histories")
       expect(result.scope).toContain("recorded ending Time")
       expect(result.scope).toContain("Global history diagnostics and direct target commits were not checked")
-      return result.changes
+      return result.published.changes
     }
     expect((await list()).some((row) => row.branch === branch)).toBe(false)
     const shown = capture(repo)
@@ -2250,16 +2315,17 @@ describe("a queue is the selected origin branch carrying config", () => {
       await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" }),
       shown.stderr(),
     ).toBe(0)
-    expect((JSON.parse(shown.stdout()) as { changes: readonly { branch: string; state: string }[] }).changes).toEqual([
-      expect.objectContaining({ branch, state: "merged" }),
-    ])
+    expect(
+      (JSON.parse(shown.stdout()) as { published: { changes: readonly { branch: string; state: string }[] } }).published
+        .changes,
+    ).toEqual([expect.objectContaining({ branch, state: "merged" })])
     const complete = capture(repo)
     expect(
       await coreQueueCommand(repo, complete.io, { command: "list", all: true }, { json: true, queue: "main" }),
     ).toBe(0)
-    expect((JSON.parse(complete.stdout()) as { changes: readonly { branch: string }[] }).changes).toEqual([
-      expect.objectContaining({ branch }),
-    ])
+    expect(
+      (JSON.parse(complete.stdout()) as { published: { changes: readonly { branch: string }[] } }).published.changes,
+    ).toEqual([expect.objectContaining({ branch })])
     expect((await list()).some((row) => row.branch === branch)).toBe(false)
   }, 15_000)
 
@@ -2315,7 +2381,9 @@ describe("a queue is the selected origin branch carrying config", () => {
       ),
     ).toBe(0)
     expect(
-      (JSON.parse(json.stdout()) as { changes: readonly { state: string }[] }).changes.map((row) => row.state).sort(),
+      (JSON.parse(json.stdout()) as { published: { changes: readonly { state: string }[] } }).published.changes
+        .map((row) => row.state)
+        .sort(),
     ).toEqual([...CHANGE_STATUSES].sort())
 
     const table = capture(repo)
@@ -2341,7 +2409,8 @@ describe("a queue is the selected origin branch carrying config", () => {
         ),
       ).toBe(0)
       expect(
-        (JSON.parse(filteredJson.stdout()) as { changes: readonly { branch: string; state: string }[] }).changes,
+        (JSON.parse(filteredJson.stdout()) as { published: { changes: readonly { branch: string; state: string }[] } })
+          .published.changes,
       ).toEqual([expect.objectContaining({ branch, state: status })])
       const filteredTable = capture(repo)
       expect(
@@ -2383,9 +2452,10 @@ describe("a queue is the selected origin branch carrying config", () => {
         { json: true, queue: "main" },
       ),
     ).toBe(0)
-    expect((JSON.parse(listed.stdout()) as { changes: readonly { head: string; state: string }[] }).changes).toEqual([
-      expect.objectContaining({ head: direct, state: "direct" }),
-    ])
+    expect(
+      (JSON.parse(listed.stdout()) as { published: { changes: readonly { head: string; state: string }[] } }).published
+        .changes,
+    ).toEqual([expect.objectContaining({ head: direct, state: "direct" })])
     expect(listed.stdout()).not.toContain(declaration)
 
     const table = capture(repo)
@@ -2428,7 +2498,9 @@ describe("a queue is the selected origin branch carrying config", () => {
         { json: true, queue: "main" },
       ),
     ).toBe(0)
-    expect((JSON.parse(accounted.stdout()) as { changes: readonly unknown[] }).changes).toEqual([])
+    expect(
+      (JSON.parse(accounted.stdout()) as { published: { changes: readonly unknown[] } }).published.changes,
+    ).toEqual([])
   }, 15_000)
 
   it("shows an older direct commit after an accounted queue publication", async () => {
@@ -2459,7 +2531,8 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await coreQueueCommand(repo, shown.io, { command: "show", all: true }, { json: true, queue: "main" })).toBe(
       0,
     )
-    const rows = (JSON.parse(shown.stdout()) as { changes: readonly { head: string; state: string }[] }).changes
+    const rows = (JSON.parse(shown.stdout()) as { published: { changes: readonly { head: string; state: string }[] } })
+      .published.changes
     expect(rows).toContainEqual(expect.objectContaining({ head: direct, state: "direct" }))
   }, 15_000)
 
@@ -2483,7 +2556,8 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await coreQueueCommand(repo, shown.io, { command: "show", all: true }, { json: true, queue: "main" })).toBe(
       0,
     )
-    const rows = (JSON.parse(shown.stdout()) as { changes: readonly { head: string; state: string }[] }).changes
+    const rows = (JSON.parse(shown.stdout()) as { published: { changes: readonly { head: string; state: string }[] } })
+      .published.changes
     // The listing is newest first; distinct fixed times expose the order even on a fast host.
     expect(rows.filter((row) => row.state === "direct").map((row) => row.head)).toEqual([direct[1], direct[0]])
   }, 15_000)
@@ -5575,9 +5649,9 @@ describe("a queue is the selected origin branch carrying config", () => {
       await coreQueueCommand(repo, run.io, { command: "list", drafts: true }, { json: true, queue: "main" }),
       run.stderr(),
     ).toBe(0)
-    const shown = (JSON.parse(run.stdout()) as { changes: readonly { branch: string }[] }).changes.map(
-      (row) => row.branch,
-    )
+    const shown = (
+      JSON.parse(run.stdout()) as { published: { changes: readonly { branch: string }[] } }
+    ).published.changes.map((row) => row.branch)
     expect(shown).toContain("task/kept")
     expect(shown).toContain("other/task/hidden")
     expect((JSON.parse(run.stdout()) as { scope: string }).scope).toContain("task/hidden*")
@@ -6485,13 +6559,16 @@ describe("a queue is the selected origin branch carrying config", () => {
           run.stderr(),
         ).toBe(0)
         // Scope/journal notices may name retained histories outside the row filter.
-        const rows = (JSON.parse(run.stdout()) as { changes: readonly { branch: string }[] }).changes
+        const rows = (JSON.parse(run.stdout()) as { published: { changes: readonly { branch: string }[] } }).published
+          .changes
         expect(rows.map((row) => row.branch)).toContain("task/topic")
         expect(rows.map((row) => row.branch)).not.toContain("task/default")
         expect(rows.map((row) => row.branch)).not.toContain("task/other")
         if (command[1] === "show") {
-          const shown = JSON.parse(run.stdout()) as Readonly<{ changes: readonly Readonly<{ queue: string }>[] }>
-          expect(shown.changes[0]?.queue).toBe("release/1.x")
+          const shown = JSON.parse(run.stdout()) as Readonly<{
+            published: { changes: readonly Readonly<{ queue: string }>[] }
+          }>
+          expect(shown.published.changes[0]?.queue).toBe("release/1.x")
         }
       }
     }

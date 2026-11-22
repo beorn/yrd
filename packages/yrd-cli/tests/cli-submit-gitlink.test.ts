@@ -298,7 +298,7 @@ async function assertCarrier(
   const listed = await yrd(w.work, "list", "--json", "--fresh")
   expect(listed.exitCode, listed.report).toBe(0)
   expect(
-    (JSON.parse(listed.stdout) as { changes: readonly { branch: string }[] }).changes.some(
+    (JSON.parse(listed.stdout) as { published: { changes: readonly { branch: string }[] } }).published.changes.some(
       (row) => row.branch === branch,
     ),
   ).toBe(true)
