@@ -237,7 +237,13 @@ it("writes a refused registry once across fresh processes, with the environments
     const first = await runRound(w, createEnvironmentCleanup(), "refused-1", [])
     const kept = first.filter((row) => row.result === "kept" && row.path === w.env)
     expect(kept, JSON.stringify(first)).toHaveLength(1)
-    expect(String(kept[0]?.why), "the refusal names the pid it could not read").toContain("could not read pid 999999")
+    // The refusal's contract, not one sentence for it: 37675 splits the message by whether the caller looks
+    // sandboxed, and this census (1 of 1 unreadable) now takes the sandboxed branch. Both branches name the pid
+    // they could not clear and both say a holder cannot be ruled out.
+    expect(String(kept[0]?.why), "the refusal names the pid it could not read").toContain("pid 999999")
+    expect(String(kept[0]?.why), "and says a holder cannot be ruled out").toContain(
+      "a holder among them cannot be ruled out",
+    )
     expect(existsSync(w.env), "the environment is protected, never removed on a refusal").toBe(true)
 
     // A FRESH process meets the same refusal for the same folder with the same reason. The row is written
@@ -494,7 +500,10 @@ it("persists a refused registry even when the retained cursor points past a shru
     expect(
       saved.reported?.[surviving[0]!],
       "the refusal reason is persisted, so a restart does not reprint it",
-    ).toContain("could not read pid 999999")
+    ).toContain("pid 999999")
+    expect(saved.reported?.[surviving[0]!], "the persisted reason still refuses coverage").toContain(
+      "a holder among them cannot be ruled out",
+    )
 
     // Round 3 is a FRESH process meeting the same refusal: every surviving environment is unchanged, so the
     // round writes no kept row for it — the flood this rule exists to remove — and still counts its coverage.
