@@ -526,9 +526,30 @@ async function consumeCloseRequests(
       report.needsDelegation.length > 0 &&
       report.kept.length === report.needsDelegation.length
     ) {
-      const attempts = (request.coverageAttempts ?? 0) + 1
+      // A standing request never counts past the bound: the row keeps naming the same bound instead of
+      // reading as more retries than a first request would ever get.
+      const attempts = Math.min(request.coverageAttempts ?? 0, MAX_COVERAGE_ATTEMPTS - 1) + 1
       const retried = { ...request, coverageAttempts: attempts }
-      if (attempts >= MAX_COVERAGE_ATTEMPTS) {
+      // #37455-A (@cto 66909a0f): the bound is not a reason to forget the environment. An EACCES on a
+      // same-UID pid read is usually a process mid-exec that clears on a later read, and retiring the
+      // request here preserved the tree with nothing left to retry it — five present /hh/var/wt trees
+      // still carried a retired request. The request stands, keeps naming the unreadable pid on every
+      // round, and the first round whose census certifies coverage removes the environment. The
+      // counter stops at the bound so the row never reads as more retries than were ever attempted.
+      // A release-checkout request keeps the old bound: its remedy is a re-file by its owner, not an
+      // environment the queue must eventually remove.
+      if (attempts >= MAX_COVERAGE_ATTEMPTS && request.intent !== "release-checkout") {
+        journal(
+          file,
+          retried,
+          request.path,
+          "kept",
+          `coverage refused at the ${MAX_COVERAGE_ATTEMPTS}-round bound; the request stands and is retried every round until the census certifies coverage or a person closes it; last: ${rows(report.needsDelegation)}; ${releaseRemedy(request.release)}`,
+          undefined,
+          timing,
+        )
+        restoreCloseRequest(staged, file, MAX_COVERAGE_ATTEMPTS)
+      } else if (attempts >= MAX_COVERAGE_ATTEMPTS) {
         journal(
           file,
           retried,
@@ -719,19 +740,23 @@ async function consumeCloseRequests(
       })
     } catch (cause) {
       if (cause instanceof IncompleteCensusError) {
-        const attempts = (request.coverageAttempts ?? 0) + 1
+        const attempts = Math.min(request.coverageAttempts ?? 0, MAX_COVERAGE_ATTEMPTS - 1) + 1
         const retired = { ...request, coverageAttempts: attempts }
+        // #37455-A (@cto 66909a0f): an EACCES on a same-UID pid read is usually a process mid-exec
+        // that clears on a later read. Retiring the request at the bound preserved the environment
+        // with nothing left to retry it, which is how merged trees collect. The request stands,
+        // keeps naming the unreadable pid, and the first round whose census certifies removes it.
         if (attempts >= MAX_COVERAGE_ATTEMPTS) {
           journal(
             file,
             retired,
             request.path,
-            "retired",
-            `the census could not certify coverage in ${attempts} rounds (bound ${MAX_COVERAGE_ATTEMPTS}); pending request retired; last: ${cause.refusal} (${censusReaderLine(cause.census)}); ${closeRemedy(request.options)}`,
+            "kept",
+            `coverage refused at the ${MAX_COVERAGE_ATTEMPTS}-round bound; the request stands and is retried every round until the census certifies coverage or a person closes it; last: ${cause.refusal} (${censusReaderLine(cause.census)}); ${closeRemedy(request.options)}`,
             fingerprint,
             timing,
           )
-          dropCloseRequest(staged)
+          restoreCloseRequest(staged, file, MAX_COVERAGE_ATTEMPTS)
         } else {
           journal(
             file,

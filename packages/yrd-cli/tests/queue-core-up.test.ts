@@ -1710,7 +1710,7 @@ describe("yrd queue up, the service", () => {
    * @consumer the operator whose workdir must not accumulate dead requests
    * @testonly none
    */
-  it("retries a request whose close census is incomplete and retires it after three rounds (22894 T3)", async () => {
+  it("retries a request whose close census is incomplete and keeps it standing at the bound (22894 T3, 37455-A)", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
     await redeclare(w, "setup: ':'\n")
@@ -1786,29 +1786,34 @@ describe("yrd queue up, the service", () => {
         run.stderr(),
       ).toBe(0)
       const rows = allCleanupRows(workdir).filter((row) => typeof row.request === "object")
-      expect(rows.filter((row) => row.result === "kept").length, JSON.stringify(rows)).toBe(2)
-      expect(rows.filter((row) => row.result === "retired").length, JSON.stringify(rows)).toBe(1)
+      // #37455-A (@cto 66909a0f): the bound keeps the request standing instead of retiring it, so the
+      // environment is removed on the first round whose census certifies coverage — never forgotten
+      // while the pid that blocked it is unreadable.
+      expect(rows.length, JSON.stringify(rows)).toBeGreaterThanOrEqual(3)
+      expect(rows.filter((row) => row.result === "kept").length, JSON.stringify(rows)).toBe(rows.length)
+      expect(rows.filter((row) => row.result === "retired").length, JSON.stringify(rows)).toBe(0)
       const attempts = rows.map((row) => (row.request as { coverageAttempts?: number }).coverageAttempts)
-      expect([...attempts].sort((left, right) => (left ?? 0) - (right ?? 0))).toEqual([1, 2, 3])
+      expect([...attempts].sort((left, right) => (left ?? 0) - (right ?? 0))).toEqual(
+        rows.map((_, index) => Math.min(index + 1, 3)),
+      )
       expect(existsSync(environment.path), run.stderr()).toBe(true)
-      expect(existsSync(file), run.stderr()).toBe(false)
-      // Fix 1: the request pass refuses rather than delegating, so no second
-      // request file is ever written into the slot it just staged away.
-      expect(listCloseRequests(workdir), run.stderr()).toEqual([])
-      // @cto 13:21 PST (@hh/var/@cto/do-20261114T1623/34329-retirement-diagnostic-ruling.md): the retirement
-      // names the requested operation, the bound, the pending request's fate and the close's own recorded
-      // options, and it carries no routing owner (ADR 0007).
-      const retiredClose = allCleanupRows(workdir).find(
-        (row) => row.result === "retired" && row.path === environment.path,
-      )
-      const retirement = String(retiredClose?.why)
-      expect(retirement).toContain("close not performed:")
-      expect(retirement).toContain("the census could not certify coverage in 3 rounds (bound 3)")
-      expect(retirement).toContain("pending request retired")
+      expect(existsSync(file), run.stderr()).toBe(true)
+      // The request pass refuses rather than delegating, so no second request
+      // file is ever written into the slot it just staged away: the standing
+      // request is the same file, restored in place.
+      expect(listCloseRequests(workdir), run.stderr()).toEqual([file])
+      for (const row of rows) {
+        expect((row.request as { coverageAttempts?: number }).coverageAttempts).toBeLessThanOrEqual(3)
+      }
+      // @cto 13:21 PST (@hh/var/@cto/do-20261114T1623/34329-retirement-diagnostic-ruling.md): the row
+      // names the requested operation, the bound, the standing request's fate and the close's own
+      // recorded options, and it carries no routing owner (ADR 0007).
+      const capped = rows.find((row) => String(row.why).includes("bound"))
+      const retirement = String(capped?.why)
+      expect(retirement).toContain("coverage refused at the 3-round bound")
+      expect(retirement).toContain("the request stands and is retried every round")
       expect(retirement).toContain("EACCES")
-      expect(retirement).toContain(
-        "re-file the same close --no-rehome from a context that can read every same-UID pid's cwd",
-      )
+      expect(retirement).toContain("re-file the same close --no-rehome")
       expect(retirement).not.toMatch(/\bowner\b/i)
     } finally {
       stop.abort()
@@ -3196,10 +3201,17 @@ describe("yrd queue up, the service", () => {
               typeof row.why === "string" &&
               row.why.includes(unpublishedComponent),
           )
+          // 37455-A (@cto 29f8631c): when every component head the environment holds is an ancestor of the published
+          // branch, custody is proven by head ancestry and the receipt names the leftover object it drops instead of
+          // keeping the environment for a reflog-only or dangling commit.
+          const reachabilityNamesCommit = retained.some((entry) =>
+            JSON.stringify(entry.proof).includes(unpublishedComponent),
+          )
           expect(
             (environmentRetained && keptForCommit !== undefined) ||
               sharedReachable.includes(unpublishedComponent) ||
-              originReachable.includes(unpublishedComponent),
+              originReachable.includes(unpublishedComponent) ||
+              reachabilityNamesCommit,
             JSON.stringify({
               before: custodyBefore,
               after: { environmentRetained, keptForCommit, sharedReachable, originReachable, retained },
