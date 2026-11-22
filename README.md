@@ -93,7 +93,17 @@ yrd env open | list | close     a separate checkout of one branch to work in
 yrd drop <branch>               retire a branch whose tip is kept by main or a queue event
 ```
 
-Every command takes `--json` and `--help`, and `yrd <command> --help` lists every option. The details, including queue addresses, submitting submodule commits, and branch cleanup, are in [docs/commands.md](docs/commands.md).
+Every command takes `--json` and `--help`, and `yrd <command> --help` lists every option.
+
+The JSON readings — `yrd queue list` (also `yrd list`), `yrd watch`, `yrd queue show` and
+`yrd queue stats` — share one document contract and carry `schemaVersion: 2`. Each separates
+what the queue refs publish from what this machine could read: `published` holds the facts
+every reader sees, while `execution`, `executionStats` and `localRunner` are `Local<T>` values
+that say `local: false` with a reason when this machine cannot answer. Change rows never carry
+journal-only fields. A `schemaVersion: 1` document is refused by name, not read as if it were
+current.
+
+The details, including queue addresses, submitting submodule commits, and branch cleanup, are in [docs/commands.md](docs/commands.md).
 
 ## The config, `.yrd.yml`
 

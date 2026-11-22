@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- `yrd queue list`, `yrd watch`, `yrd queue show` and `yrd queue stats` emit `schemaVersion: 2`. Published
+  queue facts move under `published` (`changes`, `stopped`, `pause`, `overrides`, `runner`), while this
+  machine's own journal read and runner read become `Local<T>` values — `execution` and `localRunner` — that
+  answer `local: false` with a reason instead of an empty row set or a zero count. Published change rows drop
+  the journal-only fields (`result`, `log`, `incident`, `diagnostics`, `malformed`, `base`, `live`), and stats
+  move `total`/`groups` under a required root `executionStats: Local<...>`. The root `changes`, `journal`,
+  `runner`, `total` and `groups` slots are gone with no alias, so a reader that still expects them fails by
+  name instead of rendering absence as zero. `yrd-queue-core` exports the contract as `SCHEMA_VERSION`,
+  `PublishedChange`, `Execution`, `executionOf` and `executionAnswer`; the shared queue reader and the PM
+  metrics parser refuse a `schemaVersion: 1` document (28522, ADR-0033).
+
 - Explicit `yrd drop --retire` can retire a merged branch's unkept exact head when its
   generated origin archive already exists for the same actor and UTC date. A `retained`
   event keeps that commit before branch removal, preserving the original merged ending
