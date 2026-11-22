@@ -20,6 +20,38 @@ export const OWNER_ACTIVITY_WINDOW_MS = 24 * 60 * 60 * 1000
 
 export type InProgressColumns = Readonly<{ in_progress: boolean | null; in_progress_reason: string | null }>
 
+/**
+ * #37838 (@cto 3083a003): the sparse progress frame. A native delta says which ROWS moved; it can never say that a
+ * hold expired or that a previously idle owner wrote, because nothing about those rows changed. This frame carries
+ * that second fact on its own — every open hold and every (identity, actor) the activity window qualifies — from
+ * the SAME single capture the column annotation uses, in a size that follows the qualifying set, never the store.
+ *
+ * The reader joins it against its own cached rows: a hold entry qualifies by identity alone and wins whatever the
+ * owner, an activity entry qualifies only when its `owner` equals the cached row's owner — the same predicate
+ * {@link columns} applies, including its empty-owner rule (an empty owner matches no actor). So no row list travels
+ * and no consumer re-implements the window or parses a reason.
+ */
+export type IssuesProgressHoldEntry = Readonly<{ id: string; reason: string }>
+export type IssuesProgressActivityEntry = Readonly<{ id: string; owner: string; reason: string }>
+export type IssuesProgressEntry = IssuesProgressHoldEntry | IssuesProgressActivityEntry
+
+export type IssuesProgressSource = "ok" | "undeclared" | "unreadable"
+
+export type IssuesProgress = Readonly<{
+  /**
+   * `false` when the activity source answered or none was declared, JSON `null` when one WAS declared and could not
+   * be read. A string such as "unknown" would be a fourth state nobody can type; the column's three states are
+   * true, false and null (@cto 8e7cbb99, 3083a003).
+   */
+  default: false | null
+  /** How the activity leg answered, so a stale-default is visible in the frame instead of inferred from it. */
+  source: IssuesProgressSource
+  /** Sorted holds first, then activity, each by identity: two captures of one store differ only in the facts. */
+  qualifying: readonly IssuesProgressEntry[]
+  /** The capture this frame was built from was whole. A partial or cut-short frame is a failure, never this. */
+  complete: true
+}>
+
 export type InProgressInputs = Readonly<{
   holds: readonly IssuesEnvironmentHold[]
   /** The owner-activity leg's journal records; absent, only environments decide. */
@@ -267,6 +299,45 @@ export function annotateInProgress(
   return {
     ok: true,
     result: Array.isArray(result) ? annotated : { ...(result as Record<string, unknown>), rows: annotated },
+  }
+}
+
+/**
+ * The progress frame for one refresh, built from the one capture that also annotates the rows. Refuses (with the
+ * cause) rather than publish a frame it cannot vouch for: an unreadable hold expiry makes the whole frame a named
+ * failure, because "no holds" and "holds I could not read" are different facts and only one is safe to join with.
+ */
+export function progressOf(
+  holds: readonly IssuesEnvironmentHold[],
+  now: number,
+  activity: Readonly<{
+    /** The owner-activity capture; absent, only environments qualify and the source is `undeclared`. */
+    events?: readonly IssuesActivityEvent[]
+    /** A declared source could not be read: the default is `null`, never `false`. */
+    unknown?: boolean
+    windowMs?: number
+  }>,
+): Readonly<{ ok: true; progress: IssuesProgress }> | Readonly<{ ok: false; detail: string }> {
+  const open = openHolds(holds, now)
+  if ("unreadable" in open) return { ok: false, detail: open.unreadable }
+  const active = activeByIssue(activity.events ?? [], now, activity.windowMs ?? OWNER_ACTIVITY_WINDOW_MS)
+  const unreadable = activity.unknown === true && activity.events === undefined
+  const source: IssuesProgressSource = unreadable ? "unreadable" : activity.events === undefined ? "undeclared" : "ok"
+  const qualifying: IssuesProgressEntry[] = []
+  for (const [identity, name] of [...open].sort(([left], [right]) => left.localeCompare(right))) {
+    qualifying.push({ id: identity, reason: `environment ${name}` })
+  }
+  for (const [key, activeAt] of [...active].sort(([left], [right]) => left.localeCompare(right))) {
+    const split = key.indexOf("\u0000")
+    const identity = key.slice(0, split)
+    // A hold already qualified this identity, whatever the actor: the same precedence `columns` applies.
+    if (open.has(identity)) continue
+    const actor = key.slice(split + 1)
+    qualifying.push({ id: identity, owner: actor, reason: `owner ${actor}, active ${activeAt}` })
+  }
+  return {
+    ok: true,
+    progress: { default: source === "unreadable" ? null : false, source, qualifying, complete: true },
   }
 }
 

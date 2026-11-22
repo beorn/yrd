@@ -60,7 +60,7 @@ if (mode === "json") {
   const [callsLog, pagesFile, requestJson] = rest
   if (callsLog === undefined || pagesFile === undefined) throw new Error("stream requires a calls log and a pages file")
   const request = requestJson === undefined ? {} : (JSON.parse(requestJson) as { traverse?: unknown })
-  appendFileSync(callsLog, `${JSON.stringify({ traverse: request.traverse === true })}\n`)
+  appendFileSync(callsLog, `${JSON.stringify({ traverse: request.traverse === true, request: requestJson ?? "" })}\n`)
   const pages = JSON.parse(readFileSync(pagesFile, "utf8")) as unknown[]
   const answer = request.traverse === true ? pages : pages.slice(0, 1)
   process.stdout.write(`${answer.map((page) => JSON.stringify(page)).join("\n")}\n`)

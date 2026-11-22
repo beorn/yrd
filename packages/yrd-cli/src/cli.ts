@@ -1975,7 +1975,7 @@ function buildProgram(
       // #37838 (@cto e1873f39): the traversal opt-in is a key in the caller's own page request, so the one place
       // a consumer looks must name it — no second verb and no declaration key to discover.
       command.description(
-        "read a finite page using the provider's JSON page request; traverse:true reads every page, one JSON line each",
+        "read a finite page using the provider's JSON page request; traverse:true reads every page, one JSON line each; progress:true adds the sparse holds+activity frame on the terminal answer (alone, no page is read)",
       )
     }
     if (verb === "assign") {

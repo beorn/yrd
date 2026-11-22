@@ -31,9 +31,11 @@ import {
 import {
   OWNER_ACTIVITY_WINDOW_MS,
   annotateInProgress,
+  progressOf,
   readActivity,
   type IssuesActivityEvent,
   type IssuesEnvironmentHold,
+  type IssuesProgress,
 } from "./in-progress.ts"
 
 export type { IssuesActivityEvent, IssuesEnvironmentHold } from "./in-progress.ts"
@@ -670,14 +672,23 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
   }
 
   const command = commandText(declared)
+  // #37838 (@cto 3083a003): `progress:true` is Yrd's own flag inside the caller's `<page>` request. It never reaches
+  // the provider, so the argv a project declares means exactly what it meant before — a strict provider is not asked
+  // to tolerate a key it never defined. A request naming nothing but `progress` asks for the sparse frame alone: the
+  // native read is not run at all, which is what keeps a 22k-row store as cheap to refresh as an empty one.
+  const wantsProgress = verb === "list-page" && pageRequestProgress(request.values.page)
+  const progressOnly = wantsProgress && pageRequestNamesOnlyProgress(request.values.page)
+  const providerValues = withoutProgress(request.values)
   let parsed: unknown
   let streamedPages: Record<string, unknown>[] | undefined
-  if (verb === "list-page" && pageRequestTraversal(request.values.page)) {
+  if (progressOnly) {
+    parsed = {}
+  } else if (verb === "list-page" && pageRequestTraversal(providerValues.page)) {
     const read = await readListPages({
       verb,
       command,
       declared,
-      values: request.values,
+      values: providerValues,
       runDeclared,
       bound: LIST_PAGE_TRAVERSE_BOUND,
     })
@@ -685,7 +696,7 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
     streamedPages = read.pages.map((page) => ({ ...page }))
     parsed = streamedPages[0]
   } else {
-    const ran = await runDeclared(substituteArgv(declared, request.values), command)
+    const ran = await runDeclared(substituteArgv(declared, providerValues), command)
     if (!ran.ok) return ran
     try {
       parsed = JSON.parse(ran.stdout)
@@ -712,18 +723,35 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       )
     }
   }
-  if (IN_PROGRESS_VERBS.has(verb) && options.environments !== undefined) {
+  if (IN_PROGRESS_VERBS.has(verb) && (options.environments !== undefined || wantsProgress)) {
     const readEnvironments = options.environments
+    if (readEnvironments === undefined) {
+      // A frame without the holds is the one thing it must never be: it would say "nothing holds this issue" about a
+      // capture that never happened. The reader keeps its last usable frame, marks it stale and reports this cause.
+      return fail(
+        1,
+        ISSUES_CODES.environmentUnreadable,
+        `${verb} ${command}`,
+        "progress:true needs an environment source on this read; this caller supplied none, so no hold was read",
+      )
+    }
     let holds: readonly IssuesEnvironmentHold[] | undefined
     try {
       holds = await readEnvironments({ root, cwd: options.cwd })
     } catch (error) {
+      const detail = `in_progress columns unavailable: ${error instanceof Error ? error.message : String(error)}`
+      if (wantsProgress) {
+        return fail(
+          1,
+          ISSUES_CODES.environmentUnreadable,
+          `${verb} ${command}`,
+          `${detail}; no progress frame is complete without the holds it could not read`,
+        )
+      }
       // The columns enrich a provider answer; they never gate reading one. An environment home that cannot be
       // located (an origin no network can answer, 25843) leaves the answer whole and says why on stderr, so a row
       // reader refuses an answer without columns instead of reading an absent column as false.
-      writeStderr(
-        `yrd issues ${verb}: in_progress columns unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
-      )
+      writeStderr(`yrd issues ${verb}: ${detail}\n`)
     }
     if (holds !== undefined) {
       const now = Date.now()
@@ -751,6 +779,16 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       const activityUnknown = activityArgv !== undefined && activity === undefined
       const inputs =
         activity === undefined ? { holds, ...(activityUnknown ? { activityUnknown } : {}) } : { holds, activity }
+      let progress: IssuesProgress | undefined
+      if (wantsProgress) {
+        const built = progressOf(
+          holds,
+          now,
+          activity === undefined ? (activityUnknown ? { unknown: true } : {}) : { events: activity },
+        )
+        if (!built.ok) return fail(1, ISSUES_CODES.environmentUnreadable, `${verb} ${command}`, built.detail)
+        progress = built.progress
+      }
       const annotateOne = (
         page: unknown,
       ): IssuesFailure | Readonly<{ ok: true; page: unknown; unknownRows?: number }> => {
@@ -766,7 +804,11 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
         if (annotated.notice !== undefined) writeStderr(annotated.notice)
         return { ok: true, page: annotated.result, unknownRows: annotated.unknownRows }
       }
-      if (streamedPages !== undefined) {
+      if (progressOnly) {
+        // Nothing native was read, so there is nothing to annotate: the frame IS the answer, and it is one object,
+        // so it is terminal by shape. The reader joins it against cached rows it already holds.
+        parsed = { progress }
+      } else if (streamedPages !== undefined) {
         // ONE capture for the whole refresh: every page is annotated from the same holds and activity read.
         const annotated: Record<string, unknown>[] = []
         let unknownRows = 0
@@ -781,13 +823,27 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
         // failed (#37838).
         const last = annotated[annotated.length - 1] as Record<string, unknown>
         const meta = isPlainObject(last.meta) ? (last.meta as Record<string, unknown>) : {}
-        annotated[annotated.length - 1] = { ...last, meta: { ...meta, activityUnreadRows: unknownRows } }
+        annotated[annotated.length - 1] = {
+          ...last,
+          meta: { ...meta, activityUnreadRows: unknownRows },
+          ...(progress === undefined ? {} : { progress }),
+        }
         streamedPages = annotated
         parsed = annotated[0]
       } else {
         const one = annotateOne(parsed)
         if (!one.ok) return one
-        parsed = one.page
+        if (progress === undefined) parsed = one.page
+        else if (!isPlainObject(one.page)) {
+          // The frame rides the page it belongs to; an answer that is not a page object has nowhere to carry it, and
+          // dropping it would leave the caller believing a refresh it never got. Say which shape arrived.
+          return fail(
+            1,
+            ISSUES_CODES.providerInvalidResult,
+            `${verb} ${command}`,
+            `progress:true needs a page object to carry the frame; the provider answered ${typeof one.page}`,
+          )
+        } else parsed = { ...one.page, progress }
       }
     }
   }
@@ -814,11 +870,42 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * that is not a JSON object; anything else here is an ordinary one-page call and stays byte-identical.
  */
 function pageRequestTraversal(page: string | undefined): boolean {
-  if (page === undefined) return false
+  return pageRequestObject(page)?.traverse === true
+}
+
+/**
+ * #37838 (@cto 3083a003): the same opt-in, for the sparse progress frame — `progress:true` inside the caller's own
+ * `<page>` JSON. It rides the capture the refresh already takes, so asking for it never reads holds or activity a
+ * second time; the provider never sees the key at all.
+ */
+function pageRequestProgress(page: string | undefined): boolean {
+  return pageRequestObject(page)?.progress === true
+}
+
+/**
+ * True when the caller asks for the frame and nothing the provider must read. Such a request is answered from
+ * Yrd's capture alone: a native read is never started, so its cost does not follow the store.
+ */
+function pageRequestNamesOnlyProgress(page: string | undefined): boolean {
+  const request = pageRequestObject(page)
+  return request !== undefined && Object.keys(request).every((key) => key === "progress")
+}
+
+function pageRequestObject(page: string | undefined): Readonly<Record<string, unknown>> | undefined {
+  if (page === undefined) return undefined
   try {
     const request: unknown = JSON.parse(page)
-    return isPlainObject(request) && request.traverse === true
+    return isPlainObject(request) ? request : undefined
   } catch {
-    return false
+    return undefined
   }
+}
+
+/** The caller's `<page>` request without Yrd's own `progress` flag: the declared provider sees the argv it always saw. */
+function withoutProgress(values: Readonly<Record<string, string>>): Readonly<Record<string, string>> {
+  const page = pageRequestObject(values.page)
+  if (page === undefined) return values
+  const rest = { ...page }
+  delete rest.progress
+  return { ...values, page: JSON.stringify(rest) }
 }
