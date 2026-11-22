@@ -8,6 +8,7 @@
  *   stall  write one stderr line, then sleep 30 s silently (the no-progress lease must kill it)
  *   trace  record the requested key and whether queue output is complete; issue-3 fails
  *   pages  <calls-log> <pages-json> <request>: append the request, answer the page whose token it names
+ *   stream <calls-log> <pages-json>: append one call and print every page as one compact JSON line (traverse)
  *   count  <calls-log> <stdout bytes>: append one line per call, answer the bytes (one activity read per refresh)
  */
 import { appendFileSync, existsSync, readFileSync } from "node:fs"
@@ -53,6 +54,12 @@ if (mode === "json") {
   if (callsLog === undefined || bytes === undefined) throw new Error("count requires a calls log and bytes")
   appendFileSync(callsLog, "call\n")
   process.stdout.write(bytes)
+} else if (mode === "stream") {
+  const [callsLog, pagesFile] = rest
+  if (callsLog === undefined || pagesFile === undefined) throw new Error("stream requires a calls log and a pages file")
+  appendFileSync(callsLog, "call\n")
+  const pages = JSON.parse(readFileSync(pagesFile, "utf8")) as unknown[]
+  process.stdout.write(`${pages.map((page) => JSON.stringify(page)).join("\n")}\n`)
 } else if (mode === "text") {
   process.stdout.write("this is not json\n")
 } else if (mode === "exit3") {

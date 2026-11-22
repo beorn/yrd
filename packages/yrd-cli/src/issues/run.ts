@@ -330,47 +330,30 @@ type TraverseWalk = Readonly<{
 }>
 
 /**
- * Walk the provider's existing bounded pages as ONE read (@cto 8e7cbb99, @dev/3 7a95653e): every answer must
- * describe the same snapshot and journal head as the first, a change refuses the whole read rather than serving
- * two cuts, the page bound refuses instead of returning a partial set, and the result is one page-shaped answer
- * whose `next` is null. Callers that read a single page keep using `list-page`; nothing here restarts.
+ * Walk the provider's bounded pages as ONE read (@cto 8e7cbb99, @dev/3 7a95653e): every page must describe the
+ * same snapshot and journal head as the first, a change refuses the whole read rather than serving two cuts, the
+ * page bound refuses instead of returning a partial set, and the result is one page-shaped answer whose `next`
+ * is null. Callers that read a single page keep using `list-page`; nothing here restarts.
+ *
+ * ONE PROCESS, not a token loop. Measured on /hh/pm 2026-11-22: a loop that re-invokes the provider per token
+ * read 10 pages in 124 s and then refused — the vault landed, and a token names one revision, so the next
+ * continuation was no longer that checkout's tree. A provider that streams its pages from one loaded snapshot
+ * (km `traverse`) answers them all; a provider that answers one page in one JSON object still works unchanged.
  */
 async function traversePages(
   input: TraverseWalk,
 ): Promise<Readonly<{ ok: true; result: Record<string, unknown> }> | IssuesFailure> {
-  const base = JSON.parse(input.values.page as string) as Record<string, unknown>
-  let request: Record<string, unknown> = base
+  const ran = await input.runDeclared(substituteArgv(input.declared, input.values), input.command)
+  if (!ran.ok) return ran
+  const pages = readPageStream(ran.stdout, input.verb, input.command)
+  if (!("pages" in pages)) return pages
   let pageIndex = 1
   let rowsRead = 0
   let cursor: string | null = null
   let first: Record<string, unknown> | undefined
   const rows: unknown[] = []
-  for (;;) {
-    const ran = await input.runDeclared(
-      substituteArgv(input.declared, { ...input.values, page: JSON.stringify(request) }),
-      input.command,
-    )
-    if (!ran.ok) return ran
-    let answer: unknown
-    try {
-      answer = JSON.parse(ran.stdout)
-    } catch {
-      return fail(
-        1,
-        ISSUES_CODES.providerNotJson,
-        `${input.verb} ${input.command}`,
-        `page ${pageIndex}: exit 0 but stdout is not JSON`,
-      )
-    }
-    const page = answer as Record<string, unknown> | null
-    if (page === null || typeof page !== "object" || Array.isArray(page) || !Array.isArray(page.rows)) {
-      return fail(
-        1,
-        ISSUES_CODES.providerInvalidResult,
-        `${input.verb} ${input.command}`,
-        `page ${pageIndex} is not a page object with a rows array`,
-      )
-    }
+  let complete = false
+  for (const page of pages.pages) {
     const pageRows = page.rows as unknown[]
     if (first === undefined) {
       first = page
@@ -388,7 +371,10 @@ async function traversePages(
     }
     rows.push(...pageRows)
     rowsRead += pageRows.length
-    if (page.complete === true) break
+    if (page.complete === true) {
+      complete = true
+      break
+    }
     const next = page.next
     if (typeof next !== "string" || next.length === 0) {
       return fail(
@@ -408,9 +394,64 @@ async function traversePages(
     }
     cursor = next
     pageIndex += 1
-    request = { ...base, page: next }
+  }
+  if (!complete) {
+    return fail(
+      1,
+      ISSUES_CODES.providerInvalidResult,
+      `${input.verb} ${input.command}`,
+      `the last page (${pageIndex}) is incomplete and the provider sent no page after it; no rows served`,
+    )
   }
   return { ok: true, result: { ...(first as Record<string, unknown>), rows, next: null, complete: true } }
+}
+
+/**
+ * The provider's stdout as page documents: one JSON object (a single-page answer) or one compact JSON object per
+ * line (a streaming traversal). Anything else is refused by name rather than guessed at.
+ */
+function readPageStream(
+  stdout: string,
+  verb: IssuesVerb,
+  command: string,
+): Readonly<{ pages: readonly (Record<string, unknown> & { rows: unknown[] })[] }> | IssuesFailure {
+  const invalid = (detail: string): IssuesFailure =>
+    fail(1, ISSUES_CODES.providerInvalidResult, `${verb} ${command}`, detail)
+  const asPage = (value: unknown, index: number): Readonly<{ page: Record<string, unknown> & { rows: unknown[] } }> | Readonly<{ failure: IssuesFailure }> => {
+    const page = value as Record<string, unknown> | null
+    if (page === null || typeof page !== "object" || Array.isArray(page) || !Array.isArray(page.rows)) {
+      return { failure: invalid(`page ${index} is not a page object with a rows array`) }
+    }
+    return { page: page as Record<string, unknown> & { rows: unknown[] } }
+  }
+  const text = stdout.trim()
+  if (text === "") return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "exit 0 but stdout is empty")
+  try {
+    const whole = asPage(JSON.parse(text), 1)
+    return "failure" in whole ? whole.failure : { pages: [whole.page] }
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error
+  }
+  const pages: (Record<string, unknown> & { rows: unknown[] })[] = []
+  for (const [index, line] of text.split("\n").entries()) {
+    if (line.trim() === "") continue
+    let value: unknown
+    try {
+      value = JSON.parse(line)
+    } catch {
+      return fail(
+        1,
+        ISSUES_CODES.providerNotJson,
+        `${verb} ${command}`,
+        `document ${index + 1} is not JSON and the whole answer is not one JSON object`,
+      )
+    }
+    const document = asPage(value, pages.length + 1)
+    if ("failure" in document) return document.failure
+    pages.push(document.page)
+  }
+  if (pages.length === 0) return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "no page documents")
+  return { pages }
 }
 
 /** Run one verb end to end and return the envelope or a named failure. Never throws for a provider's fault. */
