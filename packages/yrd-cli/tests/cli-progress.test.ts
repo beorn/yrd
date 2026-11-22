@@ -104,6 +104,8 @@ function project(
         .split("\n")
         .filter((line) => line.length > 0)
     } catch {
+      // silent-fallback-allow: the call log is written by the first provider call; absent means zero calls yet,
+      // which is the pre-state these assertions measure.
       return []
     }
   }

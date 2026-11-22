@@ -897,6 +897,8 @@ function pageRequestObject(page: string | undefined): Readonly<Record<string, un
     const request: unknown = JSON.parse(page)
     return isPlainObject(request) ? request : undefined
   } catch {
+    // silent-fallback-allow: an unparseable <page> is handed to the provider untouched, which refuses it by name;
+    // Yrd must not replace the caller's argv with a parse error of its own.
     return undefined
   }
 }
