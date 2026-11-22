@@ -351,6 +351,22 @@ describe("#37838 one refresh carries the complete progress frame", () => {
     expect(JSON.parse(request as string)).toEqual({ binding: "workspace-a/native", limit: 10, traverse: true })
   }, 120_000)
 
+  it("passes an ordinary page request through byte for byte, whitespace included", async () => {
+    const fixture = project(streamed([{ rows: [row("a")], next: null, complete: true }]))
+    const request = '{"binding":"workspace-a/native",  "limit":1e3}'
+    const outcome = await runIssuesVerb({
+      verb: "list-page",
+      args: [request],
+      projectRoot: fixture.root,
+      cwd: fixture.root,
+      env: process.env,
+      environments: async () => [],
+      stderr: () => {},
+    })
+    expect(outcome.ok, outcome.ok ? "" : outcome.message).toBe(true)
+    expect(fixture.providerRequests()[0]).toBe(request)
+  }, 120_000)
+
   it("leaves an ordinary request byte-identical: no frame, no extra key", async () => {
     const fixture = project(streamed([{ rows: [row("a")], next: null, complete: true }]))
     const outcome = await listPage(fixture.root, { binding: "workspace-a/native", limit: 10 })

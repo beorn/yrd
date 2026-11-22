@@ -905,6 +905,9 @@ function pageRequestObject(page: string | undefined): Readonly<Record<string, un
 function withoutProgress(values: Readonly<Record<string, string>>): Readonly<Record<string, string>> {
   const page = pageRequestObject(values.page)
   if (page === undefined) return values
+  // A request that never named the flag is passed through untouched: re-serialising it would rewrite whitespace and
+  // number spelling for every ordinary caller, and "the ordinary page path keeps its behaviour" means the bytes too.
+  if (!Object.hasOwn(page, "progress")) return values
   const rest = { ...page }
   delete rest.progress
   return { ...values, page: JSON.stringify(rest) }
