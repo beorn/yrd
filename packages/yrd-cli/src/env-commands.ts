@@ -58,6 +58,7 @@ import { adaptProcessGit, createProcess, type Process } from "@yrd/process"
 // the whole queue (the derive's `bun install --lockfile-only` cannot resolve bearly@workspace:* in
 // yrd's own workspace); @chief withdrew that change (c6939f8255f0). Shape @cto, 2026-10-13.
 import { createLocalGitProcess } from "git-super/process"
+import { BUSY_PREFIX, isExclusiveBusy } from "git-super/exclusive"
 import type { WorktreeRemovalProof } from "./branch-retirement.ts"
 import {
   assertNoPrivateStore,
@@ -170,6 +171,22 @@ export class IncompleteCensusError extends Error {
 
 /** Who runs the close decides what an uncertifiable census means. */
 export type CloseAdmissionMode = "delegate" | "refuse"
+
+/**
+ * #37624: git-super's writer-lock wait ran out, so another writer held the repository's mutation lock
+ * for the whole bound. The in-process removal throws isExclusiveBusy's Error; the CLI route leaves only
+ * stderr behind, so both read the one prefix git-super exports — never a second copy of it in yrd.
+ * A "waiting for writer lock held by" line is progress, not this: a close still waiting must not settle.
+ */
+export function isWriterLockWaitFailure(error: unknown): boolean {
+  for (let current: unknown = error, depth = 0; current != null && depth < 8; depth += 1) {
+    if (isExclusiveBusy(current)) return true
+    const text = current instanceof Error ? current.message : String(current)
+    if (text.includes(BUSY_PREFIX)) return true
+    current = current instanceof Error ? current.cause : undefined
+  }
+  return false
+}
 export type EnvironmentRemovalTarget = Readonly<{ name: string; path: string; branch?: string; head?: string }>
 export type CloseExecutionContext = Readonly<{
   onIncompleteCensus?: CloseAdmissionMode
@@ -2726,7 +2743,8 @@ export async function closeEnvironment(
   const common = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
   const retentionRoot =
     options.retain === undefined ? join(workdir, "retained-modules") : resolve(io.cwd, options.retain)
-  const concurrentClose = async (error: unknown): Promise<boolean> => {
+  const concurrentClose = async (error: unknown): Promise<YrdCliExitCode | false> => {
+    const writerWait = isWriterLockWaitFailure(error)
     // Both queue routes use refuse mode; the request pass can omit the typed callback.
     // Only the direct manual route may recognize a competing removal from a narrowed lookup.
     if (onIncompleteCensus !== "delegate" || removedProof !== undefined || existsSync(path)) return false
@@ -2783,13 +2801,35 @@ export async function closeEnvironment(
               ? `${JSON.stringify({ closed: path, retirement: "incomplete" })}\n`
               : `closed environment ${path}; concurrent removal verified; branch retirement outcome was not observed\n`,
           )
-          return true
+          return 0
         }
       }
     } catch (inspectionError) {
       details.push(
         `proof inspection failed: ${inspectionError instanceof Error ? inspectionError.message : String(inspectionError)}`,
       )
+    }
+    if (writerWait) {
+      // The wait is the evidence (37624): this close held nothing while another writer held the
+      // mutation lock for the whole bound, and the environment is gone now. Say only what the facts
+      // prove — a retained copy this close never wrote stays UNVERIFIED, so the close is not a success.
+      const branch = registered.branch?.replace(/^refs\/heads\//u, "")
+      const keptBranch = branch === undefined || branch === "" ? undefined : await refAt(git, `refs/heads/${branch}`)
+      const retained = existsSync(retentionRoot)
+        ? `no retained copy under ${retentionRoot} matches this environment`
+        : `${retentionRoot} does not exist`
+      io.stderr(
+        `yrd: ${path}@${commit} is gone and this close never held the writer lock: another writer removed it during the wait; ${retained}; inspect it before trusting any custody${details.length === 0 ? "" : `\n${details.join("\n")}`}\n`,
+      )
+      if (keptBranch !== undefined) {
+        io.stderr(`yrd: branch ${branch} still resolves at ${keptBranch}; its retirement outcome was not observed\n`)
+      }
+      io.stdout(
+        options.json === true
+          ? `${JSON.stringify({ closed: path, retention: "unverified", retirement: "incomplete" })}\n`
+          : `closed environment ${path}; removed by another writer during the writer-lock wait; retained copy UNVERIFIED (inspect ${retentionRoot})${keptBranch === undefined ? "" : `; branch ${branch} still resolves`}\n`,
+      )
+      return 1
     }
     return keep()
   }
@@ -2847,7 +2887,8 @@ export async function closeEnvironment(
   try {
     modules = await treeGit(["ls-tree", commit, "--", ".gitmodules"])
   } catch (error) {
-    if (await concurrentClose(error)) return 0
+    const settled = await concurrentClose(error)
+    if (settled !== false) return settled
     throw error
   }
   const recheck = await admitEnvironmentClose(path, io, censusSource, context?.budget)
@@ -2994,7 +3035,8 @@ export async function closeEnvironment(
         removed = JSON.parse(removalOutput)
       }
     } catch (error) {
-      if (await concurrentClose(error)) return 0
+      const settled = await concurrentClose(error)
+      if (settled !== false) return settled
       await restoreAlignedGitlinks()
       throw new Error(
         `environment ${path} could not close through git super worktree remove: ${error instanceof Error ? error.message : String(error)}; inspect its registration and retention directory ${retain} before retrying; no plain-git fallback was attempted`,
