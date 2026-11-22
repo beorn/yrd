@@ -27,6 +27,31 @@ afterAll(() => {
 
 type Ran = Readonly<{ exitCode: YrdCliExitCode; stdout: string; stderr: string; report: string }>
 
+/** One change as the published projection states it. */
+type PublishedChange = Readonly<{ branch: string }>
+
+/** `yrd list --json` schemaVersion 2: the published projection beside this machine's reads. */
+type ListDocument = Readonly<{
+  schemaVersion: number
+  source: string
+  asOf: string
+  published: Readonly<{
+    changes: readonly PublishedChange[]
+    stopped: unknown
+    pause: unknown
+    overrides: readonly unknown[]
+    runner: Record<string, unknown>
+  }>
+  execution: Readonly<{ local: true; value: Record<string, unknown> }> | Readonly<{ local: false; why: string }>
+  localRunner: Readonly<{ local: true; value: Record<string, unknown> }> | Readonly<{ local: false; why: string }>
+  observation: Record<string, unknown>
+  scope?: string
+}>
+
+function parseDocument(text: string): ListDocument {
+  return JSON.parse(text) as ListDocument
+}
+
 /** The CLI as the shell runs it: argv in, exit code and both streams out. */
 async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
   let stdout = ""
@@ -91,10 +116,9 @@ async function queueWithOneChange(hosted?: string): Promise<string> {
   return work
 }
 
-/** The `--json` reading with the one field that names the moment it was taken removed, so two readings compare. */
+/** The `--json` reading with this machine's journal reads removed, so two readings compare. */
 function timeless(json: string): unknown {
-  const parsed = JSON.parse(json) as Record<string, unknown>
-  const { journal: _journal, ...rest } = parsed
+  const { execution: _execution, localRunner: _localRunner, ...rest } = parseDocument(json)
   return rest
 }
 
@@ -146,9 +170,9 @@ describe("`yrd list` is `yrd queue list`", () => {
         exit = await waiting
       }
       expect(exit!, stderr).toBe(0)
-      const result = JSON.parse(stdout) as { source: string; changes: unknown[] }
+      const result = parseDocument(stdout)
       expect(result.source).toBe("local")
-      expect(result.changes).toEqual((JSON.parse(initial.stdout) as { changes: unknown[] }).changes)
+      expect(result.published.changes).toEqual(parseDocument(initial.stdout).published.changes)
     } finally {
       vi.unstubAllEnvs()
     }
@@ -163,7 +187,7 @@ describe("`yrd list` is `yrd queue list`", () => {
     expect(canonical.exitCode, canonical.report).toBe(0)
     expect(alias.exitCode, alias.report).toBe(canonical.exitCode)
     expect(timeless(alias.stdout)).toEqual(timeless(canonical.stdout))
-    const rows = (JSON.parse(alias.stdout) as { changes: readonly { branch: string }[] }).changes
+    const rows = parseDocument(alias.stdout).published.changes
     expect(rows.map((row) => row.branch)).toEqual(["task/one"])
   })
 

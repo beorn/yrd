@@ -40,6 +40,67 @@ afterAll(() => {
 
 type Ran = Readonly<{ exitCode: YrdCliExitCode; stdout: string; stderr: string; report: string }>
 
+/** One missing-Run entry, as this machine's journal read reports it. */
+type MissingRunTrailer = Readonly<{
+  branch: string
+  head: string
+  segment: string
+  state: string
+  expected: boolean
+  reason: string
+  selected: boolean
+}>
+
+/** What reading this machine's journal produced, beside the published rows (#28522). */
+type ExecutionValue = Readonly<{
+  dir: string
+  runs: readonly Record<string, unknown>[]
+  malformed: readonly Record<string, unknown>[]
+  absent?: string
+  fallbacks?: Record<string, unknown>
+  coverage?: Readonly<{
+    missingRunTrailers: readonly MissingRunTrailer[]
+    malformed: readonly Record<string, unknown>[]
+  }>
+  unread?: number
+  unreadReason?: string
+}>
+
+/** `yrd list --json` schemaVersion 2: the published projection beside this machine's reads. */
+type ListDocument = Readonly<{
+  schemaVersion: number
+  source: string
+  asOf: string
+  published: Readonly<{
+    changes: readonly Record<string, unknown>[]
+    stopped: unknown
+    pause: unknown
+    overrides: readonly unknown[]
+    runner: Record<string, unknown>
+  }>
+  execution: Readonly<{ local: true; value: ExecutionValue }> | Readonly<{ local: false; why: string }>
+  localRunner: Readonly<{ local: true; value: Record<string, unknown> }> | Readonly<{ local: false; why: string }>
+  observation: Record<string, unknown>
+  scope?: string
+}>
+
+function parseDocument(text: string): ListDocument {
+  return JSON.parse(text) as ListDocument
+}
+
+/** The journal read's own notes, from the one branch that carries them. */
+function localExecution(document: ListDocument): ExecutionValue {
+  if (document.execution.local !== true) throw new Error(`expected a local journal read: ${document.execution.why}`)
+  return document.execution.value
+}
+
+/** The coverage verdict a local journal read always states. */
+function journalCoverage(document: ListDocument): NonNullable<ExecutionValue["coverage"]> {
+  const { coverage } = localExecution(document)
+  if (coverage === undefined) throw new Error("expected the journal read to state its coverage")
+  return coverage
+}
+
 /** The CLI as the shell runs it: argv in, exit code and both streams out; `color` and `columns` as the terminal would say them. */
 async function yrd(cwd: string, io: Pick<YrdCliIO, "color" | "columns">, ...args: string[]): Promise<Ran> {
   let stdout = ""
@@ -296,29 +357,34 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(plain.exitCode, plain.report).toBe(0)
     expect(colored.stdout).toBe(plain.stdout)
     expect(plain.stdout).not.toContain(ESC)
-    const document = JSON.parse(plain.stdout) as Record<string, unknown>
-    // `overrides` is always present (25296 C5): an empty array is "no merge check held off".
+    const document = parseDocument(plain.stdout)
+    // The published projection, this machine's journal read and this machine's
+    // runner read are separate keys; the document names its contract version.
     expect(Object.keys(document).sort()).toEqual([
       "asOf",
-      "changes",
-      "journal",
+      "execution",
+      "localRunner",
       "observation",
-      "overrides",
-      "pause",
-      "runner",
+      "published",
+      "schemaVersion",
       "scope",
       "source",
-      "stopped",
     ])
-    expect(document["source"]).toBe("local")
-    expect(document["overrides"]).toEqual([])
-    expect(document["runner"]).toEqual({
+    expect(document.schemaVersion).toBe(2)
+    expect(document.source).toBe("local")
+    // `overrides` is always present (25296 C5): an empty array is "no merge check held off".
+    expect(document.published.overrides).toEqual([])
+    expect(document.published.runner).toEqual({
       state: "unpublished",
-      service: { kind: "absent", why: expect.any(String) },
-      published: { signal: "absent", why: expect.any(String) },
+      signal: "absent",
+      why: expect.any(String),
     })
-    expect((document as { observation: unknown }).observation).toMatchObject({ contract: "native", notices: [] })
-    const [row] = document["changes"] as readonly Record<string, unknown>[]
+    expect(document.localRunner).toMatchObject({
+      local: true,
+      value: { service: { kind: "absent", why: expect.any(String) } },
+    })
+    expect(document.observation).toMatchObject({ contract: "native", notices: [] })
+    const [row] = document.published.changes
     expect(row).toMatchObject({ branch: "task/one", position: 1, state: "queued", submitter: "@dev/10" })
     // The bare-line era's row fields, all still there under their names.
     expect(Object.keys(row!)).toEqual(expect.arrayContaining(["branch", "head", "state", "since", "subject"]))
@@ -340,8 +406,8 @@ describe("a state name means the state", () => {
     const ran = await yrd(cwd, { color: false, columns: 120 }, "list", "--json", "queued")
 
     expect(ran.exitCode, ran.report).toBe(0)
-    const document = JSON.parse(ran.stdout) as Record<string, unknown>
-    const changes = document["changes"] as readonly Record<string, unknown>[]
+    const document = parseDocument(ran.stdout)
+    const changes = document.published.changes
     expect(changes, ran.report).toHaveLength(1)
     expect(changes[0]).toMatchObject({ branch: "task/one", state: "queued" })
   })
@@ -356,8 +422,8 @@ describe("a state name means the state", () => {
     const ran = await yrd(cwd, { color: false, columns: 120 }, "list", "--json", "merged")
 
     expect(ran.exitCode, ran.report).toBe(0)
-    const document = JSON.parse(ran.stdout) as Record<string, unknown>
-    const changes = document["changes"] as readonly Record<string, unknown>[]
+    const document = parseDocument(ran.stdout)
+    const changes = document.published.changes
     const byBranch = (branch: string): Record<string, unknown> | undefined =>
       changes.find((change) => change["branch"] === branch)
     // Both answer: the coincidence, matched on branch TEXT, and the real
@@ -367,7 +433,7 @@ describe("a state name means the state", () => {
     // The message, not only the count: both rows counted as matches, so the
     // numerator is 2 — the denominator is however many rows this fixture's
     // queue reading carries in total, which is not this test's concern.
-    expect(document["scope"], ran.report).toMatch(/^2 of \d+ change\(s\) match merged\b/u)
+    expect(document.scope, ran.report).toMatch(/^2 of \d+ change\(s\) match merged\b/u)
   })
 })
 
@@ -410,9 +476,7 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
 
     expect(filtered.exitCode, filtered.report).toBe(0)
     const branchesIn = (ran: Ran): readonly string[] =>
-      ((JSON.parse(ran.stdout) as Record<string, unknown>)["changes"] as readonly Record<string, unknown>[]).map(
-        (change) => String(change["branch"]),
-      )
+      parseDocument(ran.stdout).published.changes.map((change) => String(change["branch"]))
     // The unfiltered listing still carries the change (the original's first
     // assertion), and the filtered payload selects it by its state.
     expect(branchesIn(unfiltered), unfiltered.report).toContain("task/one")
@@ -423,7 +487,7 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
     const work = await queueWithOneChange()
     const positional = await yrd(work, { color: false, columns: 120 }, "list", "--json", "merged")
     const flagged = await yrd(work, { color: false, columns: 120 }, "list", "--json", "--status", "merged")
-    const documentOf = (ran: Ran): Record<string, unknown> => JSON.parse(ran.stdout) as Record<string, unknown>
+    const documentOf = (ran: Ran): ListDocument => parseDocument(ran.stdout)
 
     // EXIT 0 BY DEFAULT is the owning bead's ruling (@chief, 2026-09-07): a
     // filter term matching zero rows is user input producing an empty result,
@@ -438,35 +502,34 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
     // must say what it matched against, and JSON gets the same notice the page does.
     expect(Object.keys(documentOf(flagged)).sort()).toEqual([
       "asOf",
-      "changes",
-      "journal",
+      "execution",
+      "localRunner",
       "observation",
-      "overrides",
-      "pause",
-      "runner",
+      "published",
+      "schemaVersion",
       "scope",
       "source",
-      "stopped",
     ])
-    expect(documentOf(flagged)["changes"], flagged.report).toEqual([])
-    expect(documentOf(flagged)["runner"]).toEqual({
+    expect(documentOf(flagged).published.changes, flagged.report).toEqual([])
+    expect(documentOf(flagged).published.runner).toEqual({
       state: "unpublished",
-      service: { kind: "absent", why: expect.any(String) },
-      published: { signal: "absent", why: expect.any(String) },
+      signal: "absent",
+      why: expect.any(String),
     })
-    expect(documentOf(positional)["changes"], positional.report).toEqual([])
+    expect(documentOf(flagged).localRunner).toMatchObject({
+      local: true,
+      value: { service: { kind: "absent", why: expect.any(String) } },
+    })
+    expect(documentOf(positional).published.changes, positional.report).toEqual([])
     // And 22301's own specimen, the other way round: a non-matching state must
     // never answer with the queue it did not select.
     const flaggedDocument = documentOf(flagged)
     const positionalDocument = documentOf(positional)
-    expect(flaggedDocument["scope"]).toContain("0 of 1 change(s) match merged")
+    expect(flaggedDocument.scope).toContain("0 of 1 change(s) match merged")
     expect({
       ...flaggedDocument,
-      asOf: positionalDocument["asOf"],
-      scope: String(flaggedDocument["scope"]).replace(
-        String(flaggedDocument["asOf"]),
-        String(positionalDocument["asOf"]),
-      ),
+      asOf: positionalDocument.asOf,
+      scope: String(flaggedDocument.scope).replace(String(flaggedDocument.asOf), String(positionalDocument.asOf)),
     }).toEqual(positionalDocument)
     expect(stripAnsi(flagged.stderr), flagged.report).toBe(stripAnsi(positional.stderr))
   })
@@ -505,16 +568,18 @@ describe("the JSON runner is independent of selected change rows (#24570)", () =
     const filtered = await yrd(work, { color: false }, "list", "--json", "__no_such_change__")
     expect(populated.exitCode, populated.report).toBe(0)
     expect(filtered.exitCode, filtered.report).toBe(0)
-    const populatedDoc = JSON.parse(populated.stdout) as Record<string, unknown>
-    const filteredDoc = JSON.parse(filtered.stdout) as Record<string, unknown>
-    expect(populatedDoc["changes"]).toHaveLength(1)
-    expect(filteredDoc["changes"]).toEqual([])
-    expect(populatedDoc["runner"]).toEqual({
+    const populatedDoc = parseDocument(populated.stdout)
+    const filteredDoc = parseDocument(filtered.stdout)
+    expect(populatedDoc.published.changes).toHaveLength(1)
+    expect(filteredDoc.published.changes).toEqual([])
+    expect(populatedDoc.published.runner).toEqual({
       state: "idle",
-      service: { kind: "beating" },
-      published: { signal: "absent", why: expect.any(String) },
+      signal: "absent",
+      why: expect.any(String),
     })
-    expect(filteredDoc["runner"]).toEqual(populatedDoc["runner"])
+    expect(populatedDoc.localRunner).toMatchObject({ local: true, value: { service: { kind: "beating" } } })
+    expect(filteredDoc.published.runner).toEqual(populatedDoc.published.runner)
+    expect(filteredDoc.localRunner).toEqual(populatedDoc.localRunner)
   })
 
   /** @failure An off-machine reader could see only its missing local journal, even while the queue published a fresh runner claim. */
@@ -531,15 +596,16 @@ describe("the JSON runner is independent of selected change rows (#24570)", () =
     const filtered = await yrd(work, { color: false }, "list", "--json", "__no_such_change__")
     expect(populated.exitCode, populated.report).toBe(0)
     expect(filtered.exitCode, filtered.report).toBe(0)
-    const first = JSON.parse(populated.stdout) as { runner: Record<string, unknown> }
-    const second = JSON.parse(filtered.stdout) as { runner: Record<string, unknown> }
-    expect(first.runner).toMatchObject({
-      published: { signal: "fresh", claim: { Runner: "host/42", State: "checking" } },
+    const first = parseDocument(populated.stdout)
+    const second = parseDocument(filtered.stdout)
+    expect(first.published.runner).toMatchObject({
+      state: "checking",
+      signal: "fresh",
+      claim: { Runner: "host/42", State: "checking" },
     })
-    expect(second.runner.published).toEqual(first.runner.published)
-    expect(first.runner.state).toBe("checking")
-    expect(second.runner.state).toBe("checking")
-    expect(first.runner.service).toMatchObject({ kind: "absent" })
+    expect(second.published.runner).toEqual(first.published.runner)
+    expect(second.published.runner.state).toBe("checking")
+    expect(first.localRunner).toMatchObject({ local: true, value: { service: { kind: "absent" } } })
   })
 })
 
@@ -581,7 +647,7 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     expect(empty.exitCode, empty.report).not.toBe(2)
     expect(matched.exitCode, matched.report).toBe(0)
     // `--require-match` changes only the exit code, never the document.
-    expect(JSON.parse(empty.stdout)).toMatchObject({ changes: [] })
+    expect(JSON.parse(empty.stdout)).toMatchObject({ published: { changes: [] } })
   })
 
   // @failure Expected submissions and actual never-submitted drops were reported as missing journals, while
@@ -659,28 +725,9 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
 
     const result = await yrd(work, { color: false }, "list", "--json", "--require-match", "task/one")
     expect(result.exitCode, result.report).toBe(0)
-    const document = JSON.parse(result.stdout) as {
-      changes: readonly { branch: string }[]
-      journal: {
-        absent?: string
-        unread: number
-        unreadReason: string
-        coverage: {
-          missingRunTrailers: readonly {
-            branch: string
-            head: string
-            segment: string
-            state: string
-            expected: boolean
-            reason: string
-            selected: boolean
-          }[]
-          malformed: readonly unknown[]
-        }
-      }
-    }
-    expect(document.changes.map((change) => change.branch)).toEqual(["task/one"])
-    const noRun = document.journal.coverage.missingRunTrailers
+    const document = parseDocument(result.stdout)
+    expect(document.published.changes.map((change) => change["branch"])).toEqual(["task/one"])
+    const noRun = journalCoverage(document).missingRunTrailers
     expect(noRun).toHaveLength(2)
     expect(noRun).toEqual(
       expect.arrayContaining([
@@ -701,7 +748,7 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
       ]),
     )
     expect(noRun.every((entry) => entry.head.length > 0 && entry.segment.length > 0)).toBe(true)
-    expect(document.journal.coverage.malformed).toEqual([
+    expect(journalCoverage(document).malformed).toEqual([
       expect.objectContaining({
         run: malformedRun.id,
         key: `task/unrelated@${malformedHead}`,
@@ -713,34 +760,34 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
         selected: false,
       }),
     ])
-    expect(document.journal.absent ?? "").not.toContain("has no Run trailer")
-    expect(document.journal.unread).toEqual(expect.any(Number))
-    expect(document.journal.unreadReason).toMatch(/unselected.*round journal files/i)
+    expect(localExecution(document).absent ?? "").not.toContain("has no Run trailer")
+    expect(localExecution(document).unread).toEqual(expect.any(Number))
+    expect(localExecution(document).unreadReason).toMatch(/unselected.*round journal files/i)
 
     const empty = await yrd(work, { color: false }, "list", "--json", "--require-match", "no-such-change")
     expect(empty.exitCode, empty.report).toBe(1)
-    const emptyDocument = JSON.parse(empty.stdout) as typeof document
-    expect(emptyDocument.changes).toEqual([])
-    expect(emptyDocument.journal.coverage.missingRunTrailers).toEqual(
+    const emptyDocument = parseDocument(empty.stdout)
+    expect(emptyDocument.published.changes).toEqual([])
+    expect(journalCoverage(emptyDocument).missingRunTrailers).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ branch: "task/one", selected: false }),
         expect.objectContaining({ branch: "task/draft", selected: false }),
       ]),
     )
-    expect(emptyDocument.journal.coverage.malformed).toEqual(
+    expect(journalCoverage(emptyDocument).malformed).toEqual(
       expect.arrayContaining([expect.objectContaining({ run: malformedRun.id, selected: false })]),
     )
 
     const unfiltered = await yrd(work, { color: false }, "list", "--json")
     expect(unfiltered.exitCode, unfiltered.report).toBe(0)
-    const fullDocument = JSON.parse(unfiltered.stdout) as typeof document
-    expect(fullDocument.journal.coverage.missingRunTrailers).toEqual(
+    const fullDocument = parseDocument(unfiltered.stdout)
+    expect(journalCoverage(fullDocument).missingRunTrailers).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ branch: "task/one", selected: true }),
         expect.objectContaining({ branch: "task/draft", selected: true }),
       ]),
     )
-    expect(fullDocument.journal.coverage.malformed).toEqual(
+    expect(journalCoverage(fullDocument).malformed).toEqual(
       expect.arrayContaining([expect.objectContaining({ run: malformedRun.id, selected: true })]),
     )
 
@@ -765,8 +812,8 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     // The earlier list populated a local view; refresh after the writer appends the custody event.
     const repeated = await yrd(work, { color: false }, "list", "--json", "--fresh", "--require-match", "task/draft")
     expect(repeated.exitCode, repeated.report).toBe(0)
-    const repeatedDocument = JSON.parse(repeated.stdout) as typeof document
-    expect(repeatedDocument.journal.coverage.missingRunTrailers).toContainEqual(
+    const repeatedDocument = parseDocument(repeated.stdout)
+    expect(journalCoverage(repeatedDocument).missingRunTrailers).toContainEqual(
       expect.objectContaining({
         branch: "task/draft",
         state: "cancelled",
@@ -775,7 +822,7 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
         selected: true,
       }),
     )
-    expect(repeatedDocument.journal.absent ?? "").not.toContain("task/draft@")
+    expect(localExecution(repeatedDocument).absent ?? "").not.toContain("task/draft@")
   })
 
   // @failure A prior execution event with no Run link was printed as the same short generic warning as an expected
@@ -814,22 +861,8 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     }
     const json = await yrd(work, { color: false, columns }, "list", "--json", "task/one")
     expect(json.exitCode, json.report).toBe(0)
-    const unresolvedDocument = JSON.parse(json.stdout) as {
-      journal: {
-        coverage: {
-          missingRunTrailers: readonly {
-            branch: string
-            head: string
-            segment: string
-            state: string
-            expected: boolean
-            reason: string
-            selected: boolean
-          }[]
-        }
-      }
-    }
-    expect(unresolvedDocument.journal.coverage.missingRunTrailers).toEqual(
+    const unresolvedDocument = parseDocument(json.stdout)
+    expect(journalCoverage(unresolvedDocument).missingRunTrailers).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           branch: "task/one",
@@ -869,10 +902,8 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     })
     const listed = await yrd(work, { color: false }, "list", "--json", "task/one")
     expect(listed.exitCode, listed.report).toBe(0)
-    const document = JSON.parse(listed.stdout) as {
-      journal: { absent?: string; coverage: { missingRunTrailers: readonly unknown[] } }
-    }
-    expect(document.journal.coverage.missingRunTrailers).toContainEqual(
+    const document = parseDocument(listed.stdout)
+    expect(journalCoverage(document).missingRunTrailers).toContainEqual(
       expect.objectContaining({
         branch: "task/one",
         state: "failed",
@@ -881,7 +912,7 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
         selected: true,
       }),
     )
-    expect(document.journal.absent).toContain("has no Run trailer")
+    expect(localExecution(document).absent).toContain("has no Run trailer")
     const human = await yrd(work, { color: false }, "list", "task/one")
     expect(human.exitCode, human.report).toBe(0)
     expect(stripAnsi(human.stdout).replace(/\s+/gu, " ")).toContain("run not recorded (pre-fix row)")
@@ -900,15 +931,8 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     expect(history.history?.events.map((event) => event.type)).toEqual(["opened", "cancelled"])
     const listed = await yrd(work, { color: false }, "list", "--json")
     expect(listed.exitCode, listed.report).toBe(0)
-    const document = JSON.parse(listed.stdout) as {
-      journal: {
-        absent?: string
-        coverage: {
-          missingRunTrailers: readonly { branch: string; state: string; expected: boolean; reason: string }[]
-        }
-      }
-    }
-    expect(document.journal.coverage.missingRunTrailers).toContainEqual(
+    const document = parseDocument(listed.stdout)
+    expect(journalCoverage(document).missingRunTrailers).toContainEqual(
       expect.objectContaining({
         branch: "task/one",
         state: "cancelled",
@@ -916,6 +940,6 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
         reason: expect.stringMatching(/withdrawn before execution/i),
       }),
     )
-    expect(document.journal.absent ?? "").not.toContain("has no Run trailer")
+    expect(localExecution(document).absent ?? "").not.toContain("has no Run trailer")
   })
 })

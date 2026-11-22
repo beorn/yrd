@@ -194,6 +194,8 @@ import {
   type Journals,
   type JournalRun,
   type JournalSummary,
+  publishedChange,
+  SCHEMA_VERSION,
   executionOf,
   readJournalSource,
   localAbsent,
@@ -4772,12 +4774,17 @@ export async function coreQueueCommand(
         const listed = watchRows(all, { journals, perRun: options.json === true, latest: request.latest })
         const changes = filterRows(listed, request.terms ?? []).filter((item) => item.row.state !== "draft")
         const rows = filterRows(watchRows(all, { journals }), request.terms ?? [])
-        const documentRows = request.drafts === true ? filterRows(listed, request.terms ?? []) : changes
+        // The published lens: the event projection only, never a journal overlay.
+        // Runs are carried once, in execution, so `--json` no longer duplicates a
+        // change per run it had on this machine (#28522).
+        const publishedRows = filterRows(watchRows(all), request.terms ?? [])
+        const documentRows =
+          request.drafts === true ? publishedRows : publishedRows.filter((item) => item.row.state !== "draft")
         const diagnosticKeys =
           request.terms === undefined || request.terms.length === 0
             ? undefined
             : new Set(
-                documentRows.flatMap((item) => [
+                changes.flatMap((item) => [
                   journalKey(item.row.branch, item.row.head),
                   ...(item.run === undefined ? [] : [journalKey(item.run.branch, item.run.head)]),
                 ]),
@@ -4810,15 +4817,6 @@ export async function coreQueueCommand(
         // The runner's own word decides whether an absent projection is a fault
         // or simply a run that has not written it yet (@yrd/29994).
         const projectionFallback = projectionFallbackReport(localRunner.projectionFallback, localRunner, runnerState)
-        const runnerStatus =
-          options.json === true
-            ? {
-                state: runnerState,
-                service: service.kind === "beating" ? { kind: service.kind } : { kind: service.kind, why: service.why },
-                published,
-                ...(projectionFallback === undefined ? {} : { projectionFallback }),
-              }
-            : undefined
         // The table and stop come from the same authority read as this listing.
         const overrides = overrideFacts(reading.overrides, Date.now())
         // What was queried, where it looked, and what it left out — said on the
@@ -4844,28 +4842,56 @@ export async function coreQueueCommand(
         // the local source and event-store scope are long.
         const scopeParts = [filteredScope, statusLine(), baseScope, ignoreScope].filter((part) => part !== undefined)
         const scope = scopeParts.length === 0 ? undefined : scopeParts.join(" ")
+        // The journal read's own coverage notes ride inside execution: they are
+        // observations of this read, not facts about any change.
+        const journal = journalFact(diagnostics)
+        const { dir: journalDir, malformed: journalMalformed, ...journalNotes } = journal
+        void journalDir
+        void journalMalformed
+        const execution =
+          reading.execution.local === true
+            ? localValue({ ...reading.execution.value, ...journalNotes })
+            : reading.execution
+        // Published runner health and this machine's read stay apart: the merged
+        // `runner` above feeds the RUNNER box, while the wire carries the ref's
+        // own answer in `published.runner` and the local facts in `localRunner`.
+        const { published: _runnerRef, ...localRunnerFacts } = localRunner
+        void _runnerRef
         return {
           observation,
           data: {
+            schemaVersion: SCHEMA_VERSION,
             ...statusFact(),
+            published: {
+              // #28195: a listing states a row's warning in ONE summary line — counts by kind, the
+              // coverage verdict, the admission-warning event — built from the row's structured notice
+              // and never from the reason's prose. `yrd queue show` renders the stored reason in full.
+              changes: documentRows.map((item) => {
+                const row = publishedChange(item.row)
+                return item.row.revertWarning === undefined
+                  ? row
+                  : { ...row, diagnosticSummary: revertWarningLine(item.row) }
+              }),
+              stopped,
+              // The everyday reader of a stopped line: always present, null while
+              // the line runs, so a stop can never be read as absent.
+              pause: pause ?? null,
+              // Always present: an empty array is "no overrides", never an absent field.
+              overrides,
+              // The runner ref is read with the queue refs, so it is available on
+              // every machine; its own signal variants carry its absence. `state`
+              // is the reader-clock judgment over that claim, not a stored value.
+              runner: { ...published, state: runnerState },
+            },
+            execution,
+            // This machine's runner read, with the fallback verdict the RUNNER
+            // box used to carry only in JSON. Published health stays in
+            // published.runner; neither overrides the other.
+            localRunner: localValue({
+              ...localRunnerFacts,
+              ...(projectionFallback === undefined ? {} : { projectionFallbackReport: projectionFallback }),
+            }),
             observation,
-            // #28195: a listing states a row’s warning in ONE summary line — counts by kind, the
-            // coverage verdict, the admission-warning event — built from the row’s structured notice
-            // and never from the reason’s prose. `yrd queue show` renders the stored reason in full.
-            changes: documentRows.map((row) =>
-              row.row.revertWarning === undefined
-                ? row.row
-                : { ...row.row, diagnosticSummary: revertWarningLine(row.row) },
-            ),
-            journal: journalFact(diagnostics),
-            // The runner belongs to the whole queue, even when a selector hides every row.
-            ...(runnerStatus === undefined ? {} : { runner: runnerStatus }),
-            pause: pause ?? null,
-            // The everyday reader of a stopped line: always present, null while
-            // the line runs, so a stop can never be read as absent.
-            stopped,
-            // Always present: an empty array is "no overrides", never an absent field.
-            overrides,
             ...(scope === undefined ? {} : { scope }),
           },
           eventChanges: reading.changes,
