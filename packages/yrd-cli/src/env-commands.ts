@@ -1509,6 +1509,12 @@ interface EnvironmentCloseState {
   readonly discarded: readonly DiscardedCommit[]
   readonly admissibleGitlinks: readonly AdmissibleGitlink[]
   /**
+   * 37775: components whose HEAD resolves to no commit (an interrupted `env open`). Git records nothing in them, so
+   * `--preserve` cannot keep them and "preserve or commit" is the wrong advice; each entry carries git-super's reason
+   * with the one command that restores the pin.
+   */
+  readonly unbornComponents: readonly Readonly<{ path: string; reason: string }>[]
+  /**
    * 33555 (@cto 5a8ec5a1, a5953bad): a detached HEAD whose commits ahead of origin/main are each reachable from some
    * branch, remote-tracking ref or tag loses nothing on close. `ref` names one ref that holds them, so the close says
    * where they are instead of closing with no record.
@@ -1572,8 +1578,10 @@ async function inspectEnvironmentCloseState(
   const status = superStatus({ repo: path })
   const dirty: string[] = []
   let rootAheadContent = 0
+  const unbornComponents: { path: string; reason: string }[] = []
   for (const problem of status.submoduleProblems) {
     dirty.push(`${problem.path}: ${problem.reason}`)
+    if (problem.kind === "unborn-head") unbornComponents.push({ path: problem.path, reason: problem.reason })
   }
   const cleanByPath = new Map<string, boolean>()
   const repoByPath = new Map<string, (typeof status.consultedRepositories)[number]>()
@@ -1848,6 +1856,7 @@ async function inspectEnvironmentCloseState(
     dirty,
     discarded,
     admissibleGitlinks,
+    unbornComponents,
     rootAheadContent,
     retainedComponents,
     ...(heldOn === undefined ? {} : { heldOn }),
@@ -1902,6 +1911,17 @@ async function requireCleanState(
   dropped: () => Promise<string>,
 ): Promise<void> {
   if (state.dirty.length > 0) {
+    // 37775: an interrupted open leaves a component materialized with files and no commit. Git records nothing
+    // there, so `--preserve` cannot keep it and "commit these changes" names work that does not exist; the
+    // refusal names the state and the one command that restores the pin instead.
+    if (state.unbornComponents.length === state.dirty.length) {
+      const which = state.unbornComponents.length === 1 ? "a component holds" : "components hold"
+      throw new Error(
+        `environment ${path}: ${which} no commit — an interrupted open left files and no HEAD, so Git records ` +
+          `nothing there and --preserve cannot keep it. Restore the pinned content and run close again, or move ` +
+          `its files out first:\n${state.dirty.join("\n")}`,
+      )
+    }
     // 34764: root content commits alone need only a branch; the close then keeps them on it (attached root commits are
     // not dirt). Never offered when a component or uncommitted entry is also dirty: a branch keeps neither.
     const rootOnly = detached && state.rootAheadContent > 0 && state.rootAheadContent === state.dirty.length

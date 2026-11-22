@@ -5057,3 +5057,30 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     expect(admission).toEqual({ kind: "admitted" })
   })
 })
+
+/**
+ * @failure 37775: a component left materialized with files and no commit by an interrupted open reads as ordinary
+ *          dirt, so `yrd env close` tells the owner to "preserve or commit" work no ref can hold and never names
+ *          the one command that restores the pin.
+ * @level   l2 (real environment, real materialized component)
+ * @consumer an author closing an environment an interrupted open left behind
+ */
+it("names a component that holds no commit instead of asking for a preserve (37775)", async () => {
+  const w = await world(":")
+  await addMaterializedDependency(w)
+  const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+  const component = join(path, "vendor/dependency")
+  const pin = (await w.git(["rev-parse", "HEAD:vendor/dependency"])).trim()
+  await gitIn(component)(["symbolic-ref", "HEAD", "refs/heads/never-created"])
+  await expect(gitIn(component)(["rev-parse", "HEAD"])).rejects.toThrow()
+
+  const run = capture(w.work)
+  const failure = await closeEnvironment(path, { json: true }, run.io).then(
+    () => "closed",
+    (error: unknown) => (error instanceof Error ? error.message : String(error)),
+  )
+  expect(failure).toContain("holds no commit")
+  expect(failure).toContain(`checkout -f --detach ${pin}`)
+  expect(failure).toContain("an interrupted open left files and no HEAD")
+  expect(failure).not.toContain("preserve or commit these changes")
+})
