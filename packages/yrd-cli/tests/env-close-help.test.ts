@@ -65,5 +65,8 @@ describe("the env close help says what a queued close does to a hold", () => {
     expect(section).toMatch(/without the sweep's ancestry check/i)
     expect(section).toMatch(/kept only for ancestry IS closed by a standing request/i)
     expect(section).toMatch(/recorded hold is not: the request is journaled STALE and dropped/i)
+    // 34329: the native queue can also encounter persistent same-UID denials.
+    expect(section).toMatch(/queue.*census may also be incomplete/is)
+    expect(section).toMatch(/request standing.*environment preserved/is)
   })
 })

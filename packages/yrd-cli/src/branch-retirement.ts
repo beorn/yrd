@@ -1561,7 +1561,7 @@ export async function releaseRetainedCheckouts(
       request.apply !== true
         ? // Lead with the command to run: a confined caller (37675: luna3's sandbox) re-running the preview reaches the
           // same blind census, and --apply is the one cure it can take.
-          "run with --apply; the queue's own round runs the census: --apply files a release request for the queue's own round, whose census reads every same-UID pid. The admission there is unchanged: a process holding the checkout still refuses"
+          "run with --apply; the queue's own round runs the census: --apply files a release request for the queue's own round. That census may also be incomplete; unreadable pids preserve the checkout. The admission there is unchanged: a process holding the checkout still refuses"
         : input.workdir === undefined
           ? "this round could not certify it either. The admission there is unchanged: a process holding the checkout still refuses"
           : `not filed: ${
