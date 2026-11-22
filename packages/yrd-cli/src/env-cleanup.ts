@@ -99,7 +99,7 @@ type ReleaseRoundRow = Readonly<{ repo: string; branch: string; reason: string; 
 
 /**
  * The round's own run of a delegated `drop --release-checkout` (29772): the same release, `--apply`, under the
- * same admission, from the context whose census reads every same-UID pid. The queue command supplies it.
+ * same admission, using the queue round's own census, which may also be incomplete.
  */
 export type ReleaseCheckoutRound = (request: StoredReleaseRequest) => Promise<
   Readonly<{
@@ -1758,7 +1758,7 @@ async function cleanupEnvironments(
     return proofs
   }
   // 22894: a close no caller here could certify is consumed BEFORE the cursor
-  // batch, because this round is the context whose census reads every pid.
+  // batch, using this round's own census; incomplete coverage preserves it.
   const requests = await consumeCloseRequests({
     workdir,
     registry,
