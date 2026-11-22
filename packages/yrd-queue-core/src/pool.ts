@@ -417,7 +417,10 @@ function messageOf(error: unknown): string {
 }
 
 /** One entry a clean would delete, and why the pool may not: another writer's repository, or content it cannot read. */
-export type PooledHold = Readonly<{ entry: string; cause: "independent repository" | "unreadable" }>
+export type PooledHold = Readonly<{
+  entry: string
+  cause: "independent repository" | "unreadable" | "uninspected depth"
+}>
 
 /** A pooled tree whose clean would delete another writer's repository, or content this process cannot read. */
 export class PooledTreeHeld extends Error {
@@ -433,12 +436,22 @@ function describeHolds(holds: readonly PooledHold[]): string {
 
 /**
  * Why deleting `target` would take bytes this program did not write: "independent repository" when a `.git` of its
- * own sits at it or under it, "unreadable" when it cannot be listed (unknown is not ours). `undefined` otherwise — a
- * plain untracked file, or a directory of them, is pool scratch and is cleaned as before (@cto 2026-11-22, #34952).
+ * own sits at it or under it, "unreadable" when it cannot be read (unknown is not ours), "uninspected depth" when it
+ * sits past the depth this check walks — an uninspected subtree is unknown too, never pool scratch. `undefined`
+ * otherwise: a plain untracked file, or a directory of them, is cleaned as before (@cto 2026-11-22, #34952).
  */
-function holdCause(target: string, depth = 0): "independent repository" | "unreadable" | undefined {
-  if (depth > 8) return undefined
-  const stat = statSync(target, { throwIfNoEntry: false })
+function holdCause(target: string, depth = 0): PooledHold["cause"] | undefined {
+  // Past this depth the subtree is not inspected, and what is not inspected cannot be proven pool scratch: holding
+  // it keeps the clean from deleting another writer's repository nested deeper (@dev/15 review, #34952).
+  if (depth > 8) return "uninspected depth"
+  let stat
+  try {
+    stat = statSync(target, { throwIfNoEntry: false })
+  } catch (error) {
+    // silent-fallback-allow: a stat that vanished has nothing left to lose; one this process cannot read IS the hold and is reported
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    return "unreadable"
+  }
   if (stat === undefined || !stat.isDirectory()) return undefined
   let entries: Dirent[]
   try {
