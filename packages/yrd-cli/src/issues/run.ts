@@ -523,7 +523,15 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
           )
         }
       }
-      const annotated = annotateInProgress(verb, parsed, activity === undefined ? { holds } : { holds, activity }, now)
+      // A declared source that failed leaves the columns unknown, never idle: an empty set would say "nobody
+      // wrote", which is the one thing the failure did not establish (@cto 8e7cbb99).
+      const activityUnknown = activityArgv !== undefined && activity === undefined
+      const annotated = annotateInProgress(
+        verb,
+        parsed,
+        activity === undefined ? { holds, ...(activityUnknown ? { activityUnknown } : {}) } : { holds, activity },
+        now,
+      )
       if (!annotated.ok) {
         return fail(
           1,

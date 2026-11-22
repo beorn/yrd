@@ -379,3 +379,37 @@ describe("#37838 computed in_progress", () => {
     })
   })
 })
+
+describe("#37838 a declared activity source that failed", () => {
+  // @cto 8e7cbb99: an empty activity set says "nobody wrote", which a failed read never established. A known hold
+  // still answers true; every other row says null, and the diagnostic the caller already wrote stays the only claim.
+  const page = {
+    rows: [
+      { path: "a/1-held.md", version: "v1", row: { id: "a/1-held.md", title: "held", status: "todo", owner: "@dev/1" } },
+      { path: "a/2-free.md", version: "v1", row: { id: "a/2-free.md", title: "free", status: "todo", owner: "@dev/2" } },
+    ],
+    next: null,
+    complete: true,
+  }
+  const holds: IssuesEnvironmentHold[] = [{ name: "bay-one", issue: "a/1-held.md" }]
+
+  it("reads rows as unknown, not idle, and keeps a known hold true", () => {
+    const annotated = annotateInProgress("list-page", page, { holds, activityUnknown: true }, Date.now()) as Extract<
+      InProgressAnnotation,
+      { ok: true }
+    >
+    expect(annotated.ok).toBe(true)
+    const rows = (annotated.result as { rows: Array<{ row: Record<string, unknown> }> }).rows
+    expect(rows[0]?.row).toMatchObject({ in_progress: true, in_progress_reason: "environment bay-one" })
+    expect(rows[1]?.row).toMatchObject({ in_progress: null, in_progress_reason: null })
+  })
+
+  it("still reads idle when no activity source was declared", () => {
+    const annotated = annotateInProgress("list-page", page, { holds }, Date.now()) as Extract<
+      InProgressAnnotation,
+      { ok: true }
+    >
+    const rows = (annotated.result as { rows: Array<{ row: Record<string, unknown> }> }).rows
+    expect(rows[1]?.row).toMatchObject({ in_progress: false, in_progress_reason: null })
+  })
+})

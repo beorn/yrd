@@ -18,12 +18,18 @@ export type IssuesActivityEvent = Readonly<{ path: string; actor: string; ts: nu
 /** How recent an owner's write must be for the issue to count as in progress (#37838 slice 2). */
 export const OWNER_ACTIVITY_WINDOW_MS = 24 * 60 * 60 * 1000
 
-export type InProgressColumns = Readonly<{ in_progress: boolean; in_progress_reason: string | null }>
+export type InProgressColumns = Readonly<{ in_progress: boolean | null; in_progress_reason: string | null }>
 
 export type InProgressInputs = Readonly<{
   holds: readonly IssuesEnvironmentHold[]
   /** The owner-activity leg's journal records; absent, only environments decide. */
   activity?: readonly IssuesActivityEvent[]
+  /**
+   * A source WAS declared and could not be read. The columns must then say "could not say" (null) rather than
+   * false: an empty activity set means nobody wrote, which is a different fact from nobody being readable
+   * (@cto 8e7cbb99). A known environment hold still answers true.
+   */
+  activityUnknown?: boolean
   /** How fresh an owner's record must be. Defaults to {@link OWNER_ACTIVITY_WINDOW_MS}. */
   windowMs?: number
 }>
@@ -33,6 +39,7 @@ export type InProgressAnnotation =
   | Readonly<{ ok: false; fault: "environment" | "provider"; detail: string }>
 
 const IDLE: InProgressColumns = { in_progress: false, in_progress_reason: null }
+const UNKNOWN: InProgressColumns = { in_progress: null, in_progress_reason: null }
 
 /** Open means an expiry still ahead of now; `expiresAt <= now` is closed, and an unreadable expiry is not a guess. */
 function openHolds(
@@ -103,10 +110,12 @@ function columns(
   owner: string,
   open: ReadonlyMap<string, string>,
   active: ReadonlyMap<string, string>,
+  activityUnknown: boolean,
 ): InProgressColumns {
   const identity = identityOf(path)
   const environment = open.get(identity)
   if (environment !== undefined) return { in_progress: true, in_progress_reason: `environment ${environment}` }
+  if (activityUnknown) return UNKNOWN
   const activity = owner === "" ? undefined : active.get(`${identity}\u0000${owner}`)
   return activity === undefined ? IDLE : { in_progress: true, in_progress_reason: `owner ${owner}, active ${activity}` }
 }
@@ -185,6 +194,7 @@ export function annotateInProgress(
   const open = openHolds(inputs.holds, now)
   if ("unreadable" in open) return { ok: false, fault: "environment", detail: open.unreadable }
   const active = activeByIssue(inputs.activity ?? [], now, inputs.windowMs ?? OWNER_ACTIVITY_WINDOW_MS)
+  const activityUnknown = inputs.activityUnknown === true && inputs.activity === undefined
 
   if (verb === "view") {
     if (!isRecord(result)) return skip(result)
@@ -200,7 +210,7 @@ export function annotateInProgress(
           }
         : skip(result)
     }
-    return { ok: true, result: { ...result, ...columns(id, ownerOf(result), open, active) } }
+    return { ok: true, result: { ...result, ...columns(id, ownerOf(result), open, active, activityUnknown) } }
   }
 
   if (verb === "list-page") {
@@ -220,7 +230,7 @@ export function annotateInProgress(
           detail: `row ${String(index)} carries no string id; cannot say whether it is in progress`,
         }
       }
-      annotated.push({ ...entry, row: { ...row, ...columns(id, ownerOf(row), open, active) } })
+      annotated.push({ ...entry, row: { ...row, ...columns(id, ownerOf(row), open, active, activityUnknown) } })
     }
     return { ok: true, result: { ...page, rows: annotated } }
   }
@@ -240,7 +250,7 @@ export function annotateInProgress(
   }
   const annotated = entries.map((entry) => {
     const row = entry as Record<string, unknown>
-    return { ...row, ...columns(row.id as string, ownerOf(row), open, active) }
+    return { ...row, ...columns(row.id as string, ownerOf(row), open, active, activityUnknown) }
   })
   return {
     ok: true,
