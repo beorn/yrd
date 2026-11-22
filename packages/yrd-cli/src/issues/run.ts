@@ -28,9 +28,15 @@ import {
   type IssuesCode,
   type IssuesVerb,
 } from "./declaration.ts"
-import { annotateInProgress, type IssuesEnvironmentHold } from "./in-progress.ts"
+import {
+  OWNER_ACTIVITY_WINDOW_MS,
+  annotateInProgress,
+  readActivity,
+  type IssuesActivityEvent,
+  type IssuesEnvironmentHold,
+} from "./in-progress.ts"
 
-export type { IssuesEnvironmentHold } from "./in-progress.ts"
+export type { IssuesActivityEvent, IssuesEnvironmentHold } from "./in-progress.ts"
 
 export type IssuesEnvelope = Readonly<{
   declaration: Readonly<{ repository: string; commit: string; path: typeof ISSUES_DECLARATION_PATH }>
@@ -362,15 +368,16 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
   const where = `${repository}@${commit}:${ISSUES_DECLARATION_PATH}`
   if (text === undefined) return fail(1, ISSUES_CODES.declarationMissing, where, "absent")
 
-  let declared: readonly string[] | undefined
+  let declaration: ReturnType<typeof parseIssuesDeclaration>
   try {
-    declared = parseIssuesDeclaration(text, where)[verb]
+    declaration = parseIssuesDeclaration(text, where)
   } catch (error) {
     if (error instanceof IssuesDeclarationError) {
       return { ok: false, exitCode: 1, code: error.code, message: error.message }
     }
     throw error
   }
+  const declared = declaration[verb]
   if (declared === undefined) {
     return fail(1, ISSUES_CODES.unsupported, verb, `${verb} is not declared in ${where} (unsupported)`)
   }
@@ -392,60 +399,74 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
     }
   }
 
-  const argv = substituteArgv(declared, request.values)
-  const command = commandText(declared)
-  const stopped = (): IssuesFailure =>
-    fail(1, ISSUES_CODES.providerFailed, `${verb} ${command}`, `stopped: ${String(options.signal?.reason)}`)
-  if (options.signal?.aborted) return stopped()
-  const decoder = new TextDecoder()
-  await using provider = createProcess({ cwd: options.cwd, env })
-  let result: Awaited<ReturnType<typeof provider.run>>
-  try {
-    result = await provider.run({
-      argv,
-      cwd: options.cwd,
-      env,
-      signal: options.signal,
-      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-      ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
-      onOutput: ({ stream, chunk }) => {
-        if (stream === "stderr") writeStderr(decoder.decode(chunk, { stream: true }))
-      },
-    })
-  } catch (error) {
+  /** Run one declared argv and hand back its stdout, or the named failure the caller reports. */
+  const runDeclared = async (
+    argv: readonly string[],
+    command: string,
+  ): Promise<Readonly<{ ok: true; stdout: string }> | IssuesFailure> => {
+    const stopped = (): IssuesFailure =>
+      fail(1, ISSUES_CODES.providerFailed, `${verb} ${command}`, `stopped: ${String(options.signal?.reason)}`)
     if (options.signal?.aborted) return stopped()
-    if ((error as { code?: unknown } | null)?.code === "ENOENT") {
-      return fail(1, ISSUES_CODES.providerMissing, `${verb} ${command}`, `command ${JSON.stringify(argv[0])} not found`)
+    const decoder = new TextDecoder()
+    await using provider = createProcess({ cwd: options.cwd, env })
+    let result: Awaited<ReturnType<typeof provider.run>>
+    try {
+      result = await provider.run({
+        argv,
+        cwd: options.cwd,
+        env,
+        signal: options.signal,
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
+        onOutput: ({ stream, chunk }) => {
+          if (stream === "stderr") writeStderr(decoder.decode(chunk, { stream: true }))
+        },
+      })
+    } catch (error) {
+      if (options.signal?.aborted) return stopped()
+      if ((error as { code?: unknown } | null)?.code === "ENOENT") {
+        return fail(
+          1,
+          ISSUES_CODES.providerMissing,
+          `${verb} ${command}`,
+          `command ${JSON.stringify(argv[0])} not found`,
+        )
+      }
+      return fail(
+        1,
+        ISSUES_CODES.providerFailed,
+        `${verb} ${command}`,
+        `could not start: ${error instanceof Error ? error.message : String(error)}`,
+      )
     }
-    return fail(
-      1,
-      ISSUES_CODES.providerFailed,
-      `${verb} ${command}`,
-      `could not start: ${error instanceof Error ? error.message : String(error)}`,
-    )
+    if (options.signal?.aborted) return stopped()
+    if (result.timedOut) {
+      return fail(1, ISSUES_CODES.providerTimedOut, `${verb} ${command}`, `killed after ${options.timeoutMs} ms`)
+    }
+    if (result.stalled === true) {
+      return fail(
+        1,
+        ISSUES_CODES.providerStalled,
+        `${verb} ${command}`,
+        `no output for ${options.noProgressTimeoutMs} ms after ${result.lastProgressBytes} bytes; killed`,
+      )
+    }
+    if (result.exitCode !== 0 || result.signal !== null) {
+      const how = result.signal === null ? `exit ${result.exitCode}` : `signal ${result.signal}`
+      return fail(1, ISSUES_CODES.providerFailed, `${verb} ${command}`, `provider ended with ${how}`)
+    }
+    if (result.outputTruncation !== undefined) {
+      return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "exit 0 but stdout overflowed its capture")
+    }
+    return { ok: true, stdout: result.stdout }
   }
-  if (options.signal?.aborted) return stopped()
-  if (result.timedOut) {
-    return fail(1, ISSUES_CODES.providerTimedOut, `${verb} ${command}`, `killed after ${options.timeoutMs} ms`)
-  }
-  if (result.stalled === true) {
-    return fail(
-      1,
-      ISSUES_CODES.providerStalled,
-      `${verb} ${command}`,
-      `no output for ${options.noProgressTimeoutMs} ms after ${result.lastProgressBytes} bytes; killed`,
-    )
-  }
-  if (result.exitCode !== 0 || result.signal !== null) {
-    const how = result.signal === null ? `exit ${result.exitCode}` : `signal ${result.signal}`
-    return fail(1, ISSUES_CODES.providerFailed, `${verb} ${command}`, `provider ended with ${how}`)
-  }
-  if (result.outputTruncation !== undefined) {
-    return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "exit 0 but stdout overflowed its capture")
-  }
+
+  const command = commandText(declared)
+  const ran = await runDeclared(substituteArgv(declared, request.values), command)
+  if (!ran.ok) return ran
   let parsed: unknown
   try {
-    parsed = JSON.parse(result.stdout)
+    parsed = JSON.parse(ran.stdout)
   } catch {
     return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "exit 0 but stdout is not JSON")
   }
@@ -482,7 +503,27 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       )
     }
     if (holds !== undefined) {
-      const annotated = annotateInProgress(verb, parsed, holds, Date.now())
+      const now = Date.now()
+      let activity: readonly IssuesActivityEvent[] | undefined
+      const activityArgv = declaration.activity
+      if (activityArgv !== undefined) {
+        const activityCommand = commandText(activityArgv)
+        try {
+          const answered = await runDeclared(
+            substituteArgv(activityArgv, { cutoff: String(now - OWNER_ACTIVITY_WINDOW_MS) }),
+            activityCommand,
+          )
+          if (!answered.ok) throw new Error(answered.message)
+          activity = readActivity(answered.stdout)
+        } catch (error) {
+          writeStderr(
+            `yrd issues ${verb}: owner-activity columns unavailable: ${
+              error instanceof Error ? error.message : String(error)
+            }\n`,
+          )
+        }
+      }
+      const annotated = annotateInProgress(verb, parsed, activity === undefined ? { holds } : { holds, activity }, now)
       if (!annotated.ok) {
         return fail(
           1,

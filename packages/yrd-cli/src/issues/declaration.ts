@@ -40,6 +40,9 @@ export const ISSUES_VERBS = {
   // Yrd holds it, resolved by the provider; <source> is `<repository>@<sha>`; <text> is the same on every replay.
   event: ["raw", "kind", "source", "text"],
   "list-page": ["page"],
+  // #37838 slice 2: the journal a row's owner was last seen writing, from a cutoff in epoch milliseconds. It is a
+  // declared argv beside the reads (@cto 0a53b47f), so the provider stays the only thing that knows the store.
+  activity: ["cutoff"],
 } as const satisfies Record<string, readonly string[]>
 
 export type IssuesVerb = keyof typeof ISSUES_VERBS

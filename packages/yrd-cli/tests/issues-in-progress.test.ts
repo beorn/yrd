@@ -39,14 +39,21 @@ function git(cwd: string, ...args: string[]): string {
   return result.stdout.toString().trim()
 }
 
-/** A one-repository project whose `main` declares the given verbs, each answered with a fixed payload. */
+/**
+ * A one-repository project whose `main` declares the given verbs, each answered with a fixed payload. A string
+ * value is that verb's literal answer (the activity leg's JSON lines); null answers an operand echoed back.
+ */
 function project(payloads: Readonly<Record<string, unknown>>): string {
   const root = join(realpathSync(mkdtempSync(join(tmpdir(), "yrd-in-progress-"))), "project")
   roots.push(join(root, ".."))
   mkdirSync(root, { recursive: true })
   git(root, "init", "--quiet", "--initial-branch=main")
-  const declaration = Object.keys(payloads)
-    .map((verb) => `${verb}: ${JSON.stringify([BUN, PROVIDER, "reply", `<${verb === "view" ? "key" : "page"}>`])}`)
+  const declaration = Object.entries(payloads)
+    .map(([verb, literal]) =>
+      verb === "activity"
+        ? `${verb}: ${JSON.stringify([BUN, PROVIDER, "reply", literal as string, "<cutoff>"])}`
+        : `${verb}: ${JSON.stringify([BUN, PROVIDER, "reply", `<${verb === "view" ? "key" : "page"}>`])}`,
+    )
     .join("\n")
   writeFileSync(join(root, "issues.yml"), `${declaration}\n`)
   git(root, "add", "-A")
@@ -263,5 +270,82 @@ describe("#37838 computed in_progress", () => {
     if (!outcome.ok) throw new Error(outcome.message)
     expect(outcome.envelope.result).toEqual({ id: "a", title: "a", status: "open", owner: "" })
     expect(notices).toEqual([])
+  })
+
+  // @failure #37838 slice 2: an issue its owner is writing to reads in progress without any environment; a write
+  //          outside the 24 h window, by another seat, or to another issue does not.
+  it("marks an issue in progress when its owner wrote to it inside the window", async () => {
+    const now = Date.now()
+    const record = (path: string, actor: string, ts: number) =>
+      JSON.stringify({ seq: 1, ts, type: "node_updated", actor, source: "item-history", data: { data: { path } } })
+    const journal = [
+      record("@hh/tooling/37821-git-c-walks-up-to-root-repo.md", "@dev/10", now - 60_000),
+      record("@hh/tooling/1-outside.md", "@dev/10", now - 25 * 60 * 60 * 1000),
+      record("@hh/tooling/2-other-seat.md", "@dev/11", now - 60_000),
+    ].join("\n")
+    const root = project({ view: null, activity: journal })
+    const read = async (key: string) => {
+      const outcome = await runIssuesVerb({
+        verb: "view",
+        args: [key],
+        projectRoot: root,
+        cwd: root,
+        environments: async () => [],
+        stderr: () => {},
+      })
+      expect(outcome.ok, outcome.ok ? "" : outcome.message).toBe(true)
+      if (!outcome.ok) throw new Error(outcome.message)
+      return outcome.envelope.result as PageRow
+    }
+    const held = await read(
+      JSON.stringify({ ...issue("@hh/tooling/37821-git-c-walks-up-to-root-repo"), owner: "@dev/10" }),
+    )
+    expect(held.in_progress).toBe(true)
+    expect(held.in_progress_reason).toMatch(/^owner @dev\/10, active \d{4}-\d{2}-\d{2}T/u)
+    for (const [key, owner] of [
+      ["@hh/tooling/1-outside", "@dev/10"],
+      ["@hh/tooling/2-other-seat", "@dev/10"],
+      ["@hh/tooling/2-other-seat", "@dev/12"],
+      ["@hh/tooling/37821-git-c-walks-up-to-root-repo", ""],
+    ] as const) {
+      expect(await read(JSON.stringify({ ...issue(key), owner }))).toMatchObject({
+        in_progress: false,
+        in_progress_reason: null,
+      })
+    }
+    expect(journal.length).toBeGreaterThan(0)
+  })
+
+  // @failure A move rewrites the path, so joining on it would lose the owner's work; the bead number survives
+  //          (#37793 AC2). An open environment still wins the reason when both legs agree.
+  it("joins activity across a move by bead number, and lets an environment win the reason", async () => {
+    const now = Date.now()
+    const moved = JSON.stringify({
+      seq: 2,
+      ts: now - 60_000,
+      type: "node_updated",
+      actor: "@dev/10",
+      source: "item-history",
+      data: { data: { path: "@hh/tooling/37000-old-place.md" } },
+    })
+    const root = project({ view: null, activity: moved })
+    const read = async (key: string, holds: readonly IssuesEnvironmentHold[] = []) => {
+      const outcome = await runIssuesVerb({
+        verb: "view",
+        args: [key],
+        projectRoot: root,
+        cwd: root,
+        environments: async () => holds,
+        stderr: () => {},
+      })
+      expect(outcome.ok, outcome.ok ? "" : outcome.message).toBe(true)
+      if (!outcome.ok) throw new Error(outcome.message)
+      return outcome.envelope.result as PageRow
+    }
+    const afterMove = JSON.stringify({ ...issue("@hh/tooling/37000-new-place"), owner: "@dev/10" })
+    expect(await read(afterMove)).toMatchObject({ in_progress: true })
+    expect(await read(afterMove, [hold("env-wins", "@hh/tooling/37000-new-place", inAnHour())])).toMatchObject({
+      in_progress_reason: "environment env-wins",
+    })
   })
 })
