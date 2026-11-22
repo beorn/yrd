@@ -712,8 +712,9 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       }
       if (annotated.notice !== undefined) writeStderr(annotated.notice)
       parsed = annotated.result
-      if (verb === "traverse" && annotated.unknownRows !== undefined) {
-        parsed = { ...(parsed as Record<string, unknown>), activityUnreadRows: annotated.unknownRows }
+      if (verb === "traverse") {
+        // Always present, so a clean refresh and an all-unknown one have the same shape (0 vs a real count).
+        parsed = { ...(parsed as Record<string, unknown>), activityUnreadRows: annotated.unknownRows ?? 0 }
       }
     }
   }
