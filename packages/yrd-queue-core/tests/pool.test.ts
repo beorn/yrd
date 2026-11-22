@@ -264,3 +264,33 @@ it("holds a warm tree with a subtree it cannot read, instead of treating it as a
     if (existsSync(join(first.path, "private"))) chmodSync(join(first.path, "private"), 0o700)
   }
 })
+
+/**
+ * The depth this check walks stops somewhere, and a subtree past it that was never read is unknown, not pool
+ * scratch: a repository nested deeper must hold the tree rather than be deleted by the clean (@dev/15, #34952).
+ */
+it("holds a warm tree whose other writer's repository sits past the inspected depth", async () => {
+  const { git, newPool, notes, pool } = await poolFixture()
+  const commit = (await git(["rev-parse", "HEAD"])).trim()
+
+  const first = await pool.borrow({ commit, role: "candidate", targetSha: commit })
+  const nested = Array.from({ length: 10 }, (_, index) => `d${index + 1}`)
+  const deep = join(first.path, ...nested)
+  mkdirSync(join(deep, ".git"), { recursive: true })
+  writeFileSync(join(deep, ".git", "HEAD"), "ref: refs/heads/main\n")
+  writeFileSync(join(deep, "work.txt"), "tracked by the other repository\n")
+  await pool.give(first)
+  expect(readFileSync(join(deep, "work.txt"), "utf8")).toBe("tracked by the other repository\n")
+
+  const second = await newPool().borrow({ commit, role: "candidate", targetSha: commit })
+  expect(second.path).toBe(first.path)
+  expect(existsSync(join(second.path, "d1"))).toBe(false)
+  expect(notes.some((note) => note.includes("uninspected depth"))).toBe(true)
+
+  const kept = heldTrees(first.path)
+  expect(kept).toHaveLength(1)
+  expect(readFileSync(join(kept[0] ?? "", ...nested, "work.txt"), "utf8")).toBe(
+    "tracked by the other repository\n",
+  )
+  await second.remove()
+})
