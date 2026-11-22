@@ -416,6 +416,17 @@ async function readListPages(
       `the last page (${pageIndex}) is incomplete and the provider sent no page after it; no rows served`,
     )
   }
+  // @cto f8d9b5b1: the snapshot stays private until EXACTLY ONE terminal frame. A provider that keeps writing
+  // after complete:true is not publishing a cut this reader can vouch for, so the trailing window cannot be
+  // silently dropped in its favour.
+  if (kept.length < pages.pages.length) {
+    return fail(
+      1,
+      ISSUES_CODES.providerInvalidResult,
+      `${input.verb} ${input.command}`,
+      `the terminal page (${pageIndex}) says complete but the provider sent ${pages.pages.length - kept.length} more page(s) after it; no rows served`,
+    )
+  }
   const last = kept[kept.length - 1] as Record<string, unknown>
   if (typeof last.population === "number" && last.population !== rowsRead) {
     return fail(

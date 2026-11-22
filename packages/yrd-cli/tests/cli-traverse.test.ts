@@ -263,6 +263,22 @@ describe("#37838 one Workboard refresh enters Yrd once", () => {
     expect(outcome.message).toContain("no rows served")
   }, 120_000)
 
+  it("refuses trailing output after the terminal complete frame instead of publishing it", async () => {
+    const fixture = project(
+      streamed([
+        { rows: [row("a")], next: null, complete: true },
+        { rows: [row("b")], next: null, complete: true },
+      ]),
+    )
+    const outcome = await listPage(fixture.root, true)
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.code).toBe(ISSUES_CODES.providerInvalidResult)
+    expect(outcome.message).toContain("terminal page (1) says complete")
+    expect(outcome.message).toContain("1 more page(s) after it")
+    expect(outcome.message).toContain("no rows served")
+  }, 120_000)
+
   it("answers the 256th complete page and refuses an incomplete 256th at the internal bound", async () => {
     const full = Array.from({ length: 256 }, (_, index) => ({
       rows: [row(`r${String(index)}`)],
