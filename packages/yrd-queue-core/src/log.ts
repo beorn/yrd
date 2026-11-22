@@ -2101,8 +2101,17 @@ function runsIn(
  */
 export function readJournalSource(
   dir: string,
-  options: ReadJournalsOptions & { detail?: "include" } = {},
-): LocalSource<Journals> {
+  options: ReadJournalsOptions & { detail: "omit" },
+): LocalSource<Journals<JournalSummary>>
+export function readJournalSource(
+  dir: string,
+  options?: ReadJournalsOptions & { detail?: "include" },
+): LocalSource<Journals>
+export function readJournalSource(dir: string, options: ReadJournalsOptions): LocalSource<Journals<JournalSummary>>
+export function readJournalSource(
+  dir: string,
+  options: ReadJournalsOptions = {},
+): LocalSource<Journals<JournalSummary>> {
   // `runIds` names the files to open and never lists the directory, so the
   // directory's own existence is only a question for a whole-window read.
   if (options.runIds === undefined) {

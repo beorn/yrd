@@ -194,6 +194,13 @@ import {
   type Journals,
   type JournalRun,
   type JournalSummary,
+  executionOf,
+  readJournalSource,
+  localAbsent,
+  localValue,
+  type Execution,
+  type Local,
+  type LocalSource,
   type Git,
   type IssueResolution,
   type AdmissionOutcome,
@@ -7526,6 +7533,8 @@ export type EventListingResult<Run extends JournalSummary = JournalRun> = Readon
   document: readonly Row[]
   history: ReadonlyMap<string, readonly EventHistoryRow[]>
   journals: Journals<Run>
+  /** The journal read as this machine's answer: absent and unreadable stay apart from a readable empty one. */
+  execution: Local<Execution<Run>>
   drafts: DraftReading | undefined
   acquisition?: Readonly<{ read: number; retained: number }>
   pause: PauseRecord | undefined
@@ -7729,13 +7738,18 @@ export async function readEventListing(
   const journalsFor = async (
     history: EventListingResult["history"],
     rows: EventListingResult["all"],
-  ): Promise<Journals<JournalSummary>> => {
+  ): Promise<Readonly<{ journals: Journals<JournalSummary>; execution: Local<Execution<JournalSummary>> }>> => {
     const detail = options.journalDetail ?? "include"
     const dir = join(workdir, "logs")
     if (options.skipJournals === true) {
-      return { dir, absent: "Compact history did not read run journals", malformed: [], runs: new Map() }
+      const absent = "Compact history did not read run journals"
+      return { journals: { dir, absent, malformed: [], runs: new Map() }, execution: localAbsent(absent) }
     }
-    const read = (runTerminal?: (id: string) => boolean): Journals<JournalSummary> => {
+    // A directory this process could not list is not the same as one that held
+    // nothing (#28522): the ingress source travels with the read result below.
+    const read = (
+      runTerminal?: (id: string) => boolean,
+    ): Readonly<{ journals: Journals<JournalSummary>; source: LocalSource<Journals<JournalSummary>> }> => {
       const judged = runTerminal === undefined ? {} : { runTerminal }
       const listed = new Set(rows.map((row) => row.branch))
       const segments =
@@ -7748,10 +7762,14 @@ export async function readEventListing(
           return id === undefined ? [] : [id]
         }),
       )
-      const journals =
+      const source: LocalSource<Journals<JournalSummary>> =
         options.branch === undefined && recent === undefined
-          ? readJournals(dir, { detail, sinceMs: options.journalSinceMs ?? FULL_READ_RUNS_MS, ...judged })
-          : readJournals(dir, { runIds: ids, branch: options.branch, detail, ...judged })
+          ? readJournalSource(dir, { detail, sinceMs: options.journalSinceMs ?? FULL_READ_RUNS_MS, ...judged })
+          : readJournalSource(dir, { runIds: ids, branch: options.branch, detail, ...judged })
+      const journals: Journals<JournalSummary> =
+        source.kind === "readable" || source.kind === "malformed-partial"
+          ? source.value
+          : { dir, malformed: [], runs: new Map() }
       // enumerateChangeSegments has already validated the complete event chain.
       // Only its own known opening and wholly pre-execution sequence prove an
       // expected absence; the resting state alone cannot erase prior execution.
@@ -7820,7 +7838,7 @@ export async function readEventListing(
                   : "malformed journal row for the acquired change segment",
         }
       })
-      return { ...journals, missingRunTrailers, malformed }
+      return { journals: { ...journals, missingRunTrailers, malformed }, source }
     }
     // A source-changed artifact is repaired only when its round's writer is
     // proven gone (28918), and that proof costs a Git read of the runner claim.
@@ -7829,17 +7847,35 @@ export async function readEventListing(
     // reader consults the probe ONLY on a source-changed artifact, so whatever
     // it asks about is exactly what cannot be reused.
     const asked = new Set<string>()
-    const journals = read((id) => {
+    let outcome = read((id) => {
       asked.add(id)
       return terminalJournalRuns.has(id)
     })
-    if (asked.size === 0 || [...asked].every((id) => terminalJournalRuns.has(id))) return journals
-    const left: string[] = []
-    const liveness = await readRunnerLiveness(git, repo, config.target.branch, config.target.remote, runnerTip)
-    const judged = read(runTerminalProbe(liveness, dir, (message) => left.push(message)))
-    return left.length === 0
-      ? judged
-      : { ...judged, absent: [judged.absent, ...left].filter((part) => part !== undefined).join("; ") }
+    if (asked.size > 0 && ![...asked].every((id) => terminalJournalRuns.has(id))) {
+      const left: string[] = []
+      const liveness = await readRunnerLiveness(git, repo, config.target.branch, config.target.remote, runnerTip)
+      const judged = read(runTerminalProbe(liveness, dir, (message) => left.push(message)))
+      outcome =
+        left.length === 0
+          ? judged
+          : {
+              journals: {
+                ...judged.journals,
+                absent: [judged.journals.absent, ...left].filter((part) => part !== undefined).join("; "),
+              },
+              source: judged.source,
+            }
+    }
+    const { journals, source } = outcome
+    return {
+      journals,
+      execution:
+        source.kind === "absent"
+          ? localAbsent(`run journal not found at ${dir}`)
+          : source.kind === "unreadable"
+            ? localAbsent(source.why)
+            : localValue(executionOf(journals)),
+    }
   }
 
   const observe = async (qRefs: ReadonlyMap<string, string>, bRefs: ReadonlyMap<string, string>) =>
@@ -7932,7 +7968,7 @@ export async function readEventListing(
         ...cache.reading,
         ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
         observation: await observe(cache.queueRefs, cache.branchRefs),
-        journals: await journalsFor(cache.reading.history, cache.reading.all),
+        ...(await journalsFor(cache.reading.history, cache.reading.all)),
       },
       workdir,
       options?.onIssueDiagnosticsUnavailable,
@@ -7972,7 +8008,7 @@ export async function readEventListing(
         ...cache.reading,
         ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
         observation: await observe(cache.queueRefs, branchRefs),
-        journals: await journalsFor(cache.reading.history, cache.reading.all),
+        ...(await journalsFor(cache.reading.history, cache.reading.all)),
       },
       workdir,
       options?.onIssueDiagnosticsUnavailable,
@@ -8252,7 +8288,7 @@ export async function readEventListing(
     all,
     document,
     history: titledHistory,
-    journals: await journalsFor(titledHistory, all),
+    ...(await journalsFor(titledHistory, all)),
     drafts,
     pause: operational.stop,
     overrides: operational.overrides,
