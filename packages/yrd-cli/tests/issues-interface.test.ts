@@ -397,8 +397,21 @@ describe("yrd issues", () => {
     expect(ran.exitCode).toBe(1)
     expect(ran.stderr).toContain("fake provider refused")
     expect(ran.stderr).toContain(
-      `yrd-issues-provider-failed: list ${BUN} ${PROVIDER} exit3: provider ended with exit 3`,
+      `yrd-issues-provider-failed: list ${BUN} ${PROVIDER} exit3: provider ended with exit 3: fake provider refused`,
     )
+  })
+
+  it("keeps a provider's named cause in the failure, not just in raw stderr (rule: provider failure names why)", async () => {
+    const root = project({
+      "issues.yml": declare({ list: provider("raised", "cursor 42 is ahead of this journal's head 7; do a full read") }),
+    })
+    const ran = await yrd(root, "issues", "list")
+    expect(ran.exitCode).toBe(1)
+    expect(ran.stderr).toContain(
+      "provider ended with exit 1: TypeError: cursor 42 is ahead of this journal's head 7; do a full read",
+    )
+    // The code frame is the provider's first line; the machine-readable failure must carry its named refusal instead.
+    expect(ran.stderr).not.toContain("provider ended with exit 1: 427 |")
   })
 
   it("refuses a close reason outside completed|not-planned with exit 2 (rule: bad arguments)", async () => {

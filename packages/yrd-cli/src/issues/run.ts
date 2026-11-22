@@ -110,6 +110,24 @@ function commandText(argv: readonly string[]): string {
   return argv.map((word) => (word === "" || /[\s"'`$\\]/u.test(word) ? JSON.stringify(word) : word)).join(" ")
 }
 
+/**
+ * The provider's own words for a refusal, as ONE bounded line. A caller deciding whether to retry, restart a whole
+ * read, or stop must not have to parse a stack frame, and a named provider cause must never reach it as a bare exit
+ * code (docs/principles.md § Fail Loud, Fail Now). A line shaped `Name: detail` is the provider's named refusal, so
+ * the last such line wins; otherwise the first non-empty line is the provider's first word. ANSI is stripped and
+ * whitespace collapses, so the detail stays one field of one message.
+ */
+function providerDiagnostic(stderr: string): string | undefined {
+  const lines = stderr
+    .split("\n")
+    .map((line) => line.replace(/\u001b\[[0-9;]*m/gu, "").trim())
+    .filter((line) => line !== "")
+  if (lines.length === 0) return undefined
+  const named = lines.filter((line) => /^(?:[A-Za-z]*Error|[a-z][a-z0-9-]*):\s*\S/u.test(line))
+  const line = (named.at(-1) ?? lines[0]!).replace(/\s+/gu, " ")
+  return line.length > 300 ? `${line.slice(0, 300)}…` : line
+}
+
 function isExpectedOwner(value: unknown): value is string | null {
   return value === null || typeof value === "string"
 }
@@ -637,7 +655,13 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
     }
     if (result.exitCode !== 0 || result.signal !== null) {
       const how = result.signal === null ? `exit ${result.exitCode}` : `signal ${result.signal}`
-      return fail(1, ISSUES_CODES.providerFailed, `${verb} ${command}`, `provider ended with ${how}`)
+      const diagnostic = providerDiagnostic(result.stderr)
+      return fail(
+        1,
+        ISSUES_CODES.providerFailed,
+        `${verb} ${command}`,
+        `provider ended with ${how}${diagnostic === undefined ? "" : `: ${diagnostic}`}`,
+      )
     }
     if (result.outputTruncation !== undefined) {
       return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "exit 0 but stdout overflowed its capture")

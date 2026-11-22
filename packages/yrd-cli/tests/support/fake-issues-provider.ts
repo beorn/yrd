@@ -4,6 +4,7 @@
  *   json   print {"argv": [...rest]} and exit 0
  *   text   print a line that is not JSON and exit 0
  *   exit3  write "fake provider refused" to stderr and exit 3
+ *   raised <message>  write a code frame, then `TypeError: <message>`, and exit 1 (a provider that threw)
  *   sleep  sleep 30 s (the caller's timeout must kill it)
  *   stall  write one stderr line, then sleep 30 s silently (the no-progress lease must kill it)
  *   trace  record the requested key and whether queue output is complete; issue-3 fails
@@ -68,6 +69,11 @@ if (mode === "json") {
 } else if (mode === "exit3") {
   process.stderr.write("fake provider refused\n")
   process.exit(3)
+} else if (mode === "raised") {
+  const [message] = rest
+  if (message === undefined) throw new Error("raised requires a message")
+  process.stderr.write(`427 |     const oldest = row?.oldest ?? null\n      ^\nTypeError: ${message}\n`)
+  process.exit(1)
 } else if (mode === "sleep") {
   await Bun.sleep(30_000)
 } else if (mode === "stall") {
