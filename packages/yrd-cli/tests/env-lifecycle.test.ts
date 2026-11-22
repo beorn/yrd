@@ -5080,9 +5080,10 @@ it("names a component that holds no commit instead of asking for a preserve (377
     (error: unknown) => (error instanceof Error ? error.message : String(error)),
   )
   expect(failure).toContain("holds no commit")
+  expect(failure).toContain(`checkout -f --detach ${pin}`)
+  expect(failure).toContain("overwrites the component's working files")
   expect(failure).toContain(`reset ${pin}`)
   expect(failure).toContain("checkout-index -a")
-  expect(failure).not.toContain("checkout -f")
   expect(failure).toContain("an interrupted open left files and no HEAD")
   expect(failure).not.toContain("preserve or commit these changes")
 })
