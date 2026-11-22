@@ -1971,7 +1971,13 @@ function buildProgram(
       .option("--timeout-ms <n>", "kill the provider after this many milliseconds (yrd-issues-provider-timed-out)", int)
     // NO OPTION IS ACCEPTED AND IGNORED: a read takes no replay key, so --id is refused on it.
     if (write) command.option("--id <id>", "the event's replay key; required, the provider dedupes on it")
-    if (verb === "list-page") command.description("read a finite page using the provider's JSON page request")
+    if (verb === "list-page") {
+      // #37838 (@cto e1873f39): the traversal opt-in is a key in the caller's own page request, so the one place
+      // a consumer looks must name it — no second verb and no declaration key to discover.
+      command.description(
+        "read a finite page using the provider's JSON page request; traverse:true reads every page, one JSON line each",
+      )
+    }
     if (verb === "assign") {
       command
         .option("--expected-owner <json>", "owner observed before assignment, as a JSON string or null")
