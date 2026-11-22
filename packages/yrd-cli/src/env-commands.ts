@@ -2442,8 +2442,8 @@ export async function closeEnvironment(
   /**
    * Internal, never a CLI option (22894). The `env close` verb delegates an
    * uncertifiable census to the queue's own round; a queue-round caller (the
-   * request pass, the sweep) must refuse instead — it IS the capable context,
-   * and filing a request from it would close a path nobody asked for.
+   * request pass, the sweep) must refuse instead when its own census is also
+   * incomplete; filing another request would close a path nobody asked for.
    */
   onIncompleteCensus: CloseAdmissionMode = "delegate",
   /** Internal conditional-intent check; the package entry never forwards it. */

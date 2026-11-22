@@ -304,7 +304,7 @@ function closeRemedy(options: EnvCloseRequestOptions): string {
 
 /**
  * Consume the durable close requests a caller filed because its own same-UID CWD
- * census could not certify the close (22894). This round IS the capable context:
+ * census could not certify the close (22894). This round uses its own census:
  * it runs the SAME `closeEnvironment` lifecycle the direct verb runs, under the
  * direct admission predicate (clean, unlocked, no holder, ancestry not required),
  * up to CLOSE_ATTEMPTS_PER_ROUTE locked close attempts per invocation.
@@ -705,7 +705,7 @@ async function consumeCloseRequests(
           },
         },
         undefined,
-        // The round IS the capable context: an incomplete census here must
+        // The round uses its own census: incomplete coverage here must
         // never file a second request (that is a close nobody asked for).
         "refuse",
         ending === undefined

@@ -1459,8 +1459,8 @@ export async function releaseRetainedCheckouts(
       // A confined caller cannot certify the release, and re-running its own
       // command from where it stands reaches the same blind census (29772).
       // The cure it CAN take is the one env close already has: --apply files a
-      // release request, and the queue's own round, whose census reads every
-      // same-UID pid, reruns this release under the same admission. The census
+      // release request, and the queue's own round reruns this release under
+      // the same admission; its census may also be incomplete. The census
       // receipt and this reader's privilege facts stay in the detail, and the
       // uncleared pids stay named: an unreadable pid is never treated as absent.
       // What became of the hold is appended once the delegation is decided.
