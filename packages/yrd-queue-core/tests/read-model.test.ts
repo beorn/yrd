@@ -102,6 +102,65 @@ const journals: Journals<JournalSummary> = {
   ]),
 }
 
+/** Two attempts at ONE branch@head, newest first, as the journal map holds them. */
+const attempts: Journals<JournalSummary> = {
+  dir: "/queue/logs",
+  malformed: [],
+  runs: new Map([
+    [
+      "task/1@" + "a".repeat(40),
+      [
+        {
+          id: "q-later",
+          startedAt: new Date("2026-11-22T10:40:00Z"),
+          branch: "task/1",
+          head: "a".repeat(40),
+          checks: [],
+          at: new Date("2026-11-22T10:50:00Z"),
+          merge: "b".repeat(40),
+        },
+        {
+          id: "q-earlier",
+          startedAt: new Date("2026-11-22T10:30:00Z"),
+          branch: "task/1",
+          head: "a".repeat(40),
+          checks: [],
+          at: new Date("2026-11-22T10:35:00Z"),
+        },
+      ],
+    ],
+  ]),
+}
+
+describe("two attempts at one head (28522)", () => {
+  it("keeps both runs, each identified by its own id and the same branch@head", () => {
+    const execution = executionOf(attempts)
+    // group-by-branch+head identifies the CANDIDATES only; each attempt keeps its own id,
+    // in the journal's own newest-first order, with no index given a meaning.
+    expect(execution.runs.map((run) => run.id)).toEqual(["q-later", "q-earlier"])
+    expect(execution.runs.map((run) => `${run.branch}@${run.head}`)).toEqual([
+      `task/1@${"a".repeat(40)}`,
+      `task/1@${"a".repeat(40)}`,
+    ])
+  })
+
+  it("publishes the row's own ending, never a run's", () => {
+    // The published failure is the first attempt's ending and says so itself: no
+    // run list is folded into it, so a later attempt's merge cannot ride along.
+    const published = publishedChange({
+      format: "event",
+      branch: "task/1",
+      head: "a".repeat(40),
+      state: "failed",
+      run: "q-earlier",
+      reason: "check failed",
+    } as Row)
+    expect(published.run).toBe("q-earlier")
+    expect(published.merge).toBeUndefined()
+    expect("result" in published).toBe(false)
+  })
+})
+
 describe("executionOf / executionAnswer", () => {
   it("flattens every run and keeps the keyed defects", () => {
     const execution = executionOf(journals)

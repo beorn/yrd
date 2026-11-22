@@ -1227,6 +1227,39 @@ describe("a run's journal, read back", () => {
     expect(perRun[1]?.row.next?.because).toContain("restart the watch from the landing root")
   })
 
+  // @cto e288e42b (28522): association between a published ending and a local
+  // attempt is by evidence only. The fold attributes a merge to the run that
+  // recorded it, or to the row's own current run — never to a sibling attempt
+  // at the same head, and never by index or by nearest timestamp.
+  it("never hands an earlier attempt a later attempt's merge (28522)", () => {
+    const at = new Date("2026-11-22T10:00:00.000Z")
+    const branch = "task/two-attempts"
+    const head = "a".repeat(40)
+    const { dir, run: earlier } = journalDir(
+      [{ at: at.toISOString(), branch, decision: "failed", head, kind: "change" }],
+      at,
+    )
+    const later = new Date(at.getTime() + 60_000)
+    const retry = openLog(dir, () => later)
+    const merge = "b".repeat(40)
+    retry.write({ at: later.toISOString(), branch, decision: "merged", head, kind: "change" })
+    retry.write({ at: later.toISOString(), branch, head, kind: "merge", commit: merge })
+    const journals = readJournals(dir, { now: later })
+    const runs = journals.runs.get(journalKey(branch, head)) ?? []
+    // One head, two attempts: both local runs stay, newest first, each with its own id.
+    expect(runs.map((run) => run.id)).toEqual([retry.id, earlier])
+    // The published row is the SECOND attempt's ending.
+    const current = { branch, head, state: "merged", run: retry.id, merge } as Row
+    const perRun = watchRows([current], { journals, perRun: true })
+    const older = perRun.find((item) => item.run?.id === earlier)?.row
+    expect(older?.run).toBe(earlier)
+    // The earlier attempt recorded no merge and is not the current run: the later
+    // attempt's SHA must not be inherited, under any timestamp or index rule.
+    expect(older?.merge).toBeUndefined()
+    const newest = perRun.find((item) => item.run?.id === retry.id)?.row
+    expect(newest?.merge).toBe(merge)
+  })
+
   // Was "still refuses a partial incident outside a change-ref race
   // diagnostic". 24408 supersedes the refusal, not the detection: a partial
   // incident that is not a race diagnostic is still a defect, and it is still

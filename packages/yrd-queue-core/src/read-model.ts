@@ -49,6 +49,20 @@ type JournalOnlyField = (typeof JOURNAL_ONLY_FIELDS)[number]
 /** One change as its own refs describe it: no journal-only field can be present. */
 export type PublishedChange = Readonly<Omit<Row, JournalOnlyField>>
 
+/**
+ * What the read itself has to say beyond the runs: expected pre-execution
+ * absences, projection fallbacks, window files it did not open, and the
+ * sentence for a directory that held nothing. These are local observations of
+ * the read, never facts about a change, so they ride inside `execution`.
+ */
+export type JournalReadNotes = Readonly<{
+  absent?: string
+  fallbacks?: Journals["fallbacks"]
+  coverage?: Readonly<{ missingRunTrailers: readonly unknown[]; malformed: readonly unknown[] }>
+  unread?: number
+  unreadReason?: string
+}>
+
 /** Every journal row read on this machine, keyed by the change each one wrote about. */
 export type Execution<Run extends JournalSummary = JournalSummary> = Readonly<{
   /** The directory that was read, so a reader can name the source it did or did not see. */
@@ -61,7 +75,8 @@ export type Execution<Run extends JournalSummary = JournalSummary> = Readonly<{
   runs: readonly Run[]
   /** Rows that could not be read, each naming its run, key and sentence. */
   malformed: Journals["malformed"]
-}>
+}> &
+  JournalReadNotes
 
 /**
  * The published projection of one mixed row, field by field.
