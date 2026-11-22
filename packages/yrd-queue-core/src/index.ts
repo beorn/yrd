@@ -421,3 +421,5 @@ export type { LocalBranchRetirement, LocalBranchRetirementResult } from "./local
 
 export { isLocal, localAbsent, localCollectionAnswer, localSourceState, localValue } from "./local.ts"
 export type { Local, LocalSource, LocalSourceState } from "./local.ts"
+export { executionAnswer, executionOf, publishedChange, SCHEMA_VERSION } from "./read-model.ts"
+export type { Execution, PublishedChange } from "./read-model.ts"
