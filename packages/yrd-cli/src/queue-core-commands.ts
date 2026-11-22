@@ -5763,14 +5763,21 @@ export async function coreQueueCommand(
             io,
             true,
             {
+              schemaVersion: SCHEMA_VERSION,
               ...statusFact(),
               queue: name,
-              stopped: stopFact(reading.pause),
               detail: "compact",
-              changes: histories.map(({ events, ...history }) => ({
-                ...history,
-                events: events.map(({ id }) => ({ id })),
-              })),
+              published: {
+                // The event chains and their ids only: a compact reading names what the
+                // refs record, and its scope says neither checks nor journals were read.
+                changes: histories.map(({ events, ...history }) => ({
+                  ...publishedChange(history),
+                  events: events.map(({ id }) => ({ id })),
+                })),
+                stopped: stopFact(reading.pause),
+              },
+              execution: reading.execution,
+              localRunner: localValue(await readRunnerFacts(workdir)),
               observation: reading.observation,
               scope: `${scope} Event IDs are included; check views and run journals were not read.`,
             },
@@ -5831,21 +5838,40 @@ export async function coreQueueCommand(
                 (branch) =>
                   `Raw events: ${formatQueueCommand(io, formatStoredQueueAddress(name), ["queue", "show", branch, "--json"])}`,
               )
+        // The published histories keep their event chains, endings and the checks the
+        // refs declare; the journal read's own notes and this machine's runner read
+        // ride beside them, marked local, so neither can be mistaken for a published
+        // fact (#28522).
+        const journal = journalFact(journalDiagnostics(reading.journals))
+        const { dir: journalDir, malformed: journalMalformed, ...journalNotes } = journal
+        void journalDir
+        void journalMalformed
+        const execution =
+          reading.execution.local === true
+            ? localValue({ ...reading.execution.value, ...journalNotes })
+            : reading.execution
         emit(
           io,
           options.json,
           {
+            schemaVersion: SCHEMA_VERSION,
             ...statusFact(),
             queue: name,
-            changes: histories.map((history) => {
-              const view = views.get(history)
-              return {
-                ...history,
-                ...(view?.checks === undefined || view.checks.length === 0 ? {} : { checks: view.checks }),
-                ...(view?.note === undefined ? {} : { checksNote: view.note }),
-              }
-            }),
-            journal: journalFact(journalDiagnostics(reading.journals)),
+            published: {
+              changes: histories.map((history) => {
+                const view = views.get(history)
+                const { events, ...row } = history
+                return {
+                  ...publishedChange(row),
+                  events,
+                  ...(view?.checks === undefined || view.checks.length === 0 ? {} : { checks: view.checks }),
+                  ...(view?.note === undefined ? {} : { checksNote: view.note }),
+                }
+              }),
+              stopped: stopFact(reading.pause),
+            },
+            execution,
+            localRunner: localValue(await readRunnerFacts(workdir)),
             observation: reading.observation,
             scope,
           },

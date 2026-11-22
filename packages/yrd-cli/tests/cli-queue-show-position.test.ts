@@ -8,7 +8,7 @@
  * @consumer an agent checking where its submitted change stands in the queue
  * @testonly none
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -16,6 +16,7 @@ import { changeInput, changesRef, createEventStore, readEventQueue, submit } fro
 import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { workdirOf } from "../src/workdir.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
@@ -89,11 +90,16 @@ async function queueWithTwoChanges(): Promise<string> {
 
 type Change = Readonly<{ branch: string; position?: number; state: string }>
 
+/** The published change rows of a `queue list` or `queue show` document (#28522). */
+function publishedChanges(reading: Ran): readonly Change[] {
+  const parsed = JSON.parse(reading.stdout) as { published: { changes: readonly Change[] } }
+  return parsed.published.changes
+}
+
 /** The line positions a reading reports, keyed by branch, for the changes holding one. */
 function positions(reading: Ran): Record<string, number> {
-  const parsed = JSON.parse(reading.stdout) as { changes: readonly Change[] }
   const found: Record<string, number> = {}
-  for (const change of parsed.changes) {
+  for (const change of publishedChanges(reading)) {
     if (change.position !== undefined) found[change.branch] = change.position
   }
   return found
@@ -249,6 +255,39 @@ describe("`yrd queue show` and the merge-line position (#29342)", () => {
     expect(overflow.stderr).toContain("event history exceeds maxEvents=50")
   })
 
+  // @cto e288e42b (28522): a change-history document names which local source could
+  // not answer and why. Absent, readable-empty and readable-present are three
+  // different answers, and none of them is a dash, a STOPPED or a zero.
+  it("marks the local run read it could not make, and answers a readable empty one as a measurement", async () => {
+    const work = await queueWithTwoChanges()
+    type Execution = { local: true; value: { runs: readonly unknown[]; dir: string } } | { local: false; why: string }
+
+    const absent = await yrd(work, "queue", "show", "--all", "--json")
+    expect(absent.exitCode, absent.report).toBe(0)
+    const absentDocument = JSON.parse(absent.stdout) as { schemaVersion: number; execution: Execution; published: unknown }
+    expect(absentDocument.schemaVersion).toBe(2)
+    if (absentDocument.execution.local !== false) throw new Error("expected an absent run journal")
+    expect(absentDocument.execution.why).toContain("run journal not found at")
+    expect(absentDocument.execution.why).toContain("logs")
+
+    // A compact reading opens no journals at all, and says so rather than looking empty.
+    const compact = await yrd(work, "queue", "show", "--all", "--json", "--compact")
+    expect(compact.exitCode, compact.report).toBe(0)
+    const compactDocument = JSON.parse(compact.stdout) as { detail: string; execution: Execution }
+    expect(compactDocument.detail).toBe("compact")
+    if (compactDocument.execution.local !== false) throw new Error("expected a compact read to withhold the journals")
+    expect(compactDocument.execution.why).toBe("Compact history did not read run journals")
+
+    // The directory exists and holds nothing: a readable population of zero runs.
+    mkdirSync(join(await workdirOf(gitIn(work), { cwd: work }), "logs"), { recursive: true })
+    const empty = await yrd(work, "queue", "show", "--all", "--json")
+    expect(empty.exitCode, empty.report).toBe(0)
+    const emptyDocument = JSON.parse(empty.stdout) as { execution: Execution }
+    if (emptyDocument.execution.local !== true) throw new Error("expected a readable empty journal population")
+    expect(emptyDocument.execution.value.runs).toEqual([])
+    expect(emptyDocument.execution.value.dir).toContain("logs")
+  })
+
   it("reports list's line position where it reads the line, and none where it reads one branch", async () => {
     const work = await queueWithTwoChanges()
 
@@ -267,14 +306,14 @@ describe("`yrd queue show` and the merge-line position (#29342)", () => {
     for (const [branch, position] of Object.entries({ "task/one": 1, "task/two": 2 })) {
       const show = await yrd(work, "queue", "show", branch, "--json")
       expect(show.exitCode, show.report).toBe(0)
-      const parsed = JSON.parse(show.stdout) as { changes: readonly Change[] }
+      const rows = publishedChanges(show)
       expect(
-        parsed.changes.map((change) => change.branch),
+        rows.map((change) => change.branch),
         show.report,
       ).toContain(branch)
       expect(positions(show), show.report).toEqual({})
       expect(
-        parsed.changes.every((change) => change.position === undefined),
+        rows.every((change) => change.position === undefined),
         show.report,
       ).toBe(true)
       expect(positions(list)[branch], list.report).toBe(position)
