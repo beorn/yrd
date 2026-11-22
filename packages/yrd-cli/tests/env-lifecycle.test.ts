@@ -4703,8 +4703,8 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
   /**
    * @failure 22894: a caller whose own same-UID CWD census cannot read every pid
    *          may neither certify the close nor state an intent: it refuses, and
-   *          the environment waits for a human. The intent belongs to a context
-   *          whose census reads every pid.
+   *          the environment waits for a human. A real close may file intent,
+   *          but its consumer must still certify its own census.
    * @level   l1 (injected incomplete census at the existing process-census boundary)
    * @consumer every seat whose sandbox scopes ptrace over other same-UID pids
    */
@@ -4883,6 +4883,8 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       expect(run.stderr()).toContain("1 same-UID pid(s) were unreadable here")
       expect(run.stderr()).toContain("cannot certify the close")
       expect(run.stderr()).toContain("queued request")
+      expect(run.stderr()).toMatch(/queue may also have unreadable pids/i)
+      expect(run.stderr()).toMatch(/request standing.*environment preserved/i)
       expect(run.stderr()).toContain(`unlinks ${file} when consumed`)
       expect(run.stderr()).toContain(join(workdir, "logs", "post-merge"))
       expect(readCloseRequest(file)).toMatchObject({
@@ -4947,6 +4949,8 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
       expect(await runYrdProcess(["bun", "yrd", "env", "close", path], human.io), human.stderr()).toBe(0)
       expect(human.stdout()).toContain("queued, not closed")
       expect(human.stdout()).toContain("1 same-UID pid(s) unreadable here")
+      expect(human.stdout()).toMatch(/queue may also have unreadable pids/i)
+      expect(human.stdout()).toMatch(/request standing.*environment preserved/i)
       expect(human.stdout()).toContain(`unlink ${file} when consumed`)
       expect(human.stdout()).toContain(join(workdir, "logs", "post-merge"))
       // A request for the same path with DIFFERENT options is a conflict, named
@@ -5024,6 +5028,8 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
         const run = capture(w.work)
         expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], run.io), run.stderr()).toBe(2)
         expect(run.stderr()).toContain("could not be written")
+        // 34329: even the unwritable-request remedy must qualify queue coverage.
+        expect(run.stderr()).toMatch(/queue may also have unreadable pids/i)
         expect(run.stderr()).toContain(directory)
         expect(run.stderr()).toContain("read every same-UID pid")
         expect(existsSync(path)).toBe(true)

@@ -1459,8 +1459,8 @@ export async function releaseRetainedCheckouts(
       // A confined caller cannot certify the release, and re-running its own
       // command from where it stands reaches the same blind census (29772).
       // The cure it CAN take is the one env close already has: --apply files a
-      // release request, and the queue's own round, whose census reads every
-      // same-UID pid, reruns this release under the same admission. The census
+      // release request, and the queue's own round reruns this release under
+      // the same admission; its census may also be incomplete. The census
       // receipt and this reader's privilege facts stay in the detail, and the
       // uncleared pids stay named: an unreadable pid is never treated as absent.
       // What became of the hold is appended once the delegation is decided.
@@ -1561,7 +1561,7 @@ export async function releaseRetainedCheckouts(
       request.apply !== true
         ? // Lead with the command to run: a confined caller (37675: luna3's sandbox) re-running the preview reaches the
           // same blind census, and --apply is the one cure it can take.
-          "run with --apply; the queue's own round runs the census: --apply files a release request for the queue's own round, whose census reads every same-UID pid. The admission there is unchanged: a process holding the checkout still refuses"
+          "run with --apply; the queue's own round runs the census: --apply files a release request for the queue's own round. That census may also be incomplete; unreadable pids preserve the checkout. The admission there is unchanged: a process holding the checkout still refuses"
         : input.workdir === undefined
           ? "this round could not certify it either. The admission there is unchanged: a process holding the checkout still refuses"
           : `not filed: ${

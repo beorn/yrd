@@ -5,8 +5,8 @@
  * scope; 28120's UNKNOWN=KEEP) cannot certify a close, and refusing blindly
  * leaves the environment to a human. It files its intent — the path, the
  * options it asked for, and the head it asked at — under the queue workdir; the
- * queue's own round is the context whose census reads every pid (ruling 27723),
- * and it runs the SAME close lifecycle the direct verb runs.
+ * queue's own round runs the SAME close lifecycle the direct verb runs, and
+ * preserves the environment if its own census is also incomplete.
  *
  * The file carries INTENT and nothing else: never a census fact and never a
  * decision, so it is not a second safety authority beside removely's census
@@ -193,8 +193,8 @@ export function writeCloseRequest(
     throw new Error(
       `close request for ${request.path} could not be written to ${file}: ` +
         `${cause instanceof Error ? cause.message : String(cause)}; the environment was preserved; ` +
-        `a context that can read every same-UID pid (the queue service's own round) must close it, ` +
-        `or make ${dirname(file)} writable`,
+        `the queue may also have unreadable pids; make ${dirname(file)} writable to file the request, ` +
+        `or close it from a context that can read every same-UID pid`,
       { cause },
     )
   }

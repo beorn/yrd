@@ -1877,8 +1877,9 @@ function buildProgram(
     .addHelpSection(
       "When this caller's same-UID CWD census cannot read every pid:",
       "The close is not certified and not refused: the request is queued under the queue workdir " +
-        "(`state/yrd/env-close-requests/`) and the queue's own round, whose census reads every pid, " +
-        "runs the same close lifecycle and journals the outcome. That queued consumer applies direct " +
+        "(`state/yrd/env-close-requests/`) and the queue's own round runs the same close lifecycle and journals the outcome. " +
+        "The queue's census may also be incomplete: unreadable pids leave the request standing and the environment preserved " +
+        "until coverage can be certified. Queuing does not guarantee that coverage. That queued consumer applies direct " +
         "admission (clean, unlocked, no holder), without the sweep's ancestry check: an environment the " +
         "sweep kept only for ancestry IS closed by a standing request; an environment with a recorded " +
         "hold is not: the request is journaled STALE and dropped. That ending EXITS 0 and is named " +

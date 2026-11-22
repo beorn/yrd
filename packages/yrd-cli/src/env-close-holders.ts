@@ -268,8 +268,8 @@ export function censusReader(): Readonly<{ pid: number; uid: number }> {
  * `admitted` may proceed. `needs-delegation` means this invocation's census
  * could NOT certify the close and no readable holder was found: the caller is
  * not permitted to quietly proceed, and refusing outright would leave the
- * environment to a human, so the intent is delegated to a context whose census
- * reads every pid (22894). A readable holder is never delegation — it is a
+ * environment to a human, so the intent is delegated to the queue's own census,
+ * which may also be incomplete (22894). A readable holder is never delegation — it is a
  * refusal, exactly as before (28120).
  */
 export type CloseAdmission =

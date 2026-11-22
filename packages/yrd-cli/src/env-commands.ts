@@ -2442,8 +2442,8 @@ export async function closeEnvironment(
   /**
    * Internal, never a CLI option (22894). The `env close` verb delegates an
    * uncertifiable census to the queue's own round; a queue-round caller (the
-   * request pass, the sweep) must refuse instead — it IS the capable context,
-   * and filing a request from it would close a path nobody asked for.
+   * request pass, the sweep) must refuse instead when its own census is also
+   * incomplete; filing another request would close a path nobody asked for.
    */
   onIncompleteCensus: CloseAdmissionMode = "delegate",
   /** Internal conditional-intent check; the package entry never forwards it. */
@@ -3348,7 +3348,8 @@ function queueDelegatedClose(
   io.stderr(
     `yrd: env close ${path}: queued, not closed: ${admission.refusal}; ` +
       `${admission.census.unreadable} same-UID pid(s) were unreadable here, so this caller cannot certify the close; ` +
-      `queued request ${file} for the queue's own round, which reads every same-UID pid, runs the same close lifecycle, unlinks ${file} when consumed, and journals the outcome under ${journalDir}\n`,
+      `queued request ${file} for the queue's own round, which runs the same close lifecycle, unlinks ${file} when consumed, and journals the outcome under ${journalDir}; ` +
+      `the queue may also have unreadable pids, leaving the request standing and the environment preserved until coverage can be certified\n`,
   )
   io.stdout(
     options.json === true
@@ -3372,7 +3373,7 @@ function queueDelegatedClose(
               }
             : {}),
         })}\n`
-      : `queued, not closed: environment ${path}: ${admission.refusal}; ${admission.census.unreadable} same-UID pid(s) unreadable here; a context that can read every same-UID pid will close it, unlink ${file} when consumed, and journal the outcome under ${journalDir}; request ${file}\n`,
+      : `queued, not closed: environment ${path}: ${admission.refusal}; ${admission.census.unreadable} same-UID pid(s) unreadable here; the queue's own round runs the same close lifecycle, will unlink ${file} when consumed, and journal the outcome under ${journalDir}; the queue may also have unreadable pids, leaving the request standing and the environment preserved until coverage can be certified; request ${file}\n`,
   )
   return 0
 }
