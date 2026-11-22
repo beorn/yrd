@@ -8,9 +8,22 @@
  * tree and materialized fresh, and every borrow was cold. What only this file
  * can show is the artifact the pool exists to keep - node_modules - surviving a
  * second borrow, with no refusal note on the way.
+ *
+ * @reach fs-walk <fixture-only: mkdtempSync pool roots, and the held trees this file moves aside and reads>
  */
 
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
+import {
+  accessSync,
+  chmodSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { basename, dirname, join, resolve, sep } from "node:path"
 import { safeRemoveSync } from "removely"
@@ -188,4 +201,66 @@ it("discards a dirty warm tree whose pool root is outside tmpdir (28751: allowed
   expect(second.path).toBe(first)
   expect(existsSync(join(second.path, WITNESS))).toBe(false)
   await second.remove()
+})
+
+/** The one tree a hold moved aside for `role`, read from the pool beside the slot. */
+function heldTrees(slot: string): string[] {
+  // `<workdir>/worktrees/pool/<ref>/<role>` -> `<workdir>/worktrees/pool/held/<ref>/<role>-<stamp>`
+  const held = join(dirname(dirname(slot)), "held", basename(dirname(slot)))
+  return existsSync(held)
+    ? readdirSync(held)
+        .filter((entry) => entry.startsWith(`${basename(slot)}-`))
+        .map((entry) => join(held, entry))
+    : []
+}
+
+/**
+ * @cto 2026-11-22 (#34952): a path inside the pooled tree is containment evidence, not proof of who wrote the bytes.
+ * The clean's own discard set is read first, and a tree that holds another writer's repository is moved aside
+ * intact instead of being cleaned or removed.
+ */
+it("holds a warm tree whose discard set holds an independent repository, and keeps its files", async () => {
+  const { git, newPool, notes, pool } = await poolFixture()
+  const commit = (await git(["rev-parse", "HEAD"])).trim()
+
+  const first = await pool.borrow({ commit, role: "candidate", targetSha: commit })
+  // Another writer's repository inside the pooled checkout, at no path the candidate tracks or gitlinks.
+  mkdirSync(join(first.path, "elsewhere", ".git"), { recursive: true })
+  writeFileSync(join(first.path, "elsewhere", ".git", "HEAD"), "ref: refs/heads/main\n")
+  writeFileSync(join(first.path, "elsewhere", "work.txt"), "tracked by the other repository\n")
+  await pool.give(first)
+  expect(readFileSync(join(first.path, "elsewhere", "work.txt"), "utf8")).toBe("tracked by the other repository\n")
+
+  const second = await newPool().borrow({ commit, role: "candidate", targetSha: commit })
+  expect(second.path).toBe(first.path)
+  expect(existsSync(join(second.path, "elsewhere"))).toBe(false)
+  expect(notes.some((note) => note.includes("held, not cleaned"))).toBe(true)
+
+  const kept = heldTrees(first.path)
+  expect(kept).toHaveLength(1)
+  expect(readFileSync(join(kept[0] ?? "", "elsewhere", "work.txt"), "utf8")).toBe("tracked by the other repository\n")
+  await second.remove()
+})
+
+it("holds a warm tree with a subtree it cannot read, instead of treating it as absent", async () => {
+  const { git, notes, pool } = await poolFixture()
+  const commit = (await git(["rev-parse", "HEAD"])).trim()
+
+  const first = await pool.borrow({ commit, role: "candidate", targetSha: commit })
+  mkdirSync(join(first.path, "private"))
+  writeFileSync(join(first.path, "private", "secret.txt"), "not this program's bytes\n")
+  chmodSync(join(first.path, "private"), 0o000)
+  try {
+    const second = await pool.borrow({ commit, role: "candidate", targetSha: commit })
+    expect(second.path).toBe(first.path)
+    expect(notes.some((note) => note.includes("unreadable"))).toBe(true)
+    const kept = heldTrees(first.path)
+    expect(kept).toHaveLength(1)
+    chmodSync(join(kept[0] ?? "", "private"), 0o700)
+    expect(readFileSync(join(kept[0] ?? "", "private", "secret.txt"), "utf8")).toBe("not this program's bytes\n")
+    await second.remove()
+  } finally {
+    // The moved copy is the only survivor; the slot tree was renamed, so restoring here is best-effort.
+    if (existsSync(join(first.path, "private"))) chmodSync(join(first.path, "private"), 0o700)
+  }
 })

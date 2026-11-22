@@ -15,10 +15,17 @@
  * submodules to the candidate's gitlinks through the materializer that made
  * them. Setup ALWAYS runs afterwards, because `node_modules` is the cache and
  * nothing else may be: a stale ignored artifact must never reach a judgment.
+ *
+ * The clean reads its own discard set first (`git clean -ffdxn`), because being
+ * under a pooled path is containment evidence, not proof of who wrote the bytes:
+ * an entry that is an independent repository is another writer's tracked work,
+ * and an entry this process cannot read is unknown rather than ours. Such a tree
+ * is HELD — never cleaned, never removed — and moved intact into
+ * `worktrees/pool/held/` when its slot is needed again (@cto 2026-11-22, #34952).
  */
 
-import { existsSync } from "node:fs"
-import { join } from "node:path"
+import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, type Dirent } from "node:fs"
+import { basename, dirname, join } from "node:path"
 import type { Process } from "@yrd/process"
 import { createGitWorktreeStore } from "git-super/worktree"
 import { gitIn, seamProcess, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
@@ -105,6 +112,11 @@ export class WorktreePool {
     try {
       await this.reset(path, input)
     } catch (error) {
+      if (error instanceof PooledTreeHeld) {
+        // Nothing is deleted: the tree is moved intact under pool custody and the slot is freed for a fresh one.
+        this.note(input, `pooled ${input.role} tree held, not cleaned or reused: ${describeHolds(error.holds)}`)
+        return this.materialize(await this.holdAside(path, error.holds), input)
+      }
       this.note(input, `pooled ${input.role} tree could not be reset: ${messageOf(error)}`)
       return this.materialize(await this.discard(path), input)
     }
@@ -114,6 +126,42 @@ export class WorktreePool {
   /** Discard a pooled tree and hand back the path the round should materialize at. */
   private async discard(path: string): Promise<string> {
     await this.forget(path)
+    return path
+  }
+
+  /**
+   * Move a held tree out of its slot, intact, and free the slot. Everything the clean would have DELETED is
+   * evidence — another writer's repository, or a subtree this process cannot read — so the whole tree is renamed
+   * into `worktrees/pool/held/<ref>/<role>-<stamp>/` and never deleted (@cto 2026-11-22, #34952).
+   *
+   * A rename needs no permission INSIDE the tree, which is what lets even an unreadable subtree move. The
+   * registration is then forgotten by the same removal primitive every other discard uses, so a held tree frees
+   * its slot without a raw `git worktree` call: the primitive wants a checkout at the registered path, so a stub
+   * holding only the linked worktree's `.git` pointer is left for it to remove.
+   */
+  private async holdAside(path: string, holds: readonly PooledHold[]): Promise<string> {
+    const retained = join(
+      this.options.workdir,
+      "worktrees",
+      "pool",
+      "held",
+      this.options.ref.replaceAll("/", "_"),
+      `${basename(path)}-${new Date().toISOString().replace(/[:.]/g, "-")}`,
+    )
+    mkdirSync(dirname(retained), { recursive: true })
+    renameSync(path, retained)
+    const pointer = join(retained, ".git")
+    if (statSync(pointer, { throwIfNoEntry: false })?.isFile() !== true) {
+      throw new Error(`pooled tree ${path} has no .git pointer file; its registration cannot be forgotten without it`)
+    }
+    mkdirSync(path)
+    copyFileSync(pointer, join(path, ".git"))
+    await this.forget(path)
+    this.options.plumbing?.trace?.("held pooled worktree aside", {
+      from: path,
+      path: retained,
+      holds: holds.map((hold) => `${hold.entry} (${hold.cause})`),
+    })
     return path
   }
 
@@ -128,7 +176,14 @@ export class WorktreePool {
    * that fails costs a warning and nothing else.
    */
   async give(tree: PreparedWorktree): Promise<void> {
-    await this.clean(tree.path)
+    try {
+      await this.clean(tree.path)
+    } catch (error) {
+      if (!(error instanceof PooledTreeHeld)) throw error
+      // A hold is left in place: the tree returns to the pool uncleaned, and the next borrow moves it aside.
+      this.options.note?.(`pooled tree left uncleaned, held: ${describeHolds(error.holds)}`)
+      return
+    }
     this.options.plumbing?.trace?.("returned worktree to the pool", { commit: tree.commit, path: tree.path })
   }
 
@@ -199,6 +254,41 @@ export class WorktreePool {
    * here and cleaned from inside, one level down, by this same function.
    */
   private async clean(path: string): Promise<void> {
+    const holds = await this.discardHolds(path)
+    if (holds.length > 0) throw new PooledTreeHeld(holds)
+    await this.cleanRoot(path)
+  }
+
+  /**
+   * The entries this tree's clean would DELETE that are other writers', root and submodules: an independent
+   * repository is another writer's tracked work, and an unreadable subtree is unknown rather than ours. Read with
+   * `git clean -ffdxn` and the clean's own exclusions, so the answer is the actual discard set and nothing is
+   * destroyed to learn it (@cto 2026-11-22, #34952). A plain untracked file is pool scratch and is not a hold.
+   */
+  private async discardHolds(path: string): Promise<PooledHold[]> {
+    const at = this.gitAt(path)
+    const submodules = await gitlinkPaths(at)
+    const exclusions = [...submodules, "node_modules"].flatMap((name) => ["-e", name])
+    const listed = (await at(["clean", "-ffdxn", ...exclusions]))
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("Would remove "))
+      .map((line) => line.slice("Would remove ".length))
+    const holds: PooledHold[] = []
+    for (const entry of listed) {
+      const cause = holdCause(join(path, entry))
+      if (cause !== undefined) holds.push({ entry, cause })
+    }
+    for (const submodule of submodules) {
+      if (!existsSync(join(path, submodule, ".git"))) continue
+      for (const child of await this.discardHolds(join(path, submodule))) {
+        holds.push({ entry: join(submodule, child.entry), cause: child.cause })
+      }
+    }
+    return holds
+  }
+
+  private async cleanRoot(path: string): Promise<void> {
     const at = this.gitAt(path)
     const submodules = await gitlinkPaths(at)
     const exclusions = [...submodules, "node_modules"].flatMap((name) => ["-e", name])
@@ -207,7 +297,7 @@ export class WorktreePool {
       // A gitlink the tree did not materialize names no repository to clean:
       // `-e` above already left it alone.
       if (!existsSync(join(path, submodule, ".git"))) continue
-      await this.clean(join(path, submodule))
+      await this.cleanRoot(join(path, submodule))
     }
   }
 
@@ -324,4 +414,45 @@ async function gitlinkPaths(at: Git): Promise<readonly string[]> {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** One entry a clean would delete, and why the pool may not: another writer's repository, or content it cannot read. */
+export type PooledHold = Readonly<{ entry: string; cause: "independent repository" | "unreadable" }>
+
+/** A pooled tree whose clean would delete another writer's repository, or content this process cannot read. */
+export class PooledTreeHeld extends Error {
+  constructor(readonly holds: readonly PooledHold[]) {
+    super(`pooled tree holds ${describeHolds(holds)}`)
+    this.name = "PooledTreeHeld"
+  }
+}
+
+function describeHolds(holds: readonly PooledHold[]): string {
+  return holds.map((hold) => `${hold.entry} (${hold.cause})`).join(", ")
+}
+
+/**
+ * Why deleting `target` would take bytes this program did not write: "independent repository" when a `.git` of its
+ * own sits at it or under it, "unreadable" when it cannot be listed (unknown is not ours). `undefined` otherwise — a
+ * plain untracked file, or a directory of them, is pool scratch and is cleaned as before (@cto 2026-11-22, #34952).
+ */
+function holdCause(target: string, depth = 0): "independent repository" | "unreadable" | undefined {
+  if (depth > 8) return undefined
+  const stat = statSync(target, { throwIfNoEntry: false })
+  if (stat === undefined || !stat.isDirectory()) return undefined
+  let entries: Dirent[]
+  try {
+    entries = readdirSync(target, { withFileTypes: true })
+  } catch (error) {
+    // silent-fallback-allow: an entry that vanished between the dry run and this read has nothing left to lose; an unreadable one IS the hold and is reported
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    return "unreadable"
+  }
+  if (entries.some((entry) => entry.name === ".git")) return "independent repository"
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === "node_modules") continue
+    const nested = holdCause(join(target, entry.name), depth + 1)
+    if (nested !== undefined) return nested
+  }
+  return undefined
 }
