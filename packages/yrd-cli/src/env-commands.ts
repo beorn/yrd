@@ -2810,16 +2810,17 @@ export async function closeEnvironment(
       )
     }
     if (writerWait) {
-      // The wait is the evidence (37624): this close held nothing while another writer held the
-      // mutation lock for the whole bound, and the environment is gone now. Say only what the facts
-      // prove — a retained copy this close never wrote stays UNVERIFIED, so the close is not a success.
+      // The wait is the evidence (37624): this close never held the mutation lock and the environment is
+      // gone now. Attribute the lock, not the removal — a landed-environment prune can unregister a
+      // worktree too, so the facts prove an absence, never who removed it (@dev/luna3 peer read). A
+      // retained copy this close never wrote stays UNVERIFIED, so the close is not a success.
       const branch = registered.branch?.replace(/^refs\/heads\//u, "")
       const keptBranch = branch === undefined || branch === "" ? undefined : await refAt(git, `refs/heads/${branch}`)
       const retained = existsSync(retentionRoot)
         ? `no retained copy under ${retentionRoot} matches this environment`
         : `${retentionRoot} does not exist`
       io.stderr(
-        `yrd: ${path}@${commit} is gone and this close never held the writer lock: another writer removed it during the wait; ${retained}; inspect it before trusting any custody${details.length === 0 ? "" : `\n${details.join("\n")}`}\n`,
+        `yrd: ${path}@${commit} was admitted at ${new Date(admittedAt).toISOString()} and is gone and unregistered now: another writer held the repository mutation lock for the whole wait, and this close never held it; ${retained}; inspect it before trusting any custody${details.length === 0 ? "" : `\n${details.join("\n")}`}\n`,
       )
       if (keptBranch !== undefined) {
         io.stderr(`yrd: branch ${branch} still resolves at ${keptBranch}; its retirement outcome was not observed\n`)
@@ -2827,7 +2828,7 @@ export async function closeEnvironment(
       io.stdout(
         options.json === true
           ? `${JSON.stringify({ closed: path, retention: "unverified", retirement: "incomplete" })}\n`
-          : `closed environment ${path}; removed by another writer during the writer-lock wait; retained copy UNVERIFIED (inspect ${retentionRoot})${keptBranch === undefined ? "" : `; branch ${branch} still resolves`}\n`,
+          : `closed environment ${path}; gone while another writer held the writer lock; retained copy UNVERIFIED (inspect ${retentionRoot})${keptBranch === undefined ? "" : `; branch ${branch} still resolves`}\n`,
       )
       return 1
     }

@@ -199,7 +199,10 @@ it("settles a close whose writer-lock wait ran out after another writer removed 
   // The other writer's removal is a fact; the retained copy this close never wrote is not, and says so.
   expect(exit, run.stdout() + run.stderr()).toBe(1)
   expect(JSON.parse(run.stdout())).toMatchObject({ closed: path, retention: "unverified", retirement: "incomplete" })
-  expect(run.stderr()).toContain("another writer removed it during the wait")
+  // The lock is what the refusal proves; who removed it is not established, so it is not claimed.
+  expect(run.stderr()).toContain("another writer held the repository mutation lock for the whole wait")
+  expect(run.stderr()).toMatch(/was admitted at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z/u)
+  expect(run.stderr()).not.toContain("another writer removed it")
   expect(run.stderr()).toContain("retained-modules")
 })
 
@@ -239,5 +242,5 @@ it("keeps failing a close whose waiter only printed the contention line (37624)"
     "could not close through git super worktree remove",
   )
   expect(existsSync(path)).toBe(true)
-  expect(run.stderr()).not.toContain("another writer removed it during the wait")
+  expect(run.stderr()).not.toContain("another writer held the repository mutation lock")
 })
