@@ -417,3 +417,6 @@ export { retireLocalBranch } from "./local-branch-retirement.ts"
 export { retireOriginBranch } from "./origin-branch-retirement.ts"
 export type { OriginRetirementAuthority } from "./origin-branch-retirement.ts"
 export type { LocalBranchRetirement, LocalBranchRetirementResult } from "./local-branch-retirement.ts"
+
+export { isLocal, localAbsent, localCollectionAnswer, localSourceState, localValue } from "./local.ts"
+export type { Local, LocalSource, LocalSourceState } from "./local.ts"
