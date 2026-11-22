@@ -6,13 +6,14 @@
  *           on `yrd queue list --json | jq`, 2a71e626).
  * @consumer the operator's retro · pm-metrics (@hh/tooling/pm-metrics)
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { submit } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { workdirOf } from "../src/workdir.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
@@ -52,7 +53,9 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
  * from it, and one branch pushed without a submit (plan E2): the smallest
  * queue with every number the stats command counts.
  */
-async function queueWithOneChangeAndOnePush(): Promise<string> {
+async function queueWithOneChangeAndOnePush(
+  options: Readonly<{ journals?: boolean }> = {},
+): Promise<string> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-stats-"))
   roots.push(root)
   const seed = gitIn(root)
@@ -86,6 +89,11 @@ async function queueWithOneChangeAndOnePush(): Promise<string> {
   await git(["commit", "--quiet", "-m", "task/pushed-only is pushed and never submitted"])
   await git(["push", "--quiet", "origin", "task/pushed-only"])
   await git(["checkout", "--quiet", "main"])
+  // A machine that ran the queue has this directory; an empty one is a readable
+  // population with no runs there, which is not the same as an absent resource.
+  if (options.journals !== false) {
+    mkdirSync(join(await workdirOf(git, { cwd: work }), "logs"), { recursive: true })
+  }
   return work
 }
 
@@ -94,18 +102,39 @@ describe("yrd queue stats through the process entry", () => {
     const work = await queueWithOneChangeAndOnePush()
     const listed = await yrd(work, "queue", "list", "--json")
     expect(listed.exitCode, listed.report).toBe(0)
-    const changes = (JSON.parse(listed.stdout) as { changes: readonly { branch: string }[] }).changes
+    const changes = (JSON.parse(listed.stdout) as { published: { changes: readonly { branch: string }[] } })
+      .published.changes
     const ran = await yrd(work, "queue", "stats", "--json")
     expect(ran.exitCode, ran.report).toBe(0)
     const stats = JSON.parse(ran.stdout) as {
-      total: { changes: number; branches: number }
+      executionStats: { local: true; value: { total: { changes: number; branches: number } } }
       pushedNeverSubmitted: { count: number }
     }
     expect(changes.map((change) => change.branch)).toContain("task/one")
-    expect(stats.total.changes).toBe(changes.length)
-    expect(stats.total.branches).toBe(1)
+    expect(stats.executionStats.local, ran.report).toBe(true)
+    expect(stats.executionStats.value.total.changes).toBe(changes.length)
+    expect(stats.executionStats.value.total.branches).toBe(1)
     expect(stats.pushedNeverSubmitted.count).toBe(1)
     expect(ran.stderr).not.toContain("changed to event format during legacy read")
+  })
+
+  /** @failure A machine with no run journal reported counted zeros as if it had measured the queue (@i/10-yrd/28522).
+   * @level l3 @consumer the retro and pm-metrics reading `queue stats` from a machine that never ran the queue
+   */
+  it("answers counts this machine cannot support as local:false with the reason, never as zeros", async () => {
+    const work = await queueWithOneChangeAndOnePush({ journals: false })
+    const ran = await yrd(work, "queue", "stats", "--json")
+    expect(ran.exitCode, ran.report).toBe(0)
+    const document = JSON.parse(ran.stdout) as {
+      executionStats: { local: boolean; why?: string }
+    }
+    expect(document.executionStats.local, ran.report).toBe(false)
+    expect(document.executionStats.why).toContain("run journal not found at")
+    // The v1 root slots are gone with no alias, and no zero stands in their place.
+    expect(Object.keys(document)).not.toContain("total")
+    expect(Object.keys(document)).not.toContain("groups")
+    // Everything the refs publish still answers: the window, its provenance, the drafts.
+    expect(document).toMatchObject({ schemaVersion: 2, by: "submitter" })
   })
 
   /** @failure Event stats counted drafts outside the requested committer-date window.
@@ -157,18 +186,24 @@ describe("yrd queue stats through the process entry", () => {
     expect(ran.exitCode, ran.report).toBe(0)
     const document = JSON.parse(ran.stdout) as {
       queue: string
+      schemaVersion: number
       at: string
       since: string
       defaultWindow: boolean
       by: string
-      total: {
-        rows: number
-        changes: number
-        branches: number
-        latency: { count: number }
-        decisions: Record<string, number>
+      executionStats: {
+        local: true
+        value: {
+          total: {
+            rows: number
+            changes: number
+            branches: number
+            latency: { count: number }
+            decisions: Record<string, number>
+          }
+          groups: readonly { key: string; rows: number }[]
+        }
       }
-      groups: readonly { key: string; rows: number }[]
       pushedNeverSubmitted: {
         ageBasis: string
         count: number
@@ -177,11 +212,18 @@ describe("yrd queue stats through the process entry", () => {
       }
     }
     expect(document.queue).toMatch(/remote\.git#main$/u)
+    expect(document.schemaVersion, ran.report).toBe(2)
+    // The counts are this machine's journal read of the queue, not a published
+    // fact: they ride under `executionStats`, and the v1 root slots are gone.
+    expect(Object.keys(document)).not.toContain("total")
+    expect(Object.keys(document)).not.toContain("groups")
+    expect(document.executionStats.local, ran.report).toBe(true)
     expect(document.defaultWindow).toBe(false)
     expect(new Date(document.at).getTime() - new Date(document.since).getTime()).toBe(86_400_000)
     expect(document.by).toBe("branch")
-    expect(document.total).toMatchObject({ branches: 1, changes: 1, inLine: 1, merged: 0, rows: 1 })
-    expect(document.total.decisions).toEqual({
+    const { total, groups } = document.executionStats.value
+    expect(total).toMatchObject({ branches: 1, changes: 1, inLine: 1, merged: 0, rows: 1 })
+    expect(total.decisions).toEqual({
       checked: 0,
       duplicates: 0,
       failed: 0,
@@ -189,7 +231,7 @@ describe("yrd queue stats through the process entry", () => {
       stuck: 0,
       unclassified: 0,
     })
-    expect(document.groups).toEqual([expect.objectContaining({ key: "task/one", rows: 1 })])
+    expect(groups).toEqual([expect.objectContaining({ key: "task/one", rows: 1 })])
     expect(document.pushedNeverSubmitted.ageBasis).toBe("tip committer date")
     expect(document.pushedNeverSubmitted.count).toBe(1)
     expect(document.pushedNeverSubmitted.ageUnknown).toBe(0)

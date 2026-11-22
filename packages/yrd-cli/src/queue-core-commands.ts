@@ -5627,7 +5627,34 @@ export async function coreQueueCommand(
         ...(request.by === undefined ? {} : { by: request.by }),
       })
       const name = queueName(config.target, await remoteUrl(git, config.target.remote))
-      emit(io, options.json, { queue: name, ...stats }, formatQueueStats(stats, name))
+      // The counts ride inside `executionStats`, marked with whether this machine's
+      // journal read could support them: an absent or unreadable journal makes the
+      // derived aggregate local:false with the read's own reason, while the window,
+      // the drafts and their provenance stay published facts (#28522).
+      const { total, groups, ...publishedStats } = stats
+      const journal = journalFact(journalDiagnostics(reading.journals))
+      const { dir: journalDir, malformed: journalMalformed, ...journalNotes } = journal
+      void journalDir
+      void journalMalformed
+      const execution =
+        reading.execution.local === true
+          ? localValue({ ...reading.execution.value, ...journalNotes })
+          : reading.execution
+      const executionStats =
+        reading.execution.local === true ? localValue({ total, groups }) : localAbsent(reading.execution.why)
+      emit(
+        io,
+        options.json,
+        {
+          schemaVersion: SCHEMA_VERSION,
+          queue: name,
+          ...publishedStats,
+          execution,
+          executionStats,
+          observation: reading.observation,
+        },
+        formatQueueStats(stats, name),
+      )
       return 0
     }
     case "ls": {
@@ -7459,7 +7486,7 @@ function journalDiagnostics<Run extends JournalSummary>(
     ...(omittedParts.length === 0
       ? {}
       : {
-          omitted: `global journal incompleteness: ${omittedParts.join(", ")} outside or not attributable to the selected change identities; named facts are in journal.coverage; run ${unfilteredCommand?.()} for unfiltered diagnostics`,
+          omitted: `global journal incompleteness: ${omittedParts.join(", ")} outside or not attributable to the selected change identities; named facts are in execution.coverage; run ${unfilteredCommand?.()} for unfiltered diagnostics`,
         }),
   }
 }
