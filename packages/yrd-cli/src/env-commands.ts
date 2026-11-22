@@ -71,6 +71,7 @@ import { unaddressedRepository as findRepository } from "./declaration.ts"
 import { ISSUE_DISPLAY_TIMEOUT_MS } from "./issue-resolver.ts"
 import { issueComparer } from "./issue-sameness.ts"
 import { ISSUES_CODES } from "./issues/declaration.ts"
+import type { IssuesEnvironmentHold } from "./issues/in-progress.ts"
 import { runIssuesVerb } from "./issues/run.ts"
 import { originHead } from "./queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO, CloseExecutionBudget } from "./types.ts"
@@ -211,6 +212,31 @@ export type EnvRow = Readonly<{
   hold: string | null
   issueBinding: EnvIssueBinding
 }>
+
+/**
+ * #37838: the environments holding an issue, for `yrd issues`' computed `in_progress` columns. Only a recorded
+ * binding names an issue; an unrecorded or unreadable one is not a hold, and its reason stays where `yrd env list`
+ * already prints it. Expiry is carried verbatim: whether it is open is the reader's call, at the reader's clock.
+ */
+export async function openIssueEnvironments(
+  input: Readonly<{ root: string; cwd: string; env?: NodeJS.ProcessEnv }>,
+): Promise<readonly IssuesEnvironmentHold[]> {
+  const selection = await resolveGitSelection(input.root)
+  await using process = createProcess({ cwd: input.root })
+  const git = gitIn(input.root, process, selection)
+  const { rows } = await environmentInventory(input.root, git, await workdirOf(git, { cwd: input.cwd, env: input.env }))
+  return rows.flatMap((row) => {
+    const binding = row.issueBinding
+    if (binding.state !== "recorded" || binding.issue === undefined) return []
+    return [
+      {
+        name: row.name,
+        issue: binding.issue,
+        ...(binding.expiresAt === undefined ? {} : { expiresAt: binding.expiresAt }),
+      },
+    ]
+  })
+}
 
 /**
  * The repository a command stands in, and the target its declaration names.

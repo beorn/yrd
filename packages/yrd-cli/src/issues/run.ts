@@ -28,6 +28,9 @@ import {
   type IssuesCode,
   type IssuesVerb,
 } from "./declaration.ts"
+import { annotateInProgress, type IssuesEnvironmentHold } from "./in-progress.ts"
+
+export type { IssuesEnvironmentHold } from "./in-progress.ts"
 
 export type IssuesEnvelope = Readonly<{
   declaration: Readonly<{ repository: string; commit: string; path: typeof ISSUES_DECLARATION_PATH }>
@@ -75,11 +78,20 @@ export type RunIssuesVerbOptions = Readonly<{
   signal?: AbortSignal
   /** Where the provider's stderr passes through. Defaults to this process's stderr. */
   stderr?: (text: string) => void
+  /**
+   * #37838: the environments that hold an issue open, for the computed `in_progress` columns on `view`,
+   * `list-page` and `list`. Absent, the provider's JSON passes back whole: the columns cost an environment read,
+   * so a caller that does not show them (post-merge's close checks, env-close's release state) never pays it.
+   */
+  environments?: (input: Readonly<{ root: string; cwd: string }>) => Promise<readonly IssuesEnvironmentHold[]>
 }>
 
 function fail(exitCode: 1 | 2, code: IssuesCode, subject: string, detail: string): IssuesFailure {
   return { ok: false, exitCode, code, message: `${code}: ${subject}: ${detail}` }
 }
+
+/** The reads whose rows Yrd can complete with its own environments (#37838). */
+const IN_PROGRESS_VERBS: ReadonlySet<string> = new Set(["view", "list-page", "list"])
 
 function commandText(argv: readonly string[]): string {
   return argv.map((word) => (word === "" || /[\s"'`$\\]/u.test(word) ? JSON.stringify(word) : word)).join(" ")
@@ -454,6 +466,33 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
         `${verb} ${command}`,
         "exit 0 but expected {keys: [...]} with at least one nonempty string and no duplicate keys",
       )
+    }
+  }
+  if (IN_PROGRESS_VERBS.has(verb) && options.environments !== undefined) {
+    const readEnvironments = options.environments
+    let holds: readonly IssuesEnvironmentHold[] | undefined
+    try {
+      holds = await readEnvironments({ root, cwd: options.cwd })
+    } catch (error) {
+      // The columns enrich a provider answer; they never gate reading one. An environment home that cannot be
+      // located (an origin no network can answer, 25843) leaves the answer whole and says why on stderr, so a row
+      // reader refuses an answer without columns instead of reading an absent column as false.
+      writeStderr(
+        `yrd issues ${verb}: in_progress columns unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
+      )
+    }
+    if (holds !== undefined) {
+      const annotated = annotateInProgress(verb, parsed, holds, Date.now())
+      if (!annotated.ok) {
+        return fail(
+          1,
+          annotated.fault === "environment" ? ISSUES_CODES.environmentUnreadable : ISSUES_CODES.providerInvalidResult,
+          `${verb} ${command}`,
+          annotated.detail,
+        )
+      }
+      if (annotated.notice !== undefined) writeStderr(annotated.notice)
+      parsed = annotated.result
     }
   }
   return {

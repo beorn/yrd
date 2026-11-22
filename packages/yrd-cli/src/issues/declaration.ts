@@ -20,6 +20,7 @@ export const ISSUES_CODES = {
   providerInvalidResult: "yrd-issues-provider-invalid-result",
   providerTimedOut: "yrd-issues-provider-timed-out",
   providerStalled: "yrd-issues-provider-stalled",
+  environmentUnreadable: "yrd-issues-environment-unreadable",
 } as const
 
 export type IssuesCode = (typeof ISSUES_CODES)[keyof typeof ISSUES_CODES]

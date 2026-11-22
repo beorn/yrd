@@ -55,6 +55,7 @@ import {
   closeEnvironment,
   listEnvironments,
   openEnvironment,
+  openIssueEnvironments,
   retainedEnvironments,
 } from "./env-commands.ts"
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
@@ -2003,6 +2004,8 @@ function buildProgram(
         cwd: cwd(),
         env,
         stderr: (text) => io.stderr(text),
+        // #37838: the computed in_progress columns come from this repository's own open environments.
+        environments: ({ root, cwd: at }) => openIssueEnvironments({ root, cwd: at, env }),
         ...(options.id === undefined ? {} : { id: options.id }),
         ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
