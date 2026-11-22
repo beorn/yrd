@@ -13,6 +13,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterAll, describe, expect, it } from "vitest"
+import { OWNER_ACTIVITY_WINDOW_MS, annotateInProgress, type InProgressAnnotation } from "../src/issues/in-progress.ts"
 import { runIssuesVerb, type IssuesEnvironmentHold } from "../src/issues/run.ts"
 
 const PROVIDER = resolve(import.meta.dirname, "support/fake-issues-provider.ts")
@@ -138,6 +139,35 @@ describe("#37838 computed in_progress", () => {
     const root = project({ "list-page": null })
     const rows = await pageRows(root, [issue("a")], [hold("zulu", "a"), hold("alpha", "a")])
     expect(rows[0]?.in_progress_reason).toBe("environment alpha")
+  })
+
+  // @failure AC2's boundaries, exactly: an expiry that has arrived is closed and a record exactly one window old
+  //          is outside it, because "still open" and "inside 24 h" are both strict comparisons.
+  it("holds both cutoffs exactly: an expiry at now and a write at now minus 24 h do not qualify", () => {
+    const now = 1_760_000_000_000
+    const view = (owner: string, holdExpiry?: string, eventTs?: number) =>
+      annotateInProgress(
+        "view",
+        { id: "@hh/tooling/1234-boundary", title: "t", status: "open", owner },
+        {
+          holds:
+            holdExpiry === undefined
+              ? []
+              : [{ name: "env", issue: "@hh/tooling/1234-boundary", expiresAt: holdExpiry }],
+          ...(eventTs === undefined
+            ? {}
+            : { activity: [{ path: "@hh/tooling/1234-boundary.md", actor: "@dev/10", ts: eventTs }] }),
+        },
+        now,
+      )
+    const columnsOf = (annotation: InProgressAnnotation) => {
+      if (!annotation.ok) throw new Error(annotation.detail)
+      return annotation.result as PageRow
+    }
+    expect(columnsOf(view("@dev/10", new Date(now).toISOString())).in_progress).toBe(false)
+    expect(columnsOf(view("@dev/10", new Date(now + 1).toISOString())).in_progress).toBe(true)
+    expect(columnsOf(view("@dev/10", undefined, now - OWNER_ACTIVITY_WINDOW_MS)).in_progress).toBe(false)
+    expect(columnsOf(view("@dev/10", undefined, now - OWNER_ACTIVITY_WINDOW_MS + 1)).in_progress).toBe(true)
   })
 
   // @failure `view` carries the same columns beside status and owner, and only for its own issue.
