@@ -21,6 +21,10 @@ export const ISSUES_CODES = {
   providerTimedOut: "yrd-issues-provider-timed-out",
   providerStalled: "yrd-issues-provider-stalled",
   environmentUnreadable: "yrd-issues-environment-unreadable",
+  // #37838 (@cto 8e7cbb99, @dev/3 7a95653e): one entry traverses the provider's bounded pages, so the read must
+  // refuse a set that changed under it and must never pass a partial set off as complete.
+  pageSourceMoved: "yrd-issues-page-source-moved",
+  pageBound: "yrd-issues-page-bound",
 } as const
 
 export type IssuesCode = (typeof ISSUES_CODES)[keyof typeof ISSUES_CODES]
@@ -40,6 +44,9 @@ export const ISSUES_VERBS = {
   // Yrd holds it, resolved by the provider; <source> is `<repository>@<sha>`; <text> is the same on every replay.
   event: ["raw", "kind", "source", "text"],
   "list-page": ["page"],
+  // #37838: ONE Workboard refresh enters Yrd once (@cto 8e7cbb99). `<page>` is the base page request; Yrd walks
+  // the provider's existing `list-page` contract and answers one page-shaped result whose `next` is null.
+  traverse: ["page"],
   // #37838 slice 2: the journal a row's owner was last seen writing, from a cutoff in epoch milliseconds. It is a
   // declared argv beside the reads (@cto 0a53b47f), so the provider stays the only thing that knows the store.
   activity: ["cutoff"],
@@ -138,8 +145,8 @@ export function parseIssuesDeclaration(text: string, where: string): IssuesDecla
     if (ISSUES_WRITE_VERBS.has(key) && !argv.includes("<id>")) {
       throw refuse(`write verb ${key} lacks <id>; add <id> where the provider takes its replay key`)
     }
-    if (key === "list-page" && !argv.includes("<page>")) {
-      throw refuse("list-page lacks <page>; add <page> where the provider takes its finite page request")
+    if ((key === "list-page" || key === "traverse") && !argv.includes("<page>")) {
+      throw refuse(`${key} lacks <page>; add <page> where the provider takes its finite page request`)
     }
     declaration[key] = argv
   }

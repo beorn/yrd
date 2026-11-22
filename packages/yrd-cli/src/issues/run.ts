@@ -97,7 +97,7 @@ function fail(exitCode: 1 | 2, code: IssuesCode, subject: string, detail: string
 }
 
 /** The reads whose rows Yrd can complete with its own environments (#37838). */
-const IN_PROGRESS_VERBS: ReadonlySet<string> = new Set(["view", "list-page", "list"])
+const IN_PROGRESS_VERBS: ReadonlySet<string> = new Set(["view", "list-page", "traverse", "list"])
 
 function commandText(argv: readonly string[]): string {
   return argv.map((word) => (word === "" || /[\s"'`$\\]/u.test(word) ? JSON.stringify(word) : word)).join(" ")
@@ -307,6 +307,112 @@ async function repositoryToRead(root: string, env: NodeJS.ProcessEnv): Promise<I
   return local
 }
 
+/**
+ * #37838 (@cto 8e7cbb99): how many provider pages ONE traversal may read before it refuses. A page limit is the
+ * difference between a wrong answer and a read that never ends; the default is generous and the env is the knob.
+ */
+const TRAVERSE_PAGE_BOUND = 256
+
+function traversePageBound(env: NodeJS.ProcessEnv): number | undefined {
+  const raw = env.YRD_ISSUES_PAGE_BOUND?.trim()
+  if (raw === undefined || raw === "") return TRAVERSE_PAGE_BOUND
+  const parsed = Number(raw)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+}
+
+type TraverseWalk = Readonly<{
+  verb: IssuesVerb
+  command: string
+  declared: readonly string[]
+  values: Readonly<Record<string, string>>
+  runDeclared: (argv: readonly string[], command: string) => Promise<Readonly<{ ok: true; stdout: string }> | IssuesFailure>
+  bound: number
+}>
+
+/**
+ * Walk the provider's existing bounded pages as ONE read (@cto 8e7cbb99, @dev/3 7a95653e): every answer must
+ * describe the same snapshot and journal head as the first, a change refuses the whole read rather than serving
+ * two cuts, the page bound refuses instead of returning a partial set, and the result is one page-shaped answer
+ * whose `next` is null. Callers that read a single page keep using `list-page`; nothing here restarts.
+ */
+async function traversePages(
+  input: TraverseWalk,
+): Promise<Readonly<{ ok: true; result: Record<string, unknown> }> | IssuesFailure> {
+  const base = JSON.parse(input.values.page as string) as Record<string, unknown>
+  let request: Record<string, unknown> = base
+  let pageIndex = 1
+  let rowsRead = 0
+  let cursor: string | null = null
+  let first: Record<string, unknown> | undefined
+  const rows: unknown[] = []
+  for (;;) {
+    const ran = await input.runDeclared(
+      substituteArgv(input.declared, { ...input.values, page: JSON.stringify(request) }),
+      input.command,
+    )
+    if (!ran.ok) return ran
+    let answer: unknown
+    try {
+      answer = JSON.parse(ran.stdout)
+    } catch {
+      return fail(
+        1,
+        ISSUES_CODES.providerNotJson,
+        `${input.verb} ${input.command}`,
+        `page ${pageIndex}: exit 0 but stdout is not JSON`,
+      )
+    }
+    const page = answer as Record<string, unknown> | null
+    if (page === null || typeof page !== "object" || Array.isArray(page) || !Array.isArray(page.rows)) {
+      return fail(
+        1,
+        ISSUES_CODES.providerInvalidResult,
+        `${input.verb} ${input.command}`,
+        `page ${pageIndex} is not a page object with a rows array`,
+      )
+    }
+    const pageRows = page.rows as unknown[]
+    if (first === undefined) {
+      first = page
+    } else if (page.snapshot !== first.snapshot || page.head !== first.head) {
+      const moved =
+        page.snapshot !== first.snapshot
+          ? `snapshot ${String(first.snapshot)} -> ${String(page.snapshot)}`
+          : `head ${String(first.head)} -> ${String(page.head)}`
+      return fail(
+        1,
+        ISSUES_CODES.pageSourceMoved,
+        `${input.verb} ${input.command}`,
+        `${moved} at page ${pageIndex} after ${rowsRead} rows (last cursor ${String(cursor)}); no rows served, read again for a fresh cut`,
+      )
+    }
+    rows.push(...pageRows)
+    rowsRead += pageRows.length
+    if (page.complete === true) break
+    const next = page.next
+    if (typeof next !== "string" || next.length === 0) {
+      return fail(
+        1,
+        ISSUES_CODES.providerInvalidResult,
+        `${input.verb} ${input.command}`,
+        `page ${pageIndex} is incomplete but names no next cursor`,
+      )
+    }
+    if (pageIndex >= input.bound) {
+      return fail(
+        1,
+        ISSUES_CODES.pageBound,
+        `${input.verb} ${input.command}`,
+        `stopped at the ${input.bound}-page bound after ${pageIndex} pages and ${rowsRead} rows (last cursor ${next}); no rows served`,
+      )
+    }
+    cursor = next
+    pageIndex += 1
+    request = { ...base, page: next }
+  }
+  return { ok: true, result: { ...(first as Record<string, unknown>), rows, next: null, complete: true } }
+}
+
 /** Run one verb end to end and return the envelope or a named failure. Never throws for a provider's fault. */
 export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<IssuesOutcome> {
   const request = checkRequest(options)
@@ -380,6 +486,16 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
   const declared = declaration[verb]
   if (declared === undefined) {
     return fail(1, ISSUES_CODES.unsupported, verb, `${verb} is not declared in ${where} (unsupported)`)
+  }
+
+  const bound = verb === "traverse" ? traversePageBound(env) : undefined
+  if (verb === "traverse" && bound === undefined) {
+    return fail(
+      2,
+      ISSUES_CODES.badArguments,
+      verb,
+      `YRD_ISSUES_PAGE_BOUND must be a positive integer, found ${JSON.stringify(env.YRD_ISSUES_PAGE_BOUND)}`,
+    )
   }
 
   if (verb === "assign") {
@@ -462,13 +578,26 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
   }
 
   const command = commandText(declared)
-  const ran = await runDeclared(substituteArgv(declared, request.values), command)
-  if (!ran.ok) return ran
   let parsed: unknown
-  try {
-    parsed = JSON.parse(ran.stdout)
-  } catch {
-    return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "exit 0 but stdout is not JSON")
+  if (verb === "traverse") {
+    const walked = await traversePages({
+      verb,
+      command,
+      declared,
+      values: request.values,
+      runDeclared,
+      bound: bound ?? 0,
+    })
+    if (!walked.ok) return walked
+    parsed = walked.result
+  } else {
+    const ran = await runDeclared(substituteArgv(declared, request.values), command)
+    if (!ran.ok) return ran
+    try {
+      parsed = JSON.parse(ran.stdout)
+    } catch {
+      return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "exit 0 but stdout is not JSON")
+    }
   }
   if (verb === "resolve") {
     const keys =
@@ -542,6 +671,9 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
       }
       if (annotated.notice !== undefined) writeStderr(annotated.notice)
       parsed = annotated.result
+      if (verb === "traverse" && annotated.unknownRows !== undefined) {
+        parsed = { ...(parsed as Record<string, unknown>), activityUnreadRows: annotated.unknownRows }
+      }
     }
   }
   return {

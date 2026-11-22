@@ -35,7 +35,13 @@ export type InProgressInputs = Readonly<{
 }>
 
 export type InProgressAnnotation =
-  | Readonly<{ ok: true; result: unknown; notice?: string }>
+  | Readonly<{
+      ok: true
+      result: unknown
+      notice?: string
+      /** Rows whose columns came out unknown BECAUSE a declared activity source failed (#37838, @dev/3 7a95653e). */
+      unknownRows?: number
+    }>
   | Readonly<{ ok: false; fault: "environment" | "provider"; detail: string }>
 
 const IDLE: InProgressColumns = { in_progress: false, in_progress_reason: null }
@@ -190,7 +196,9 @@ export function annotateInProgress(
   inputs: InProgressInputs,
   now: number,
 ): InProgressAnnotation {
-  if (verb !== "view" && verb !== "list-page" && verb !== "list") return { ok: true, result }
+  if (verb !== "view" && verb !== "list-page" && verb !== "traverse" && verb !== "list") {
+    return { ok: true, result }
+  }
   const open = openHolds(inputs.holds, now)
   if ("unreadable" in open) return { ok: false, fault: "environment", detail: open.unreadable }
   const active = activeByIssue(inputs.activity ?? [], now, inputs.windowMs ?? OWNER_ACTIVITY_WINDOW_MS)
@@ -213,7 +221,7 @@ export function annotateInProgress(
     return { ok: true, result: { ...result, ...columns(id, ownerOf(result), open, active, activityUnknown) } }
   }
 
-  if (verb === "list-page") {
+  if (verb === "list-page" || verb === "traverse") {
     const page = isRecord(result) ? result : undefined
     const rows = page?.rows
     if (!Array.isArray(rows)) return skip(result)
@@ -232,7 +240,11 @@ export function annotateInProgress(
       }
       annotated.push({ ...entry, row: { ...row, ...columns(id, ownerOf(row), open, active, activityUnknown) } })
     }
-    return { ok: true, result: { ...page, rows: annotated } }
+    // A traversing caller must be able to tell an all-unknown read from a clean no-holds page (#37838).
+    const unknownRows = activityUnknown
+      ? annotated.filter((entry) => (entry as { row: { in_progress?: unknown } }).row.in_progress === null).length
+      : 0
+    return { ok: true, result: { ...page, rows: annotated }, ...(activityUnknown ? { unknownRows } : {}) }
   }
 
   // The unpaged `list` dump has no fixed row shape across providers: annotate what is recognisable, and say so
