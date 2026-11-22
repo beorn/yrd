@@ -1325,10 +1325,12 @@ export async function retainedEnvironments(
   const selection = await resolveGitSelection(root)
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process, selection)
+  const workdir = await workdirOf(git, { cwd: root, env: io.commandEnv })
   const retentionRoot =
-    options.retain === undefined
-      ? join(await workdirOf(git, { cwd: root, env: io.commandEnv }), "retained-modules")
-      : resolve(io.cwd, options.retain)
+    options.retain === undefined ? join(workdir, "retained-modules") : resolve(io.cwd, options.retain)
+  // 37792 (@cto 78e96f64): a workdir names the branch the stores were closed from (`<repo>~<branch>`), so gate 5 can
+  // prove a component's heads against the tip that branch's own remote publishes now instead of fscking a mirror.
+  const publishedBranch = /~([^/]+)$/u.exec(workdir)?.[1]
   const census = censusRetainedStores(retentionRoot, Date.now())
   if (options.retireExpired === true) {
     // #35047: a TERM, INT or HUP to this CLI closes its Process owner before the process dies of the signal, so the
@@ -1400,6 +1402,7 @@ export async function retainedEnvironments(
       "retention",
       "retire-batch",
       ...scope,
+      ...(publishedBranch === undefined ? [] : ["--custody-target-branch", publishedBranch]),
       ...(options.apply === true ? ["--apply"] : []),
       ...entries,
     ]
