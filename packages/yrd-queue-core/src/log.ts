@@ -56,6 +56,7 @@ import { join } from "node:path"
 import { gunzipSync } from "node:zlib"
 import { incidentIn, type Incident } from "./incident.ts"
 import type { GitInvocation, GitInvocationOptions, GitOutputSink } from "./git.ts"
+import type { LocalSource } from "./local.ts"
 
 /**
  * The decisions a run can record about a change — the journal's type contract
@@ -2075,4 +2076,56 @@ function runsIn(
       startedAt,
     }
   })
+}
+
+/**
+ * A whole journal read at INGRESS, marked (#28522, @cto disposition 6e5624aa;
+ * shape `LocalSource` in ./local.ts).
+ *
+ * `readJournals` folds "there is no such directory", "it holds no run journal",
+ * "everything is older than the window" and "a selected run has no recognized
+ * identity" into one `absent?: string` INSIDE the value. A caller that only
+ * wants facts cannot tell a measured empty window from a machine that has no
+ * journal at all, and the difference is exactly what an off-host reader must
+ * be able to see. This function keeps the fact and the reason apart:
+ *
+ * - `absent` — nothing was there to read (ENOENT): no journal on this machine;
+ * - `unreadable` — something was there and this process could not list it;
+ * - `malformed-partial` — the window was read and at least one row was not, with
+ *   the valid runs kept and every bad row named in `malformed`;
+ * - `readable` — the window was read; emptiness is the value's own property and
+ *   `localSourceState` reports it as `readable-empty` or `readable-present`.
+ *
+ * `readJournals` itself is unchanged: this is the ingress for readers that are
+ * being migrated, not a second reader. Every case here delegates to it.
+ */
+export function readJournalSource(
+  dir: string,
+  options: ReadJournalsOptions & { detail?: "include" } = {},
+): LocalSource<Journals> {
+  // `runIds` names the files to open and never lists the directory, so the
+  // directory's own existence is only a question for a whole-window read.
+  if (options.runIds === undefined) {
+    try {
+      readdirSync(dir)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === "ENOENT") return { kind: "absent" }
+      return {
+        kind: "unreadable",
+        why: `no run journal was read: ${dir} could not be listed (${String(error instanceof Error ? error.message : error)})`,
+      }
+    }
+  }
+  const journals = readJournals(dir, options)
+  if (journals.malformed.length > 0) {
+    return {
+      kind: "malformed-partial",
+      value: journals,
+      why:
+        `${String(journals.malformed.length)} journal row(s) under ${dir} could not be read; ` +
+        `the valid runs are kept and each bad row is named in malformed`,
+    }
+  }
+  return { kind: "readable", value: journals }
 }

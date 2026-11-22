@@ -178,6 +178,7 @@ export {
   LOG_KINDS,
   journalKey,
   openLog,
+  readJournalSource,
   readJournals,
   readJournalLine,
   readJournalProjection,
