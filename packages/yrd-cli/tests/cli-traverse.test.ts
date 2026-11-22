@@ -64,7 +64,11 @@ const streamed = (answers: readonly PageAnswer[]): string =>
  */
 function project(
   documents: string,
-  options: Readonly<{ activity?: "ok" | "fail"; traverse?: string }> = {},
+  options: Readonly<{
+    activity?: "ok" | "fail"
+    events?: readonly { path: string; actor: string; ts: number }[]
+    traverse?: string
+  }> = {},
 ): { root: string; pageCalls: () => number; activityCalls: () => number } {
   const base = join(realpathSync(mkdtempSync(join(tmpdir(), "yrd-traverse-"))), "project")
   roots.push(join(base, ".."))
@@ -82,7 +86,9 @@ function project(
           PROVIDER,
           "count",
           activityLog,
-          `${JSON.stringify({ path: "a.md", actor: "@dev/1", ts: Date.now() - 60_000 })}\n`,
+          `${(options.events ?? [{ path: "a.md", actor: "@dev/1", ts: Date.now() - 60_000 }])
+            .map((event) => JSON.stringify(event))
+            .join("\n")}\n`,
           "<cutoff>",
         ])
   const declaration = [
@@ -229,5 +235,37 @@ describe("#37838 one Workboard refresh enters Yrd once", () => {
       ["b", null],
     ])
     expect(result.activityUnreadRows).toBe(1)
+  }, 120_000)
+
+  // @cto 80894587: a hold can end or activity can age out with NO store edit, so the next refresh must correct
+  // the row. The traversal re-reads the whole set every time, which is what makes the correction possible.
+  it("flips a row whose owner activity aged out although every page answer is identical", async () => {
+    const window = 24 * 60 * 60 * 1000
+    const fixture = project(streamed([{ rows: [{ ...row("a"), row: { id: "a", title: "a", owner: "@dev/1" } }], next: null, complete: true }]), {
+      events: [{ path: "a.md", actor: "@dev/1", ts: Date.now() - window + 400 }],
+    })
+    const refresh = async (): Promise<boolean | null> => {
+      const outcome = await runIssuesVerb({
+        verb: "traverse",
+        args: [basePageRequest],
+        projectRoot: fixture.root,
+        cwd: fixture.root,
+        env: { ...process.env },
+        environments: async () => [],
+        stderr: () => {},
+      })
+      expect(outcome.ok, outcome.ok ? "" : outcome.message).toBe(true)
+      if (!outcome.ok) return null
+      const result = outcome.envelope.result as { rows: readonly { row: { in_progress: boolean | null } }[] }
+      return result.rows[0]?.row.in_progress ?? null
+    }
+
+    expect(await refresh()).toBe(true)
+    await Bun.sleep(1_200)
+    // Same snapshot, same rows, same page document: only the captured cutoff moved past the write.
+    const after = await refresh()
+    expect(after).toBe(false)
+    expect(fixture.pageCalls()).toBe(2)
+    expect(fixture.activityCalls()).toBe(2)
   }, 120_000)
 })
