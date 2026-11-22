@@ -607,6 +607,39 @@ describe("the JSON runner is independent of selected change rows (#24570)", () =
     expect(second.published.runner.state).toBe("checking")
     expect(first.localRunner).toMatchObject({ local: true, value: { service: { kind: "absent" } } })
   })
+
+  // 28522 Acceptance: absent journals plus a FRESH published runner must not render
+  // a stopped line or an invented counter. The page may only say what the published
+  // facts say — this machine read no journal at all.
+  it("prints a fresh published runner's own word beside no journal, never stopped and never a false count", async () => {
+    const work = await queueWithOneChange()
+    const git = gitIn(work)
+    const tree = (await git(["mktree"], "")).trim()
+    const at = new Date().toISOString()
+    const body = `yrd runner claim\n\nRunner: host/42\nStarted: ${at}\nAt: ${at}\nBeat: 60000ms\nState: checking\nHolding: task/one@${"a".repeat(40)}\nSince: ${at}\n`
+    const claim = (await git(["commit-tree", tree, "-m", body])).trim()
+    await git(["push", "--quiet", "origin", `${claim}:refs/yrd/main/runner`])
+
+    const page = await yrd(work, { color: false, columns: 120 }, "list")
+    expect(page.exitCode, page.report).toBe(0)
+    // The published claim's own state is what the RUNNER row says.
+    expect(page.stdout, page.report).toContain("checking")
+    // Nothing read this machine's journal, and the page says exactly that.
+    expect(page.stdout, page.report).toContain("no run journal was read")
+    // A stop word here would be invented: the runner published a fresh claim, so
+    // no reading of an absent journal may turn it into `stopped` or `silent`.
+    expect(page.stdout, page.report).not.toContain("stopped")
+    expect(page.stdout, page.report).not.toContain("silent")
+    expect(page.stdout, page.report).not.toContain("no runner status")
+    // The published row keeps its own state and the real count; a journal that was
+    // never read contributes no step, attempt or check number.
+    expect(page.stdout, page.report).toContain("1 waiting")
+    const row = page.stdout.split("\n").find((line) => line.includes("task/one") && !line.includes("RUNNER"))
+    expect(row, page.report).toBeDefined()
+    expect(row).toContain("queued")
+    expect(row).not.toMatch(/\[q-/u)
+    expect(row).not.toMatch(/\b\d+ checks?\b/u)
+  })
 })
 
 /**
