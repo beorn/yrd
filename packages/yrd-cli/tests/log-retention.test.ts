@@ -227,9 +227,9 @@ describe("expiredRoundOutput (selection, by name only)", () => {
     expect(found).toEqual([])
   })
 
-  it("defaults to the fourteen-day window and honours an explicit one", () => {
+  it("defaults to the seven-day window and honours an explicit one", () => {
     const { logs } = tree("window")
-    expect(ROUND_OUTPUT_WINDOW_MS).toBe(14 * DAY)
+    expect(ROUND_OUTPUT_WINDOW_MS).toBe(7 * DAY)
     place(join(logs, round(ago(5))))
     const fiveDays = expiredRoundOutput({ roots: [logs], now: NOW, windowMs: 3 * DAY }).entries
     expect(fiveDays).toHaveLength(1)
@@ -375,7 +375,7 @@ describe("retentionHumanLines (the operator's rendering)", () => {
       },
       { roots: ["/x/logs", "/x/checks"], dryRun: true, listed: selected },
     )
-    expect(lines[0]).toContain("would remove 2 round-output directories older than 14 days")
+    expect(lines[0]).toContain("would remove 2 round-output directories older than 7 days")
     expect(lines[1]).toContain("searched /x/logs, /x/checks")
     expect(lines.slice(2)).toEqual(["/x/logs/q-a", "/x/logs/q-b"])
   })
@@ -385,7 +385,7 @@ describe("retentionHumanLines (the operator's rendering)", () => {
       { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], failuresOmitted: 0, remaining: [], missing: [] },
       { roots: ["/x/logs", "/x/checks"], dryRun: false, listed: [] },
     )
-    expect(lines[0]).toContain("removed 0 round-output directories older than 14 days")
+    expect(lines[0]).toContain("removed 0 round-output directories older than 7 days")
     expect(lines[1]).toContain("searched /x/logs, /x/checks")
     expect(lines).toHaveLength(2)
   })
@@ -948,12 +948,13 @@ describe("the round sweep gzips finished round output past 24 hours (34923 rulin
 describe("the round sweep gzips journals past seven days, never the newest (34923 ruling 3, 4)", () => {
   it("converts old journals, keeps the newer and the newest plain, and their readers read the same runs", async () => {
     const { workdir, logs } = tree("gz-journals")
-    // Journals compress at seven days while raw output is kept fourteen (34952): the 10- and 8-day rounds' journals
-    // are gzipped here, and their round directories, inside the window, stay.
+    // Journals and raw output share the seven-day window since @chief narrowed it on 2026-11-23 (hh 34127): the 10-
+    // and 8-day rounds are past it, so their journals are gzipped and their directories removed; the 6-day stays.
     const old = finishedRound(logs, ago(10))
     const eight = finishedRound(logs, ago(8))
     const six = finishedRound(logs, ago(6))
-    const raw = output(join(logs, old.id, "git", "1.stdout.bin"), body("ten days"))
+    output(join(logs, old.id, "git", "1.stdout.bin"), body("ten days"))
+    output(join(logs, eight.id, "git", "1.stdout.bin"), body("eight days"))
     const ids = [old.id, eight.id]
     const before = {
       logs: ids.map((id) => readRunLog(logs, id)),
@@ -964,9 +965,8 @@ describe("the round sweep gzips journals past seven days, never the newest (3492
     gone(old.path)
     gone(eight.path)
     plain(six.path)
-    // The 10-day round's raw output is inside the fourteen-day window: nothing is removed.
-    expect(result?.removed).toEqual([])
-    expect(existsSync(raw) || existsSync(`${raw}.gz`)).toBe(true)
+    const removed = (result?.removed ?? []).map((entry) => entry.path).sort()
+    expect(removed).toEqual([join(logs, eight.id), join(logs, old.id)].sort())
     expect(ids.map((id) => readRunLog(logs, id))).toEqual(before.logs)
     expect(readJournals(logs, { runIds: ids, now: NOW }).runs).toEqual(before.runs)
     // The projection still serves the converted journal: refreshed against the archive, never left stale.
@@ -1001,7 +1001,7 @@ describe("yrd logs prune only removes; compression is the queue round's (34923)"
 })
 
 describe("compressed output still expires by round name; journals never (34923 ruling 4)", () => {
-  it("removes a compressed round directory at fourteen days by its name, and keeps the compressed journal", async () => {
+  it("removes a compressed round directory past seven days by its name, and keeps the compressed journal", async () => {
     const { workdir, logs } = tree("gz-expiry")
     const log = finishedRound(logs, ago(6.5))
     finishedRound(logs, ago(0.5))
@@ -1240,11 +1240,12 @@ describe("compression work is bounded per round and later rounds progress (34923
     // bounds. Since units went to 2048 (@cto 340938a3) that is the files bound, so the backlogs keep their 1024-unit
     // sizes and their run time instead of doubling past the 30 s test timeout on a loaded host.
     const PASS_BUDGET = Math.min(ROUND_COMPRESSION_UNITS, ROUND_COMPRESSION_FILES)
-    // A minute apart from ten days back: 3 x 1024 rounds span ~2.1 days, all past the 24-hour line and inside the
-    // 14-day window (37402; from three days back the newest third was too young to be eligible at all).
+    // A minute apart from five days back: 3 x 1024 rounds span ~2.1 days, all past the 24-hour line and inside the
+    // seven-day window that @chief set on 2026-11-23 (hh 34127); from ten days back they would already be expired, so
+    // the removal budget — not this compression bound — would end the drain (37402).
     function backlog(logs: string, count: number): string[] {
       return Array.from({ length: count }, (_, index) => {
-        const log = finishedRound(logs, new Date(ago(10).getTime() + index * 60_000))
+        const log = finishedRound(logs, new Date(ago(5).getTime() + index * 60_000))
         return output(join(logs, log.id, "git", "1.stdout.bin"), body(log.id, 300))
       })
     }

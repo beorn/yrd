@@ -62,10 +62,12 @@ import { safeRemove } from "removely"
  */
 
 /**
- * Fourteen days: the round-output window. @cto ruled seven (28499); the operator's later disk rule 2 gives queue logs
- * fourteen (hh 33167, 2026-11-10), applied by @cto 08bcb1af (hh 34952). Journals are never windowed by this.
+ * Seven days: the round-output window, which is @cto's original ruling (28499). The operator's disk rule 2 widened it
+ * to fourteen for queue logs (hh 33167, 2026-11-10, applied by @cto 08bcb1af / hh 34952); @chief narrowed it back to
+ * seven on 2026-11-23 (d22a08f6, hh 34127) because non-production queue logs are covered by the operator's standing
+ * permission and the fourteen-day hold was where the growth went. Journals are never windowed by this.
  */
-export const ROUND_OUTPUT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000
+export const ROUND_OUTPUT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
 /**
  * How many round-output directories are removed per batch, oldest first. Two
@@ -97,8 +99,9 @@ export type RetentionPace = { last?: Date }
 export const ROUND_OUTPUT_COMPRESS_AFTER_MS = 24 * 60 * 60 * 1000
 
 /**
- * A run journal is compressed once its round NAME is older than seven days; it is never removed. Seven is the old
- * round-output window, kept when that window became fourteen (hh 34952), so journal compression did not change.
+ * A run journal is compressed once its round NAME is older than seven days; it is never removed. Seven matches the
+ * round-output window since @chief narrowed it back on 2026-11-23 (hh 34127), so a journal is compressed no later than
+ * the round directory it points at is removed.
  */
 export const JOURNAL_COMPRESS_AFTER_MS = 7 * 24 * 60 * 60 * 1000
 

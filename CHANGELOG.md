@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Round-output retention (the raw `logs/q-*` trees) windows at seven days again, down from fourteen (hh 34127,
+  @chief 2026-11-23). Journals stay compressed, never removed, at the same seven days.
+
 - `yrd queue list`, `yrd watch`, `yrd queue show` and `yrd queue stats` emit `schemaVersion: 2`. Published
   queue facts move under `published` (`changes`, `stopped`, `pause`, `overrides`, `runner`), while this
   machine's own journal read and runner read become `Local<T>` values — `execution` and `localRunner` — that
