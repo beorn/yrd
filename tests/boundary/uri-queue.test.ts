@@ -237,10 +237,15 @@ describe("a queue started by address on a host with no checkout", () => {
     const selectedCalls = selected.readCalls()
     expect(selectedCalls.some(({ cwd, args }) => cwd === dirname(owned) && args[0] === "clone")).toBe(true)
     expect(selectedCalls.some(({ cwd, args }) => cwd === owned && args[0] === "remote")).toBe(true)
+    // A bare-store command (`--git-dir`) now runs inside the store so a deleted
+    // caller cwd cannot fail it (gitomic a63a093, hh 37460): author-side bare
+    // calls report `author/.git`, worktree-scoped calls report `author`.
+    const authorStore = (await git(author, "rev-parse", "--absolute-git-dir")).trim()
+    const atAuthor = (cwd: string): boolean => cwd === author || cwd === authorStore
     // Gitomic places global options before the subcommand. The selected
     // executable still owns the one atomic, leased author publication.
     const authorPush = selectedCalls
-      .filter(({ cwd }) => cwd === author)
+      .filter(({ cwd }) => atAuthor(cwd))
       .map(({ args }) => gitSubcommand(args))
       .find((call) => call?.name === "push")
     expect(authorPush, "selected author Git saw no push verb").toBeDefined()
@@ -253,7 +258,7 @@ describe("a queue started by address on a host with no checkout", () => {
     expect(
       selectedCalls.some(
         ({ cwd, args }) =>
-          cwd === author &&
+          atAuthor(cwd) &&
           args[0] === "--git-dir" &&
           gitSubcommand(args)?.name === "fetch" &&
           args.some((arg) => arg.includes("refs/heads/main")),
