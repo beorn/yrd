@@ -178,8 +178,13 @@ export function readActivity(stdout: string): readonly IssuesActivityEvent[] {
     let record: unknown
     try {
       record = JSON.parse(line)
-    } catch {
-      throw new Error(`activity line ${String(index + 1)} is not JSON`)
+    } catch (error) {
+      // Thread the parser's own message: the line number says WHICH record broke, and the cause says what the bytes
+      // really were. A thrown Error with neither is the class the catch-cause guard counts.
+      throw new Error(
+        `activity line ${String(index + 1)} is not JSON: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      )
     }
     if (!isRecord(record)) throw new Error(`activity line ${String(index + 1)} is not a journal record`)
     const path = recordPath(record)
