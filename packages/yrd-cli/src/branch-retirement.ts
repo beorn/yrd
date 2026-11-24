@@ -2208,13 +2208,6 @@ export function retentionOf(proof: WorktreeRemovalProof): RetentionRecord | unde
 }
 
 /** The retained copy's manifest for a caller that must read the file; a `not-retained` receipt has none by design. */
-export function retainedManifestOf(proof: WorktreeRemovalProof): string {
-  const retention = retentionOf(proof)
-  if (retention?.kind !== "retained") {
-    throw new Error(`${proof.path}: this removal proof records no retained copy`)
-  }
-  return retention.manifest
-}
 
 export type AuthorReleaseOutcome = Readonly<{
   retirement: "complete" | "incomplete"

@@ -43,7 +43,7 @@ import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { createProcess } from "@yrd/process"
-import { readBranchProtections, retainedManifestOf } from "../src/branch-retirement.ts"
+import { readBranchProtections, retentionOf, type WorktreeRemovalProof } from "../src/branch-retirement.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
 import * as publicCli from "../src/index.ts"
 import {
@@ -188,6 +188,13 @@ function captureRemovalProof(run: ReturnType<typeof capture>): () => string {
     if (line === undefined) throw new Error(`no removal proof line in close stderr:\n${run.stderr()}`)
     return line.slice("retained environment removal proof ".length).trim()
   }
+}
+
+/** The manifest of a retained copy, or a loud failure: every row that calls this needs the copy to exist. */
+function retainedManifestIn(proof: WorktreeRemovalProof): string {
+  const retention = retentionOf(proof)
+  if (retention?.kind !== "retained") throw new Error(`row needs a retained copy: ${JSON.stringify(retention)}`)
+  return retention.manifest
 }
 
 async function openEnvironment(cwd: string, commit: string): Promise<Readonly<{ path: string; head: string }>> {
@@ -628,7 +635,7 @@ it.each([
             "delegate",
             undefined,
             (proof) => {
-              manifest = retainedManifestOf(proof)
+              manifest = retainedManifestIn(proof)
             },
           ),
           competing.stderr(),
