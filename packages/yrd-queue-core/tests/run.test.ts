@@ -4910,7 +4910,11 @@ it("observes a submitted head on the target without attributing its unsubmitted 
       stderr: (text) => void (stderr += text),
     })
     expect(exit, stderr).toBe(0)
-    return (JSON.parse(stdout) as { changes: { branch: string; head: string; state: string }[] }).changes
+    // ADR-0033 schema 2 publishes the change projection under `published`; there is no root `changes` array.
+    const document = JSON.parse(stdout) as {
+      published: { changes: { branch: string; head: string; state: string }[] }
+    }
+    return document.published.changes
   }
   expect((await cliChanges()).find((row) => row.branch === sibling)).toMatchObject({ head, state: "draft" })
   await w.git(["checkout", "--quiet", "main"])
