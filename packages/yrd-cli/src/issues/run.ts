@@ -10,6 +10,7 @@
 import { realpathSync, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { fileURLToPath } from "node:url"
+import { spawn, type ChildProcess } from "node:child_process"
 import { cleanGitEnvironment, createProcess } from "@yrd/process"
 // Gitomic only through Yrd's one configured git seam (gitomic-boundary.test.ts): scrubbed env, bounded calls.
 import { createLegacyBackend, gitIn, isAncestor, openReader, resolveGitSelection } from "@yrd/queue-core"
@@ -56,6 +57,9 @@ export type IssuesFailure = Readonly<{ ok: false; exitCode: 1 | 2; code: IssuesC
  */
 export type IssuesOutcome =
   | Readonly<{ ok: true; envelope: IssuesEnvelope; stream?: readonly IssuesEnvelope[] }>
+  // A declared long-lived reader ran with this process's own stdio until it exited (38182): there is no envelope to
+  // print, and its exit code is the answer. `list-page-serve` only.
+  | Readonly<{ ok: true; served: Readonly<{ exitCode: number }> }>
   | IssuesFailure
 
 type IssuesRequester = Readonly<{ authority: string; subject: string }>
@@ -586,6 +590,13 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
     return fail(1, ISSUES_CODES.unsupported, verb, `${verb} is not declared in ${where} (unsupported)`)
   }
 
+  // 38182 (@cto 17:49Z): a declared long-lived reader. The declaration and its pin resolve exactly as for
+  // `list-page`; then the provider gets THIS process's stdin, stdout and stderr and yrd stays its parent for its
+  // lifetime. Nothing here parses a frame: the protocol is the provider's, and a proxy would be a second contract.
+  if (verb === "list-page-serve") {
+    return await serveDeclared(substituteArgv(declared, request.values), options, env)
+  }
+
   if (verb === "assign") {
     for (const [key, flag] of [
       ["expected-owner", "--expected-owner"],
@@ -603,7 +614,45 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
     }
   }
 
-  /** Run one declared argv and hand back its stdout, or the named failure the caller reports. */
+  /**
+ * Run a declared long-lived reader with this process's stdio, forwarding termination, and answer with its exit code.
+ * A child that cannot start is the same named failure a one-shot provider gets.
+ */
+async function serveDeclared(
+  argv: readonly string[],
+  options: RunIssuesVerbOptions,
+  env: NodeJS.ProcessEnv,
+): Promise<IssuesOutcome> {
+  const [executable, ...args] = argv
+  if (executable === undefined) {
+    return fail(1, ISSUES_CODES.providerMissing, options.verb, "the declaration's argv is empty")
+  }
+  let child: ChildProcess
+  try {
+    child = spawn(executable, args, { cwd: options.cwd, env, stdio: "inherit" })
+  } catch (error) {
+    return fail(
+      1,
+      ISSUES_CODES.providerMissing,
+      options.verb,
+      `command ${JSON.stringify(executable)} not found: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  const forward: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP"]
+  const handlers = forward.map((signal) => {
+    const handler = (): void => void child.kill(signal)
+    process.once(signal, handler)
+    return [signal, handler] as const
+  })
+  const exitCode = await new Promise<number>((resolve) => {
+    child.once("error", () => resolve(1))
+    child.once("close", (code, signal) => resolve(signal === null ? (code ?? 1) : 1))
+  })
+  for (const [signal, handler] of handlers) process.off(signal, handler)
+  return { ok: true, served: { exitCode } }
+}
+
+/** Run one declared argv and hand back its stdout, or the named failure the caller reports. */
   const runDeclared = async (
     argv: readonly string[],
     command: string,

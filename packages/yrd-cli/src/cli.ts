@@ -2022,6 +2022,11 @@ function buildProgram(
         ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       })
+      if (outcome.ok && "served" in outcome) {
+        // 38182: a long-lived reader wrote straight to this process's stdio; its exit is yrd's exit.
+        if (outcome.served.exitCode !== 0) setExit(outcome.served.exitCode)
+        return
+      }
       if (outcome.ok) {
         // #37838 (@cto e1873f39): a `list-page` traversal answers one compact page envelope per line; every other
         // call answers its one envelope, byte for byte.
