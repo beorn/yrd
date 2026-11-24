@@ -212,10 +212,7 @@ async function openEnvironment(cwd: string, commit: string): Promise<Readonly<{ 
  * unpublished commit is the ordinary author environment: close is clean with it (34764 keeps attached root commits),
  * and the copy then holds something only that copy can lose. Opened per row, so each fixture gets its own bay.
  */
-async function openUnpublishedEnvironment(
-  cwd: string,
-  bay: string,
-): Promise<Readonly<{ path: string; head: string }>> {
+async function openUnpublishedEnvironment(cwd: string, bay: string): Promise<Readonly<{ path: string; head: string }>> {
   const opened = await openAttachedEnvironment(cwd, (await gitIn(cwd)(["rev-parse", "HEAD"])).trim(), bay)
   const git = gitIn(opened.path)
   writeFileSync(join(opened.path, "unpublished-work.txt"), "only this environment holds it\n")
