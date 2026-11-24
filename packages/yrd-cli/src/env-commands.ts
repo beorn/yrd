@@ -1164,10 +1164,20 @@ export type EnvRetainedOptions = Readonly<{
   reason?: string
   /** #35047: the termination port a retirement batch answers; the process signals unless a test injects one. */
   terminate?: TerminatePort
+  /**
+   * 34127 (@cto 2026-11-24 chunk ruling): entries proved-and-retired per chunk, with a rotating cursor, so a deadline
+   * ends the run with real retirements behind it instead of discarding what it proved. 0 keeps the single batch.
+   */
+  chunkSize?: number
 }>
 
 // The approved batch scan measured 469-665 s; this caller alone needs room beyond gitIn's normal 300 s ceiling.
 const RETAINED_BATCH_TIMEOUT_MS = 1_200_000
+/**
+ * 34127 (@cto 2026-11-24): entries per chunk, small enough that one chunk's proofs fit a share of the batch budget.
+ * The cursor advances inside the artifact directory, so each pass starts after the entry the last one stopped at.
+ */
+const RETAINED_CHUNK_SIZE = 50
 
 /** 34787: `env retained --discard <entry>`; the batch selectors never mix with it. */
 async function discardRetained(options: EnvRetainedOptions, io: EnvironmentCommandIO): Promise<YrdCliExitCode> {
@@ -1421,6 +1431,9 @@ export async function retainedEnvironments(
       )
       return 0
     }
+    const chunkSize = options.chunkSize ?? RETAINED_CHUNK_SIZE
+    if (!Number.isInteger(chunkSize) || chunkSize < 0)
+      throw new Error("--chunk-size must be zero or a positive whole number")
     const args = [
       "super",
       ...(options.json === true ? ["--json"] : []),
@@ -1430,6 +1443,9 @@ export async function retainedEnvironments(
       ...scope,
       ...(publishedBranch === undefined ? [] : ["--custody-target-branch", publishedBranch]),
       ...(options.apply === true ? ["--apply"] : []),
+      // 34127: a chunked run proves and retires chunk by chunk and rotates its start through the artifact directory's
+      // cursor, so the kept head of the census cannot eat every night's budget before anything is retired.
+      ...(chunkSize === 0 ? [] : ["--chunk-size", String(chunkSize)]),
       ...entries,
     ]
     try {

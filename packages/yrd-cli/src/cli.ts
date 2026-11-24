@@ -1849,6 +1849,11 @@ function buildProgram(
     )
     .option("--artifact-dir <directory>", "external caller-owned directory for retirement evidence")
     .option(
+      "--chunk-size <count>",
+      "prove and retire this many entries per chunk, resuming after the cursor in the artifact directory (default 50; 0 keeps the single batch)",
+      Number,
+    )
+    .option(
       "--discard <entry>",
       "preview the exact un-witnessed loss of one retained entry (commit roots, root pins, attribution); with --apply, " +
         "record the decision in the Yrd log and remove the entry through GitSuper; never with --retire-expired",
