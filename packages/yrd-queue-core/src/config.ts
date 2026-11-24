@@ -181,6 +181,13 @@ export type QueueConfig = Readonly<{
    * runs it: a submit-side compose has no final inputs.
    */
   derive?: string
+  /**
+   * The root files a derive may regenerate, repo-relative (hh #38155, @cto e134ae02/dcf4a12e: "exactly one named
+   * path, declared by the target"). A derive that changes any other root path still stops the compose by name.
+   * Declared as its own key rather than nested under `derive:` because an older reader must warn-and-ignore it
+   * instead of refusing every submit: the string `derive:` stays exactly what every earlier reader parses.
+   */
+  deriveRootPaths?: readonly string[]
   /** One shell command run before closing a retained environment. */
   teardown?: string
   /** What the queue notifies, per ending; empty when the declaration names none. */
@@ -271,6 +278,7 @@ export function parseConfig(
   const notify = readNotify(declared.notify, unknownNotifyEvents)
   const setup = optionalString(declared, "setup")
   const derive = optionalString(declared, "derive")
+  const deriveRootPaths = readDeriveRootPaths(declared["derive-root-paths"])
   const teardown = optionalString(declared, "teardown")
   const issuesProvider = readIssuesProvider(declared.issuesProvider)
   const admission = readAdmission(declared.admission)
@@ -290,6 +298,7 @@ export function parseConfig(
     notify,
     setup,
     ...(derive === undefined ? {} : { derive }),
+    ...(deriveRootPaths === undefined ? {} : { deriveRootPaths }),
     teardown,
     target,
   }
@@ -567,6 +576,7 @@ const TOP_KEYS = [
   "archive-after",
   "checks",
   "derive",
+  "derive-root-paths",
   "health",
   "ignore",
   "issuesProvider",
@@ -677,6 +687,30 @@ function onlyKeys(record: Record<string, unknown>, known: readonly string[], whe
     `${where}: unknown key ${unknown.join(", ")} (known: ${known.join(", ")})` +
     (retired.length === 0 ? "" : `; ${retired.join("; ")}`)
   throw retired.length === 0 ? new UnknownConfigKey(message) : new Error(message)
+}
+
+/**
+ * The root files a derive may regenerate (hh #38155). Each is a repo-relative path inside the repository: no leading
+ * slash, no parent segment, no glob, no newline. Empty is refused rather than read as "nothing declared", so a
+ * mistyped key cannot silently re-create the refusal it was meant to lift.
+ */
+function readDeriveRootPaths(value: unknown): QueueConfig["deriveRootPaths"] {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(".yrd.yml derive-root-paths: must be a non-empty list of repo-relative paths")
+  }
+  return value.map((entry) => {
+    if (
+      typeof entry !== "string" ||
+      entry === "" ||
+      entry.startsWith("/") ||
+      /[\\*?[\]\0\r\n]/u.test(entry) ||
+      entry.split("/").some((part) => part === "" || part === "." || part === "..")
+    ) {
+      throw new Error(`.yrd.yml derive-root-paths: ${String(entry)} is not a repo-relative file path`)
+    }
+    return entry
+  })
 }
 
 function optionalString(record: Record<string, unknown>, key: string): string | undefined {

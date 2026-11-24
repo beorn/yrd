@@ -53,6 +53,8 @@ export type QueueRunOptions = Readonly<{
   setup?: string
   /** The target's `derive:`: run once in each composed merge before it is verified (derive.ts). */
   derive?: string
+  /** The root files the target's `derive-root-paths:` lets that command regenerate, carried on the derive's carrier. */
+  deriveRootPaths?: readonly string[]
   /** The target's retained-environment teardown; event queues refuse it until #25065 defines its event evidence. */
   teardown?: string
   /** The blob the checks were read from, recorded on every checked record. */

@@ -2236,6 +2236,7 @@ export async function eventQueueRun(
             : {
                 derive: {
                   run: options.derive,
+                  ...(options.deriveRootPaths === undefined ? {} : { rootPaths: options.deriveRootPaths }),
                   logDir: join(options.workdir, "checks", `${branch}@${head}`, log.id, "compose"),
                   tmpdir: options.tempRoot,
                 },
@@ -2403,6 +2404,8 @@ export async function eventQueueRun(
             repo: options.repo,
             targetSha: target,
             raises,
+            candidate,
+            ...(options.deriveRootPaths === undefined ? {} : { rootPaths: options.deriveRootPaths }),
             path: join(
               options.workdir,
               "worktrees",
@@ -2808,6 +2811,8 @@ export async function eventQueueRun(
               repo: options.repo,
               targetSha: target,
               raises,
+              candidate,
+              ...(options.deriveRootPaths === undefined ? {} : { rootPaths: options.deriveRootPaths }),
               path: join(
                 options.workdir,
                 "worktrees",

@@ -175,9 +175,12 @@ async function world(
  * a function of the merged gitlinks: run again on the derived candidate it writes the same bytes. (A derive that
  * copied the pin of the submodule it writes into would never be — the compose's second run catches that.)
  */
-function deriveScript(root: string, variant: "ok" | "root" | "fail" | "quiet" | "perfile" | "staged" = "ok"): string {
+function deriveScript(
+  root: string,
+  variant: "ok" | "root" | "fail" | "quiet" | "perfile" | "staged" | "declared" = "ok",
+): string {
   const script = join(root, `derive-${variant}.sh`)
-  const touchesLib = variant === "ok" || variant === "root" || variant === "fail"
+  const touchesLib = variant === "ok" || variant === "root" || variant === "fail" || variant === "declared"
   writeFileSync(
     script,
     [
@@ -187,6 +190,7 @@ function deriveScript(root: string, variant: "ok" | "root" | "fail" | "quiet" | 
       variant === "fail" ? 'echo "derive broke on purpose" >&2; exit 7' : "",
       touchesLib ? 'printf "derived-from: %s\\n" "$pin" > "$YRD_REPO/lib/derived.txt"' : "",
       variant === "root" ? 'printf "root\\n" > "$YRD_REPO/root-derived.txt"' : "",
+      variant === "declared" ? 'printf "declared\\n" > "$YRD_REPO/target.txt"' : "",
       variant === "quiet" ? 'echo "chore: nothing to derive"' : "",
       // The leftover is reported as every file under the removed path once the directory no longer holds a `.git`
       // file, so this variant reaches git's per-file form of the same leftover (the collapsed `vendor/nested/`
@@ -196,6 +200,7 @@ function deriveScript(root: string, variant: "ok" | "root" | "fail" | "quiet" | 
         ? 'blob=$(printf "edited\\n" | git -C "$YRD_REPO" hash-object -w --stdin)\ngit -C "$YRD_REPO" update-index --add --cacheinfo 100644,$blob,vendor/nested/keep.txt\necho "chore: staged a tracked change under the removed submodule"'
         : "",
       touchesLib ? 'echo "chore(lib): derived.txt follows lib ${pin}"' : "",
+      variant === "declared" ? 'echo "chore(lock): root file follows the merged pins"' : "",
       "",
     ].join("\n"),
     { mode: 0o755 },
@@ -203,7 +208,13 @@ function deriveScript(root: string, variant: "ok" | "root" | "fail" | "quiet" | 
   return script
 }
 
-async function compose(w: World, run: string | undefined, path: string, process?: Process) {
+async function compose(
+  w: World,
+  run: string | undefined,
+  path: string,
+  process?: Process,
+  deriveRootPaths?: readonly string[],
+) {
   const logDir = join(w.root, "logs", path)
   mkdirSync(logDir, { recursive: true })
   return verifyCandidate({
@@ -219,7 +230,16 @@ async function compose(w: World, run: string | undefined, path: string, process?
     // As the queue runs it: the derived child objects are adopted into the queue clone's stores before the
     // worktree goes, which is where publication reads them.
     worktree: { env: w.env, populateReference: true },
-    ...(run === undefined ? {} : { derive: { run, logDir, tmpdir: join(w.root, "tmp") } }),
+    ...(run === undefined
+      ? {}
+      : {
+          derive: {
+            run,
+            logDir,
+            tmpdir: join(w.root, "tmp"),
+            ...(deriveRootPaths === undefined ? {} : { rootPaths: deriveRootPaths }),
+          },
+        }),
   })
 }
 
@@ -469,10 +489,31 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
     expect(readFileSync(join(w.root, "logs", "forked", "derive-base.log"), "utf8")).toContain("does not descend")
   })
 
-  it("a change outside every submodule stops the compose by name and says root derivation is not admitted", async () => {
+  it("a root change the target did not declare stops the compose by name", async () => {
     const w = await world()
     await expect(compose(w, deriveScript(w.root, "root"), "root")).rejects.toThrow(
-      /root-derived\.txt outside every submodule; root derivation is not admitted yet/u,
+      /root-derived\.txt outside every submodule; a derive may only regenerate files inside a submodule and the root paths the target declares/u,
+    )
+  })
+
+  /** hh #38155, @cto dcf4a12e condition 1: the target names exactly one root path, and the file the derive regenerates
+   * there rides the same carrier as the pins — so the composed tree never pairs a raised pin with a stale root file.
+   */
+  it("a declared root file rides the carrier beside the derived pin, in one commit on the target", async () => {
+    const w = await world()
+    const verified = await compose(w, deriveScript(w.root, "declared"), "declared", undefined, ["target.txt"])
+    expect(verified.state).toBe("verified")
+    if (verified.state !== "verified") throw new Error("declared root file refused")
+    const derived = verified.verifying.derived
+    expect(derived?.files.map((file) => file.path)).toEqual(["target.txt"])
+    expect(derived?.submodules.map((entry) => entry.path)).toEqual(["lib"])
+    const carrier = derived?.carrier as string
+    expect((await w.git(["rev-list", "--parents", "-n", "1", carrier])).trim()).toMatch(
+      new RegExp(`^${carrier} ${w.target}$`, "u"),
+    )
+    expect((await w.git(["show", `${carrier}:target.txt`])).trim()).toBe("declared")
+    expect((await w.git(["ls-tree", "--object-only", carrier, "lib"])).trim()).toBe(
+      derived?.submodules.find((entry) => entry.path === "lib")?.to,
     )
   })
 
@@ -528,7 +569,7 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
     const w = await world({ removesChild: true })
     using _fixtureEnvironment = ambientTransport(w)
     await expect(compose(w, deriveScript(w.root, "staged"), "staged")).rejects.toThrow(
-      /vendor\/nested\/keep\.txt.*outside every submodule; root derivation is not admitted yet/u,
+      /vendor\/nested\/keep\.txt.*outside every submodule; a derive may only regenerate files inside a submodule and the root paths the target declares/u,
     )
   })
 })

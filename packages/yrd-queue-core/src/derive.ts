@@ -20,6 +20,12 @@
  * two-parent merge that freezes its own publication intent. Any other exit, a
  * change outside a submodule, or a command that is not there stops the
  * compose by name: the change is stuck, the queue's, never the submitter's.
+ * A root file is admitted ONLY when the target's `derive-root-paths:` names exactly that
+ * path (hh #38155, @cto dcf4a12e): a generated file whose inputs are the merged pins can
+ * be a root one — the root lockfile names every workspace member's version — and only the
+ * queue knows the merged set. A declared root file rides the same carrier commit as the
+ * pins, so a carrier never pairs a raised pin with the base's stale lock, and any root
+ * path the target did not declare still stops by name.
  * A submodule the CANDIDATE removes is the one exception: its populated
  * leftover directory is the checkout's, not the derive's, so an untracked
  * change under a path the target declared as a gitlink is admitted, and a run
@@ -40,6 +46,8 @@ export const DERIVE = "derive"
 export type DeriveSpec = Readonly<{
   /** The declaration's `derive:`: one shell command, as a check's `run:` is. */
   run: string
+  /** The declaration's `derive-root-paths:`: the only root files this command may regenerate. */
+  rootPaths?: readonly string[]
   /** Where the derive's log goes, the check logs' own directory. */
   logDir: string
   /** The temp root the derive gets as `TMPDIR`, as a check does. */
@@ -54,6 +62,8 @@ export type Derived = Readonly<{
   subject: string
   /** Each submodule the command changed, with the pin it stood at and the commit made on it. */
   submodules: readonly Readonly<{ path: string; from: string; to: string }>[]
+  /** Each declared root file the command regenerated, as the exact blob the carrier writes. */
+  files: readonly Readonly<{ path: string; mode: string; blob: string }>[]
   /** The one root commit on the target that carries the new pins. */
   carrier: string
   /** The command's own run. */
@@ -162,20 +172,27 @@ export async function deriveInWorktree(options: DeriveInWorktree): Promise<Deriv
     }
     return false
   }
+  // The root files the target's `derive-root-paths:` admits (hh #38155). Anything else outside a submodule still
+  // stops the compose by name, and so does a declared path this target never declared.
+  const admittedRoot = new Set(options.derive.rootPaths ?? [])
   const outside = changes.filter(
-    (change) => !gitlinks.has(change.path) && !(change.untracked && underRemovedGitlink(change.path)),
+    (change) =>
+      !gitlinks.has(change.path) &&
+      !(change.untracked && underRemovedGitlink(change.path)) &&
+      !admittedRoot.has(change.path),
   )
   if (outside.length > 0) {
     throw new DeriveFailed(
       candidate,
-      `\`${derive.run}\` changed ${outside.map((change) => change.path).join(", ")} outside every submodule; root derivation is not admitted yet (27176 first slice): a derive may only regenerate files inside a submodule`,
+      `\`${derive.run}\` changed ${outside.map((change) => change.path).join(", ")} outside every submodule; a derive may only regenerate files inside a submodule and the root paths the target declares (derive-root-paths:, 27176 and 38155)`,
       ran,
     )
   }
   // Only a candidate gitlink is a submodule the derive may commit on; the admitted leftover is not one, so a run that
   // merely reconciled it derived nothing.
   const changedPaths = changes.filter((change) => gitlinks.has(change.path)).map((change) => change.path)
-  if (changedPaths.length === 0) return undefined
+  const rootChanges = changes.filter((change) => admittedRoot.has(change.path)).map((change) => change.path)
+  if (changedPaths.length === 0 && rootChanges.length === 0) return undefined
   const subject = await subjectOf(derive, candidate, ran)
   const submodules: Derived["submodules"][number][] = []
   for (const path of [...changedPaths].sort()) {
@@ -222,13 +239,30 @@ export async function deriveInWorktree(options: DeriveInWorktree): Promise<Deriv
   }
   // Composed in the worktree: the derived child commits live in its submodule stores, and its root objects are the
   // queue clone's, so the carrier is reachable there for the compose that follows.
+  const files: Derived["files"][number][] = []
+  for (const path of [...rootChanges].sort()) {
+    const recorded = /^(\d{6}) ([0-9a-f]{40,64}) \d+\t(.*)$/u.exec(
+      (await root(["ls-files", "-s", "--", path])).replace(/\n$/u, ""),
+    )
+    if (recorded === null || recorded[3] !== path) {
+      throw new DeriveFailed(candidate, `${path} is declared in derive-root-paths: but the tree does not track it`, ran)
+    }
+    const blob = (await root(["hash-object", "-w", "--", path])).trim()
+    files.push({ path, mode: recorded[1] ?? "100644", blob })
+  }
+  // A derived SUBMODULE leaves the root worktree clean (its bytes are committed in the child); a derived ROOT FILE
+  // does not, and the recompose that folds the carrier into the merge refuses a dirty tree (`dirty-worktree`). The
+  // blob is already in the carrier, so the worktree path goes back to the composed merge's own content — exactly the
+  // bytes the carrier's tree will replace — and nothing the derive wrote is lost.
+  for (const file of files) await root(["checkout", candidate, "--", file.path])
   const carrier = await composeGitlinkCarrier({
     repo: cwd,
     base: options.targetHead,
     pins: submodules.map(({ path, to }) => ({ path, commit: to })),
+    ...(files.length === 0 ? {} : { files: files.map((file) => ({ path: file.path, mode: file.mode as "100644", blob: file.blob })) }),
     message: `${subject}\n\nDerived-From: ${candidate}\n`,
   })
-  return { subject, submodules, carrier: carrier.commit, ran }
+  return { subject, submodules, files, carrier: carrier.commit, ran }
 }
 
 /**
