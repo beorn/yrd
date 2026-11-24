@@ -172,6 +172,47 @@ export type Process = Readonly<{
   [Symbol.asyncDispose](): Promise<void>
 }>
 
+/**
+ * One long-lived child attached to THIS process's own stdio: its bytes are the caller's protocol, so yrd never
+ * captures, parses or rewrites a frame. The bounded capture in {@link createProcess} is the wrong shape here — a
+ * serving reader must outlive one request and speak the terminal or socket it was handed. This is the ONE place a
+ * Yrd source may start such a child; every other src file imports it from here rather than `node:child_process`
+ * (tools/worktree-mechanics.guard.test.ts).
+ */
+export type InheritedProcess = Readonly<{
+  pid: number
+  /** Resolves with the child's exit status once it ends; 128+N when a signal ended it. */
+  exited: Promise<number>
+  /** The signal that ended it, when one did; populated by the time {@link exited} resolves. */
+  readonly signalCode: NodeJS.Signals | null
+  kill(signal?: NodeJS.Signals | number): void
+}>
+
+/** Start one child attached to this process's stdin, stdout and stderr. A missing executable throws (ENOENT). */
+export function spawnInherited(
+  argv: readonly string[],
+  options: Readonly<{ cwd?: string; env?: NodeJS.ProcessEnv }> = {},
+): InheritedProcess {
+  const [command, ...args] = argv
+  if (command === undefined) throw new TypeError("yrd: process argv must contain an executable")
+  const env = definedEnv(options.env ?? process.env)
+  const child = Bun.spawn([resolveExecutable(command, env), ...args], {
+    cwd: options.cwd ?? process.cwd(),
+    env,
+    stdio: ["inherit", "inherit", "inherit"],
+  })
+  return {
+    pid: child.pid,
+    exited: child.exited,
+    get signalCode() {
+      return child.signalCode === null ? null : (child.signalCode as NodeJS.Signals)
+    },
+    kill: (signal) => {
+      child.kill(signal)
+    },
+  }
+}
+
 /** Explicitly opts one process invocation into shell parsing. */
 export function shellCommand(script: string): readonly ["sh", "-c", string] {
   if (typeof script !== "string" || script.trim() === "") {

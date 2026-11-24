@@ -10,7 +10,7 @@
 import { realpathSync, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { fileURLToPath } from "node:url"
-import { cleanGitEnvironment, createProcess } from "@yrd/process"
+import { cleanGitEnvironment, createProcess, spawnInherited } from "@yrd/process"
 // Gitomic only through Yrd's one configured git seam (gitomic-boundary.test.ts): scrubbed env, bounded calls.
 import { createLegacyBackend, gitIn, isAncestor, openReader, resolveGitSelection } from "@yrd/queue-core"
 import {
@@ -57,6 +57,14 @@ export type IssuesFailure = Readonly<{ ok: false; exitCode: 1 | 2; code: IssuesC
 export type IssuesOutcome =
   | Readonly<{ ok: true; envelope: IssuesEnvelope; stream?: readonly IssuesEnvelope[] }>
   | IssuesFailure
+
+/**
+ * A declared long-lived reader ran with this process's own stdio until it exited (38182): there is no envelope to
+ * print, and its exit code is the answer. `list-page-serve` only, and only for the CLI, which is why it is not part
+ * of {@link IssuesOutcome}: every in-process caller reads `outcome.envelope` and must not have to prove otherwise.
+ */
+export type IssuesServedOutcome = Readonly<{ ok: true; served: Readonly<{ exitCode: number }> }>
+export type IssuesCommandOutcome = IssuesOutcome | IssuesServedOutcome
 
 type IssuesRequester = Readonly<{ authority: string; subject: string }>
 type IssuesAssignmentAudit = Readonly<{ expectedOwner?: string | null; requestedBy?: IssuesRequester }>
@@ -512,7 +520,11 @@ function readPageStream(
 }
 
 /** Run one verb end to end and return the envelope or a named failure. Never throws for a provider's fault. */
-export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<IssuesOutcome> {
+export function runIssuesVerb(options: RunIssuesVerbOptions & { readonly serve: true }): Promise<IssuesCommandOutcome>
+export function runIssuesVerb(options: RunIssuesVerbOptions): Promise<IssuesOutcome>
+export async function runIssuesVerb(
+  options: RunIssuesVerbOptions & { readonly serve?: true },
+): Promise<IssuesCommandOutcome> {
   const request = checkRequest(options)
   if (!request.ok) return request
   const verb = options.verb as IssuesVerb
@@ -586,6 +598,23 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
     return fail(1, ISSUES_CODES.unsupported, verb, `${verb} is not declared in ${where} (unsupported)`)
   }
 
+  // 38182 (@cto 17:49Z): a declared long-lived reader. The declaration and its pin resolve exactly as for
+  // `list-page`; then the provider gets THIS process's stdin, stdout and stderr and yrd stays its parent for its
+  // lifetime. Nothing here parses a frame: the protocol is the provider's, and a proxy would be a second contract.
+  if (verb === "list-page-serve") {
+    // Only the CLI runs a reader: it hands over this process's stdio. An in-process caller asking for one is a bug,
+    // named rather than answered with a value it would read as missing.
+    if (options.serve !== true) {
+      return fail(
+        2,
+        ISSUES_CODES.badArguments,
+        verb,
+        "list-page-serve runs through the CLI's serve path, not an in-process read",
+      )
+    }
+    return await serveDeclared(substituteArgv(declared, request.values), options, env)
+  }
+
   if (verb === "assign") {
     for (const [key, flag] of [
       ["expected-owner", "--expected-owner"],
@@ -601,6 +630,47 @@ export async function runIssuesVerb(options: RunIssuesVerbOptions): Promise<Issu
         return fail(1, ISSUES_CODES.unsupported, verb, `${where} does not declare ${token} for ${flag}`)
       }
     }
+  }
+
+  /**
+   * Run a declared long-lived reader with this process's stdio, forwarding termination, and answer with its exit code.
+   * A child that cannot start is the same named failure a one-shot provider gets.
+   */
+  async function serveDeclared(
+    argv: readonly string[],
+    options: RunIssuesVerbOptions,
+    env: NodeJS.ProcessEnv,
+  ): Promise<IssuesCommandOutcome> {
+    const [executable, ...args] = argv
+    if (executable === undefined) {
+      return fail(1, ISSUES_CODES.providerMissing, options.verb, "the declaration's argv is empty")
+    }
+    let child: ReturnType<typeof spawnInherited>
+    try {
+      child = spawnInherited([executable, ...args], { cwd: options.cwd, env })
+    } catch (error) {
+      return fail(
+        1,
+        ISSUES_CODES.providerMissing,
+        options.verb,
+        `command ${JSON.stringify(executable)} not found: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    const forward: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP"]
+    const handlers = forward.map((signal) => {
+      const handler = (): void => void child.kill(signal)
+      process.once(signal, handler)
+      return [signal, handler] as const
+    })
+    const exitCode = await child.exited
+    // Killed by a signal is not an exit status: name the signal rather than a plain 1.
+    const endingSignal = child.signalCode
+    for (const [signal, handler] of handlers) process.off(signal, handler)
+    if (endingSignal !== null) {
+      process.stderr.write(`yrd issues ${options.verb}: the declared reader was killed by ${endingSignal}\n`)
+      return { ok: true, served: { exitCode: 1 } }
+    }
+    return { ok: true, served: { exitCode } }
   }
 
   /** Run one declared argv and hand back its stdout, or the named failure the caller reports. */

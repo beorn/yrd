@@ -45,6 +45,9 @@ export const ISSUES_VERBS = {
   // Yrd holds it, resolved by the provider; <source> is `<repository>@<sha>`; <text> is the same on every replay.
   event: ["raw", "kind", "source", "text"],
   "list-page": ["page"],
+  // 38182 (@cto 17:49Z): the long-lived form of `list-page`. It takes no operand — the frames carry their own
+  // page requests — and a project opts in by declaring its argv. Yrd runs it once and hands it stdio unchanged.
+  "list-page-serve": [],
   // #37838 slice 2: the journal a row's owner was last seen writing, from a cutoff in epoch milliseconds. It is a
   // declared argv beside the reads (@cto 0a53b47f), so the provider stays the only thing that knows the store.
   activity: ["cutoff"],

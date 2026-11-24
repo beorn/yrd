@@ -2010,6 +2010,7 @@ function buildProgram(
         return
       }
       const outcome = await runIssuesVerb({
+        serve: true,
         ...assignmentAudit,
         verb,
         args,
@@ -2022,6 +2023,12 @@ function buildProgram(
         ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       })
+      if (outcome.ok && "served" in outcome) {
+        // 38182: a long-lived reader wrote straight to this process's stdio; its exit is yrd's exit. yrd's own codes
+        // are 0-4, so a reader's arbitrary status is a failed reader (1) — its stderr, inherited, still names why.
+        setExit(outcome.served.exitCode === 0 ? 0 : 1)
+        return
+      }
       if (outcome.ok) {
         // #37838 (@cto e1873f39): a `list-page` traversal answers one compact page envelope per line; every other
         // call answers its one envelope, byte for byte.
