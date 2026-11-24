@@ -43,7 +43,7 @@ import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { createProcess } from "@yrd/process"
-import { readBranchProtections } from "../src/branch-retirement.ts"
+import { readBranchProtections, retainedManifestOf } from "../src/branch-retirement.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
 import * as publicCli from "../src/index.ts"
 import {
@@ -206,6 +206,33 @@ async function openEnvironment(cwd: string, commit: string): Promise<Readonly<{ 
  * writes only to that attached branch and refuses a detached HEAD (33557, @cto 0576f4ca), so every row that proves
  * yrd's handling of a SUCCESSFUL preserve opens its environment this way.
  */
+/**
+ * #38198: `env close` keeps no copy when every head is published and the worktree is clean, so a row whose subject IS
+ * the retained copy must open an environment that holds work found nowhere else. An attached branch with one
+ * unpublished commit is the ordinary author environment: close is clean with it (34764 keeps attached root commits),
+ * and the copy then holds something only that copy can lose. Opened per row, so each fixture gets its own bay.
+ */
+async function openUnpublishedEnvironment(
+  cwd: string,
+  bay: string,
+): Promise<Readonly<{ path: string; head: string }>> {
+  const opened = await openAttachedEnvironment(cwd, (await gitIn(cwd)(["rev-parse", "HEAD"])).trim(), bay)
+  const git = gitIn(opened.path)
+  writeFileSync(join(opened.path, "unpublished-work.txt"), "only this environment holds it\n")
+  await git(["-c", "user.email=env-open@yrd.test", "-c", "user.name=yrd", "add", "unpublished-work.txt"])
+  await git([
+    "-c",
+    "user.email=env-open@yrd.test",
+    "-c",
+    "user.name=yrd",
+    "commit",
+    "--quiet",
+    "-m",
+    "unpublished author work",
+  ])
+  return { path: opened.path, head: (await git(["rev-parse", "HEAD"])).trim() }
+}
+
 async function openAttachedEnvironment(
   cwd: string,
   commit: string,
@@ -577,8 +604,7 @@ it.each([
   async ({ checkpoint, proof }) => {
     const w = await world(":")
     if (proof !== "no-modules") await addMaterializedDependency(w)
-    const head = (await w.git(["rev-parse", "HEAD"])).trim()
-    const { path } = await openEnvironment(w.work, head)
+    const { path } = await openUnpublishedEnvironment(w.work, "concurrent-retirement")
     const retain = join(dirname(w.work), "retained-modules")
     const original = capture(w.work)
     const competing = capture(w.work)
@@ -605,7 +631,7 @@ it.each([
             "delegate",
             undefined,
             (proof) => {
-              manifest = proof.manifest
+              manifest = retainedManifestOf(proof)
             },
           ),
           competing.stderr(),
@@ -2456,6 +2482,62 @@ process.stdout.write(JSON.stringify({ state: "updated", path: args[3], proof: { 
     expect(JSON.parse(closed.stdout())).toEqual({ closed: path })
     expect(existsSync(path)).toBe(false)
     expect(closed.stderr()).toContain(phase)
+  })
+
+  /** @failure #38198: a close that proved the retained copy unnecessary still prints a manifest path, or reports
+   *          the close as malformed because the proof carries no `manifest` at all.
+   * @level l2 (real close lifecycle with a fake removal executable and real worktree removal)
+   * @consumer every author whose environment closed with nothing unpublished
+   */
+  it("accepts a not-retained removal proof and prints its reason, not a path", async () => {
+    const w = await world(":")
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const shim = join(dirname(w.work), "not-retained-git-super")
+    writeFileSync(
+      shim,
+      `#!${process.execPath}
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+if (args[0] !== "--json" || args[1] !== "worktree" || args[2] !== "remove" || args[3] === undefined) {
+  console.error("fixture removal: unexpected git-super arguments " + JSON.stringify(args));
+  process.exit(64);
+}
+const removed = spawnSync("git", ["-C", process.cwd(), "worktree", "remove", args[3]], { encoding: "utf8" });
+if (removed.error) throw removed.error;
+if (removed.status !== 0) {
+  process.stderr.write(removed.stderr);
+  process.exit(removed.status ?? 70);
+}
+process.stdout.write(JSON.stringify({ state: "updated", path: args[3], retained: null, proof: {
+  path: args[3],
+  head: "0".repeat(40),
+  retained: null,
+  retention: {
+    kind: "not-retained",
+    reason: "every head is on refs/remotes/origin/main and the worktree is clean",
+    provedBy: ["refs/remotes/origin/main"],
+  },
+} }) + "\\n");
+`,
+      { mode: 0o700 },
+    )
+    vi.stubEnv("YRD_GIT_SUPER_BIN", shim)
+
+    const closed = capture(w.work)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "env", "close", path, "--retain", join(dirname(path), "retained-modules"), "--json"],
+        closed.io,
+      ),
+      closed.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(closed.stdout())).toEqual({ closed: path })
+    expect(existsSync(path)).toBe(false)
+    expect(closed.stderr()).toContain("retained environment removal kept no copy")
+    expect(closed.stderr()).toContain("refs/remotes/origin/main")
+    // YRD_GIT_SUPER_BIN is process-wide: leaving the fixture removal in place would make every later row in this file
+    // close through it instead of real git-super.
+    vi.unstubAllEnvs()
   })
 
   /**

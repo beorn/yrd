@@ -99,6 +99,27 @@ describe("env-retired dispatch", () => {
     expect(sent).toEqual(["/w/env-a", "/w/env-b", "/w/env-c"])
   })
 
+  // #38198: a close that proved the copy unnecessary tells the author where the work went, not an empty path.
+  it("carries the not-retained reason and proving refs instead of a manifest", async () => {
+    const { context, records } = await dispatchFixture((file) => `cat >> ${file}`)
+    const notice: EnvRetiredNotice = {
+      record: "env-retired",
+      change: "task/thing@abcdef1234567890abcdef1234567890abcdef12",
+      endingId: "q-run9:/w/env-a",
+      endedAt: "2026-10-17T00:00:00.000Z",
+      environment: "/w/env-a",
+      notRetained: {
+        reason: "every head is on refs/remotes/origin/main and the worktree is clean",
+        provedBy: ["refs/remotes/origin/main"],
+      },
+    }
+    expect(await notifyEnvRetired(context, [notice])).toEqual([{ delivery: "sent", name: "recorder", notice }])
+    const sent = JSON.parse(readFileSync(records, "utf8").trim().split("\n")[0] as string) as EnvRetiredNotice
+    expect(sent).toEqual(notice)
+    expect(sent.proof).toBeUndefined()
+    expect(sent.retainUntil).toBeUndefined()
+  })
+
   it("one notice the entry refuses does not block the notices after it", async () => {
     const { context, records, workdir } = await dispatchFixture(
       (file) => `line=$(cat); printf '%s\\n' "$line" >> ${file}; case "$line" in *env-bad*) exit 3;; esac`,

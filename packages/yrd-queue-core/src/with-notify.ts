@@ -132,8 +132,15 @@ export type EnvRetiredNotice = Readonly<{
   issue?: string
   merge?: string
   environment: string
-  proof: string
-  retainUntil: string
+  /** The sealed retained copy's manifest, when a copy was kept. */
+  proof?: string
+  /** The instant that copy may be dropped. */
+  retainUntil?: string
+  /**
+   * #38198: set instead of `proof`/`retainUntil` when the close proved no copy was needed — every head was on these
+   * remote refs and the worktree was clean. A reader that asks "where did my work go" gets the refs, not an empty path.
+   */
+  notRetained?: Readonly<{ reason: string; provedBy: readonly string[] }>
 }>
 
 /**

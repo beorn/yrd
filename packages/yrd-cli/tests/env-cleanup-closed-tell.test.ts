@@ -19,6 +19,7 @@ import type { QueueConfig } from "@yrd/queue-core"
 import { remoteUrl } from "@yrd/queue-core"
 import { createEnvironmentCleanup, type ClosedEnvironment } from "../src/env-cleanup.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
+import { retentionOf } from "../src/branch-retirement.ts"
 import { closeRequestFile, writeCloseRequest } from "../src/env-close-requests.ts"
 import { writeEnvOpenRecord } from "../src/env-open-record.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
@@ -35,10 +36,15 @@ vi.mock("removely", async (importOriginal) => {
   }
 })
 
-const PROOF = {
+// #38198: the removal proof carries its retention record as a union; a kept copy names its manifest and window.
+const RETENTION = {
+  kind: "retained" as const,
   manifest: "/retained/env-fresh/manifest.json",
-  retained: "/retained/env-fresh",
   retainUntil: "2026-10-24T00:00:00.000Z",
+}
+const PROOF = {
+  retention: RETENTION,
+  retained: "/retained/env-fresh",
 }
 
 // The close succeeds and reports a retained-removal proof, as the native close does.
@@ -190,8 +196,7 @@ it("reports a sweep-closed environment once, with its proof, and never a kept on
   expect(closed, "the sweep close is reported exactly once").toHaveLength(1)
   expect(closed[0]?.path).toBe(w.env)
   expect(closed[0]?.branch).toBe(w.branch)
-  expect(closed[0]?.proof?.manifest).toBe(PROOF.manifest)
-  expect(closed[0]?.proof?.retainUntil).toBe(PROOF.retainUntil)
+  expect(retentionOf(closed[0]!.proof!)).toEqual(RETENTION)
   const sweepClose = vi.mocked(closeEnvironment).mock.calls.findLast((call) => call[0] === w.env)
   expect(sweepClose?.[1]).toMatchObject({ componentCustody: { primaryRoot: w.repo, targetBranch: "main" } })
 
@@ -239,7 +244,7 @@ it.each([true, false])("reports a consumed close request only after its ending v
   expect(closed, "the consumed close is reported exactly once").toHaveLength(1)
   expect(closed[0]?.branch).toBe(w.branch)
   expect(closed[0]?.head).toBe(w.head)
-  expect(closed[0]?.proof?.manifest).toBe(PROOF.manifest)
+  expect(retentionOf(closed[0]!.proof!)).toEqual(RETENTION)
   const requestClose = vi.mocked(closeEnvironment).mock.calls.findLast((call) => call[0] === w.env)
   expect(requestClose?.[1]).toMatchObject({ componentCustody: { primaryRoot: w.repo, targetBranch: "main" } })
 })

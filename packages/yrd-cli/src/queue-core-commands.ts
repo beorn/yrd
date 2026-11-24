@@ -47,6 +47,7 @@ import {
   type AdvancedRecord,
   componentDropHint,
   componentsHoldingBranch,
+  retentionOf,
 } from "./branch-retirement.ts"
 import { holdsJudgeCommand, type RetentionPace, sweepRoundOutputInRound } from "./log-retention.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
@@ -6542,18 +6543,30 @@ async function tellEnvRetired(
   run: string,
   io: YrdCliIO,
 ): Promise<void> {
-  const notices: EnvRetiredNotice[] = retired.map(({ closed, change }) => ({
-    record: "env-retired",
-    change: `${closed.branch}@${closed.head ?? change.commit ?? ""}`,
-    endingId: `${run}:${closed.path}`,
-    endedAt: new Date().toISOString(),
-    ...(change.submitter === undefined ? {} : { submitter: change.submitter }),
-    ...(change.issue === undefined ? {} : { issue: change.issue }),
-    ...(change.merge === undefined ? {} : { merge: change.merge }),
-    environment: closed.path,
-    proof: closed.proof.manifest,
-    retainUntil: closed.proof.retainUntil,
-  }))
+  const notices: EnvRetiredNotice[] = retired.map(({ closed, change }) => {
+    // #38198: a copy that was kept prints its manifest and window; a close that proved the copy unnecessary prints
+    // the reason and the refs that proved it. The author hears where the work is either way.
+    const retention = retentionOf(closed.proof)
+    return {
+      record: "env-retired",
+      change: `${closed.branch}@${closed.head ?? change.commit ?? ""}`,
+      endingId: `${run}:${closed.path}`,
+      endedAt: new Date().toISOString(),
+      ...(change.submitter === undefined ? {} : { submitter: change.submitter }),
+      ...(change.issue === undefined ? {} : { issue: change.issue }),
+      ...(change.merge === undefined ? {} : { merge: change.merge }),
+      environment: closed.path,
+      ...(retention?.kind === "retained"
+        ? {
+            proof: retention.manifest,
+            ...(retention.retainUntil === undefined ? {} : { retainUntil: retention.retainUntil }),
+          }
+        : {}),
+      ...(retention?.kind === "not-retained"
+        ? { notRetained: { reason: retention.reason, provedBy: retention.provedBy } }
+        : {}),
+    }
+  })
   const environmentOf = (each: TellDelivery): string =>
     each.notice?.record === "env-retired"
       ? each.notice.environment
