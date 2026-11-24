@@ -33,8 +33,9 @@ describe("an explicit round keeps its pause", () => {
     for (const record of records) expect(record, run.report).not.toHaveProperty("garage")
     const listed = await runYrd(repo, "queue", "list", "--json", "--fresh")
     expect(listed.exitCode, listed.report).toBe(0)
+    // ADR-0033 schema 2 answers carry the stop projection under `published`.
     expect(JSON.parse(listed.stdout)).toMatchObject({
-      pause: { kind: "paused", reason: "rebuilding the core", by: "@cto" },
+      published: { pause: { kind: "paused", reason: "rebuilding the core", by: "@cto" } },
     })
   })
 })
