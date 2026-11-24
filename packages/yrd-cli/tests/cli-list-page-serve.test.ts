@@ -89,4 +89,30 @@ describe("list-page-serve: a declared reader runs with this process's stdio", ()
     expect(exitCode).toBe(1)
     expect(stderr).toMatch(/list-page-serve is not declared/)
   }, 60_000)
+
+  // @cto 18:01Z finding 1: node reports a spawn failure through the child's "error" event, never by throwing, so a
+  // bare exit 1 here would be a silent error with no reason a host could show.
+  it("names a reader whose argv does not exist, instead of a bare exit 1", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-cli-page-serve-missing-"))
+    roots.push(root)
+    const git = (...args: string[]): string => execFileSync("git", args, { cwd: root, encoding: "utf8" })
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@t.t")
+    git("config", "user.name", "t")
+    writeFileSync(join(root, "issues.yml"), `list-page-serve: [${JSON.stringify(join(root, "no-such-reader"))}]\n`)
+    git("add", "issues.yml")
+    git("commit", "-q", "-m", "declare a reader that cannot start")
+    const child = spawn(process.execPath, [YRD, "issues", "list-page-serve", "--project-root", root], {
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    let stderr = ""
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
+    const exitCode = await new Promise<number | null>((resolve) => child.once("close", (code) => resolve(code)))
+    expect(exitCode).toBe(1)
+    expect(stderr).toMatch(/yrd-issues-provider-missing/)
+    expect(stderr).toMatch(/no-such-reader/)
+    expect(stderr).toMatch(/ENOENT/)
+  }, 60_000)
 })

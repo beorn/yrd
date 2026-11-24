@@ -645,8 +645,18 @@ async function serveDeclared(
     return [signal, handler] as const
   })
   const exitCode = await new Promise<number>((resolve) => {
-    child.once("error", () => resolve(1))
-    child.once("close", (code, signal) => resolve(signal === null ? (code ?? 1) : 1))
+    // Node reports a spawn failure (ENOENT, EACCES, EAGAIN) through this event, never by throwing: a bare 1 here
+    // would be a silent error, so the reason goes to stderr and the caller's exit status says a start failed.
+    child.once("error", (error: NodeJS.ErrnoException) => {
+      const why = error.code === undefined ? error.message : `${error.code}: ${error.message}`
+      process.stderr.write(`yrd issues ${options.verb}: ${ISSUES_CODES.providerMissing}: command ${JSON.stringify(executable)} could not start (${why})\n`)
+      resolve(1)
+    })
+    // Killed by a signal is not an exit status: name the signal rather than a plain 1.
+    child.once("close", (code, signal) => {
+      if (signal !== null) process.stderr.write(`yrd issues ${options.verb}: the declared reader was killed by ${signal}\n`)
+      resolve(signal === null ? (code ?? 1) : 1)
+    })
   })
   for (const [signal, handler] of handlers) process.off(signal, handler)
   return { ok: true, served: { exitCode } }
