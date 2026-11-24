@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { createInterface } from "node:readline"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { afterAll, describe, expect, it } from "vitest"
 
 const roots: string[] = []
@@ -20,7 +21,7 @@ afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
 
-const YRD = new URL("../../../bin/yrd", import.meta.url).pathname
+const YRD = fileURLToPath(new URL("../../../bin/yrd", import.meta.url))
 
 /** A repository whose main declares a long-lived reader that echoes each frame back unchanged. */
 function projectWithServe(): string {

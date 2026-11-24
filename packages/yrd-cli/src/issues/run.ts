@@ -10,8 +10,7 @@
 import { realpathSync, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { fileURLToPath } from "node:url"
-import { spawn, type ChildProcess } from "node:child_process"
-import { cleanGitEnvironment, createProcess } from "@yrd/process"
+import { cleanGitEnvironment, createProcess, spawnInherited } from "@yrd/process"
 // Gitomic only through Yrd's one configured git seam (gitomic-boundary.test.ts): scrubbed env, bounded calls.
 import { createLegacyBackend, gitIn, isAncestor, openReader, resolveGitSelection } from "@yrd/queue-core"
 import {
@@ -606,7 +605,12 @@ export async function runIssuesVerb(
     // Only the CLI runs a reader: it hands over this process's stdio. An in-process caller asking for one is a bug,
     // named rather than answered with a value it would read as missing.
     if (options.serve !== true) {
-      return fail(2, ISSUES_CODES.badArguments, verb, "list-page-serve runs through the CLI's serve path, not an in-process read")
+      return fail(
+        2,
+        ISSUES_CODES.badArguments,
+        verb,
+        "list-page-serve runs through the CLI's serve path, not an in-process read",
+      )
     }
     return await serveDeclared(substituteArgv(declared, request.values), options, env)
   }
@@ -629,54 +633,47 @@ export async function runIssuesVerb(
   }
 
   /**
- * Run a declared long-lived reader with this process's stdio, forwarding termination, and answer with its exit code.
- * A child that cannot start is the same named failure a one-shot provider gets.
- */
-async function serveDeclared(
-  argv: readonly string[],
-  options: RunIssuesVerbOptions,
-  env: NodeJS.ProcessEnv,
-): Promise<IssuesCommandOutcome> {
-  const [executable, ...args] = argv
-  if (executable === undefined) {
-    return fail(1, ISSUES_CODES.providerMissing, options.verb, "the declaration's argv is empty")
-  }
-  let child: ChildProcess
-  try {
-    child = spawn(executable, args, { cwd: options.cwd, env, stdio: "inherit" })
-  } catch (error) {
-    return fail(
-      1,
-      ISSUES_CODES.providerMissing,
-      options.verb,
-      `command ${JSON.stringify(executable)} not found: ${error instanceof Error ? error.message : String(error)}`,
-    )
-  }
-  const forward: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP"]
-  const handlers = forward.map((signal) => {
-    const handler = (): void => void child.kill(signal)
-    process.once(signal, handler)
-    return [signal, handler] as const
-  })
-  const exitCode = await new Promise<number>((resolve) => {
-    // Node reports a spawn failure (ENOENT, EACCES, EAGAIN) through this event, never by throwing: a bare 1 here
-    // would be a silent error, so the reason goes to stderr and the caller's exit status says a start failed.
-    child.once("error", (error: NodeJS.ErrnoException) => {
-      const why = error.code === undefined ? error.message : `${error.code}: ${error.message}`
-      process.stderr.write(`yrd issues ${options.verb}: ${ISSUES_CODES.providerMissing}: command ${JSON.stringify(executable)} could not start (${why})\n`)
-      resolve(1)
+   * Run a declared long-lived reader with this process's stdio, forwarding termination, and answer with its exit code.
+   * A child that cannot start is the same named failure a one-shot provider gets.
+   */
+  async function serveDeclared(
+    argv: readonly string[],
+    options: RunIssuesVerbOptions,
+    env: NodeJS.ProcessEnv,
+  ): Promise<IssuesCommandOutcome> {
+    const [executable, ...args] = argv
+    if (executable === undefined) {
+      return fail(1, ISSUES_CODES.providerMissing, options.verb, "the declaration's argv is empty")
+    }
+    let child: ReturnType<typeof spawnInherited>
+    try {
+      child = spawnInherited([executable, ...args], { cwd: options.cwd, env })
+    } catch (error) {
+      return fail(
+        1,
+        ISSUES_CODES.providerMissing,
+        options.verb,
+        `command ${JSON.stringify(executable)} not found: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    const forward: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP"]
+    const handlers = forward.map((signal) => {
+      const handler = (): void => void child.kill(signal)
+      process.once(signal, handler)
+      return [signal, handler] as const
     })
+    const exitCode = await child.exited
     // Killed by a signal is not an exit status: name the signal rather than a plain 1.
-    child.once("close", (code, signal) => {
-      if (signal !== null) process.stderr.write(`yrd issues ${options.verb}: the declared reader was killed by ${signal}\n`)
-      resolve(signal === null ? (code ?? 1) : 1)
-    })
-  })
-  for (const [signal, handler] of handlers) process.off(signal, handler)
-  return { ok: true, served: { exitCode } }
-}
+    const endingSignal = child.signalCode
+    for (const [signal, handler] of handlers) process.off(signal, handler)
+    if (endingSignal !== null) {
+      process.stderr.write(`yrd issues ${options.verb}: the declared reader was killed by ${endingSignal}\n`)
+      return { ok: true, served: { exitCode: 1 } }
+    }
+    return { ok: true, served: { exitCode } }
+  }
 
-/** Run one declared argv and hand back its stdout, or the named failure the caller reports. */
+  /** Run one declared argv and hand back its stdout, or the named failure the caller reports. */
   const runDeclared = async (
     argv: readonly string[],
     command: string,
