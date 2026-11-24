@@ -59,7 +59,7 @@ import { adaptProcessGit, createProcess, type Process } from "@yrd/process"
 // yrd's own workspace); @chief withdrew that change (c6939f8255f0). Shape @cto, 2026-10-13.
 import { createLocalGitProcess } from "git-super/process"
 import { BUSY_PREFIX, isExclusiveBusy } from "git-super/exclusive"
-import type { WorktreeRemovalProof } from "./branch-retirement.ts"
+import { retentionOf, type WorktreeRemovalProof } from "./branch-retirement.ts"
 import {
   assertNoPrivateStore,
   createLocalGitWorktreeStore,
@@ -3187,8 +3187,9 @@ export async function closeEnvironment(
       !("proof" in removed) ||
       typeof removed.proof !== "object" ||
       removed.proof === null ||
-      !("manifest" in removed.proof) ||
-      typeof removed.proof.manifest !== "string"
+      // #38198: a close that proved the copy unnecessary returns a `not-retained` receipt with no manifest at all.
+      // Both shapes are well-formed; a proof carrying neither is not.
+      retentionOf(removed.proof as WorktreeRemovalProof) === undefined
     ) {
       await restoreAlignedGitlinks()
       throw new Error(
@@ -3241,7 +3242,12 @@ export async function closeEnvironment(
       }
     }
     removalProof = removed.proof as WorktreeRemovalProof
-    io.stderr(`retained environment removal proof ${removalProof.manifest}\n`)
+    const retention = retentionOf(removalProof)
+    io.stderr(
+      retention?.kind === "retained"
+        ? `retained environment removal proof ${retention.manifest}\n`
+        : `retained environment removal kept no copy: ${retention?.kind === "not-retained" ? retention.reason : "no retention record"}\n`,
+    )
     io.stderr(`${retainedCloseLine(retain)}\n`)
   } else {
     // No submodules recorded at this commit, so there is no gitlink for

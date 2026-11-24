@@ -2160,6 +2160,55 @@ export type WorktreeRemovalProof = Parameters<
   NonNullable<NonNullable<Parameters<GitWorktreeStore["remove"]>[1]>["retention"]>["report"]
 >[0]
 
+/**
+ * What a removal's `--retain` produced, normalised from git-super's proof (#38198, @cto d42f1a10). A copy names its
+ * manifest and retention window; a `not-retained` receipt names why a copy was unnecessary and the remote refs that
+ * proved it. `undefined` means retention was never requested, which is a different fact and never "not-retained".
+ * A proof written by an older git-super still carries top-level `manifest`/`retainUntil`; it reads as `retained`.
+ */
+export type RetentionRecord =
+  // `retainUntil` is absent only on a proof written by an older git-super that recorded no window; the manifest is the
+  // fact a reader needs, and a missing window is never a reason to call an otherwise sound proof malformed.
+  | Readonly<{ kind: "retained"; manifest: string; retainUntil?: string }>
+  | Readonly<{ kind: "not-retained"; reason: string; provedBy: readonly string[] }>
+
+export function retentionOf(proof: WorktreeRemovalProof): RetentionRecord | undefined {
+  const shape = proof as Readonly<{
+    retention?: unknown
+    manifest?: unknown
+    retainUntil?: unknown
+  }>
+  const retention = shape.retention
+  if (typeof retention === "object" && retention !== null && "kind" in retention) {
+    const record = retention as Record<string, unknown>
+    if (record.kind === "retained" && typeof record.manifest === "string") {
+      return {
+        kind: "retained",
+        manifest: record.manifest,
+        ...(typeof record.retainUntil === "string" ? { retainUntil: record.retainUntil } : {}),
+      }
+    }
+    if (record.kind === "not-retained" && typeof record.reason === "string" && Array.isArray(record.provedBy)) {
+      return {
+        kind: "not-retained",
+        reason: record.reason,
+        provedBy: record.provedBy.filter((ref): ref is string => typeof ref === "string"),
+      }
+    }
+    return undefined
+  }
+  if (typeof shape.manifest === "string") {
+    return {
+      kind: "retained",
+      manifest: shape.manifest,
+      ...(typeof shape.retainUntil === "string" ? { retainUntil: shape.retainUntil } : {}),
+    }
+  }
+  return undefined
+}
+
+/** The retained copy's manifest for a caller that must read the file; a `not-retained` receipt has none by design. */
+
 export type AuthorReleaseOutcome = Readonly<{
   retirement: "complete" | "incomplete"
   reasons: readonly string[]
@@ -2567,11 +2616,16 @@ export async function retireMergedComponentAuthors(
             `root-owned component store kept: removal proof identity does not match ${author.rootCheckout}@${author.rootTip}`,
           )
         }
-        const sealed = await verifyRetainedCopy(proof, author.rootCommonDirectory)
+        // #38198: the sealed copy's manifest comes from the proof's retention record; a `not-retained` receipt has
+        // no copy to seal, so this component store cannot be kept and the close refuses rather than assuming.
+        const retention = retentionOf(proof)
+        if (retention?.kind !== "retained") {
+          throw new Error(`${proof.path}: this removal proof records no retained copy for ${author.rootCheckout}`)
+        }
+        const manifest = retention.manifest
+        const sealed = await verifyRetainedCopy({ ...proof, manifest }, author.rootCommonDirectory)
         if (sealed.status !== "ok") {
-          throw new Error(
-            `root-owned component store kept: sealed proof ${proof.manifest} failed: ${JSON.stringify(sealed)}`,
-          )
+          throw new Error(`root-owned component store kept: sealed proof ${manifest} failed: ${JSON.stringify(sealed)}`)
         }
         const retained = realpathSync(proof.retained)
         const copiedStore = realpathSync(join(retained, inside))
@@ -2589,18 +2643,18 @@ export async function retireMergedComponentAuthors(
         const finalTip = (
           await git(["--bare", "for-each-ref", "--format=%(objectname)", `refs/heads/${author.branch}`])
         ).trim()
-        const unchanged = await verifyRetainedCopy(proof, author.rootCommonDirectory)
+        const unchanged = await verifyRetainedCopy({ ...proof, manifest }, author.rootCommonDirectory)
         if (unchanged.status !== "ok") {
           throw new Error(
-            `root-owned component store kept: sealed proof changed while reading ${proof.manifest}: ${JSON.stringify(unchanged)}`,
+            `root-owned component store kept: sealed proof changed while reading ${manifest}: ${JSON.stringify(unchanged)}`,
           )
         }
         if (finalTip !== author.tip) {
           throw new Error(
-            `root-owned component store kept: final ref refs/heads/${author.branch} advanced or absent; captured ${author.tip}, sealed ${finalTip || "absent"}; proof ${proof.manifest}`,
+            `root-owned component store kept: final ref refs/heads/${author.branch} advanced or absent; captured ${author.tip}, sealed ${finalTip || "absent"}; proof ${manifest}`,
           )
         }
-        const reason = `ended with its root: refs/heads/${author.branch}@${author.tip}; landing ${author.landing}; sealed proof ${proof.manifest}; retain until ${proof.retainUntil}`
+        const reason = `ended with its root: refs/heads/${author.branch}@${author.tip}; landing ${author.landing}; sealed proof ${manifest}; retain until ${retention.retainUntil ?? "unrecorded"}`
         input.io.stderr(`yrd: component ${author.path} ${reason}\n`)
         input.log.write({ kind: "observation", branch: author.branch, scope: "local-branch-retirement", reason })
         continue
