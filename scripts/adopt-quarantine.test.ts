@@ -52,6 +52,9 @@ function cli(work: string, ...args: string[]): unknown {
   return JSON.parse(result.stdout)
 }
 
+/** ADR-0033 schema 2 answers carry the change projection under `published`; there is no root `changes` array. */
+type QueueDocument = { published: { changes: Array<{ branch: string; state: string }> } }
+
 function yrd(work: string, ...args: string[]): { changes: Array<{ branch: string; state: string }> } {
   const result = spawnSync(
     "bun",
@@ -67,7 +70,7 @@ function yrd(work: string, ...args: string[]): { changes: Array<{ branch: string
     { cwd: work, encoding: "utf8" },
   )
   if (result.status !== 0) throw new Error(`yrd queue ${args.join(" ")} exited ${result.status}: ${result.stderr}`)
-  return JSON.parse(result.stdout) as { changes: Array<{ branch: string; state: string }> }
+  return (JSON.parse(result.stdout) as QueueDocument).published
 }
 
 async function fixture(): Promise<{
