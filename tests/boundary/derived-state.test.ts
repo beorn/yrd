@@ -72,10 +72,10 @@ async function changesListed(
   if (typeof result.json !== "object" || result.json === null) {
     throw new Error(`queue list answered with no JSON object, so it named no changes\n${result.report}`)
   }
-  const changes = (result.json as { changes?: unknown }).changes
+  const changes = (result.json as { published?: { changes?: unknown } }).published?.changes
   if (!Array.isArray(changes)) {
     throw new Error(
-      `queue list answered with keys ${Object.keys(result.json).join(",")} and no 'changes' array\n${result.report}`,
+      `queue list answered with keys ${Object.keys(result.json).join(",")} and no 'published.changes' array\n${result.report}`,
     )
   }
   return { rows: changes as readonly PlanRow[], result }
@@ -121,8 +121,10 @@ async function stateFromShow(repo: string, branch: string): Promise<{ state: str
   if (typeof result.json !== "object" || result.json === null) {
     throw new Error(`queue show ${branch} answered with no JSON object\n${result.report}`)
   }
-  const answer = result.json as { changes?: unknown; state?: unknown }
-  const newest = Array.isArray(answer.changes) ? (answer.changes[0] as PlanRow | undefined) : undefined
+  // schemaVersion 2 answers with the published projection under `published`, as `queue list` does.
+  const answer = result.json as { published?: { changes?: unknown }; state?: unknown }
+  const changes = answer.published?.changes
+  const newest = Array.isArray(changes) ? (changes[0] as PlanRow | undefined) : undefined
   const state = newest?.state ?? answer.state
   if (typeof state !== "string") {
     throw new Error(

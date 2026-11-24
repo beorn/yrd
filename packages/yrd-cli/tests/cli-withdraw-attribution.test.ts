@@ -140,13 +140,14 @@ async function cancelledRecord(
 ): Promise<Readonly<{ by?: string; recipient?: string; reason?: string }>> {
   const shown = await yrd(work, "queue", "show", branch, "--json")
   expect(shown.exitCode, shown.report).toBe(0)
+  // schemaVersion 2 answers with the published projection under published.
   const parsed = JSON.parse(shown.stdout) as {
-    changes: readonly {
+    published: { changes: readonly {
       branch: string
       events: readonly { type: string; props: readonly (readonly [string, string])[] }[]
-    }[]
+    }[] }
   }
-  const change = parsed.changes.find((row) => row.branch === branch)
+  const change = parsed.published.changes.find((row) => row.branch === branch)
   const cancelled = change?.events.findLast((event) => event.type === "cancelled")
   const prop = (key: string): string | undefined => cancelled?.props.find(([name]) => name === key)?.[1]
   return { by: prop("By"), recipient: prop("Recipient"), reason: prop("Reason") }
