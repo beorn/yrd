@@ -3,6 +3,7 @@
  * settled base is internally inconsistent and a check judges a tree the submitter never wrote.
  * @level l3
  * @consumer Yrd queue operator and submitter (hh #38155, bearly 7692206 / durable-file 0.1.0 -> 0.2.0)
+ * @reach fs-walk <fixture-only: temporary Git repositories and bare remotes the cases build under the OS temp root>
  * @testonly none
  *
  * The defect these cases stand against (hh-dev, merge 9d067f69c2a, 2026-11-24 11:15-11:27Z): the composer raised
