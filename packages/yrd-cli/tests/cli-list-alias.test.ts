@@ -15,6 +15,7 @@ import { isFlockHeld, tryAcquireFlock } from "@bearly/flock"
 import { submit } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { YRD_ENTRY } from "./support/yrd-entry.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
@@ -67,7 +68,7 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
       stdout += text
     },
   }
-  const exitCode = await runYrdProcess([process.execPath, "/usr/local/bin/yrd", ...args], io)
+  const exitCode = await runYrdProcess([process.execPath, YRD_ENTRY, ...args], io)
   return {
     exitCode,
     report: `yrd ${args.join(" ")} exited ${String(exitCode)}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`,
@@ -144,7 +145,7 @@ describe("`yrd list` is `yrd queue list`", () => {
       let stderr = ""
       let observedAt: number | undefined
       const started = performance.now()
-      const waiting = runYrdProcess([process.execPath, "/usr/local/bin/yrd", "queue", "list", "--json"], {
+      const waiting = runYrdProcess([process.execPath, YRD_ENTRY, "queue", "list", "--json"], {
         localBranchProtections: null,
         cwd: work,
         color: false,

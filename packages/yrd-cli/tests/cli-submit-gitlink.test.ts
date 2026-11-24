@@ -25,6 +25,7 @@ import { shellQuote } from "git-super/shell-command"
 import { afterAll, describe, expect, it } from "vitest"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { YRD_ENTRY } from "./support/yrd-entry.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import { createLocalEventStore, freshWorktree, preparePinCarrier, readRunLog, readStatus } from "@yrd/queue-core"
@@ -84,7 +85,7 @@ async function yrd(
       stderr += text
     },
   }
-  const exitCode = await runYrdProcess([process.execPath, "/usr/local/bin/yrd", ...args], io)
+  const exitCode = await runYrdProcess([process.execPath, YRD_ENTRY, ...args], io)
   return { exitCode, stdout, stderr, report: `yrd ${args.join(" ")} exited ${exitCode}\n${stdout}\n${stderr}` }
 }
 
@@ -792,7 +793,7 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     const code = await runYrdProcess(
       [
         process.execPath,
-        "/usr/local/bin/yrd",
+        YRD_ENTRY,
         "submit",
         "--gitlink",
         `${one.path}=${one.held}`,

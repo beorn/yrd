@@ -28,6 +28,7 @@ import {
 } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { YRD_ENTRY } from "./support/yrd-entry.ts"
 import { workdirOf } from "../src/workdir.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
@@ -116,7 +117,7 @@ async function yrd(cwd: string, io: Pick<YrdCliIO, "color" | "columns">, ...args
       stdout += text
     },
   }
-  const exitCode = await runYrdProcess([process.execPath, "/usr/local/bin/yrd", ...args], full)
+  const exitCode = await runYrdProcess([process.execPath, YRD_ENTRY, ...args], full)
   return {
     exitCode,
     report: `yrd ${args.join(" ")} exited ${String(exitCode)}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`,

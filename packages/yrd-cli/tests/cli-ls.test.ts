@@ -13,6 +13,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { submit } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { YRD_ENTRY } from "./support/yrd-entry.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
@@ -39,7 +40,7 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
       stdout += text
     },
   }
-  const exitCode = await runYrdProcess([process.execPath, "/usr/local/bin/yrd", ...args], io)
+  const exitCode = await runYrdProcess([process.execPath, YRD_ENTRY, ...args], io)
   return {
     exitCode,
     report: `yrd ${args.join(" ")} exited ${String(exitCode)}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`,

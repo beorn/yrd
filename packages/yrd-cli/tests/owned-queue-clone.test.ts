@@ -12,6 +12,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { runYrdProcess } from "../src/cli.ts"
+import { YRD_ENTRY } from "./support/yrd-entry.ts"
 import { ownedQueueClone, resolveQueueLocation } from "../src/queue-location.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
@@ -161,7 +162,7 @@ describe("container repository with nested checkout (hh 30719)", () => {
               stderr += text
             },
           }
-          const exitCode = await runYrdProcess([process.execPath, "/usr/local/bin/yrd", ...argv], io)
+          const exitCode = await runYrdProcess([process.execPath, YRD_ENTRY, ...argv], io)
           expect(exitCode, argv.join(" ")).toBe(2)
           expect(stdout, argv.join(" ")).toBe("")
           expect(stderr, argv.join(" ")).toContain(`not the nested checkout ${dev}`)

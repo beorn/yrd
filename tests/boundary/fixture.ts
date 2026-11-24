@@ -18,6 +18,7 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { runYrdProcess } from "../../packages/yrd-cli/src/cli.ts"
+import { YRD_ENTRY } from "../../packages/yrd-cli/tests/support/yrd-entry.ts"
 import { birthEventQueue } from "../../packages/yrd-cli/tests/support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../../packages/yrd-cli/src/types.ts"
 import { installDeclaredYrdEntry } from "../../packages/yrd-cli/tests/support/declared-yrd-entry.ts"
@@ -395,7 +396,7 @@ function capture(cwd: string): { io: YrdCliIO; stdout(): string; stderr(): strin
  * repository (plan, Dropped on purpose: `--repo` aliases).
  */
 function yrd(_repo: string, io: YrdCliIO, ...args: string[]): Promise<YrdCliExitCode> {
-  return runYrdProcess([process.execPath, "/usr/local/bin/yrd", ...args], io)
+  return runYrdProcess([process.execPath, YRD_ENTRY, ...args], io)
 }
 
 function expectZero(

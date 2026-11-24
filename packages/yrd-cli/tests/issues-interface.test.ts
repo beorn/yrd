@@ -11,11 +11,13 @@
  */
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { safeRemoveSync } from "removely"
 import { afterAll, describe, expect, it } from "vitest"
+import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { YRD_ENTRY } from "./support/yrd-entry.ts"
 import { runIssuesVerb } from "../src/issues/run.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
@@ -23,9 +25,14 @@ const PROVIDER = resolve(import.meta.dirname, "support/fake-issues-provider.ts")
 const BUN = process.execPath
 const TMP = realpathSync(tmpdir())
 const roots: string[] = []
+const outsideRoots: string[] = []
 
 afterAll(() => {
   for (const root of roots) safeRemoveSync(root, { within: TMP, allowedRoots: [TMP], allowMissing: true })
+  for (const root of outsideRoots) {
+    const base = resolve(dirname(root))
+    safeRemoveSync(root, { within: base, allowedRoots: [base], allowMissing: true })
+  }
 })
 
 const GIT_ENV = {
@@ -93,7 +100,7 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
       stdout += text
     },
   }
-  const exitCode = await runYrdProcess([BUN, "/usr/local/bin/yrd", ...args], io)
+  const exitCode = await runYrdProcess([BUN, YRD_ENTRY, ...args], io)
   return { exitCode, stdout, stderr }
 }
 
@@ -366,7 +373,8 @@ describe("yrd issues", () => {
   })
 
   it("refuses outside a repository naming the cwd, and honours --project-root from there (rule: discovery)", async () => {
-    const outside = scratch()
+    const outside = outsideRepositoryRoot("yrd-issues-outside-")
+    outsideRoots.push(outside)
     const refused = await yrd(outside, "issues", "list")
     expect(refused.exitCode).toBe(1)
     expect(refused.stderr).toContain(`yrd-issues-not-a-repository: ${outside}`)

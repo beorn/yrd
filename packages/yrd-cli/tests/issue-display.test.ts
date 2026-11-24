@@ -19,6 +19,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { submit } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { YRD_ENTRY } from "./support/yrd-entry.ts"
 import { readIssueDisplay } from "../src/issue-resolver.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
@@ -54,7 +55,7 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
       stdout += text
     },
   }
-  const exitCode = await runYrdProcess([BUN, "/usr/local/bin/yrd", ...args], io)
+  const exitCode = await runYrdProcess([BUN, YRD_ENTRY, ...args], io)
   return {
     exitCode,
     report: `yrd ${args.join(" ")} exited ${String(exitCode)}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`,
@@ -167,7 +168,7 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
     let stdout = ""
     let stderr = ""
     const exitCode = await runYrdProcess(
-      [BUN, "/usr/local/bin/yrd", "queue", "show", "task/one", "--json", "--fresh", "--project-root", project],
+      [BUN, YRD_ENTRY, "queue", "show", "task/one", "--json", "--fresh", "--project-root", project],
       {
         color: false,
         localBranchProtections: null,
@@ -217,7 +218,7 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
     const commands: { argv: readonly string[]; cwd: string; recipe: string }[] = []
     let stderr = ""
     const code = await runYrdProcess(
-      [BUN, "/usr/local/bin/yrd", "queue", "show", "task/one", "--json", "--fresh", "--project-root", project],
+      [BUN, YRD_ENTRY, "queue", "show", "task/one", "--json", "--fresh", "--project-root", project],
       {
         color: false,
         localBranchProtections: null,

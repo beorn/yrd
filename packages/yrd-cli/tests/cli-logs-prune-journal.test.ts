@@ -25,6 +25,7 @@ import { safeRemoveSync } from "removely"
 import { afterAll, describe, expect, it } from "vitest"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { YRD_ENTRY } from "./support/yrd-entry.ts"
 import { readRunnerFacts } from "../src/watch-runner.ts"
 import { workdirOf } from "../src/workdir.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
@@ -53,7 +54,7 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
       stdout += text
     },
   }
-  const exitCode = await runYrdProcess([process.execPath, "/usr/local/bin/yrd", ...args], io)
+  const exitCode = await runYrdProcess([process.execPath, YRD_ENTRY, ...args], io)
   return {
     exitCode,
     report: `yrd ${args.join(" ")} exited ${String(exitCode)}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`,

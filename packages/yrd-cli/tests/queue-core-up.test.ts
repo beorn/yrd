@@ -84,6 +84,7 @@ import * as queueCore from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { runYrdProcess } from "../src/cli.ts"
+import { YRD_ENTRY } from "./support/yrd-entry.ts"
 import { coreQueueCommand, endingCode } from "../src/queue-core-commands.ts"
 import { environmentInventory } from "../src/env-commands.ts"
 import {
@@ -3804,7 +3805,7 @@ describe("yrd queue up, the service", () => {
             expect(run.stdout()).toContain("no portable remote address")
             const activated = capture(w.work)
             expect(
-              await runYrdProcess([process.execPath, "/usr/local/bin/yrd", "runs", "activate", address], activated.io),
+              await runYrdProcess([process.execPath, YRD_ENTRY, "runs", "activate", address], activated.io),
               activated.stderr(),
             ).toBe(0)
             expect(activated.stdout()).toContain(indexRef)
@@ -9263,7 +9264,7 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
   /** The CLI as the shell runs it, standing in the world's clone: argv in, exit code and both streams out. */
   async function yrd(w: World, ...args: string[]): Promise<Ran> {
     const run = capture(w.work)
-    const exitCode = await runYrdProcess([process.execPath, "/usr/local/bin/yrd", ...args], run.io)
+    const exitCode = await runYrdProcess([process.execPath, YRD_ENTRY, ...args], run.io)
     return {
       exitCode,
       report: `yrd ${args.join(" ")} exited ${String(exitCode)}\n--- stdout ---\n${run.stdout()}\n--- stderr ---\n${run.stderr()}`,
@@ -9786,7 +9787,7 @@ describe("one round at a time in a queue workdir (andon phase 2, the queue lock)
     // The service's round is inside its slow merge check, holding the lock.
     await vi.waitFor(() => expect(existsSync(entered), service.stderr()).toBe(true), { timeout: 20_000 })
     let settled = false
-    merging = runYrdProcess([process.execPath, "/usr/local/bin/yrd", "merge", "task/second"], merge.io).finally(() => {
+    merging = runYrdProcess([process.execPath, YRD_ENTRY, "merge", "task/second"], merge.io).finally(() => {
       settled = true
     })
     await vi.waitFor(

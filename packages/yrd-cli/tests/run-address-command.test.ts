@@ -12,6 +12,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { appendNumberedChangeEvent, createEventStore, readStatus, selectionFor, submit } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { YRD_ENTRY } from "./support/yrd-entry.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -88,7 +89,7 @@ async function yrd(cwd: string, ...args: string[]): Promise<{ code: number; stdo
     stdout: (text) => (stdout += text),
     stderr: (text) => (stderr += text),
   }
-  const code = await runYrdProcess([process.execPath, "/usr/local/bin/yrd", ...args], io)
+  const code = await runYrdProcess([process.execPath, YRD_ENTRY, ...args], io)
   return { code, stdout, stderr }
 }
 

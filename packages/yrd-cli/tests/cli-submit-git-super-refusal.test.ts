@@ -15,6 +15,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { freshWorktree } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { YRD_ENTRY } from "./support/yrd-entry.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 
@@ -53,7 +54,7 @@ async function yrd(
       stderr += text
     },
   }
-  const exitCode = await runYrdProcess([process.execPath, "/usr/local/bin/yrd", ...args], io)
+  const exitCode = await runYrdProcess([process.execPath, YRD_ENTRY, ...args], io)
   return { exitCode, stdout, stderr, report: `yrd ${args.join(" ")} exited ${exitCode}\n${stdout}\n${stderr}` }
 }
 
