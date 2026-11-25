@@ -27,6 +27,8 @@ import {
   createEventStore,
   readBranchHistory,
   readEventQueue,
+  issueProviderId,
+  trailerEffectId,
   queueRef,
   readConfig,
   readStatus,
@@ -964,7 +966,11 @@ it.each([
       await Promise.all([first[Symbol.asyncDispose](), second[Symbol.asyncDispose]()])
       const effects = Object.values((await readEventQueue(store, "main")).issueEffects).map(({ effect }) => effect)
       expect(effects).toHaveLength(1)
-      expect(effects[0]!.providerId).toBe(calls[0]![2])
+      // The provider's replay id is per key; the merge's own record is keyed on the trailer value it carried (29630).
+      const [effect] = effects
+      expect(effect!.issueKey).toBe(calls[0]![0])
+      expect(calls[0]![2]).toBe(issueProviderId(effect!.mergeSha, "close", "completed", effect!.issueKey))
+      expect(effect!.providerId).toBe(trailerEffectId(effect!.mergeSha, "close", "completed", effect!.trailer!))
       expect(readFileSync(closeCalls, "utf8").trim().split("\n")).toHaveLength(2)
       expect(diagnostics.join(" ")).not.toContain("could not be recorded")
       return
