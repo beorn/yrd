@@ -356,7 +356,7 @@ it("does not close a reopened issue again on a resend after the provider re-keys
   expect(issueActions(attempt!)).toContainEqual(
     expect.objectContaining({ branch, mergeSha: merge, status: "fulfilled" }),
   )
-  // Answered from the merge's own record: no resolve, no close.
-  expect(lines(world.resolveCalls)).toEqual(["issue-rekeyed"])
+  // Answered from the merge's own record: no second close, and the provider is not even asked.
   expect(lines(world.closeCalls)).toHaveLength(1)
+  expect(lines(world.resolveCalls)).toEqual(["issue-rekeyed"])
 }, 60000)
