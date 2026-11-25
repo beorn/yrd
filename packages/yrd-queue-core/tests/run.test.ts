@@ -27,6 +27,7 @@ import * as gitomic from "gitomic"
 import { openEvents } from "gitomic/events"
 import type { RefUpdate } from "gitomic"
 import { gitEnvironment } from "../src/git.ts"
+import * as rootChanges from "../src/root-changes.ts"
 import * as gitRunners from "../src/git.ts"
 import { incidentTrailers } from "../src/incident.ts"
 import { openLog, readRunLog, readJournals, recentCasRefusals } from "../src/log.ts"
@@ -2024,6 +2025,19 @@ it("judges setup on the target with raised gitlinks rather than its bare pin", a
  * Row 3 of hh #38155: the stop must move no ref, name yrd-settled-base-check-failed with the repair step, and leave
  * the change stuck rather than failed. Nothing about the composition changes here; the case drives the existing path.
  */
+/** Write `refs/git-super/receipts/<merge>` for the pin the merge moved from `target` to `merge`, as git-super does. */
+async function writeRootReceipt(w: World, target: string, merge: string, path: string): Promise<void> {
+  const pin = async (commit: string): Promise<string> => (await w.git(["rev-parse", `${commit}:${path}`])).trim()
+  const from = await pin(target)
+  const to = await pin(merge)
+  if (from === to) throw new Error(`fixture receipt: ${path} did not move between ${target} and ${merge}`)
+  const payload = JSON.stringify({ changes: [{ from, mode: "160000", path, to }], merge, version: 1 })
+  const blob = (await w.git(["hash-object", "-w", "--stdin"], payload)).trim()
+  const tree = (await w.git(["mktree"], `100644 blob ${blob}\treceipt.json\n`)).trim()
+  const receipt = (await w.git(["commit-tree", tree, "-p", merge, "-m", `receipt for ${merge}`])).trim()
+  await w.git(["update-ref", `refs/git-super/receipts/${merge}`, receipt])
+}
+
 it("stops a bare raise as the queue's own defect, pushing nothing and billing no submitter", async () => {
   const w = await world()
   // The child needs its own remote: submit publishes a moved gitlink to the commit's origin before the queue runs.
@@ -2033,6 +2047,21 @@ it("stops a bare raise as the queue's own defect, pushing nothing and billing no
   const hostedRoot = "https://github.com/example/yrd-bare-raise-root.git"
   const hostedChild = "https://github.com/example/yrd-bare-raise-child.git"
   const childRemote = join(w.workdir, "child-remote.git")
+  // git-super freezes a push intent only for hosted remotes, so both remotes are named GitHub-shaped and rewritten to
+  // the fixture's bare repositories. The rewrite also rides the environment: `git submodule add` clones in its own
+  // process and the queue's git processes are its own, so neither sees this repository's config (the shape
+  // derive.test.ts uses).
+  const hostedEnv = {
+    ...process.env,
+    GIT_CONFIG_COUNT: "3",
+    GIT_CONFIG_KEY_0: "protocol.file.allow",
+    GIT_CONFIG_VALUE_0: "always",
+    GIT_CONFIG_KEY_1: `url.${w.remote}.insteadOf`,
+    GIT_CONFIG_VALUE_1: hostedRoot,
+    GIT_CONFIG_KEY_2: `url.${childRemote}.insteadOf`,
+    GIT_CONFIG_VALUE_2: hostedChild,
+  }
+  const git = gitIn(w.work, undefined, undefined, { env: hostedEnv })
   await w.git(["init", "--quiet", "--bare", "--initial-branch=main", childRemote])
   const childSeed = join(w.workdir, "child-seed")
   await w.git(["init", "--quiet", "--initial-branch=main", childSeed])
@@ -2046,29 +2075,29 @@ it("stops a bare raise as the queue's own defect, pushing nothing and billing no
   await seedGit(["push", "--quiet", "origin", "main"])
   await w.git(["config", "protocol.file.allow", "always"])
   await w.git(["config", `url.${w.remote}.insteadOf`, hostedRoot])
-  await w.git(["remote", "set-url", "origin", hostedRoot])
   await w.git(["config", `url.${childRemote}.insteadOf`, hostedChild])
-  await w.git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", hostedChild, "child"])
+  await git(["remote", "set-url", "origin", hostedRoot])
+  await git(["submodule", "add", "--quiet", hostedChild, "child"])
+  const childGit = gitIn(join(w.work, "child"), undefined, undefined, { env: hostedEnv })
   await gitIn(join(w.work, "child"))(["config", `url.${childRemote}.insteadOf`, hostedChild])
   await gitIn(join(w.work, "child"))(["config", "protocol.file.allow", "always"])
   writeFileSync(join(w.work, "bun.lock"), "child 0.1.0\n")
-  await w.git(["add", ".gitmodules", "bun.lock", "child"])
-  await w.git(["commit", "--quiet", "-m", "target pins child 0.1.0"])
-  await w.git(["push", "--quiet", "origin", "main"])
-  const target = (await w.git(["rev-parse", "HEAD"])).trim()
+  await git(["add", ".gitmodules", "bun.lock", "child"])
+  await git(["commit", "--quiet", "-m", "target pins child 0.1.0"])
+  await git(["push", "--quiet", "origin", "main"])
+  const target = (await git(["rev-parse", "HEAD"])).trim()
   await createWorldEventQueue(w, target)
   // The candidate moves the gitlink to a version its root lock does not describe, and leaves the lock alone.
-  await w.git(["checkout", "--quiet", "-b", "task/bare-raise", "main"])
-  const childGit = gitIn(join(w.work, "child"))
+  await git(["checkout", "--quiet", "-b", "task/bare-raise", "main"])
   writeFileSync(join(w.work, "child", "version"), "0.2.0\n")
   await childGit(["add", "version"])
   await childGit(["commit", "--quiet", "-m", "child 0.2.0"])
   await childGit(["push", "--quiet", "origin", "main"])
   const raised = (await childGit(["rev-parse", "HEAD"])).trim()
-  await w.git(["update-index", "--cacheinfo", `160000,${raised},child`])
-  await w.git(["commit", "--quiet", "-m", "raise child to 0.2.0 without the root lock"])
-  await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", {
+  await git(["update-index", "--cacheinfo", `160000,${raised},child`])
+  await git(["commit", "--quiet", "-m", "raise child to 0.2.0 without the root lock"])
+  await git(["checkout", "--quiet", "main"])
+  await submit(git, "origin", {
     branch: "task/bare-raise",
     submitter: "@dev/2",
     target: { branch: "main", remote: "origin" },
@@ -2080,13 +2109,23 @@ it("stops a bare raise as the queue's own defect, pushing nothing and billing no
     disagreement,
     [
       "#!/bin/sh",
-      "version=$(cat child/version 2>/dev/null || echo missing)",
-      'grep -q "child $version" bun.lock || { echo "the root lock does not name child $version, the version the gitlink pins"; exit 1; }',
+      // The root lock only: the base is judged without a submodule checkout, and the disagreement reads the same on
+      // both trees the queue compares.
+      "version=$(sed -n 's/^child //p' bun.lock)",
+      'test "$version" = "0.2.0" || { echo "the root lock names child ${version:-nothing}, the gitlink pins 0.2.0"; exit 1; }',
       "",
     ].join("\n"),
   )
   chmodSync(disagreement, 0o755)
 
+  // The queue reads a raise from git-super's receipt for the compose merge, and this fixture's merge settles no
+  // checkout, so it publishes none. The test writes the receipt that same merge would, through the reader the queue
+  // calls, so the attribution path runs on a real merge commit and a real target pin.
+  const beforeReadRootChanges = rootChanges.readRootChanges
+  using _rootReceipt = vi.spyOn(rootChanges, "readRootChanges").mockImplementation(async (git, merge, copied) => {
+    if (copied === undefined) await writeRootReceipt(w, target, merge, "child")
+    return beforeReadRootChanges(git, merge, copied)
+  })
   const outcome = await queueRun({
     ...(await w.options({ exit: 0 })),
     checks: [{ name: "verify", run: disagreement, timeoutMs: 30_000 }],
@@ -2103,7 +2142,6 @@ it("stops a bare raise as the queue's own defect, pushing nothing and billing no
     },
     notify: undefined,
   })
-
   // (a) nothing lands: the target still names the submitted head, and no merge happened.
   expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/bare-raise"], failed: [], merged: [] })
   expect((await w.git(["rev-parse", "origin/main"])).trim()).toBe(target)
