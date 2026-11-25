@@ -1612,8 +1612,8 @@ it.each(["recorded", "provider-fails", "undeclared"] as const)(
 )
 
 /**
- * @failure A .yrd.yml still holding issuesProvider.update has it run on a landing, beside Yrd's own closer (km rules
- *   run merge-close closed issues first on every landing), or the retired key is ignored without a word.
+ * @failure A .yrd.yml still holding the retired issuesProvider.update has it run on a landing, beside Yrd's own closer
+ *   (the old provider closed issues first on every landing), or the retired key is ignored without a word.
  * @level l2 @consumer Yrd's post-merge closer as the only writer closing issues from merge trailers (29630, @cto 5a66fb46)
  * @testonly none
  */
@@ -1660,7 +1660,7 @@ it("never runs a retired issuesProvider.update on a merge, says so on stderr, an
   ).toBe(0)
   expect((await readStatus(store, "main", branch)).status).toBe("merged")
   expect(stderr.join("")).toContain(
-    "yrd: .yrd.yml issuesProvider.update: retired and ignored; delete this key. Yrd's post-merge closer closes issues from merge trailers through issues.yml at --project-root (#29630).",
+    "yrd: .yrd.yml issuesProvider: retired in #29630 and ignored; delete this key. Yrd's post-merge closer closes issues from merge trailers through issues.yml at --project-root, and the issue display reads issues.yml's view (origin/main).",
   )
   expect(existsSync(marker), "the retired update must never run").toBe(false)
   // Yrd's own closer closed the trailer's issue, once.

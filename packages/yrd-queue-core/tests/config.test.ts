@@ -30,17 +30,29 @@ describe("the queue declaration grammar", () => {
   ])("refuses %s in admission", (_name, declaration) => {
     expect(() => parseConfig(declaration, SOURCE)).toThrow(/admission/u)
   })
-  it("reads provider commands as exact argv with optional display", () => {
-    expect(
-      parseConfig('issuesProvider: {read: [other, show, "<key>"], update: [other, catchup]}\n', SOURCE).issuesProvider,
-    ).toEqual({ read: ["other", "show", "<key>"], update: ["other", "catchup"] })
-    expect(parseConfig("issuesProvider: {update: [other, catchup]}\n", SOURCE).issuesProvider).toEqual({
-      update: ["other", "catchup"],
-    })
-  })
-  it.each(["[]", "''", "[other, '']", "[other, 42]"])("names invalid provider argv %s", (value) => {
-    expect(() => parseConfig(`issuesProvider: {update: ${value}}\n`, SOURCE)).toThrow(/issuesProvider.update/u)
-  })
+  // 29630 (@cto 5a66fb46 Q1, b59e0e09): issuesProvider left the parser but never refuses, because live paths read past
+  // declarations that carry it; the declaration in force hears its cure through historicalKeys.
+  it.each([
+    ["strict", {}],
+    ["addressing", { newerKeys: () => {} }],
+  ])(
+    "reads a %s declaration still carrying the retired issuesProvider key with it ignored and named",
+    (_mode, options) => {
+      const cures: string[] = []
+      const config = parseConfig('issuesProvider: {read: [other, show, "<key>"], update: [other, 42]}\n', {
+        ...SOURCE,
+        ...options,
+        historicalKeys: (heard) => cures.push(...heard),
+      })
+      expect(config).not.toHaveProperty("issuesProvider")
+      expect(cures).toEqual([
+        expect.stringMatching(
+          /^issuesProvider: retired in #29630 and ignored; delete this key\. Yrd's post-merge closer/u,
+        ),
+      ])
+      expect(parseConfig("issuesProvider: {update: [other]}\n", SOURCE)).not.toHaveProperty("issuesProvider")
+    },
+  )
 
   it("reads checkout directory omissions as literal paths on a named check", () => {
     const config = parseConfig(

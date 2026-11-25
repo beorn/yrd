@@ -27,8 +27,6 @@ notify: # the same shape as checks: a name, when it runs, what runs
   - admission-supervisor:
       on: admission-warning
       run: bun tools/notify.ts --to ops
-issuesProvider:
-  update: [issues, catchup, --json] # optional command run after each merge
 health:
   stallAfter: 45m # waiting changes with none judged for this long is a stalled line; at least 10m
 ```
@@ -38,7 +36,7 @@ Rules about the file itself:
 - Running the queue refuses a top-level key it does not read. Read-only tools (addressing, history) can opt into a `newerKeys` callback that reports unknown top-level keys and skips them. Retired keys and unknown nested fields still refuse.
 - `target:` and `remote:` are refused: the queue is the branch that carries the file, chosen with `--queue`.
 - The machine's storage path is Git configuration (`yrd.workdir`), not part of this file. See [operations.md](operations.md#where-things-are).
-- The retired `issuesProvider.read` key is ignored with a message naming its replacement, `issues.yml`.
+- `issuesProvider` (both `read` and `update`) was retired in #29630. A declaration that still carries it is read with the key ignored, so past declarations stay readable, and the declaration in force says so on stderr. Issue display reads `issues.yml`'s `view`, and Yrd's post-merge closer closes the issues a merge's `Closes:`/`Fixes:`/`Resolves:` trailers name through `issues.yml` at `--project-root`.
 
 ## The check environment
 
@@ -65,16 +63,6 @@ A check's environment is built, not inherited. It gets:
 - Stdout is read as text: whitespace and line breaks are kept, invalid UTF-8 becomes replacement characters, and empty output gets an explicit message.
 - If the queue branch moves between reading `.yrd.yml` and running admission, submit refuses and asks for a retry, so a newer policy never runs with an older config.
 - Changes with no issue skip admission and say so.
-
-## After a merge: `issuesProvider.update`
-
-After a merge round releases its lock, Yrd runs `update` with exactly the configured arguments, then runs its normal branch cleanup even if the command failed.
-
-- It passes nothing about the merge: no range, no merge arguments, no stdin, no environment facts. The command finds its own position.
-- It has a 120-second limit, separate from the 10-second issue display reads. A stuck command does not hold up later rounds.
-- The service runs one provider attempt at a time and coalesces the rest into one pending catch-up. Startup schedules one fresh catch-up.
-- Cleanup runs serially after its own provider settles; waiting on older cleanup does not delay the next provider attempt.
-- Each attempt writes `<workdir>/post-merge/*.json` with its stdout and stderr logs, command, times, exit and timeout. These are for inspection only; no later decision reads them.
 
 ## Notifications
 

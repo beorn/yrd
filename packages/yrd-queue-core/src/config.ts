@@ -155,15 +155,6 @@ export type QueueConfig = Readonly<{
   /** Whole-branch Bun.Glob patterns that suppress unsubmitted drafts. */
   ignore: readonly string[]
   /**
-   * Optional provider commands (29615; retires with km's merge-close under 29630, @cto b59e0e09). `read` is retired
-   * (29644 Y1, @cto 6a06588f): `queue show` reads `issues.yml`'s `view` at `--project-root` and says out loud on
-   * stderr when the declaration in force still holds `read`. The parser keeps accepting `read` because live paths
-   * read historical declarations from the 2026-10-16 15:27–17:52 window (5db2ceaf4f2..57aeb363646~1):
-   * `declarationFor(git, config, history.base)` (queue-core-commands.ts:4921, :6303), `inspectNativeCheckoutForRelease`
-   * (branch-retirement.ts:823), and `readConfig(git, queueState.declaration, ...)` (event-run.ts:995).
-   */
-  issuesProvider?: Readonly<{ read?: readonly string[]; update?: readonly string[] }>
-  /**
    * Target-owned retention policy (hh 34952, @cto 72645433). `holds` is an opaque argv the queue's round sweep and
    * `yrd logs prune` run once per destructive pass, before anything is removed or compressed: it answers which
    * candidates the target still holds. Absent, retention behaves as it always has; declared, a failure to judge
@@ -238,6 +229,11 @@ export type ReadConfigOptions = Readonly<{
    * event it might fire. A malformed `on:` refuses either way.
    */
   unknownNotifyEvents?: (unknown: readonly Readonly<{ entry: string; event: string }>[]) => void
+  /**
+   * Hears each HISTORICAL key the declaration still carries, as the sentence that cures it. A reader of the
+   * declaration in force passes it and says the sentence out loud; a reader of a past declaration need not.
+   */
+  historicalKeys?: (cures: readonly string[]) => void
 }>
 
 export async function readConfig(
@@ -265,6 +261,7 @@ export function parseConfig(
     target,
     newerKeys,
     unknownNotifyEvents,
+    historicalKeys,
   }: Readonly<{ at: string; blob: string; target: Target }> & ReadConfigOptions,
 ): QueueConfig {
   let raw: unknown
@@ -274,13 +271,17 @@ export function parseConfig(
     throw new Error(`.yrd.yml at ${at} does not parse: ${error instanceof Error ? error.message : String(error)}`)
   }
   if (!isRecord(raw)) throw new Error(`.yrd.yml at ${at.slice(0, 12)} is not a mapping`)
+  const historical = Object.keys(raw).filter((key) => key in HISTORICAL)
+  if (historical.length > 0) {
+    historicalKeys?.(historical.map((key) => HISTORICAL[key] as string))
+    raw = Object.fromEntries(Object.entries(raw).filter(([key]) => !(key in HISTORICAL)))
+  }
   const declared = newerKeys === undefined ? strictTop(raw) : withoutNewerKeys(raw, newerKeys)
   const notify = readNotify(declared.notify, unknownNotifyEvents)
   const setup = optionalString(declared, "setup")
   const derive = optionalString(declared, "derive")
   const deriveRootPaths = readDeriveRootPaths(declared["derive-root-paths"])
   const teardown = optionalString(declared, "teardown")
-  const issuesProvider = readIssuesProvider(declared.issuesProvider)
   const admission = readAdmission(declared.admission)
   const retention = readRetention(declared.retention)
   const queueRoot = readQueueRoot(declared["queue-root"])
@@ -292,7 +293,6 @@ export function parseConfig(
     checks: readChecks(declared.checks),
     health: readHealth(declared.health),
     ignore: readIgnore(declared.ignore),
-    ...(issuesProvider === undefined ? {} : { issuesProvider }),
     ...(admission === undefined ? {} : { admission }),
     ...(retention === undefined ? {} : { retention }),
     notify,
@@ -579,7 +579,6 @@ const TOP_KEYS = [
   "derive-root-paths",
   "health",
   "ignore",
-  "issuesProvider",
   "setup",
   "teardown",
   "notify",
@@ -619,29 +618,6 @@ function readRetention(value: unknown): QueueConfig["retention"] {
   return { holds: argv as string[] }
 }
 
-function readIssuesProvider(value: unknown): QueueConfig["issuesProvider"] {
-  if (value === undefined) return undefined
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(".yrd.yml issuesProvider: must be a mapping of read/update argv")
-  }
-  const provider = value as Record<string, unknown>
-  onlyKeys(provider, ["read", "update"], ".yrd.yml issuesProvider")
-  const result: { read?: readonly string[]; update?: readonly string[] } = {}
-  for (const key of ["read", "update"] as const) {
-    const argv = provider[key]
-    if (argv === undefined) continue
-    if (
-      !Array.isArray(argv) ||
-      argv.length === 0 ||
-      argv.some((part) => typeof part !== "string" || part === "" || /[\r\n\0]/.test(part))
-    ) {
-      throw new Error(`.yrd.yml issuesProvider.${key}: must be a non-empty argv list of single-line strings`)
-    }
-    result[key] = argv as string[]
-  }
-  return result
-}
-
 /**
  * A key the declaration used to read, and where its meaning went. A typo is
  * refused the same way, with the known keys listed; a RETIRED key is refused
@@ -655,6 +631,18 @@ const RETIRED: Readonly<Record<string, string>> = {
   scratch: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
   workdir: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
   target: "target: is not read; submit resolves the queue from --queue or the origin head",
+}
+
+/**
+ * A key every declaration before its retirement carried, and where its meaning went. Unlike RETIRED it never
+ * refuses: live paths read past declarations (a history's base in `declarationFor`, a checkout's own head in env
+ * close and release capture, the queue's creation declaration in event-run), and those must keep reading. It is
+ * not parsed and reaches no QueueConfig field; `historicalKeys` hears it, so the declaration in force says it out
+ * loud. issuesProvider (29615) left with km's merge-close in #29630 (@cto 5a66fb46 Q1, b59e0e09: never RETIRED).
+ */
+const HISTORICAL: Readonly<Record<string, string>> = {
+  issuesProvider:
+    "issuesProvider: retired in #29630 and ignored; delete this key. Yrd's post-merge closer closes issues from merge trailers through issues.yml at --project-root, and the issue display reads issues.yml's view",
 }
 
 function strictTop(raw: Record<string, unknown>): Record<string, unknown> {
