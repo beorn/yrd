@@ -9,8 +9,6 @@
  * @consumer an operator or agent reading `yrd queue show` for a change bound to an issue
  * @testonly none
  */
-import { spawnSync } from "node:child_process"
-import { shellQuote } from "git-super/shell-command"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -201,7 +199,7 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
     expect(stderr).toContain('yrd: issue info issue-1: {"key":"issue-1","queueOutputEmitted":true}')
   })
 
-  it("says out loud when the declaration in force still holds issuesProvider.read, and never runs it (rule: retired key said out loud)", async () => {
+  it("says out loud when the declaration in force still holds the retired issuesProvider key, and never runs its read (rule: retired key said out loud)", async () => {
     const marker = join(scratch("yrd-issue-display-retired-"), "ran")
     const work = await queueWithIssueHistory(
       1,
@@ -209,50 +207,8 @@ describe("yrd queue show's issue display read (29644 Y1)", () => {
     )
     const shown = await yrd(work, "queue", "show", "task/one", "--json", "--fresh")
     expect(shown.exitCode, shown.report).toBe(0)
-    expect(shown.stderr, shown.report).toContain("issuesProvider.read: retired")
-    expect(shown.stderr, shown.report).not.toContain("yrd queue show")
-    expect(shown.stderr, shown.report).toContain("project root")
-    const project = await issuesProject("json")
-    const remote = join(work, "..", "remote.git")
-    const refs = await gitIn(remote)(["for-each-ref", "--format=%(refname) %(objectname)"])
-    const commands: { argv: readonly string[]; cwd: string; recipe: string }[] = []
-    let stderr = ""
-    const code = await runYrdProcess(
-      [BUN, YRD_ENTRY, "queue", "show", "task/one", "--json", "--fresh", "--project-root", project],
-      {
-        color: false,
-        localBranchProtections: null,
-        cwd: work,
-        stdout: () => {},
-        stderr: (text) => {
-          stderr += text
-        },
-        formatYrdCommand: (argv, cwd) => {
-          const recipe = `cd ${shellQuote(cwd)} && ${shellQuote(BUN)} ${shellQuote(resolve(import.meta.dirname, "../../../bin/yrd.ts"))} ${argv.map(shellQuote).join(" ")}`
-          commands.push({ argv, cwd, recipe })
-          return recipe
-        },
-      },
-    )
-    expect(code, stderr).toBe(0)
-    expect(commands, stderr).toHaveLength(1)
-    const command = commands[0]!
-    expect(command.argv).toEqual([
-      "queue",
-      "show",
-      "task/one",
-      "--project-root",
-      project,
-      "--queue",
-      `${resolve(remote)}#main`,
-    ])
-    expect(command.cwd).toBe(work)
-    expect(stderr).toContain(command.recipe)
-    const copied = spawnSync("/bin/sh", ["-c", command.recipe], { cwd: TMP, encoding: "utf8" })
-    expect(copied.status, copied.stderr).toBe(0)
-    expect(copied.stdout).toContain("task/one")
-    expect(copied.stderr).toContain('yrd: issue info 29644: {"argv":["29644"]}')
-    expect(await gitIn(remote)(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(refs)
+    expect(shown.stderr, shown.report).toContain("yrd: .yrd.yml issuesProvider: retired in #29630 and ignored")
+    expect(shown.stderr, shown.report).toContain("the issue display reads issues.yml's view")
     expect(existsSync(marker)).toBe(false)
   })
 

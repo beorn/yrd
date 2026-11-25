@@ -113,6 +113,7 @@ import {
   QueueAuthorityUnreadable,
   QueueRunAfterRunFailed,
   QueueRunEventRetryExhausted,
+  onceEachHistoricalKey,
   readConfig,
   readJournals,
   readRunLog,
@@ -941,6 +942,9 @@ export async function coreQueueCommand(
     "merge",
     "check",
   ])
+  // 29630: a key only past declarations should carry is said out loud on the declaration in force, never run; once per
+  // process, since the service re-reads the declaration every round.
+  const historicalKeys = onceEachHistoricalKey((cure) => io.stderr(`yrd: .yrd.yml ${cure} (${targetLabel}).\n`))
   // The target's declaration as the target holds it now: fetched, read in full
   // and held to its keys, then the remote it names resolved. Undefined when the
   // target carries no `.yrd.yml` at all — there is no queue there; a
@@ -963,8 +967,9 @@ export async function coreQueueCommand(
         oid,
         target,
         RUNS_THE_DECLARATION.has(request.command)
-          ? {}
+          ? { historicalKeys }
           : {
+              historicalKeys,
               newerKeys: (keys) => {
                 io.stderr(formatUnknownTopLevelKeyWarning(targetLabel, NAMED[request.command], keys))
               },
@@ -1530,7 +1535,7 @@ export async function coreQueueCommand(
     // keeps running instead of exiting into Hab's restart budget.
     // The same sweep gzip-compresses what it keeps, bounded per round (34923).
     // A target that declares `retention.holds` (34952, @cto 72645433) has every destructive unit of the pass judged
-    // first, by its argv run where its issuesProvider runs (the queue repo, the queue's env).
+    // first, by its argv run in the queue repo, under the queue's env.
     const holds = config.retention?.holds
     await sweepRoundOutputInRound({
       workdir,
@@ -1570,17 +1575,6 @@ export async function coreQueueCommand(
   }
   // The binding IS the disposal slot; the object holds no state of its own.
   void housekeepingJournal
-  // 29630 (@cto 5a66fb46): Yrd's post-merge closer, through issues.yml, is the only writer closing issues from merge
-  // trailers. issuesProvider.update still parses until it leaves the parser, and is never run; a declaration in force
-  // that still holds it is told out loud, the way issuesProvider.read is (@cto 6a06588f).
-  if (
-    config.issuesProvider?.update !== undefined &&
-    (request.command === "up" || request.command === "run" || request.command === "merge")
-  ) {
-    io.stderr(
-      `yrd: .yrd.yml issuesProvider.update: retired and ignored; delete this key. Yrd's post-merge closer closes issues from merge trailers through issues.yml at --project-root (#29630).\n`,
-    )
-  }
   await using postMerge =
     request.command === "up" || request.command === "run" || request.command === "merge"
       ? createPostMerge({
@@ -5824,17 +5818,6 @@ export async function coreQueueCommand(
             "",
           )
           return 0
-        }
-        // The read is the issues interface's `view` at --project-root; issuesProvider.read is no longer consulted,
-        // and a declaration in force that still holds it is told out loud (@cto 6a06588f).
-        if (config.issuesProvider?.read !== undefined) {
-          const issueInspection =
-            request.branch !== undefined && options.projectRoot !== undefined
-              ? `Inspect issue display: ${formatQueueCommand(io, formatStoredQueueAddress(name), ["queue", "show", request.branch, "--project-root", options.projectRoot])}`
-              : "Choose one branch and its issues.yml project root to read the issue display."
-          io.stderr(
-            `yrd: .yrd.yml issuesProvider.read: retired and ignored; delete this key. The issue display reads issues.yml's view. ${issueInspection}\n`,
-          )
         }
         const views = new Map<Row, Readonly<{ checks: readonly CheckView[]; note?: string }>>()
         for (const history of histories) {

@@ -6,8 +6,8 @@
  * @consumer Queue runners and operators authoring or identifying `.yrd.yml`.
  */
 
-import { describe, expect, it } from "vitest"
-import { parseConfig, queueName } from "../src/config.ts"
+import { describe, expect, it, vi } from "vitest"
+import { onceEachHistoricalKey, parseConfig, queueName } from "../src/config.ts"
 
 const TARGET = { branch: "release/1.x", remote: "yrd" } as const
 const SOURCE = { at: "captured-target-A", blob: "b".repeat(40), target: TARGET } as const
@@ -30,16 +30,49 @@ describe("the queue declaration grammar", () => {
   ])("refuses %s in admission", (_name, declaration) => {
     expect(() => parseConfig(declaration, SOURCE)).toThrow(/admission/u)
   })
-  it("reads provider commands as exact argv with optional display", () => {
-    expect(
-      parseConfig('issuesProvider: {read: [other, show, "<key>"], update: [other, catchup]}\n', SOURCE).issuesProvider,
-    ).toEqual({ read: ["other", "show", "<key>"], update: ["other", "catchup"] })
-    expect(parseConfig("issuesProvider: {update: [other, catchup]}\n", SOURCE).issuesProvider).toEqual({
-      update: ["other", "catchup"],
-    })
-  })
-  it.each(["[]", "''", "[other, '']", "[other, 42]"])("names invalid provider argv %s", (value) => {
-    expect(() => parseConfig(`issuesProvider: {update: ${value}}\n`, SOURCE)).toThrow(/issuesProvider.update/u)
+  // 29630 (@cto 5a66fb46 Q1, b59e0e09): issuesProvider left the parser but never refuses, because live paths read past
+  // declarations that carry it; the declaration in force hears its cure through historicalKeys.
+  it.each([
+    ["strict", {}],
+    ["addressing", { newerKeys: () => {} }],
+  ])(
+    "reads a %s declaration still carrying the retired issuesProvider key with it ignored and named",
+    (_mode, options) => {
+      const cures: string[] = []
+      const config = parseConfig('issuesProvider: {read: [other, show, "<key>"], update: [other, 42]}\n', {
+        ...SOURCE,
+        ...options,
+        historicalKeys: (heard) => cures.push(...heard),
+      })
+      expect(config).not.toHaveProperty("issuesProvider")
+      expect(cures).toEqual([
+        expect.stringMatching(
+          /^issuesProvider: retired in #29630 and ignored; delete this key\. Yrd's post-merge closer/u,
+        ),
+      ])
+      expect(parseConfig("issuesProvider: {update: [other]}\n", SOURCE)).not.toHaveProperty("issuesProvider")
+    },
+  )
+  // @cto 19089cc0 addition 2: a past declaration is read in silence; the declaration in force says the cure once per
+  // process however often it is read (the service re-reads it every round).
+  it("reads a past declaration carrying issuesProvider in silence, and tells the in-force cure once across two reads", () => {
+    const past = 'issuesProvider: {update: [km, rules, run, merge-close]}\nchecks:\n  - unit:\n      run: "true"\n'
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      expect(parseConfig(past, SOURCE).checks.map((check) => check.name)).toEqual(["unit"])
+      expect(stderr).not.toHaveBeenCalled()
+      expect(consoleError).not.toHaveBeenCalled()
+    } finally {
+      stderr.mockRestore()
+      consoleError.mockRestore()
+    }
+    const lines: string[] = []
+    const historicalKeys = onceEachHistoricalKey((cure) => lines.push(cure))
+    parseConfig(past, { ...SOURCE, historicalKeys })
+    parseConfig(past, { ...SOURCE, historicalKeys })
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatch(/^issuesProvider: retired in #29630 and ignored; delete this key\./u)
   })
 
   it("reads checkout directory omissions as literal paths on a named check", () => {

@@ -227,7 +227,15 @@ export type { PopulateReference, ReferenceStore } from "./reference.ts"
 export { queueRun, QueueAuthorityUnreadable, QueueRunAfterRunFailed } from "./run.ts"
 export { LegacyOverridePresent, QueueRunEventRetryExhausted } from "./event-run.ts"
 export type { QueueRunOptions, QueueRunOutcome, RoundLine } from "./run.ts"
-export { ENDINGS, normalizedRemote, parseConfig, queueName, readConfig, targetName } from "./config.ts"
+export {
+  ENDINGS,
+  normalizedRemote,
+  onceEachHistoricalKey,
+  parseConfig,
+  queueName,
+  readConfig,
+  targetName,
+} from "./config.ts"
 export { parseDuration } from "./duration.ts"
 export type { Ending, Notifier, QueueConfig, QueueHealthConfig, Target } from "./config.ts"
 export { clocks, endingInstants, subjects, watchRows, watchRowKey } from "./table.ts"
