@@ -426,6 +426,23 @@ async function redeclare(w: World, text: string): Promise<void> {
 }
 
 /**
+ * An issues.yml at the target whose `resolve` is `sh provider ready release <raw>`, so Yrd's post-merge closer holds
+ * its attempt open on the first closing trailer it reads (run with --project-root); `close` is never reached.
+ */
+async function declareHeldCloser(w: World, provider: string, ready: string, release: string): Promise<void> {
+  writeFileSync(
+    join(w.work, "issues.yml"),
+    JSON.stringify({
+      resolve: ["sh", provider, ready, release, "<raw>"],
+      close: ["sh", "-c", "exit 9", "close", "<key>", "<reason>", "<id>"],
+    }),
+  )
+  await w.git(["add", "issues.yml"])
+  await w.git(["commit", "--quiet", "-m", "the target declares a held issue closer"])
+  await w.git(["push", "--quiet", "origin", "main"])
+}
+
+/**
  * A real, pushed submodule on the target's main, so an environment's dependency
  * object store exists and can lend objects to a sibling's store.
  */
@@ -897,12 +914,14 @@ describe("yrd queue up, the service", () => {
         "\n",
       )
       writeFileSync(provider, script)
-      await redeclare(w, JSON.stringify({ setup: ":", issuesProvider: { update: ["sh", provider, ready, release] } }))
+      // Yrd's closer holds the first service's post-merge attempt: its resolve waits until the stop kills it (29630).
+      await declareHeldCloser(w, provider, ready, release)
+      await redeclare(w, JSON.stringify({ setup: ":" }))
       const branch = "task/restart-job"
       await w.git(["checkout", "--quiet", "-b", branch, "main"])
       writeFileSync(join(w.work, "work.txt"), "merged job\n")
       await w.git(["add", "work.txt"])
-      await w.git(["commit", "--quiet", "-m", "job without issue metadata"])
+      await w.git(["commit", "--quiet", "-m", "job closing one issue\n\nCloses: issue-restart-job"])
       const head = (await w.git(["rev-parse", "HEAD"])).trim()
       await w.git(["checkout", "--quiet", "main"])
       const opened = capture(w.work)
@@ -945,14 +964,15 @@ describe("yrd queue up, the service", () => {
                 stop.abort()
               },
             },
-            { json: true, workdir },
+            { json: true, workdir, projectRoot: w.work },
           ),
           first.stderr(),
         ).toBe(0)
         const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
         const merged = await queueCore.readStatus(store, "main", branch)
         expect(merged.status).toBe("merged")
-        expect(merged.issue).toBeUndefined()
+        // The closing trailer that lets Yrd's closer hold the attempt also binds the job's issue.
+        expect(merged.issue).toBe("issue-restart-job")
         expect(existsSync(environment), "merge is durable while its pending cleanup is interrupted").toBe(true)
         // Another registered terminal branch makes startup's acquisition contract observable (31428).
         const olderBranch = "task/restart-older"
@@ -5598,7 +5618,8 @@ describe("yrd queue up, the service", () => {
       provider,
       ['touch "$1"', ...waitingFor('test ! -f "$2"', "promotion provider not released")].join("\n"),
     )
-    await redeclare(w, JSON.stringify({ issuesProvider: { update: ["sh", provider, ready, releaseProvider] } }))
+    // Yrd's closer holds the preparation's post-merge attempt: its resolve waits until the stop kills it (29630).
+    await declareHeldCloser(w, provider, ready, releaseProvider)
     const home = join(dirname(w.work), "work-landings")
     mkdirSync(home)
     const aRoot = (await w.git(["rev-parse", "main"])).trim()
@@ -5624,7 +5645,7 @@ describe("yrd queue up, the service", () => {
       writeFileSync(join(w.work, `job-${String(index)}.txt`), `${branch}\n`)
       await w.git(["add", `job-${String(index)}.txt`])
       if (index === 2) await w.git(["update-index", "--cacheinfo", "160000", w.b, "submodule"])
-      await w.git(["commit", "--quiet", "-m", branch])
+      await w.git(["commit", "--quiet", "-m", `${branch}\n\nCloses: issue-landing-${String(index)}`])
       const head = (await w.git(["rev-parse", "HEAD"])).trim()
       await w.git(["checkout", "--quiet", "main"])
       const opened = capture(w.work)
@@ -5669,12 +5690,13 @@ describe("yrd queue up, the service", () => {
             expect(outcome.stuck, prepared.stderr()).toEqual([])
             merged.push(...outcome.merged)
             if (merged.length === 3) {
-              await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 8000 })
+              await vi.waitFor(() => expect(existsSync(ready), prepared.stderr()).toBe(true), { timeout: 8000 })
               prepareStop.abort()
             }
           },
         },
-        { json: true, workdir: w.workdir },
+        // The bare remote, not the clone: the clone's origin is a URL alias and its own main never advances here.
+        { json: true, workdir: w.workdir, projectRoot: join(dirname(w.work), "remote.git") },
       ),
       prepared.stderr(),
     ).toBe(0)
