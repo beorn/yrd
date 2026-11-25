@@ -2067,6 +2067,31 @@ describe("the queue-format boundary", () => {
     expect((await chain.events()).at(-1)).toMatchObject({ id: dropped.event, type: "cancelled", links: [head] })
   })
 
+  // @failure a change's multi-line failure text threw at the Reason trailer and stopped the whole queue (#38594).
+  it("records a failure whose reason spans lines as one escaped Reason line", async () => {
+    const { store, location } = remoteMemStore("yrd-event-multiline-reason")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/net" })
+    const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
+    const chain = await openEvents({ ...store, ref: changesRef("lab", "task/net") })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "@dev/2" })],
+      { expect: null },
+    )
+    const reason =
+      "send-pack: unexpected disconnect while reading sideband packet\nfatal: the remote end hung up unexpectedly\x7f end"
+    await chain.append([changeInput("failed", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), reason })], {
+      expect: opened.head,
+    })
+    expect(await readStatus(location, "lab", "task/net")).toMatchObject({
+      status: "failed",
+      reason:
+        "send-pack: unexpected disconnect while reading sideband packet\\nfatal: the remote end hung up unexpectedly\\u007f\\u2028end",
+    })
+  })
+
   // @failure an owner drop after a failed ending deletes the name but leaves Df seeing a failure (26223).
   it("records an owner drop after an ended change and deletes its kept branch in one publish", async () => {
     const { store, location } = remoteMemStore("yrd-event-drop-ended")

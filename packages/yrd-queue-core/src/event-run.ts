@@ -32,6 +32,7 @@ import {
   readEventQueueWithChain,
   readStatus,
   QUEUE_RUN_WRITER,
+  singleLineTrailer,
   writeQueueEvent,
   type EventCheck,
   type EventChange,
@@ -245,9 +246,9 @@ function discardedJudgementReason(current: EventChange, error: unknown): string 
     : `change ended ${current.ending.kind} at ${current.ending.id} while this round judged it: ${failed}`
 }
 
-/** Keep every diagnostic character while meeting Gitomic's single-line trailer contract. */
+/** Keep every diagnostic character while meeting Gitomic's single-line trailer contract (one helper, #38594). */
 function trailerReason(reason: string): string {
-  const written = reason.trim().replace(/[\x00-\x1f\x7f]/gu, (char) => JSON.stringify(char).slice(1, -1))
+  const written = singleLineTrailer(reason.trim())
   if (written === "") throw new Error("notification failure has no reason to retain")
   return written
 }
