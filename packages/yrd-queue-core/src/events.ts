@@ -59,6 +59,21 @@ export type ChangeEnding = (typeof CHANGE_ENDINGS)[number]
 export type CancellationReason = "resubmitted" | "dropped" | "deleted" | "unrecorded" | "withdrawn"
 const LANDING_IN_PROGRESS = "landing in progress; resubmit after merged/failed/stuck, resume if runner gone"
 
+/**
+ * #38594: a Reason trailer that keeps every diagnostic character while meeting Gitomic's single-line contract.
+ * Gitomic refuses C0 controls, DEL, U+2028 and U+2029 in a trailer value; a failure text such as git's
+ * "send-pack: unexpected disconnect…\nfatal: the remote end hung up" carried a newline into the Reason, the write
+ * threw, and the whole queue stopped instead of the one change failing. Each refused character is written as its
+ * JSON escape, so the text survives whole and an already-escaped value is unchanged.
+ */
+export function singleLineTrailer(value: string): string {
+  return value.replace(/[\x00-\x1f\x7f\u2028\u2029]/gu, (char) => {
+    // JSON escapes C0 controls but leaves DEL, U+2028 and U+2029 raw; those take the \uXXXX form.
+    const escaped = JSON.stringify(char).slice(1, -1)
+    return escaped === char ? `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}` : escaped
+  })
+}
+
 export const EVENT_TRAILERS = {
   by: "By",
   recipient: "Recipient",
@@ -598,7 +613,7 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
         EVENT_TRAILERS.admissionOutput,
         JSON.stringify(details.reason).replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029"),
       ])
-    } else props.push([EVENT_TRAILERS.reason, details.reason])
+    } else props.push([EVENT_TRAILERS.reason, singleLineTrailer(details.reason)])
   }
   if (details.warningKind !== undefined) props.push([EVENT_TRAILERS.warningKind, details.warningKind])
   if (details.run !== undefined) props.push([EVENT_TRAILERS.run, details.run])
