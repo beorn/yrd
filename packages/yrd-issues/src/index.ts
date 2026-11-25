@@ -19,4 +19,4 @@ export {
 
 export { checkIssuesArgv, substituteArgv, type IssuesArgvRefusal } from "./argv.ts"
 
-export type { IssuesStatePayload, IssuesWatchChange, IssuesWatchAnswer } from "./payloads.ts"
+export type { IssuesStatePayload } from "./payloads.ts"

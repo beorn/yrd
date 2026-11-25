@@ -18,31 +18,24 @@ import {
 } from "../src/index.ts"
 
 describe("@yrd/issues contract", () => {
-  it("carries the twelve original verbs plus the phase-3 pair", () => {
+  it("carries the twelve original verbs plus state, and no watch without a caller", () => {
     expect(ISSUES_VERB_NAMES).toContain("state")
-    expect(ISSUES_VERB_NAMES).toContain("watch")
-    expect(ISSUES_VERB_NAMES).toHaveLength(15)
+    expect(ISSUES_VERB_NAMES).not.toContain("watch")
+    expect(ISSUES_VERB_NAMES).toHaveLength(14)
     expect(isIssuesVerb("state")).toBe(true)
-    expect(isIssuesVerb("watch")).toBe(true)
+    expect(isIssuesVerb("watch")).toBe(false)
     expect(isIssuesVerb("states")).toBe(false)
   })
 
-  it("makes state a write verb and watch a read", () => {
+  it("makes state a write verb that carries its replay key", () => {
     expect(ISSUES_WRITE_VERBS.has("state")).toBe(true)
-    expect(ISSUES_WRITE_VERBS.has("watch")).toBe(false)
     expect(allowedPlaceholders("state")).toEqual(["key", "state", "id"])
-    expect(allowedPlaceholders("watch")).toEqual(["since"])
   })
 
   it("refuses a write verb that does not carry its replay key", () => {
     const refusal = checkIssuesArgv("state", ["<key>", "<state>"])
     expect(refusal?.message).toBe("write verb state lacks <id>; add <id> where the provider takes its replay key")
     expect(checkIssuesArgv("state", ["<key>", "<state>", "<id>"])).toBeNull()
-  })
-
-  it("accepts watch's position and asks it for no replay key", () => {
-    expect(checkIssuesArgv("watch", ["<since>"])).toBeNull()
-    expect(checkIssuesArgv("watch", ["<since>", "<id>"])?.message).toContain("does not take")
   })
 
   it("refuses a placeholder the verb does not take, naming the ones it does", () => {

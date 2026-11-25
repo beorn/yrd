@@ -1,6 +1,11 @@
 /**
  * The issues interface's verb vocabulary: the twelve original verbs (design `issues-interface` rev 6 § 4, @cto ruling
- * 0e9e794e) plus the two phase-3 verbs `state` and `watch` (@cto 37a8972c, hh #37445).
+ * 0e9e794e) plus the phase-3 verb `state` (@cto 37a8972c, hh #37445).
+ *
+ * `watch` is deliberately absent (@cto 8dfe1bd3): a verb with no caller is a guess. Hightea reads host items as an AHP
+ * records channel over `km://` (030acd32 A) and takes GitHub changes from its webhook plus the timed re-list, so no
+ * Hightea caller needs `watch` today. It returns with the first argv caller that does, taking `<since>` as the
+ * provider store's own position (km's journal seq, Hightea's row seq), never a per-watch counter.
  *
  * This module is pure: no IO, no argv runner, no YAML reader, no decision made from issue state. Both consumers import
  * it — Yrd's argv runner (`packages/yrd-cli/src/issues/declaration.ts`) and Hightea's cloud provider — so the two
@@ -29,11 +34,8 @@ export const ISSUES_VERBS = {
   // declared argv beside the reads (@cto 0a53b47f), so the provider stays the only thing that knows the store.
   activity: ["cutoff"],
   // #37445 (@cto 37a8972c): move one issue between the board's states. A WRITE, so it carries <id> and a replay is a
-  // no-op at the provider; the provider refuses, by name, a state its tracker does not declare.
+  // no-op at the provider; the provider refuses, by name, a state its tracker does not declare and an unknown key.
   state: ["key", "state"],
-  // #37445 (@cto 37a8972c): the changes since an opaque provider position. A READ, so it carries no <id>; `<since>`
-  // is the same string the previous answer returned as its position.
-  watch: ["since"],
 } as const satisfies Record<string, readonly string[]>
 
 export type IssuesVerb = keyof typeof ISSUES_VERBS
