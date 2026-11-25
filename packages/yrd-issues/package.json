@@ -1,0 +1,10 @@
+{
+  "name": "@yrd/issues",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "files": ["src"],
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

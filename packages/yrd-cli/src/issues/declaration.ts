@@ -2,7 +2,12 @@
  * The issues declaration: `issues.yml` at a project's root, whose top-level keys ARE the verbs and whose values
  * are argv lists (design `issues-interface` rev 6 § 4, @cto ruling 0e9e794e). This module only reads the text
  * into a validated table; it never runs anything and never decides from issue state.
+ *
+ * The verb vocabulary and the argv rules are not owned here: they live in `@yrd/issues`, which Hightea's cloud
+ * provider imports too, and are re-exported below so this stays the one import path for the runner (@cto 37a8972c).
  */
+
+import { checkIssuesArgv, ISSUES_VERB_NAMES, isIssuesVerb, type IssuesVerb } from "@yrd/issues"
 
 /** The stable codes `yrd issues` refuses or fails with. The subject follows the code. */
 export const ISSUES_CODES = {
@@ -30,61 +35,18 @@ export const ISSUES_CODES = {
 
 export type IssuesCode = (typeof ISSUES_CODES)[keyof typeof ISSUES_CODES]
 
-/** Each verb's positional operands, in order. `<id>` is the write verbs' replay key and comes from `--id`. */
-export const ISSUES_VERBS = {
-  resolve: ["raw"],
-  view: ["key"],
-  list: [],
-  create: ["title", "body"],
-  comment: ["key", "text"],
-  close: ["key", "reason"],
-  reopen: ["key"],
-  assign: ["key", "seat"],
-  unassign: ["key", "seat"],
-  // One item event on the issue a change names (@cto 721b42d7, #31194): <raw> is the change's issue value exactly as
-  // Yrd holds it, resolved by the provider; <source> is `<repository>@<sha>`; <text> is the same on every replay.
-  event: ["raw", "kind", "source", "text"],
-  "list-page": ["page"],
-  // 38182 (@cto 17:49Z): the long-lived form of `list-page`. It takes no operand — the frames carry their own
-  // page requests — and a project opts in by declaring its argv. Yrd runs it once and hands it stdio unchanged.
-  "list-page-serve": [],
-  // #37838 slice 2: the journal a row's owner was last seen writing, from a cutoff in epoch milliseconds. It is a
-  // declared argv beside the reads (@cto 0a53b47f), so the provider stays the only thing that knows the store.
-  activity: ["cutoff"],
-} as const satisfies Record<string, readonly string[]>
-
-export type IssuesVerb = keyof typeof ISSUES_VERBS
-
-export const ISSUES_VERB_NAMES = Object.keys(ISSUES_VERBS) as IssuesVerb[]
-
-/** The verbs that change the store; each must carry `<id>` so a replay is a no-op at the provider. */
-export const ISSUES_WRITE_VERBS: ReadonlySet<IssuesVerb> = new Set<IssuesVerb>([
-  "create",
-  "comment",
-  "close",
-  "reopen",
-  "assign",
-  "unassign",
-  "event",
-])
-
-/** GitHub's pair (`gh issue close --reason`). */
-export const ISSUES_CLOSE_REASONS = ["completed", "not-planned"] as const
-
-/** The change transitions an `event` records; never `closed`, whose one writer is the close path (#29630). */
-export const ISSUES_EVENT_KINDS = ["merged", "failed", "withdrawn"] as const
+export {
+  ISSUES_VERBS,
+  ISSUES_VERB_NAMES,
+  ISSUES_WRITE_VERBS,
+  ISSUES_CLOSE_REASONS,
+  ISSUES_EVENT_KINDS,
+  isIssuesVerb,
+  allowedPlaceholders,
+} from "@yrd/issues"
+export type { IssuesVerb } from "@yrd/issues"
 
 export const ISSUES_DECLARATION_PATH = "issues.yml"
-
-export function isIssuesVerb(value: string): value is IssuesVerb {
-  return Object.hasOwn(ISSUES_VERBS, value)
-}
-
-/** The placeholders a verb's argv may carry: its operands, plus `<id>` on a write verb. */
-export function allowedPlaceholders(verb: IssuesVerb): readonly string[] {
-  if (verb === "assign") return [...ISSUES_VERBS.assign, "id", "expected-owner", "requester"]
-  return ISSUES_WRITE_VERBS.has(verb) ? [...ISSUES_VERBS[verb], "id"] : ISSUES_VERBS[verb]
-}
 
 export type IssuesDeclaration = Readonly<Partial<Record<IssuesVerb, readonly string[]>>>
 
@@ -92,9 +54,6 @@ export type IssuesDeclaration = Readonly<Partial<Record<IssuesVerb, readonly str
 export class IssuesDeclarationError extends Error {
   readonly code: IssuesCode = ISSUES_CODES.declarationInvalid
 }
-
-const PLACEHOLDER = /<([A-Za-z_][A-Za-z0-9_-]*)>/u
-const WHOLE_PLACEHOLDER = /^<([A-Za-z_][A-Za-z0-9_-]*)>$/u
 
 /**
  * Parse and validate the whole declaration, every verb, before any one is run: a misspelled verb or a write verb
@@ -122,45 +81,11 @@ export function parseIssuesDeclaration(text: string, where: string): IssuesDecla
       throw refuse(`${key} must be a non-empty list of strings (an argv)`)
     }
     const argv = value as string[]
-    const allowed = allowedPlaceholders(key)
-    for (const word of argv) {
-      const whole = WHOLE_PLACEHOLDER.exec(word)
-      if (whole !== null) {
-        const name = whole[1] as string
-        if (!allowed.includes(name)) {
-          throw refuse(
-            `${key} carries placeholder <${name}>, which ${key} does not take; ` +
-              `${key} takes ${allowed.length === 0 ? "none" : allowed.map((n) => `<${n}>`).join(", ")}`,
-          )
-        }
-        continue
-      }
-      const embedded = PLACEHOLDER.exec(word)
-      if (embedded !== null) {
-        throw refuse(
-          `${key} element ${JSON.stringify(word)} embeds <${embedded[1] as string}>; ` +
-            "a placeholder must be a whole argv element",
-        )
-      }
-    }
-    if (ISSUES_WRITE_VERBS.has(key) && !argv.includes("<id>")) {
-      throw refuse(`write verb ${key} lacks <id>; add <id> where the provider takes its replay key`)
-    }
-    if (key === "list-page" && !argv.includes("<page>")) {
-      throw refuse("list-page lacks <page>; add <page> where the provider takes its finite page request")
-    }
+    const refusal = checkIssuesArgv(key, argv)
+    if (refusal !== null) throw refuse(refusal.message)
     declaration[key] = argv
   }
   return declaration
 }
 
-/** Substitute each placeholder with exactly one argv element; nothing is ever shell-parsed. */
-export function substituteArgv(argv: readonly string[], values: Readonly<Record<string, string>>): string[] {
-  return argv.map((word) => {
-    const whole = WHOLE_PLACEHOLDER.exec(word)
-    if (whole === null) return word
-    const value = values[whole[1] as string]
-    if (value === undefined) throw new Error(`yrd issues: no value for placeholder ${word}`)
-    return value
-  })
-}
+export { substituteArgv } from "@yrd/issues"
