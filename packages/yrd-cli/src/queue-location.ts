@@ -448,10 +448,13 @@ export async function resolveQueueLocation(
   value: string | undefined,
   env: NodeJS.ProcessEnv,
   context: "queue" | "reader" | "submit" = "queue",
+  reportWorkdir?: (workdir: string, resolution: WorkdirResolution) => void,
 ): Promise<QueueLocation> {
   const { inside, addressed, selection, git, address } = await resolveQueueAddress(cwd, value, env, context, false)
-  const host = (await resolveHostWorkdir(cwd, env, git)).root
+  const resolution = await resolveHostWorkdir(cwd, env, git)
+  const host = resolution.root
   const workdir = queueRoot(host, address)
+  reportWorkdir?.(workdir, resolution)
   if (inside !== undefined && (context === "submit" || (context === "reader" && !addressed))) {
     return {
       address,

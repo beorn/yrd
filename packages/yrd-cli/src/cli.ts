@@ -1011,7 +1011,9 @@ function buildProgram(
         stopAtMs = parsed
       }
       const globalOptions = program.opts() as GlobalOptions
-      const location = await resolveQueueLocation(cwd(), queue, env, "queue", (workdir, source) => {
+      const location = await resolveQueueLocation(cwd(), queue, env, "queue", (workdir, resolution) => {
+        // The own-repository arm names the repository it read; the other arms are their own names.
+        const source = resolution.kind === "own-repository" ? resolution.source : resolution.kind
         io.stderr(
           `yrd queue run: workdir ${workdir} (from ${globalOptions.workdir === undefined ? source : "--workdir"})\n`,
         )
