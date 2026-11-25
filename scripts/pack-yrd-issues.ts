@@ -66,9 +66,9 @@ function main(): void {
   if (packed.exitCode !== 0) {
     return refuse(`bun pm pack failed: ${packed.stderr.toString().trim() || packed.stdout.toString().trim() || "(no output)"}`)
   }
-  // `bun pm pack` names the archive after the package's own name and version, exactly as npm does.
+  // `bun pm pack` names the archive as npm does: scoped `@scope/name` becomes `scope-name-<version>.tgz`.
   const manifest = JSON.parse(readFileSync(join(PACKAGE_DIR, "package.json"), "utf8")) as { name: string; version: string }
-  const archive = `${manifest.name.replace(/^@[^/]+\//u, "")}-${manifest.version}.tgz`
+  const archive = `${manifest.name.replace(/^@([^/]+)\//u, "$1-")}-${manifest.version}.tgz`
   const path = join(outDir, archive)
   if (!existsSync(path)) return refuse(`bun pm pack did not produce ${archive} in ${outDir}`)
   const digest = createHash("sha256").update(readFileSync(path)).digest("hex")
