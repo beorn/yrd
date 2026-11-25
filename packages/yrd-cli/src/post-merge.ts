@@ -5,6 +5,8 @@ import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   closingReferencesOf,
   enumerateChangeSegments,
+  gitlinkRows,
+  isRepositoryAt,
   readBranchHistory,
   readEventQueue,
   readIssueEffect,
@@ -185,6 +187,87 @@ export function readPostMergeIssueDiagnostics(
   return [...found.values()]
 }
 
+/** One component range a landing moved that its closer did not read, said by name (29630, @cto 5a66fb46). */
+type ComponentUnread = Readonly<{
+  unread: true
+  component: string
+  /** `unavailable` is a lost close until it is cured, so the attempt fails and is retried; `skipped` is a rule. */
+  status: "unavailable" | "skipped"
+  reason: "component-pin-unresolved" | "component-added" | "component-removed"
+  diagnostic: string
+}>
+
+type ClosingReference = Readonly<{ value: string; commit: string; trailer: string; component?: string }>
+
+/**
+ * The closing trailers in every component range a landing moved (29630, @cto 5a66fb46): each changed gitlink, from
+ * its pin at the root range's base to its pin at the merge, nested components included. They are read from the queue
+ * clone's own reference store for that component (`<queue clone>/<path>`), the store the landing's publication pushed
+ * the component from, so nothing is fetched. A store or pin the clone cannot resolve is a named refusal, never a
+ * skipped range, because a skipped range is a lost close. A component added or taken out by the landing has no range
+ * of landed work; each is said by name too.
+ */
+async function* componentClosingReferences(
+  git: GitRunner,
+  store: string,
+  from: string,
+  to: string,
+  branch: string,
+  prefix = "",
+): AsyncGenerator<ClosingReference | ComponentUnread, void> {
+  for (const row of await gitlinkRows(git, from, to)) {
+    const component = prefix === "" ? row.path : `${prefix}/${row.path}`
+    if (row.oldMode !== "160000" || row.newMode !== "160000") {
+      const added = row.oldMode !== "160000"
+      yield {
+        unread: true,
+        component,
+        status: "skipped",
+        reason: added ? "component-added" : "component-removed",
+        diagnostic: `${component} was ${added ? "added" : "taken out"} by this landing; it has no range of landed work to read`,
+      }
+      continue
+    }
+    const checkout = join(store, row.path)
+    let old: string
+    let unresolved: string | undefined
+    try {
+      old = (await git(["rev-parse", "--verify", "--end-of-options", `${from}:${row.path}`])).trim()
+    } catch (cause) {
+      old = ""
+      unresolved = `its pin at ${from} cannot be read: ${String(cause)}`
+    }
+    const child = git.at(checkout)
+    if (unresolved === undefined && !(await isRepositoryAt((cwd) => git.at(cwd), checkout))) {
+      unresolved = `no component store at ${checkout}`
+    }
+    for (const pin of unresolved === undefined ? [old, row.sha] : []) {
+      try {
+        await child(["cat-file", "-e", `${pin}^{commit}`])
+      } catch {
+        // catch-cause-allow: `cat-file -e` answers "is this commit here" with its exit status alone, and absence is
+        // the answer; it is reported below by store and sha as a named refusal, never dropped.
+        unresolved = `${checkout} does not hold pin ${pin}`
+        break
+      }
+    }
+    if (unresolved !== undefined) {
+      yield {
+        unread: true,
+        component,
+        status: "unavailable",
+        reason: "component-pin-unresolved",
+        diagnostic: `${component} moved ${old === "" ? "?" : old}..${row.sha} and its closing trailers were not read: ${unresolved}`,
+      }
+      continue
+    }
+    for await (const reference of closingReferencesOf(child, [`${old}..${row.sha}`], branch)) {
+      yield { ...reference, component }
+    }
+    yield* componentClosingReferences(child, checkout, old, row.sha, branch, component)
+  }
+}
+
 async function closeMergedIssues(
   input: Readonly<{
     branches: readonly string[]
@@ -294,13 +377,33 @@ async function closeMergedIssues(
               )
             }
           }
-          const references = async function* () {
+          const references = async function* (): AsyncGenerator<ClosingReference | ComponentUnread, void> {
             yield* closingReferencesOf(input.git, [`${base}..${observed ? segment.head : mergeSha}`], branch)
             if (observed && mergeSha !== segment.head) yield* closingReferencesOf(input.git, ["-1", mergeSha], branch)
+            // 29630: every component range this landing moved, from the same base the root range starts at.
+            yield* componentClosingReferences(input.git, input.store.repo, base, mergeSha, branch)
           }
           const refs = references()
+          // One raw value is resolved once per landing, wherever it appears (root or component, @cto 5a66fb46).
+          const resolvedRaw = new Set<string>()
           for await (const reference of refs) {
             if (input.stop?.aborted) return { outcomes, queue: completed }
+            if ("unread" in reference) {
+              outcomes.push({
+                branch,
+                mergedEvent: mergedEvent.id,
+                mergeSha,
+                providerId: "",
+                status: reference.status,
+                reason: reference.reason,
+                component: reference.component,
+                diagnostic: reference.diagnostic,
+              })
+              if (reference.status === "unavailable") input.report(`${branch}@${mergeSha}: ${reference.diagnostic}`)
+              continue
+            }
+            if (resolvedRaw.has(reference.value)) continue
+            resolvedRaw.add(reference.value)
             const resolved = await runIssuesVerb({
               verb: "resolve",
               args: [reference.value],
