@@ -356,9 +356,15 @@ describe("yrd issues", () => {
     expect(embeddedRan.stderr).toContain('reopen element "--id=<id>" embeds <id>')
   })
 
-  it.each(["list", "resolve"])("fails loudly for undeclared %s (rule: absent verb is unsupported)", async (verb) => {
+  // #37445 (@cto 37a8972c): a provider that does not declare `state` refuses it by this same named rule, so a
+  // board move km cannot serve is never a silent no-op. (`state` ships a replay key, hence --id.)
+  it.each([
+    ["list", []],
+    ["resolve", ["raw"]],
+    ["state", ["k", "open", "--id", "intent"]],
+  ] as const)("fails loudly for undeclared %s (rule: absent verb is unsupported)", async (verb, argv) => {
     const root = project({ "issues.yml": declare({ view: provider("json", "<key>") }) })
-    const ran = await yrd(root, "issues", verb, ...(verb === "resolve" ? ["raw"] : []))
+    const ran = await yrd(root, "issues", verb, ...argv)
     expect(ran.exitCode).toBe(1)
     expect(ran.stderr).toContain(
       `${verb} is not declared in ${root}@${git(root, "rev-parse", "main")}:issues.yml (unsupported)`,
