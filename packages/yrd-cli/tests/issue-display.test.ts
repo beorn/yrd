@@ -3,7 +3,7 @@
  *           b59e0e09 / 6a06588f). If `--project-root` did not reach the display read, show would decorate from the wrong
  *           project or not at all; if the read bypassed `runIssuesVerb`, a second reader of issue state would
  *           grow beside `yrd issues`; if a declaration in force still holding `issuesProvider.read` were ignored in
- *           silence, a retired mechanism would go unsaid; and if the 10 s bound did not kill the provider, one hung
+ *           silence, a retired mechanism would go unsaid; and if the display bound did not kill the provider, one hung
  *           tracker would hold every `show` open.
  * @level    l2 (a real queue in a real Git worktree, a real issues.yml project and provider process)
  * @consumer an operator or agent reading `yrd queue show` for a change bound to an issue

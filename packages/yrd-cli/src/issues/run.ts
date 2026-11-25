@@ -645,7 +645,7 @@ export async function runIssuesVerb(
         "list-page-serve runs through the CLI's serve path, not an in-process read",
       )
     }
-    return await serveDeclared(substituteArgv(declared, request.values), options, env)
+    return serveDeclared(substituteArgv(declared, request.values), options, env)
   }
 
   if (verb === "assign") {
@@ -689,7 +689,7 @@ export async function runIssuesVerb(
               "progress:true needs an environment source on this read; this caller supplied none, so no hold was read",
             )
           }
-          return await readEnvironments({ root: projectRoot, cwd: options.cwd })
+          return readEnvironments({ root: projectRoot, cwd: options.cwd })
         },
         log: (line) => writeStderr(line),
       })
@@ -723,6 +723,7 @@ export async function runIssuesVerb(
     const decoder = new TextDecoder()
     await using provider = createProcess({ cwd: options.cwd, env })
     let result: Awaited<ReturnType<typeof provider.run>>
+    const startedMs = Date.now()
     try {
       result = await provider.run({
         argv,
@@ -754,7 +755,12 @@ export async function runIssuesVerb(
     }
     if (options.signal?.aborted) return stopped()
     if (result.timedOut) {
-      return fail(1, ISSUES_CODES.providerTimedOut, `${verb} ${command}`, `killed after ${options.timeoutMs} ms`)
+      return fail(
+        1,
+        ISSUES_CODES.providerTimedOut,
+        `${verb} ${command}`,
+        `killed after ${options.timeoutMs} ms (measured ${Date.now() - startedMs} ms)`,
+      )
     }
     if (result.stalled === true) {
       return fail(

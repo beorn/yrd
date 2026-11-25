@@ -554,6 +554,8 @@ describe("yrd issues", () => {
     const root = project({ "issues.yml": declare({ list: provider("sleep") }) })
     const outcome = await runIssuesVerb({ verb: "list", args: [], cwd: root, timeoutMs: 300, stderr: () => {} })
     expect(outcome).toMatchObject({ ok: false, exitCode: 1, code: "yrd-issues-provider-timed-out" })
+    // A load-slowed provider is diagnosed from the refusal alone: it names the budget AND the time it really ran.
+    expect(outcome.ok ? "" : outcome.message).toMatch(/killed after 300 ms \(measured \d+ ms\)/u)
   })
 
   it("reaps a stopped write provider and names the owner stop rather than a provider fault", async () => {

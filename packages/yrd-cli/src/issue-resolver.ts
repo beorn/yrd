@@ -1,7 +1,11 @@
 import { runIssuesVerb } from "./issues/run.ts"
 
-/** The display read's bound: a provider still running at 10 s is killed and the issue shows unavailable. */
-export const ISSUE_DISPLAY_TIMEOUT_MS = 10_000
+/**
+ * The issue read's bound (resolve for env open/submit, view for env status/cleanup, sameness): a provider still
+ * running at 30 s is killed and named. 10 s failed every `km bd resolve` at host load 60+ (5.6 s measured direct,
+ * @chief c0ce760a), so `yrd env open --issue` and `yrd submit --issue` refused healthy issues.
+ */
+export const ISSUE_DISPLAY_TIMEOUT_MS = 30_000
 
 /**
  * Display transport only: provider keys and payloads have no Yrd issue semantics. The read is the issues
