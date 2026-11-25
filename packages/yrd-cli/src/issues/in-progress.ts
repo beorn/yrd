@@ -126,20 +126,64 @@ function identityOf(path: string): string {
   return number === null ? `path:${stripped}` : `bead:${String(number)}`
 }
 
+/**
+ * #38182 (@cto ac9b95be): the activity leg as a fold over journal lines, so a reader that stays up can keep what it
+ * applied and hand in only the lines after its offset. The window is the state's, not the batch's: an empty batch
+ * still drops what has aged out, which is the one fact a delta's rows can never carry.
+ *
+ * `latest` is keyed `${identity}\u0000${actor}` - the key {@link activeViews} and the columns already join on.
+ */
+export type IssuesActivityState = Readonly<{ readonly latest: ReadonlyMap<string, number> }>
+
+/** No journal read yet. */
+export const EMPTY_ACTIVITY: IssuesActivityState = { latest: new Map() }
+
+/**
+ * Apply journal records to the state. Records outside the window are not remembered, a record older than the one held
+ * never lowers it, and every call prunes what the clock has taken out of the window - so two folds of the same lines
+ * at the same `now` answer the same state however the lines were split.
+ */
+export function applyActivity(
+  state: IssuesActivityState,
+  events: readonly IssuesActivityEvent[],
+  now: number,
+  windowMs: number = OWNER_ACTIVITY_WINDOW_MS,
+): IssuesActivityState {
+  const cutoff = now - windowMs
+  const latest = new Map(state.latest)
+  for (const event of events) {
+    if (!Number.isFinite(event.ts) || event.ts <= cutoff) continue
+    const key = `${identityOf(event.path)}\u0000${event.actor}`
+    const held = latest.get(key)
+    if (held === undefined || event.ts > held) latest.set(key, event.ts)
+  }
+  for (const [key, ts] of latest) {
+    if (!Number.isFinite(ts) || ts <= cutoff) latest.delete(key)
+  }
+  return { latest }
+}
+
+/** What the columns and the frame join on: the newest in-window record per (issue, actor), as an ISO time. */
+export function activeViews(
+  state: IssuesActivityState,
+  now: number,
+  windowMs: number = OWNER_ACTIVITY_WINDOW_MS,
+): ReadonlyMap<string, string> {
+  const cutoff = now - windowMs
+  return new Map(
+    [...state.latest]
+      .filter(([, ts]) => Number.isFinite(ts) && ts > cutoff)
+      .map(([key, ts]) => [key, new Date(ts).toISOString()]),
+  )
+}
+
 /** The latest in-window record per (issue, actor), as an ISO time, so the reason names when the owner was last seen. */
 function activeByIssue(
   events: readonly IssuesActivityEvent[],
   now: number,
   windowMs: number,
 ): ReadonlyMap<string, string> {
-  const latest = new Map<string, number>()
-  for (const event of events) {
-    if (!Number.isFinite(event.ts) || event.ts <= now - windowMs) continue
-    const key = `${identityOf(event.path)}\u0000${event.actor}`
-    const held = latest.get(key)
-    if (held === undefined || event.ts > held) latest.set(key, event.ts)
-  }
-  return new Map([...latest].map(([key, ts]) => [key, new Date(ts).toISOString()]))
+  return activeViews(applyActivity(EMPTY_ACTIVITY, events, now, windowMs), now, windowMs)
 }
 
 /** Columns for one row: an open environment is the stronger fact; the owner's recent write is the other. */
