@@ -290,6 +290,32 @@ describe("yrd issues", () => {
     expect(envelope.result).toEqual({ argv: ["from-origin", "k"] })
   })
 
+  it("reads the declaration from origin/main when the checkout has no local main (rule: #38562)", async () => {
+    const root = project({ "issues.yml": declare({ view: provider("json", "component", "<key>") }) })
+    const tip = git(root, "rev-parse", "HEAD")
+    git(root, "checkout", "--quiet", "--detach", tip)
+    git(root, "branch", "--quiet", "-D", "main")
+    git(root, "update-ref", "refs/remotes/origin/main", tip)
+    const read = await runIssuesVerb({ verb: "view", args: ["key"], cwd: root, stderr: () => {} })
+    expect(read).toMatchObject({
+      ok: true,
+      envelope: { declaration: { commit: tip }, result: { argv: ["component", "key"] } },
+    })
+  })
+
+  it("refuses by name, naming every ref it tried, when neither main nor origin/main resolves (#38562)", async () => {
+    const root = project({ "issues.yml": declare({ view: provider("json", "none", "<key>") }) })
+    const tip = git(root, "rev-parse", "HEAD")
+    git(root, "checkout", "--quiet", "--detach", tip)
+    git(root, "branch", "--quiet", "-D", "main")
+    const refused = await runIssuesVerb({ verb: "view", args: ["key"], cwd: root, stderr: () => {} })
+    expect(refused).toMatchObject({
+      ok: false,
+      code: "yrd-issues-no-main",
+      message: expect.stringContaining("main, origin/main"),
+    })
+  })
+
   it.each(["git@github.com:beorn/hh.git", "https://github.com/beorn/hh.git", "ssh://git@host/x.git"])(
     "reads the root when origin %s is remote by positive match (rule: remote classification)",
     async (url) => {
@@ -417,7 +443,9 @@ describe("yrd issues", () => {
 
   it("keeps a provider's named cause in the failure, not just in raw stderr (rule: provider failure names why)", async () => {
     const root = project({
-      "issues.yml": declare({ list: provider("raised", "cursor 42 is ahead of this journal's head 7; do a full read") }),
+      "issues.yml": declare({
+        list: provider("raised", "cursor 42 is ahead of this journal's head 7; do a full read"),
+      }),
     })
     const ran = await yrd(root, "issues", "list")
     expect(ran.exitCode).toBe(1)

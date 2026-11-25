@@ -344,6 +344,31 @@ async function repositoryToRead(root: string, env: NodeJS.ProcessEnv): Promise<I
 }
 
 /**
+ * #38562: which ref holds this project's `main`. A component author checkout has no local `main` at all — shared main
+ * is a projection, so the component's main is `origin/main` there — and the queue's own main is that remote ref in
+ * every clone. Prefer a local `main` when it exists (the checked-out clone case, unchanged), and name every ref tried
+ * when none resolves: an absent main is refused, never read as an absent declaration.
+ */
+const MAIN_REFS_TO_READ = [
+  { name: "main", ref: "refs/heads/main" },
+  { name: "origin/main", ref: "refs/remotes/origin/main" },
+] as const
+
+async function mainRefToRead(repository: string, env: NodeJS.ProcessEnv): Promise<string> {
+  for (const candidate of MAIN_REFS_TO_READ) {
+    const resolved = await git(
+      ["rev-parse", "--verify", "--end-of-options", `${candidate.ref}^{commit}`],
+      repository,
+      env,
+    )
+    if (resolved.exitCode === 0 && resolved.stdout !== "") return candidate.ref
+  }
+  throw new Error(
+    `none of ${MAIN_REFS_TO_READ.map((candidate) => candidate.name).join(", ")} resolves in ${repository}`,
+  )
+}
+
+/**
  * #37838 (@cto ead63117): how many provider pages ONE `list-page` traversal may read before it refuses. A page
  * limit is the difference between a wrong answer and a read that never ends: the 256th COMPLETE page answers, an
  * incomplete 256th refuses. It is internal on purpose — a per-project knob would be a second contract for a bound
@@ -550,7 +575,11 @@ export async function runIssuesVerb(
   let commit: string
   let text: string | undefined
   try {
-    const reader = await openReader({ repo: repository, ref: "main", backend: createLegacyBackend("git", env) })
+    const reader = await openReader({
+      repo: repository,
+      ref: await mainRefToRead(repository, env),
+      backend: createLegacyBackend("git", env),
+    })
     commit = await reader.head()
     if (options.declarationCommit !== undefined) {
       await using ancestryProcess = createProcess({ cwd: repository, env: cleanGitEnvironment(env) })
