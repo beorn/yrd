@@ -35,7 +35,9 @@ function git(...args: string[]): string {
 function toolVersion(label: string, command: string[]): string {
   const run = Bun.spawnSync(command, { stdout: "pipe", stderr: "pipe" })
   if (run.exitCode !== 0) return `${label} unavailable`
-  return `${label} ${run.stdout.toString().trim().split("\n")[0]}`
+  const text = run.stdout.toString().trim().split("\n")[0] ?? ""
+  // `git --version` already says "git"; do not print it twice.
+  return text.toLowerCase().startsWith(label.toLowerCase()) ? text : `${label} ${text}`
 }
 
 function argument(name: string): string | undefined {
