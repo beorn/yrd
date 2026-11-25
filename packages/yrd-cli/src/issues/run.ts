@@ -38,6 +38,7 @@ import {
   type IssuesProgress,
 } from "./in-progress.ts"
 import { ProgressServeProviderMissing, ProgressServeRefusal, serveProgressReader } from "./progress-serve.ts"
+import { SCP_LIKE } from "../address.ts"
 
 export type { IssuesActivityEvent, IssuesEnvironmentHold } from "./in-progress.ts"
 
@@ -303,8 +304,6 @@ async function isRepositoryAt(path: string, env: NodeJS.ProcessEnv): Promise<boo
 
 /** `scheme://…` — a URL git transports over (ssh, https, git, …). `file://` is matched before this. */
 const SCHEME_URL = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u
-/** git's scp-like `[user@]host:path`: a colon before any slash, e.g. `git@github.com:beorn/x.git`. */
-const SCP_LIKE = /^(?:[^@/:\s]+@)?[^@/:\s]+:/u
 
 /**
  * The repository to read: the root's origin when that origin is local, else the root itself. An origin is remote

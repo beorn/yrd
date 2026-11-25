@@ -73,8 +73,10 @@ import {
   originHead,
   resolveDeclaredQueueLocations,
   resolveQueueLocation,
+  resolveQueueWorkdir,
   retainedComponentStoreHere,
   type QueueLocation,
+  type WorkdirResolution,
 } from "./queue-location.ts"
 import { retireRetiredRoot } from "./retire-root.ts"
 import { formatQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"
@@ -138,9 +140,13 @@ const coreQueueCommand: typeof import("./queue-core-commands.ts").coreQueueComma
 // The declared health probe loads the same way, and for a sharper reason: it
 // runs on the supervisor's tick, so it must not pay for the queue core it does
 // not use. It reads one file.
-const queueHealthCommand = async (workdir: string, io: YrdCliIO): Promise<YrdCliExitCode> => {
+const queueHealthCommand = async (
+  workdir: string,
+  resolution: WorkdirResolution,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> => {
   const health = await import("./queue-health.ts")
-  return health.queueHealthCommand(workdir, health.SERVICE, io)
+  return health.queueHealthCommand(workdir, health.SERVICE, io, undefined, resolution)
 }
 
 const NOTIFY_HELP = "deprecated alias for --submitter; both flags must name the same submitter"
@@ -710,8 +716,9 @@ function buildProgram(
     )
     .action(async (options) => {
       const declared = options as { queue?: string }
-      const location = await resolveQueueLocation(cwd(), declared.queue, env)
-      setExit(await queueHealthCommand(location.workdir, io))
+      // Computed, never created: the probe clones nothing and asks no remote (hh 38659).
+      const { workdir, resolution } = await resolveQueueWorkdir(cwd(), declared.queue, env)
+      setExit(await queueHealthCommand(workdir, resolution, io))
     })
   queue
     .command("pause")

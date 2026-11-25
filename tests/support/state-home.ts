@@ -44,6 +44,10 @@ export function pinYrdTestStateHome(env: NodeJS.ProcessEnv = process.env): strin
   // (/hh/var/wt) and a test would create worktrees inside the live pool
   // (@cto 0590fb81, P1 pool-path). Workers inherit this before they exist.
   env.HH_WORKTREE_HOME = join(root, "worktrees")
+  // The root resolution's third arm reads the `yrd.workdir` that yrd's OWN repository declares (hh 38659). Run from
+  // a host checkout, that is the host's live queue root, so a fixture declaring nothing would clone beside the real
+  // queue. Pinned to a path that never exists: the arm finds no repository and says so, and XDG above answers.
+  env.YRD_OWN_REPOSITORY = join(root, "no-own-repository")
   return root
 }
 

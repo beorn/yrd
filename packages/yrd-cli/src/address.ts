@@ -1,5 +1,8 @@
 import { isAbsolute, join, normalize, sep } from "node:path"
-import { encodeQueueComponent, formatQueueKey, parseQueueKey } from "@yrd/queue-core"
+import { encodeQueueComponent, formatQueueKey, normalizedRemote, parseQueueKey } from "@yrd/queue-core"
+
+/** git's scp-like `[user@]host:path`: a colon before any slash, e.g. `git@github.com:beorn/x.git`. */
+export const SCP_LIKE = /^(?:[^@/:\s]+@)?[^@/:\s]+:/u
 
 export type RemoteQueueAddress = Readonly<{
   kind: "remote"
@@ -121,6 +124,13 @@ export function parseQueueAddress(operand: string): QueueAddress {
     const port = /:(\d+)$/u.exec(authority)?.[1]
     host = `${url.hostname.toLowerCase()}${port === undefined ? "" : `:${Number(port)}`}`
     path = url.pathname
+  } else if (SCP_LIKE.test(repository)) {
+    // git's scp-like `[user@]host:path` is the ssh spelling of the same repository as `https://host/path`: one queue,
+    // one workdir. Read through the queue's one remote normalizer, never as `github.com/<user@host:path>` (hh 38659).
+    const normalized = normalizedRemote(repository)
+    const slash = normalized.indexOf("/")
+    host = (slash < 0 ? normalized : normalized.slice(0, slash)).toLowerCase()
+    path = slash < 0 ? "" : normalized.slice(slash + 1)
   } else {
     const parts = repository.split("/")
     if (parts.length === 2 && !versioned) {
