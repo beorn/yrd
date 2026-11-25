@@ -26,7 +26,12 @@ export type ProcessRequest = Readonly<{
    * awaits output or exit. A thrown observer error terminates and settles the
    * child before the error is propagated. */
   onStart?: (pid: number) => void
-  onOutput?: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void
+  /**
+   * Observe every byte the child writes, including bytes past the bounded capture limit. A promise is awaited
+   * before the next read, so a consumer that cannot keep up slows the pipe instead of growing a copy: the stream
+   * path's backpressure, never a buffered tail.
+   */
+  onOutput?: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void | Promise<void>
   /** Expose the existing bounded capture's exact raw head and tail alongside
    * its decoded display text, without another capture or byte budget. */
   captureRawOutput?: true
@@ -1039,7 +1044,7 @@ async function readBounded(
   limit: number,
   name: "stdout" | "stderr",
   onProgress: (bytes: number) => void = () => {},
-  onOutput: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void = () => {},
+  onOutput: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void | Promise<void> = () => {},
   abandon: AbortSignal | undefined,
   onCancelError: (error: unknown) => void,
   captureRawOutput = false,
@@ -1047,11 +1052,11 @@ async function readBounded(
   const window = new OutputWindow(limit)
   await drainBytes(
     stream,
-    (value) => {
+    async (value) => {
       window.admit(value)
       // Ordinary observers receive every byte, including capture overflow.
       onProgress(value.byteLength)
-      onOutput({ stream: name, chunk: value })
+      await onOutput({ stream: name, chunk: value })
     },
     onCancelError,
     abandon,
@@ -1062,7 +1067,7 @@ async function readBounded(
 /** One drain owner for ordinary text capture and the optional raw descriptor. */
 async function drainBytes(
   stream: ReadableStream<Uint8Array>,
-  onChunk: (chunk: Uint8Array) => void,
+  onChunk: (chunk: Uint8Array) => void | Promise<void>,
   onCancelError: (error: unknown) => void,
   abandon?: AbortSignal,
 ): Promise<boolean> {
@@ -1093,7 +1098,8 @@ async function drainBytes(
       }
       const { done, value } = outcome
       if (done) return true
-      onChunk(value)
+      // Awaited: a consumer that cannot keep up must slow the pipe, not grow a copy of the output.
+      await onChunk(value)
     }
   } finally {
     reader.releaseLock()
