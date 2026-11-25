@@ -1659,9 +1659,10 @@ it("never runs a retired issuesProvider.update on a merge, says so on stderr, an
     stderr.join(""),
   ).toBe(0)
   expect((await readStatus(store, "main", branch)).status).toBe("merged")
-  expect(stderr.join("")).toContain(
-    "yrd: .yrd.yml issuesProvider: retired in #29630 and ignored; delete this key. Yrd's post-merge closer closes issues from merge trailers through issues.yml at --project-root, and the issue display reads issues.yml's view (origin/main).",
-  )
+  // Said once for the command, however many times it reads the declaration in force (@cto 19089cc0).
+  const cure =
+    "yrd: .yrd.yml issuesProvider: retired in #29630 and ignored; delete this key. Yrd's post-merge closer closes issues from merge trailers through issues.yml at --project-root, and the issue display reads issues.yml's view (origin/main)."
+  expect(stderr.join("").split(cure).length - 1, stderr.join("")).toBe(1)
   expect(existsSync(marker), "the retired update must never run").toBe(false)
   // Yrd's own closer closed the trailer's issue, once.
   expect(existsSync(calls), stderr.join("")).toBe(true)

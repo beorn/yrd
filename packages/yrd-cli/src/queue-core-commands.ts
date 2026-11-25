@@ -113,6 +113,7 @@ import {
   QueueAuthorityUnreadable,
   QueueRunAfterRunFailed,
   QueueRunEventRetryExhausted,
+  onceEachHistoricalKey,
   readConfig,
   readJournals,
   readRunLog,
@@ -943,14 +944,7 @@ export async function coreQueueCommand(
   ])
   // 29630: a key only past declarations should carry is said out loud on the declaration in force, never run; once per
   // process, since the service re-reads the declaration every round.
-  const toldHistorical = new Set<string>()
-  const historicalKeys = (cures: readonly string[]): void => {
-    for (const cure of cures) {
-      if (toldHistorical.has(cure)) continue
-      toldHistorical.add(cure)
-      io.stderr(`yrd: .yrd.yml ${cure} (${targetLabel}).\n`)
-    }
-  }
+  const historicalKeys = onceEachHistoricalKey((cure) => io.stderr(`yrd: .yrd.yml ${cure} (${targetLabel}).\n`))
   // The target's declaration as the target holds it now: fetched, read in full
   // and held to its keys, then the remote it names resolved. Undefined when the
   // target carries no `.yrd.yml` at all — there is no queue there; a

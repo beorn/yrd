@@ -637,11 +637,36 @@ const RETIRED: Readonly<Record<string, string>> = {
  * refuses: live paths read past declarations (a history's base in `declarationFor`, a checkout's own head in env
  * close and release capture, the queue's creation declaration in event-run), and those must keep reading. It is
  * not parsed and reaches no QueueConfig field; `historicalKeys` hears it, so the declaration in force says it out
- * loud. issuesProvider (29615) left with km's merge-close in #29630 (@cto 5a66fb46 Q1, b59e0e09: never RETIRED).
+ * loud. issuesProvider (29615) left with km's merge-close in #29630 (@cto 5a66fb46 Q1, b59e0e09: never RETIRED;
+ * 19089cc0 accepted this list).
+ *
+ * When an entry goes: delete it once no live read path can reach a declaration older than the commit that removed
+ * the key from the target. For issuesProvider that commit is hh-dev main 2b689e9d3bce (2026-11-25 09:03 PST, the
+ * #29630 L1 merge that dropped it from /.yrd.yml); the parser stopped reading it in yrd 49e52a3bb. The paths that
+ * would then REFUSE are env close and release capture (a checkout or environment whose head predates that commit)
+ * and event-run's creation-declaration read (a queue created before it that has not yet recorded notify floors);
+ * `declarationFor` only degrades to a note. No retention window bounds these: environments and checkouts live until
+ * closed and queue history is never archived (archive-after: never), so the cutoff is a census, not a date: no open
+ * environment or checkout whose head lacks 2b689e9d3bce, and every queue created before it holds notify floors.
  */
 const HISTORICAL: Readonly<Record<string, string>> = {
   issuesProvider:
     "issuesProvider: retired in #29630 and ignored; delete this key. Yrd's post-merge closer closes issues from merge trailers through issues.yml at --project-root, and the issue display reads issues.yml's view",
+}
+
+/**
+ * A `historicalKeys` listener that passes each cure to `write` once for its lifetime: the service re-reads the
+ * declaration in force every round, and one process says each cure once.
+ */
+export function onceEachHistoricalKey(write: (cure: string) => void): (cures: readonly string[]) => void {
+  const told = new Set<string>()
+  return (cures) => {
+    for (const cure of cures) {
+      if (told.has(cure)) continue
+      told.add(cure)
+      write(cure)
+    }
+  }
 }
 
 function strictTop(raw: Record<string, unknown>): Record<string, unknown> {
