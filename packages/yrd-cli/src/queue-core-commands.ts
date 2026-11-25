@@ -7210,6 +7210,13 @@ const LOG_TAIL_BYTES = 64 * 1024
  */
 export function readCommandOutput(command: JournalCommand): DiffText {
   if (command.stdout === undefined) {
+    // hh 38654: a clean invocation that only ran plumbing keeps no raw file, and that is a fact to state, never an
+    // empty pane. The row still carries what a reader needs: what ran, how it exited, how long it took.
+    if (command.output === "not-kept") {
+      return {
+        why: `output not kept (succeeded, plumbing): ${command.args.join(" ")} exited ${String(command.exit ?? 0)}${command.ms === undefined ? "" : ` in ${String(command.ms)} ms`}`,
+      }
+    }
     return { why: command.failure ?? "the journal names no output file for this command" }
   }
   const parts: string[] = []

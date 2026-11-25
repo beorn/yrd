@@ -1247,9 +1247,10 @@ exec ${JSON.stringify(nativeGit)} "$@"
               if (phase === "write") throw new Error("fixture raw write failure")
               sink.onOutput(output)
             },
-            close: () => {
-              sink.close()
+            close: (outcome) => {
+              sink.close(outcome)
               if (phase === "close") throw new Error("fixture raw close failure")
+              return { kept: true, stdoutBytes: 0, stderrBytes: 0 }
             },
           }
         },
@@ -2052,4 +2053,69 @@ it("seamProcess answers for the reference repository's own git dir, and never a 
     /modules\/other/u,
   )
   await expect(process.run({ args: ["worktree", "list"], repo: "/fixture/elsewhere" })).rejects.toThrow(/elsewhere/u)
+})
+
+describe("a captured git invocation keeps its raw output only when something went wrong (hh 38654)", () => {
+  const seed = (root: string): void => {
+    const init = spawnSync("git", ["init", "--quiet", "--initial-branch=main", root], { encoding: "utf8" })
+    if (init.status !== 0) throw new Error(init.stderr)
+    writeFileSync(join(root, "a.txt"), "a\n")
+    for (const args of [
+      ["add", "a.txt"],
+      ["-c", "user.email=q@yrd.test", "-c", "user.name=yrd", "commit", "--quiet", "-m", "one"],
+    ]) {
+      const run = spawnSync("git", args, { cwd: root, encoding: "utf8" })
+      if (run.status !== 0) throw new Error(`${args.join(" ")}: ${run.stderr}`)
+    }
+  }
+
+  it("writes no file for a passing invocation, and its row carries what ran, how it ended and how many bytes", async () => {
+    const root = temporaryRoot("raw-policy-pass")
+    const repo = join(root, "repo")
+    mkdirSync(repo, { recursive: true })
+    seed(repo)
+    const log = openLog(join(root, "logs"))
+    const git = gitIn(repo, undefined, undefined, {
+      openOutput: log.openGitOutput,
+      onInvocation: log.writeGitInvocation,
+    })
+    await git(["rev-parse", "--show-toplevel"])
+    expect(git.lastInvocation?.artifacts).toBeUndefined()
+    expect(git.lastInvocation?.outputBytes?.stdout).toBeGreaterThan(0)
+    const rows = readRunLog(join(root, "logs"), log.id)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      kind: "git",
+      args: ["rev-parse", "--show-toplevel"],
+      exit: 0,
+      output: "not-kept",
+      complete: true,
+    })
+    expect(typeof rows[0]?.ms).toBe("number")
+    expect(rows[0]?.stdoutBytes).toBe(git.lastInvocation?.outputBytes?.stdout)
+    // The one file the round keeps is the row's own metadata; no raw capture is written at all.
+    const kept = readdirSync(join(root, "logs", log.id, "git"))
+    expect(kept).toHaveLength(1)
+    expect(kept[0]?.endsWith(".json")).toBe(true)
+  })
+
+  it("keeps every byte of a failing invocation, so a failure is never harder to debug than before", async () => {
+    const root = temporaryRoot("raw-policy-fail")
+    const repo = join(root, "repo")
+    mkdirSync(repo, { recursive: true })
+    seed(repo)
+    const log = openLog(join(root, "logs"))
+    const git = gitIn(repo, undefined, undefined, {
+      openOutput: log.openGitOutput,
+      onInvocation: log.writeGitInvocation,
+    })
+    await expect(git(["cat-file", "-e", "refs/heads/absent"])).rejects.toThrow()
+    const artifacts = git.lastInvocation?.artifacts
+    if (artifacts === undefined) throw new Error("a failing invocation kept no raw output")
+    expect(readFileSync(artifacts.stdout, "utf8").length).toBeGreaterThanOrEqual(0)
+    expect(artifacts.complete).toBe(true)
+    const rows = readRunLog(join(root, "logs"), log.id)
+    expect(rows[0]).toMatchObject({ kind: "git", output: "kept" })
+    expect(rows[0]?.stdoutBytes).toBe(git.lastInvocation?.outputBytes?.stdout)
+  })
 })

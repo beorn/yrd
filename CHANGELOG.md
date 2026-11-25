@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A captured git invocation keeps its raw output files only when they can be needed (hh 38654, @cto 2026-11-25): a
+  cleanly finished plumbing query (`rev-parse`, `ls-tree`, `ls-files`, `cat-file`, `config`, `merge-base`, ref and
+  diff listings) writes no `*.stdout.bin`/`*.stderr.bin` at all, and its journal row carries the argv, exit, duration
+  and byte count instead. `yrd runs` says "output not kept (succeeded, plumbing)" rather than showing an empty pane.
+  Failures, non-plumbing commands (push, fetch, merge, commit, worktree, clean, or anything unrecognised) and any
+  truncated or unsettled invocation keep every byte, exactly as before, so older captures still open unchanged.
+
 - Round-output retention (the raw `logs/q-*` trees) windows at two days, down from seven (hh 38654,
   @cto 2026-11-25): the measured hh-dev stream is 27-45 GiB a day, so seven days held 113 GiB of raw output whose
   panel nobody reads after a merge. Journals are still never removed, and now gzip at seven days independently of

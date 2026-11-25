@@ -1257,7 +1257,9 @@ describe("compression work is bounded per round and later rounds progress (34923
       })
     }
 
-    it("no new arrivals: a backlog of three lifetimes' budget converts", async () => {
+    // 3 x 1024 rounds is a deliberate multi-pass proof, and on a host already inside a merge round it runs past
+    // vitest's 30 s default. The bound is the proof's size, not its runtime.
+    it("no new arrivals: a backlog of three lifetimes' budget converts", { timeout: 180_000 }, async () => {
       const { workdir, logs } = tree("gz-progress-still")
       const files = backlog(logs, 3 * PASS_BUDGET)
       finishedRound(logs, ago(0.5))
@@ -1265,22 +1267,26 @@ describe("compression work is bounded per round and later rounds progress (34923
       expect(passes).toBeGreaterThanOrEqual(3)
     })
 
-    it("regular arrivals: each newcomer converts in the pass after it becomes eligible, and the backlog still drains", async () => {
-      const { workdir, logs } = tree("gz-progress-regular")
-      const files = backlog(logs, 2 * PASS_BUDGET)
-      finishedRound(logs, ago(0.5))
-      const arrivals: string[] = []
-      const passes = await sweepUntilConverted(workdir, () => [...files, ...arrivals], {
-        maxPasses: 40,
-        arrive: (pass) => {
-          if (arrivals.length > 0) gone(arrivals[arrivals.length - 1] ?? "")
-          // An eligible newcomer: just past the 24-hour line, newer than every backlog round.
-          const log = finishedRound(logs, new Date(ago(1.1).getTime() + pass * 60_000))
-          arrivals.push(output(join(logs, log.id, "git", "1.stdout.bin"), body(log.id, 300)))
-        },
-      })
-      expect(passes).toBeGreaterThanOrEqual(2)
-    })
+    it(
+      "regular arrivals: each newcomer converts in the pass after it becomes eligible, and the backlog still drains",
+      { timeout: 180_000 },
+      async () => {
+        const { workdir, logs } = tree("gz-progress-regular")
+        const files = backlog(logs, 2 * PASS_BUDGET)
+        finishedRound(logs, ago(0.5))
+        const arrivals: string[] = []
+        const passes = await sweepUntilConverted(workdir, () => [...files, ...arrivals], {
+          maxPasses: 40,
+          arrive: (pass) => {
+            if (arrivals.length > 0) gone(arrivals[arrivals.length - 1] ?? "")
+            // An eligible newcomer: just past the 24-hour line, newer than every backlog round.
+            const log = finishedRound(logs, new Date(ago(1.1).getTime() + pass * 60_000))
+            arrivals.push(output(join(logs, log.id, "git", "1.stdout.bin"), body(log.id, 300)))
+          },
+        })
+        expect(passes).toBeGreaterThanOrEqual(2)
+      },
+    )
 
     it("bursty arrivals: a burst wider than the newest lane still drains with the backlog", async () => {
       const { workdir, logs } = tree("gz-progress-bursty")
@@ -1302,26 +1308,30 @@ describe("compression work is bounded per round and later rounds progress (34923
   })
 
   // Shares are ceilings under the global byte bound, with the native first-file exception kept (ruling 2118 point 4).
-  it("a journal that fills the byte bound first leaves rounds deferred, honestly counted, for the next pass", async () => {
-    const { workdir, logs } = tree("gz-bytes-journal-first")
-    const big = openLog(logs, () => ago(16))
-    big.write({ kind: "run", target: "main", queue: "main" })
-    const size = Math.floor(ROUND_COMPRESSION_BYTES * 0.6)
-    for (let written = 0; written < size; written += 100_000) {
-      big.write({ kind: "warning", subject: "pad", reason: "j".repeat(100_000) })
-    }
-    big.finish()
-    const kept = finishedRound(logs, ago(1.5))
-    finishedRound(logs, ago(0.5))
-    const stdout = output(join(logs, kept.id, "git", "1.stdout.bin"), Buffer.alloc(size, 0x61))
-    const first = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
-    expect(first?.compression).toMatchObject({ compressed: 1, deferred: 1, failures: [] })
-    gone(big.path)
-    plain(stdout)
-    const second = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
-    expect(second?.compression).toMatchObject({ compressed: 1, deferred: 0 })
-    gone(stdout)
-  })
+  it(
+    "a journal that fills the byte bound first leaves rounds deferred, honestly counted, for the next pass",
+    { timeout: 180_000 },
+    async () => {
+      const { workdir, logs } = tree("gz-bytes-journal-first")
+      const big = openLog(logs, () => ago(16))
+      big.write({ kind: "run", target: "main", queue: "main" })
+      const size = Math.floor(ROUND_COMPRESSION_BYTES * 0.6)
+      for (let written = 0; written < size; written += 100_000) {
+        big.write({ kind: "warning", subject: "pad", reason: "j".repeat(100_000) })
+      }
+      big.finish()
+      const kept = finishedRound(logs, ago(1.5))
+      finishedRound(logs, ago(0.5))
+      const stdout = output(join(logs, kept.id, "git", "1.stdout.bin"), Buffer.alloc(size, 0x61))
+      const first = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+      expect(first?.compression).toMatchObject({ compressed: 1, deferred: 1, failures: [] })
+      gone(big.path)
+      plain(stdout)
+      const second = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+      expect(second?.compression).toMatchObject({ compressed: 1, deferred: 0 })
+      gone(stdout)
+    },
+  )
 
   it("a round's single file larger than the byte bound converts alone, and the next round waits a pass", async () => {
     const { workdir, logs } = tree("gz-bytes-first-file")
@@ -1593,5 +1603,26 @@ describe("holdsJudgeCommand: the declared argv, strictly read (34952)", () => {
       const judge = holdsJudgeCommand({ argv, cwd: workdir, roots: ["/q/logs"] })
       await expect(judge(candidates), name).rejects.toThrow(/retention\.holds|ENOENT|no such|not found/u)
     }
+  })
+})
+
+describe("a command whose output was not kept says so, never an empty pane (hh 38654)", () => {
+  it("names the plumbing invocation and its exit where a kept output would have been read", () => {
+    const answer = readCommandOutput({
+      args: ["ls-tree", "-r", "-z", "HEAD"],
+      cwd: "/hh/dev",
+      exit: 0,
+      ms: 41,
+      output: "not-kept",
+    })
+    expect(answer.text).toBeUndefined()
+    expect(answer.why).toBe("output not kept (succeeded, plumbing): ls-tree -r -z HEAD exited 0 in 41 ms")
+  })
+
+  it("still reports a failure's own reason, and a row with neither output nor policy", () => {
+    expect(readCommandOutput({ args: ["fetch"], cwd: "/hh/dev", failure: "remote refused" }).why).toBe("remote refused")
+    expect(readCommandOutput({ args: ["fetch"], cwd: "/hh/dev" }).why).toBe(
+      "the journal names no output file for this command",
+    )
   })
 })

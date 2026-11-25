@@ -24,6 +24,7 @@ import { createShellBackend, GitSignaled, GitTimeout, type GitomicBackend } from
 import type { Event } from "gitomic/events"
 import { GIT_REPOSITORY_LOCAL_ENV_VARS } from "removely"
 import { requireFrozenGitSuper, withGitConfig } from "./git-super-selection.ts"
+import { keepGitOutput } from "./log.ts"
 export { chainsUnder, listRefs, openEvents } from "gitomic/events"
 export type { AlsoRef, Appended, Decide, Event, EventInput } from "gitomic/events"
 export type { CommitMeta, GitomicBackend, Oid } from "gitomic"
@@ -112,14 +113,21 @@ export type GitInvocation = Readonly<{
   failure?: string
   observation?: GitObservation
   artifacts?: Readonly<{ stdout: string; stderr: string; complete: boolean }>
+  /** Bytes the child wrote, whether or not they were kept: the journal row carries them when no file does. */
+  outputBytes?: Readonly<{ stdout: number; stderr: number }>
 }>
 
 export type GitOutputSink = Readonly<{
   stdout: string
   stderr: string
   onOutput: NonNullable<ProcessRequest["onOutput"]>
-  /** Close both streams, reporting write/close failures. */
-  close(): void
+  /**
+   * Settle one invocation: keep its raw output, or drop it. `keep` is the capture policy
+   * (see `keepGitOutput` in log.ts):
+   * a kept output is written to `stdout`/`stderr` exactly as before, and an unkept one writes no
+   * file at all, so a passing plumbing call costs its bytes once and leaves nothing behind.
+   */
+  close(outcome: Readonly<{ keep: boolean }>): Readonly<{ kept: boolean; stdoutBytes: number; stderrBytes: number }>
 }>
 
 export type GitInvocationOptions = Readonly<{
@@ -549,6 +557,7 @@ export async function invokeGit(
   let closed = false
   let result: ProcessResult | undefined
   let failure: string | undefined
+  let settledOutput: Readonly<{ kept: boolean; stdoutBytes: number; stderrBytes: number }> | undefined
   try {
     output = options.openOutput?.(invocation)
     const runEnv = remoteSeam() === undefined ? env : seamEnvironment(env ?? gitEnvironment(globalThis.process.env))
@@ -569,10 +578,13 @@ export async function invokeGit(
   } finally {
     protocol?.clearDeadline()
     try {
-      output?.close()
+      settledOutput = output?.close({ keep: keepGitOutput(args, result, failure) })
       closed = true
     } catch (error) {
       failure = [failure, `raw Git output could not be closed: ${String(error)}`].filter(Boolean).join("; ")
+      // A close that threw may still have left its files behind: report them, with `complete: false` (`closed` stays
+      // false), so the row never hides evidence that exists on disk. The sink reports no byte count from this path.
+      settledOutput ??= output === undefined ? undefined : { kept: true, stdoutBytes: 0, stderrBytes: 0 }
     }
   }
   return {
@@ -580,7 +592,10 @@ export async function invokeGit(
     ...(result === undefined ? {} : { result }),
     ...(protocol === undefined ? {} : { protocol: protocol.value }),
     ...(failure === undefined ? {} : { failure }),
-    ...(output === undefined
+    ...(settledOutput === undefined
+      ? {}
+      : { outputBytes: { stdout: settledOutput.stdoutBytes, stderr: settledOutput.stderrBytes } }),
+    ...(output === undefined || settledOutput?.kept !== true
       ? {}
       : {
           artifacts: {
