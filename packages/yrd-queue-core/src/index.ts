@@ -98,6 +98,7 @@ export {
   readChangeEvents,
   readIssueEffect,
   issueProviderId,
+  trailerEffectId,
   readEventQueue,
   readEventOps,
   readEventOpsWithRefs,
@@ -146,6 +147,7 @@ export {
   readRemoteCommit,
   readRemoteCommits,
   isAncestor,
+  gitlinkRows,
   mergeChangesNothing,
   reconstructibleFromMain,
   seamProcess,
@@ -217,6 +219,7 @@ export {
 export {
   GIT_SUPER_ABSENT_STORE,
   GitlinkNotOnRemote,
+  isRepositoryAt,
   populateReferenceStores,
   ReferenceUnpopulated,
 } from "./reference.ts"

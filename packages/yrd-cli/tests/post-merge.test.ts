@@ -1,6 +1,6 @@
 /**
  * @reach fs-walk <fixture-only: temporary provider and result directories>
- * @failure A blocked or failed provider holds the merge line or skips Git cleanup; restart replays stored results.
+ * @failure A blocked or failed issue close holds the merge line or skips Git cleanup; restart replays stored results.
  * @level l2
  * @consumer Yrd post-merge provider and cleanup lifecycle
  * @testonly none
@@ -27,11 +27,14 @@ import {
   createEventStore,
   readBranchHistory,
   readEventQueue,
+  issueProviderId,
+  trailerEffectId,
   queueRef,
   readConfig,
   readStatus,
   submit,
   trailer,
+  type GitRunner,
 } from "@yrd/queue-core"
 import { safeRemoveSync } from "removely"
 const roots: string[] = []
@@ -61,15 +64,16 @@ const context = {
   target: "merge-oid",
   merged: ["task/one"],
 }
-/** @failure Checkout cleanup starves a merged issue update until reload drops it. @level l2 @consumer Post-merge tracker updates and cleanup handoff @testonly none */
+/** @failure Checkout cleanup starves a merged round's post-merge attempt until reload drops it. @level l2 @consumer Post-merge attempts and cleanup handoff @testonly none */
 it.each(["drain", "stop"] as const)(
-  "updates a merged issue while earlier cleanup is held, then %s owns cleanup disposal",
+  "settles a merged round's post-merge attempt while earlier cleanup is held, then %s owns cleanup disposal",
   async (ending) => {
     const root = world()
-    const firstIssue = join(root, "first-issue")
-    const secondIssue = join(root, "second-issue")
-    writeFileSync(firstIssue, "wip")
-    writeFileSync(secondIssue, "wip")
+    const settledStatus = (target: string) =>
+      readdirSync(join(root, "post-merge"))
+        .filter((name) => name.endsWith(".json"))
+        .map((name) => attemptAt(join(root, "post-merge", name)))
+        .find((attempt) => attempt.target === target)?.status
     const release = Promise.withResolvers<void>()
     const started: string[] = []
     const finished: string[] = []
@@ -91,25 +95,15 @@ it.each(["drain", "stop"] as const)(
       },
       report: (message) => errors.push(message),
     })
-    const update = (issue: string) => ["sh", "-c", 'printf done > "$1"', "provider", issue]
     let closing: Promise<void> | undefined
     try {
-      runner.nudge({ ...context, update: update(firstIssue) })
+      runner.nudge(context)
       await vi.waitFor(() => expect(started).toEqual([context.target]), { timeout: 10000 })
-      expect(readFileSync(firstIssue, "utf8")).toBe("done")
-      runner.nudge({ ...context, target: "second", merged: ["task/two"], update: update(secondIssue) })
-      // Observe the provider's settled artifact, not merely a child that has
-      // started writing: shutdown must occur after its update completed.
-      await vi.waitFor(
-        () => {
-          const attempts = readdirSync(join(root, "post-merge"))
-            .filter((name) => name.endsWith(".json"))
-            .map((name) => attemptAt(join(root, "post-merge", name)))
-          expect(attempts.find((attempt) => attempt.target === "second")?.status).toBe("succeeded")
-        },
-        { timeout: 10000 },
-      )
-      expect(readFileSync(secondIssue, "utf8")).toBe("done")
+      expect(settledStatus(context.target)).toBe("succeeded")
+      runner.nudge({ ...context, target: "second", merged: ["task/two"] })
+      // Observe the attempt's settled artifact, not merely a running one:
+      // shutdown must occur after the second attempt completed.
+      await vi.waitFor(() => expect(settledStatus("second")).toBe("succeeded"), { timeout: 10000 })
       expect(started).toEqual([context.target])
       expect(finished).toEqual([])
       if (ending === "stop") stop.abort()
@@ -126,27 +120,27 @@ it.each(["drain", "stop"] as const)(
     expect(dropped, "handoff reports exactly the unstarted cleanup context").toHaveLength(ending === "stop" ? 1 : 0)
   },
 )
+/**
+ * `git` whose calls naming `held` mark `ready`, wait for `released`, then answer empty (no issues.yml there, so
+ * the merged-event write skips); every other call runs. It holds one post-merge attempt open with no provider update.
+ */
+const holdingGit = (git: GitRunner, held: string, ready: string, released: Promise<void>): GitRunner =>
+  new Proxy(git, {
+    apply: async (target, _this, args: Parameters<GitRunner>) => {
+      if (!args[0].includes(held)) return target(...args)
+      writeFileSync(ready, "")
+      await released
+      return ""
+    },
+  })
 /** @failure Stop silently drops coalesced merged branch names, so branch triage cannot recover pending cleanup. @level l2 @consumer Yrd service handoff @testonly none */
-it.each([
-  { removed: false, ending: "drain" },
-  { removed: true, ending: "drain" },
-  { removed: false, ending: "stop" },
-  { removed: false, ending: "close" },
-  { removed: false, ending: "abort" },
-] as const)(
-  "coalesces catch-up and honors current provider configuration (removed=$removed, ending=$ending)",
-  async ({ removed, ending }) => {
+it.each(["drain", "stop", "close", "abort"] as const)(
+  "coalesces catch-up behind a held attempt and names the coalesced branches on handoff (ending=%s)",
+  async (ending) => {
     const root = world()
     const ready = join(root, "ready")
-    const release = join(root, "release")
-    const argv = [
-      "sh",
-      "-c",
-      'touch "$1"; while ! test -f "$2"; do sleep .05; done; echo failure >&2; exit 7',
-      "provider",
-      ready,
-      release,
-    ]
+    const release = Promise.withResolvers<void>()
+    const fixtureGit = gitIn(root)
     const cleaned: string[] = []
     const completed: string[] = []
     const errors: string[] = []
@@ -154,6 +148,9 @@ it.each([
     await using runner = createPostMerge({
       workdir: root,
       cwd: root,
+      // Only the first round reads Git: its merged-event write is the hold. Later rounds name no queueBranch.
+      git: holdingGit(fixtureGit, context.target, ready, release.promise),
+      store: createEventStore(root, "origin", fixtureGit.selection),
       ...(ending === "drain" ? {} : { stop: stop.signal }),
       cleanup: async (c) => {
         cleaned.push(c.target)
@@ -163,19 +160,15 @@ it.each([
       },
       report: (s) => errors.push(s),
     })
-    runner.nudge({ ...context, update: argv })
+    runner.nudge({ ...context, base: "first-base", queueBranch: "main", remote: "origin" })
     await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 10000 })
-    runner.nudge({ ...context, target: "second", merged: ["task/two"], update: ["sh", "-c", "printf caught-up"] })
-    runner.nudge({
-      ...context,
-      target: "third",
-      merged: ["task/three", "task/two"],
-      update: removed ? undefined : ["sh", "-c", "printf caught-up"],
-      updateDue: false,
-    })
+    runner.nudge({ ...context, target: "second", merged: ["task/two"] })
+    runner.nudge({ ...context, target: "third", merged: ["task/three", "task/two"] })
     expect(cleaned).toEqual([])
-    if (ending !== "close" && ending !== "abort") writeFileSync(release, "go")
+    let closing: Promise<void> | undefined
+    if (ending === "close") closing = runner[Symbol.asyncDispose]()
     if (ending === "abort") stop.abort()
+    release.resolve()
     if (ending === "stop") {
       await vi.waitFor(() => expect(completed).toEqual(["merge-oid"]), { timeout: 10000 })
       // Observe pump's stop reporting before invoking close, which has its own
@@ -185,7 +178,7 @@ it.each([
         { timeout: 1500 },
       )
     }
-    await runner[Symbol.asyncDispose]()
+    await (closing ?? runner[Symbol.asyncDispose]())
     if (ending !== "drain") {
       expect(cleaned, "pending cleanup does not run after handoff").toEqual(ending === "abort" ? [] : ["merge-oid"])
       expect(completed, "active cleanup finishes before disposal returns").toEqual(
@@ -203,23 +196,12 @@ it.each([
     expect(cleaned).toEqual(["merge-oid", "third"])
     const results = readdirSync(join(root, "post-merge"))
       .filter((n) => n.endsWith(".json"))
-      .map((n) => attemptAt(join(root, "post-merge", n)))
+      .map((n) => JSON.parse(readFileSync(join(root, "post-merge", n), "utf8")) as Attempt & { merged: string[] })
       .sort((a, b) => (a.target === "merge-oid" ? -1 : b.target === "merge-oid" ? 1 : 0))
-    expect(results.map((r) => r.exitCode)).toEqual([7, removed ? undefined : 0])
-    expect(results[0]).toMatchObject({
-      code: "code-oid",
-      config: "config-oid",
-      queue: "origin#main",
-      target: "merge-oid",
-      argv,
-      cwd: root,
-      status: "failed",
-      timedOut: false,
-      signal: null,
-    })
-    expect(readFileSync(results[0]!.stderr, "utf8")).toContain("failure")
-    expect(readFileSync(results[1]!.stdout, "utf8")).toBe(removed ? "" : "caught-up")
-    expect(errors.join(" ")).toContain("exit 7")
+    expect(results).toEqual([
+      expect.objectContaining({ target: "merge-oid", merged: ["task/one"], cwd: root, status: "succeeded" }),
+      expect.objectContaining({ target: "third", merged: ["task/two", "task/three"], status: "succeeded" }),
+    ])
   },
 )
 it("labels interrupted evidence and starts a fresh catch-up without consulting old output", async () => {
@@ -234,7 +216,7 @@ it("labels interrupted evidence and starts a fresh catch-up without consulting o
       },
       report: () => {},
     })
-    runner.nudge({ ...context, update: ["sh", "-c", "true"] })
+    runner.nudge(context)
     await runner[Symbol.asyncDispose]()
   }
   const path = join(
@@ -253,7 +235,7 @@ it("labels interrupted evidence and starts a fresh catch-up without consulting o
     report: () => {},
   })
   restarted.recover()
-  restarted.nudge({ ...context, target: "startup", update: ["sh", "-c", "true"] })
+  restarted.nudge({ ...context, target: "startup" })
   await restarted[Symbol.asyncDispose]()
   expect(attemptAt(path).status).toBe("interrupted")
   expect(cleaned).toEqual(["merge-oid", "startup"])
@@ -284,9 +266,9 @@ it("records every missing input for explicitly enabled automatic issue closing",
   }
 })
 
-it("attempts the provider and cleanup even when its derived artifact directory is unwritable", async () => {
-  const root = world(),
-    marker = join(root, "provider-ran")
+/** @failure An unwritable evidence directory skips the round's issue close or its Git cleanup. @level l2 @consumer post-merge attempts @testonly none */
+it("attempts the issue close and cleanup even when its derived artifact directory is unwritable", async () => {
+  const root = world()
   writeFileSync(join(root, "post-merge"), "occupied by a file")
   const cleaned: string[] = [],
     reports: string[] = []
@@ -298,9 +280,10 @@ it("attempts the provider and cleanup even when its derived artifact directory i
     },
     report: (s) => reports.push(s),
   })
-  runner.nudge({ ...context, update: ["sh", "-c", 'touch "$1"', "provider", marker] })
+  runner.nudge({ ...context, projectRoot: root })
   await runner[Symbol.asyncDispose]()
-  expect(existsSync(marker)).toBe(true)
+  // The closer was reached: an explicit projectRoot without the queue's inputs is refused out loud.
+  expect(reports.join(" ")).toContain(`automatic issue close unavailable: explicit projectRoot ${root}`)
   expect(cleaned).toEqual(["merge-oid"])
   expect(reports.join(" ")).toContain("post-merge evidence unavailable")
   const unread: string[] = []
@@ -309,7 +292,6 @@ it("attempts the provider and cleanup even when its derived artifact directory i
 })
 
 it.each([
-  { mode: "stop" },
   { mode: "completion" },
   { mode: "close-stop" },
   { mode: "append-conflict" },
@@ -355,9 +337,6 @@ it.each([
     await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
     await seed(["clone", "--quiet", remote, repo])
     const git = gitIn(repo),
-      ready = join(root, "ready"),
-      release = join(root, "release"),
-      finished = join(root, "finished"),
       closeCalls = join(root, "close-calls.jsonl"),
       closeReady = join(root, "close-ready"),
       closeRelease = join(root, "close-release"),
@@ -365,10 +344,6 @@ it.each([
     await git(["config", "user.email", "provider@yrd.test"])
     await git(["config", "user.name", "fixture"])
     await git(["checkout", "--quiet", "-b", "main"])
-    const script =
-      mode === "stop"
-        ? 'printf "%s" "$$" > "$1"; turns=0; while test "$turns" -lt 400; do turns=$((turns+1)); sleep .1; done; touch "$2"'
-        : 'printf "%s" "$$" > "$1"; while ! test -f "$2"; do sleep .05; done; touch "$3"'
     const fakeProvider = join(import.meta.dirname, "support", "fake-issues-provider.ts")
     const closeScript =
       (mode === "close-stop" ? 'printf "%s" "$$" > "$5"; while ! test -f "$6"; do sleep .05; done; ' : "") +
@@ -377,17 +352,7 @@ it.each([
       (mode === "provider-lost-reply"
         ? 'if ! test -f "$5"; then touch "$5"; exit 7; fi; printf \'{"noChange":true}\\n\''
         : "printf '{\"applied\":true}\\n'")
-    writeFileSync(
-      join(repo, ".yrd.yml"),
-      JSON.stringify({
-        issuesProvider: {
-          update:
-            mode === "stop"
-              ? ["sh", "-c", script, "provider", ready, finished]
-              : ["sh", "-c", script, "provider", ready, release, finished],
-        },
-      }),
-    )
+    writeFileSync(join(repo, ".yrd.yml"), JSON.stringify({}))
     writeFileSync(
       join(repo, "issues.yml"),
       JSON.stringify({
@@ -564,8 +529,6 @@ it.each([
       merged: string[] = [],
       diagnostics: string[] = []
     let rounds = 0
-    let terminate: ((signal?: NodeJS.Signals) => void) | undefined
-    let aliveAtReraise: boolean | undefined
     try {
       expect(
         await coreQueueCommand(
@@ -580,44 +543,11 @@ it.each([
             command: "up",
             intervalSeconds: 0,
             stop: stop.signal,
-            ...(mode === "stop"
-              ? {
-                  terminate: {
-                    on: (handler: (signal?: NodeJS.Signals) => void) => {
-                      terminate = handler
-                      return () => {
-                        terminate = undefined
-                      }
-                    },
-                    reraise: () => {
-                      const pid = Number(readFileSync(ready, "utf8"))
-                      try {
-                        process.kill(pid, 0)
-                        aliveAtReraise = true
-                      } catch (error) {
-                        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
-                        aliveAtReraise = false
-                      }
-                      stop.abort()
-                    },
-                  },
-                }
-              : {}),
             afterRound: async (outcome) => {
               rounds++
               merged.push(...outcome.merged)
               if (mode.startsWith("observed-") && merged.includes("task/first")) {
                 expect((await readStatus(store, "main", "task/first")).merge).toBe(firstObservedMerge)
-              }
-              await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 10000 })
-              expect(existsSync(finished)).toBe(false)
-              if (mode === "stop") {
-                if (merged.includes("task/first") && !merged.includes("task/second")) {
-                  await queue("task/second", "second")
-                }
-                if (merged.includes("task/second")) terminate?.("SIGTERM")
-                else if (rounds > 3) stop.abort()
-                return
               }
               if (merged.includes("task/first") && !merged.includes("task/second")) {
                 await queue("task/second", "second\n\nCloses: issue-second")
@@ -629,9 +559,7 @@ it.each([
                 )
               }
               if (merged.includes("task/refs")) {
-                writeFileSync(release, "go")
                 if (reconcileAfterQueue) {
-                  await vi.waitFor(() => expect(existsSync(finished)).toBe(true), { timeout: 10000 })
                   stop.abort()
                   return
                 }
@@ -649,7 +577,6 @@ it.each([
                   },
                   { timeout: 5000 },
                 )
-                await vi.waitFor(() => expect(existsSync(finished)).toBe(true), { timeout: 5000 })
                 // A provider call can finish before its queue fact is published; shutdown must wait for custody.
                 await vi.waitFor(
                   async () => {
@@ -738,19 +665,6 @@ it.each([
       expect(existsSync(resolveCalls)).toBe(false)
       expect(diagnostics.join(" ")).toContain("no provable historical base")
       expect((await readBranchHistory(store, "main", "task/first")).history!.state).toEqual(before.state)
-      return
-    }
-    if (mode === "stop") {
-      expect(merged).toContain("task/second")
-      expect(aliveAtReraise).toBe(false)
-      expect((await readStatus(store, "main", "task/second")).status).toBe("merged")
-      const attempts = readdirSync(join(workdir, "post-merge"))
-        .filter((n) => n.endsWith(".json"))
-        .map((n) => attemptAt(join(workdir, "post-merge", n)))
-      expect(attempts).toHaveLength(1)
-      expect(attempts[0]).toMatchObject({ status: "failed", timedOut: false })
-      expect(attempts[0]!.signal).not.toBeNull()
-      expect(existsSync(finished)).toBe(false)
       return
     }
     if (mode === "walk-retry") {
@@ -1052,7 +966,11 @@ it.each([
       await Promise.all([first[Symbol.asyncDispose](), second[Symbol.asyncDispose]()])
       const effects = Object.values((await readEventQueue(store, "main")).issueEffects).map(({ effect }) => effect)
       expect(effects).toHaveLength(1)
-      expect(effects[0]!.providerId).toBe(calls[0]![2])
+      // The provider's replay id is per key; the merge's own record is keyed on the trailer value it carried (29630).
+      const [effect] = effects
+      expect(effect!.issueKey).toBe(calls[0]![0])
+      expect(calls[0]![2]).toBe(issueProviderId(effect!.mergeSha, "close", "completed", effect!.issueKey))
+      expect(effect!.providerId).toBe(trailerEffectId(effect!.mergeSha, "close", "completed", effect!.trailer!))
       expect(readFileSync(closeCalls, "utf8").trim().split("\n")).toHaveLength(2)
       expect(diagnostics.join(" ")).not.toContain("could not be recorded")
       return
@@ -1278,11 +1196,12 @@ it.each([
       .filter((n) => n.endsWith(".json"))
       .map((n) => attemptAt(join(workdir, "post-merge", n)))
     expect(attempts.length).toBeGreaterThan(0)
+    // A round that merged nothing settles as skipped; no attempt fails.
     expect(
-      attempts.every((attempt) => attempt.status === "succeeded"),
+      attempts.every((attempt) => attempt.status === "succeeded" || attempt.status === "skipped"),
       JSON.stringify(attempts),
     ).toBe(true)
-    expect(existsSync(finished)).toBe(true)
+    expect(attempts.some((attempt) => attempt.status === "succeeded")).toBe(true)
     const calls = readFileSync(closeCalls, "utf8")
       .trim()
       .split("\n")
@@ -1507,8 +1426,14 @@ const eventDeclared = (calls: string, reply = "printf '{\"applied\":true}\\n'") 
   event: ["sh", "-c", EVENT_WRITE + reply, "event", "<raw>", "<kind>", "<source>", "<text>", "<id>", calls],
 })
 
-/** A queue on a bare remote whose issues.yml is `issues(calls)`; every provider call lands in `calls`. */
-const eventQueue = async (issues: (calls: string) => Record<string, unknown>) => {
+/**
+ * A queue on a bare remote whose issues.yml is `issues(calls)` and whose .yrd.yml is `declaration`; every provider
+ * call lands in `calls`.
+ */
+const eventQueue = async (
+  issues: (calls: string) => Record<string, unknown>,
+  declaration: Record<string, unknown> = {},
+) => {
   const root = world(),
     remote = join(root, "remote.git"),
     repo = join(root, "author"),
@@ -1522,7 +1447,7 @@ const eventQueue = async (issues: (calls: string) => Record<string, unknown>) =>
   await git(["config", "user.email", "provider@yrd.test"])
   await git(["config", "user.name", "fixture"])
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(repo, ".yrd.yml"), JSON.stringify({ issuesProvider: { update: ["sh", "-c", "true"] } }))
+  writeFileSync(join(repo, ".yrd.yml"), JSON.stringify(declaration))
   writeFileSync(join(repo, "issues.yml"), JSON.stringify(issues(calls)))
   await git(["add", ".yrd.yml", "issues.yml"])
   await git(["commit", "--quiet", "-m", "queue"])
@@ -1686,8 +1611,67 @@ it.each(["recorded", "provider-fails", "undeclared"] as const)(
   60000,
 )
 
+/**
+ * @failure A .yrd.yml still holding issuesProvider.update has it run on a landing, beside Yrd's own closer (km rules
+ *   run merge-close closed issues first on every landing), or the retired key is ignored without a word.
+ * @level l2 @consumer Yrd's post-merge closer as the only writer closing issues from merge trailers (29630, @cto 5a66fb46)
+ * @testonly none
+ */
+it("never runs a retired issuesProvider.update on a merge, says so on stderr, and closes through issues.yml", async () => {
+  const marker = join(world(), "retired-update-ran")
+  const fakeProvider = join(import.meta.dirname, "support", "fake-issues-provider.ts")
+  const { repo, workdir, calls, git, store } = await eventQueue(
+    (calls) => ({
+      resolve: [process.execPath, fakeProvider, "resolve", "<raw>"],
+      close: [
+        "sh",
+        "-c",
+        'printf "%s\\t%s\\n" "$1" "$2" >> "$4"; printf \'{"applied":true}\\n\'',
+        "close",
+        "<key>",
+        "<reason>",
+        "<id>",
+        calls,
+      ],
+    }),
+    { issuesProvider: { update: ["sh", "-c", 'touch "$1"', "update", marker] } },
+  )
+  const branch = "task/retired-update"
+  await git(["checkout", "--quiet", "-b", branch, "origin/main"])
+  writeFileSync(join(repo, "retired.txt"), "lands under a retired update key")
+  await git(["add", "retired.txt"])
+  await git(["commit", "--quiet", "-m", "retired update\n\nCloses: issue-retired"])
+  await submit(git, "origin", { branch, submitter: "fixture", target: { remote: "origin", branch: "main" } })
+  await git(["checkout", "--quiet", "main"])
+  const stderr: string[] = []
+  expect(
+    await coreQueueCommand(
+      repo,
+      {
+        cwd: repo,
+        stdout: () => {},
+        stderr: (message) => stderr.push(message),
+        localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
+      },
+      { command: "merge", branch, submitter: "fixture" },
+      { workdir, json: true, projectRoot: repo },
+    ),
+    stderr.join(""),
+  ).toBe(0)
+  expect((await readStatus(store, "main", branch)).status).toBe("merged")
+  expect(stderr.join("")).toContain(
+    "yrd: .yrd.yml issuesProvider.update: retired and ignored; delete this key. Yrd's post-merge closer closes issues from merge trailers through issues.yml at --project-root (#29630).",
+  )
+  expect(existsSync(marker), "the retired update must never run").toBe(false)
+  // Yrd's own closer closed the trailer's issue, once.
+  expect(existsSync(calls), stderr.join("")).toBe(true)
+  expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual(["issue-retired\tcompleted"])
+}, 60000)
+
 const ISSUE_31194 = "@i/16-work-lifecycle/31194-item-events"
 const TWICE = "task/twice"
+/** The branch of the attempt `coalescedAttempt` holds open while its rounds coalesce. */
+const HELD = "task/held"
 /** The provider call a `merged` event of TWICE at `merge` makes: issue as held, kind, source, text, replay key. */
 const mergedCall = (remote: string, merge: string): string =>
   [ISSUE_31194, "merged", `${remote}@${merge}`, `${TWICE} merged`, `yrd-merged-${merge}`].join("\t")
@@ -1775,33 +1759,28 @@ const coalescedAttempt = async (
 ): Promise<Readonly<{ actions: Array<Record<string, unknown>>; reports: string[] }>> => {
   const workdir = mkdtempSync(join(queue.root, "attempt-"))
   const held = join(workdir, "held"),
-    released = join(workdir, "released"),
     reports: string[] = []
+  const release = Promise.withResolvers<void>()
   const runner = createPostMerge({
     workdir,
     cwd: queue.repo,
-    git: queue.git,
+    git: holdingGit(queue.git, "held", held, release.promise),
     store: queue.store,
     cleanup: async () => {},
     report: (message) => reports.push(message),
   })
   try {
-    runner.nudge({
-      ...context,
-      target: "held",
-      base: "held",
-      merged: [],
-      update: ["sh", "-c", 'touch "$1"; while [ ! -e "$2" ]; do sleep 0.05; done', "hold", held, released],
-    })
+    runner.nudge({ ...context, target: "held", base: "held", merged: [HELD], queueBranch: "main", remote: "origin" })
     await vi.waitFor(() => expect(existsSync(held)).toBe(true), { timeout: 10000 })
     for (const round of rounds) {
       runner.nudge({ ...context, ...round, merged: [TWICE], queueBranch: "main", remote: "origin" })
     }
-    writeFileSync(released, "")
   } finally {
+    release.resolve()
     await runner[Symbol.asyncDispose]()
   }
-  return { actions: eventActionsIn(workdir), reports }
+  // The held attempt's own rows (its target has no issues.yml) are not the coalesced attempt's.
+  return { actions: eventActionsIn(workdir).filter(({ branch }) => branch !== HELD), reports }
 }
 
 /** @failure A branch merged in a second round gets its first merge's item event written again, a second event once km's 14-day operation-id window has passed. @level l2 @consumer Yrd post-merge item events (#31194, @cto 8a9995af) @testonly none */
@@ -1951,8 +1930,9 @@ it("carries a failed attempt's branches into the next attempt, and names them af
   const root = world()
   const reports: string[] = []
   const abandoned: Array<Readonly<{ branch: string; attempts: number; reason: string; evidence: string }>> = []
-  const fail = ["sh", "-c", "echo daemon timeout >&2; exit 1"]
-  const pass = ["sh", "-c", "printf ok"]
+  // Yrd's closer fails the attempt when an explicit projectRoot lacks the queue's inputs; no projectRoot settles it.
+  const fail = { projectRoot: root }
+  const pass = {}
   await using runner = createPostMerge({
     workdir: root,
     cwd: root,
@@ -1977,26 +1957,26 @@ it("carries a failed attempt's branches into the next attempt, and names them af
     vi.waitFor(() => expect(attempts().filter((a) => a.status !== "running")).toHaveLength(count), { timeout: 10000 })
 
   // Attempt 1 fails; attempt 2 is a later round's own merge and carries the failed branch with it.
-  runner.nudge({ ...context, target: "r1", base: "b1", merged: ["task/one"], update: fail })
+  runner.nudge({ ...context, target: "r1", base: "b1", merged: ["task/one"], ...fail })
   await settledCount(1)
-  runner.nudge({ ...context, target: "r2", base: "b2", merged: ["task/two"], update: fail })
+  runner.nudge({ ...context, target: "r2", base: "b2", merged: ["task/two"], ...fail })
   await settledCount(2)
   expect(attempts()[1]).toMatchObject({ merged: ["task/one", "task/two"], bases: ["b1", "b2"] })
-  // An idle round still carries what failed, and asks for the update even when the round itself owes none.
-  runner.nudge({ ...context, target: "r3", base: "b3", merged: [], update: fail, updateDue: false })
+  // An idle round still carries what failed, though the round itself merged nothing.
+  runner.nudge({ ...context, target: "r3", base: "b3", merged: [], ...fail })
   await settledCount(3)
-  expect(attempts()[2]).toMatchObject({ merged: ["task/one", "task/two"], status: "failed" })
+  expect(attempts()[2]).toMatchObject({ merged: ["task/one", "task/two"], status: "unavailable" })
   // task/one failed three times: named and handed on, never carried again. task/two has failed twice.
   await vi.waitFor(() => expect(abandoned.map((a) => a.branch)).toEqual(["task/one"]), { timeout: 10000 })
   expect(abandoned[0]).toMatchObject({ attempts: 3, evidence: expect.stringMatching(/post-merge\/.*\.json$/) })
-  expect(abandoned[0]!.reason).toContain("exit 1")
+  expect(abandoned[0]!.reason).toContain("automatic issue close unavailable")
   expect(reports.some((line) => line.includes("task/one") && line.includes("3 attempts"))).toBe(true)
-  runner.nudge({ ...context, target: "r4", base: "b4", merged: ["task/three"], update: pass })
+  runner.nudge({ ...context, target: "r4", base: "b4", merged: ["task/three"], ...pass })
   await settledCount(4)
   // task/one's round base left with it: a carried branch keeps only its own round's base (@dev/4).
   expect(attempts()[3]).toMatchObject({ merged: ["task/two", "task/three"], bases: ["b2", "b4"], status: "succeeded" })
   // A success settles what it carried: the next attempt carries nothing old.
-  runner.nudge({ ...context, target: "r5", base: "b5", merged: ["task/four"], update: pass })
+  runner.nudge({ ...context, target: "r5", base: "b5", merged: ["task/four"], ...pass })
   await settledCount(5)
   expect(attempts()[4]).toMatchObject({ merged: ["task/four"], bases: ["b5"] })
   expect(abandoned.map((a) => a.branch)).toEqual(["task/one"])
@@ -2011,7 +1991,8 @@ it("carries a failed attempt's branches into the next attempt, and names them af
 it("keeps a still-owed branch's earlier round base when it merges again, and starts its count over", async () => {
   const root = world()
   const abandoned: string[] = []
-  const fail = ["sh", "-c", "echo daemon timeout >&2; exit 1"]
+  // Yrd's closer fails the attempt when an explicit projectRoot lacks the queue's inputs.
+  const fail = { projectRoot: root }
   await using runner = createPostMerge({
     workdir: root,
     cwd: root,
@@ -2029,15 +2010,15 @@ it("keeps a still-owed branch's earlier round base when it merges again, and sta
   const settledCount = async (count: number) =>
     vi.waitFor(() => expect(attempts().filter((a) => a.status !== "running")).toHaveLength(count), { timeout: 10000 })
 
-  runner.nudge({ ...context, target: "r1", base: "b1", merged: ["task/one"], update: fail })
+  runner.nudge({ ...context, target: "r1", base: "b1", merged: ["task/one"], ...fail })
   await settledCount(1)
   // task/one merges again while its first delivery is still owed.
-  runner.nudge({ ...context, target: "r2", base: "b2", merged: ["task/one"], update: fail })
+  runner.nudge({ ...context, target: "r2", base: "b2", merged: ["task/one"], ...fail })
   await settledCount(2)
-  runner.nudge({ ...context, target: "r3", base: "b3", merged: [], update: fail, updateDue: false })
+  runner.nudge({ ...context, target: "r3", base: "b3", merged: [], ...fail })
   await settledCount(3)
   // The carry still holds b1, which precedes both deliveries.
-  expect(attempts()[2]).toMatchObject({ merged: ["task/one"], bases: ["b1", "b3"], status: "failed" })
+  expect(attempts()[2]).toMatchObject({ merged: ["task/one"], bases: ["b1", "b3"], status: "unavailable" })
   // Three failed attempts, but the re-merge started the count over: two since it, so not yet given up.
   expect(abandoned).toEqual([])
 })
@@ -2052,7 +2033,7 @@ it("charges a failed attempt to the branch its failure names, and to every branc
     { branch: "task/ghost", status: "fulfilled" },
   ]
   expect(chargedBranches(merged, closeFailed, false)).toEqual(["task/real"])
-  // The update failed too: that names nobody, so both branches are charged.
+  // The attempt itself failed too: that names nobody, so both branches are charged.
   expect(chargedBranches(merged, closeFailed, true)).toEqual(merged)
   // A failed attempt whose rows name no branch of its own still charges every branch it carried.
   expect(chargedBranches(merged, [{ branch: "task/elsewhere", status: "failed" }], false)).toEqual(merged)

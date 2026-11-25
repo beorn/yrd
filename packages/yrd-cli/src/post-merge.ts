@@ -1,15 +1,17 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { randomUUID } from "node:crypto"
-import { createProcess } from "@yrd/process"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   closingReferencesOf,
   enumerateChangeSegments,
+  gitlinkRows,
+  isRepositoryAt,
   readBranchHistory,
   readEventQueue,
   readIssueEffect,
   issueProviderId,
+  trailerEffectId,
   writeQueueEvent,
   isAncestor,
   normalizedRemote,
@@ -74,8 +76,6 @@ type Context = Readonly<{
   /** The target this round's judgements were made against; merged item events need it (#31194). */
   base?: string
   merged: readonly string[]
-  update?: readonly string[]
-  updateDue?: boolean
   projectRoot?: string
   queueBranch?: string
   /** The target's remote name; the `merged` item event names the repository by its URL. */
@@ -188,6 +188,91 @@ export function readPostMergeIssueDiagnostics(
   return [...found.values()]
 }
 
+/**
+ * What the closer did with one component range a landing moved, said by name (29630, @cto 5a66fb46). Its outcome's
+ * providerId is `component:<path>`, so a range read on a later attempt clears an earlier unresolved row.
+ */
+type ComponentUnread = Readonly<{
+  unread: true
+  component: string
+  /** `unavailable` is a lost close until it is cured, so the attempt fails and is retried; `skipped` is a rule. */
+  status: "unavailable" | "skipped" | "fulfilled"
+  reason: "component-pin-unresolved" | "component-added" | "component-removed" | "component-read"
+  diagnostic?: string
+}>
+
+type ClosingReference = Readonly<{ value: string; commit: string; trailer: string; component?: string }>
+
+/**
+ * The closing trailers in every component range a landing moved (29630, @cto 5a66fb46): each changed gitlink, from
+ * its pin at the root range's base to its pin at the merge, nested components included. They are read from the queue
+ * clone's own reference store for that component (`<queue clone>/<path>`), the store the landing's publication pushed
+ * the component from, so nothing is fetched. A store or pin the clone cannot resolve is a named refusal, never a
+ * skipped range, because a skipped range is a lost close. A component added or taken out by the landing has no range
+ * of landed work; each is said by name too.
+ */
+async function* componentClosingReferences(
+  git: GitRunner,
+  store: string,
+  from: string,
+  to: string,
+  branch: string,
+  prefix = "",
+): AsyncGenerator<ClosingReference | ComponentUnread, void> {
+  for (const row of await gitlinkRows(git, from, to)) {
+    const component = prefix === "" ? row.path : `${prefix}/${row.path}`
+    if (row.oldMode !== "160000" || row.newMode !== "160000") {
+      const added = row.oldMode !== "160000"
+      yield {
+        unread: true,
+        component,
+        status: "skipped",
+        reason: added ? "component-added" : "component-removed",
+        diagnostic: `${component} was ${added ? "added" : "taken out"} by this landing; it has no range of landed work to read`,
+      }
+      continue
+    }
+    const checkout = join(store, row.path)
+    let old: string
+    let unresolved: string | undefined
+    try {
+      old = (await git(["rev-parse", "--verify", "--end-of-options", `${from}:${row.path}`])).trim()
+    } catch (cause) {
+      old = ""
+      unresolved = `its pin at ${from} cannot be read: ${String(cause)}`
+    }
+    const child = git.at(checkout)
+    if (unresolved === undefined && !(await isRepositoryAt((cwd) => git.at(cwd), checkout))) {
+      unresolved = `no component store at ${checkout}`
+    }
+    for (const pin of unresolved === undefined ? [old, row.sha] : []) {
+      try {
+        await child(["cat-file", "-e", `${pin}^{commit}`])
+      } catch {
+        // catch-cause-allow: `cat-file -e` answers "is this commit here" with its exit status alone, and absence is
+        // the answer; it is reported below by store and sha as a named refusal, never dropped.
+        unresolved = `${checkout} does not hold pin ${pin}`
+        break
+      }
+    }
+    if (unresolved !== undefined) {
+      yield {
+        unread: true,
+        component,
+        status: "unavailable",
+        reason: "component-pin-unresolved",
+        diagnostic: `${component} moved ${old === "" ? "?" : old}..${row.sha} and its closing trailers were not read: ${unresolved}`,
+      }
+      continue
+    }
+    for await (const reference of closingReferencesOf(child, [`${old}..${row.sha}`], branch)) {
+      yield { ...reference, component }
+    }
+    yield { unread: true, component, status: "fulfilled", reason: "component-read" }
+    yield* componentClosingReferences(child, checkout, old, row.sha, branch, component)
+  }
+}
+
 async function closeMergedIssues(
   input: Readonly<{
     branches: readonly string[]
@@ -205,7 +290,8 @@ async function closeMergedIssues(
 ): Promise<Readonly<{ outcomes: Array<Record<string, unknown>>; queue?: EventQueue }>> {
   const outcomes: Array<Record<string, unknown>> = []
   let completed = input.knownQueue
-  const seen = new Set<string>()
+  // Each key's close in this round: true closed, false failed (29630).
+  const closedKeys = new Map<string, boolean>()
 
   for (const branch of new Set(input.branches)) {
     if (input.stop?.aborted) return { outcomes, queue: completed }
@@ -297,13 +383,53 @@ async function closeMergedIssues(
               )
             }
           }
-          const references = async function* () {
+          const references = async function* (): AsyncGenerator<ClosingReference | ComponentUnread, void> {
             yield* closingReferencesOf(input.git, [`${base}..${observed ? segment.head : mergeSha}`], branch)
             if (observed && mergeSha !== segment.head) yield* closingReferencesOf(input.git, ["-1", mergeSha], branch)
+            // 29630: every component range this landing moved, from the same base the root range starts at.
+            yield* componentClosingReferences(input.git, input.store.repo, base, mergeSha, branch)
           }
           const refs = references()
+          // One raw value is resolved once per landing, wherever it appears (root or component, @cto 5a66fb46).
+          const resolvedRaw = new Set<string>()
           for await (const reference of refs) {
             if (input.stop?.aborted) return { outcomes, queue: completed }
+            if ("unread" in reference) {
+              outcomes.push({
+                branch,
+                mergedEvent: mergedEvent.id,
+                mergeSha,
+                providerId: `component:${reference.component}`,
+                status: reference.status,
+                reason: reference.reason,
+                component: reference.component,
+                ...(reference.diagnostic === undefined ? {} : { diagnostic: reference.diagnostic }),
+              })
+              if (reference.status === "unavailable") input.report(`${branch}@${mergeSha}: ${reference.diagnostic}`)
+              continue
+            }
+            if (resolvedRaw.has(reference.value)) continue
+            resolvedRaw.add(reference.value)
+            // 29630 (@cto baa5a4f1): the no-resend record is keyed on the merge and the trailer value it carries, and is
+            // read before resolve, so an issue the provider re-keyed after a human reopened it is not closed again.
+            const trailerId = trailerEffectId(mergeSha, "close", "completed", reference.value)
+            completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
+            const answered = completed.issueEffects[trailerId]
+            if (answered !== undefined) {
+              if (answered.effect.declaration.blob !== pinnedBlob) {
+                throw new Error(
+                  `${branch}@${mergeSha}: applied declaration blob ${answered.effect.declaration.blob} differs from pinned ${pinnedBlob}`,
+                )
+              }
+              outcomes.push({
+                branch,
+                mergedEvent: mergedEvent.id,
+                mergeSha,
+                providerId: trailerId,
+                status: "fulfilled",
+              })
+              continue
+            }
             const resolved = await runIssuesVerb({
               verb: "resolve",
               args: [reference.value],
@@ -341,11 +467,18 @@ async function closeMergedIssues(
               raw: reference.value,
               status: "fulfilled",
             })
+            let keysClosed = true
+            let declaration: Readonly<{ repository: string; commit: string }> | undefined
             for (const key of keys) {
+              // km's operation id stays per key, so a provider replay inside its window is still one close.
               const providerId = issueProviderId(mergeSha, "close", "completed", key)
-              if (seen.has(providerId)) continue
-              seen.add(providerId)
+              const earlier = closedKeys.get(providerId)
+              if (earlier !== undefined) {
+                if (!earlier) keysClosed = false
+                continue
+              }
               completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
+              // An effect recorded per key before 29630 still answers that key for this merge.
               const fulfilled = completed.issueEffects[providerId]
               if (fulfilled !== undefined) {
                 if (fulfilled.effect.declaration.blob !== pinnedBlob) {
@@ -353,6 +486,7 @@ async function closeMergedIssues(
                     `${branch}@${mergeSha}: applied declaration blob ${fulfilled.effect.declaration.blob} differs from pinned ${pinnedBlob}`,
                   )
                 }
+                closedKeys.set(providerId, true)
                 outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
                 continue
               }
@@ -370,6 +504,8 @@ async function closeMergedIssues(
               })
               if (!closed.ok) {
                 const diagnostic = closed.message
+                closedKeys.set(providerId, false)
+                keysClosed = false
                 outcomes.push({
                   branch,
                   mergedEvent: mergedEvent.id,
@@ -383,52 +519,62 @@ async function closeMergedIssues(
                 )
                 continue
               }
-              try {
-                const declarationBlob = (
-                  await input.git.at(closed.envelope.declaration.repository)([
-                    "rev-parse",
-                    `${closed.envelope.declaration.commit}:issues.yml`,
-                  ])
-                ).trim()
-                if (declarationBlob === "") {
-                  throw new Error(`issues.yml blob is unreadable at ${closed.envelope.declaration.commit}`)
-                }
-                const issueEffect: AppliedIssueEffect = {
-                  kind: "issue-effect-v1",
-                  mergedEvent: mergedEvent.id,
-                  mergeSha,
-                  mergeCommitterTime: committerTime,
-                  verb: "close",
-                  semanticEnding: "completed",
-                  issueKey: key,
-                  providerId,
-                  declaration: { path: "issues.yml", blob: declarationBlob },
-                }
-                try {
-                  await writeQueueEvent(input.store, input.queue, {
-                    type: "notified",
-                    at: new Date(),
-                    by: "yrd-run",
-                    issueEffect,
-                  })
-                } catch (error) {
-                  // A rival append or lost publication reply can already have fulfilled this identity.
-                  completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
-                  if (completed.issueEffects[providerId] === undefined) throw error
-                }
-                outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
-              } catch (error) {
-                const diagnostic = `provider succeeded but applied effect could not be recorded: ${String(error)}`
-                outcomes.push({
-                  branch,
-                  mergedEvent: mergedEvent.id,
-                  mergeSha,
-                  providerId,
-                  status: "record-failed",
-                  diagnostic,
-                })
-                input.report(`${branch}@${mergeSha}: ${diagnostic}`)
+              closedKeys.set(providerId, true)
+              declaration = closed.envelope.declaration
+              outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
+            }
+            // A key that failed leaves the trailer unanswered, so the retry resolves and closes it again.
+            if (!keysClosed) continue
+            try {
+              const declarationBlob =
+                declaration === undefined
+                  ? pinnedBlob
+                  : (
+                      await input.git.at(declaration.repository)(["rev-parse", `${declaration.commit}:issues.yml`])
+                    ).trim()
+              if (declarationBlob === "") throw new Error(`issues.yml blob is unreadable at ${declaration?.commit}`)
+              const issueEffect: AppliedIssueEffect = {
+                kind: "issue-effect-v1",
+                mergedEvent: mergedEvent.id,
+                mergeSha,
+                mergeCommitterTime: committerTime,
+                verb: "close",
+                semanticEnding: "completed",
+                issueKey: keys.join(" "),
+                trailer: reference.value,
+                providerId: trailerId,
+                declaration: { path: "issues.yml", blob: declarationBlob },
               }
+              try {
+                await writeQueueEvent(input.store, input.queue, {
+                  type: "notified",
+                  at: new Date(),
+                  by: "yrd-run",
+                  issueEffect,
+                })
+              } catch (error) {
+                // A rival append or lost publication reply can already have fulfilled this identity.
+                completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
+                if (completed.issueEffects[trailerId] === undefined) throw error
+              }
+              outcomes.push({
+                branch,
+                mergedEvent: mergedEvent.id,
+                mergeSha,
+                providerId: trailerId,
+                status: "fulfilled",
+              })
+            } catch (error) {
+              const diagnostic = `provider succeeded but applied effect could not be recorded: ${String(error)}`
+              outcomes.push({
+                branch,
+                mergedEvent: mergedEvent.id,
+                mergeSha,
+                providerId: trailerId,
+                status: "record-failed",
+                diagnostic,
+              })
+              input.report(`${branch}@${mergeSha}: ${diagnostic}`)
             }
           }
           if (input.stop?.aborted) return { outcomes, queue: completed }
@@ -715,7 +861,6 @@ export function createPostMerge<C extends Context>(
       }
     }
   }
-  const process = createProcess({ cwd: options.cwd, env: options.env })
   /** The next attempt's context, and the base of every round coalesced into it: the attempt resolves the earliest. */
   let pending: Readonly<{ context: C; bases: ReadonlyArray<string | undefined> }> | undefined
   /** A failed attempt's branches, waiting for the next nudge (37513); folded into `pending` as soon as one exists. */
@@ -738,7 +883,6 @@ export function createPostMerge<C extends Context>(
       : {
           ...context,
           merged: [...new Set([...previous.merged, ...context.merged])],
-          updateDue: (context.updateDue ?? true) || (previous.updateDue ?? true),
         }
   // The existing service stays resident: keep only its last validated snapshot across sequential attempts.
   let completedQueue: Readonly<{ branch: string; value: EventQueue }> | undefined
@@ -848,7 +992,7 @@ export function createPostMerge<C extends Context>(
     const stdout = join(directory, id + ".stdout.log")
     const stderr = join(directory, id + ".stderr.log")
     const startedAt = new Date().toISOString()
-    const provenance = { ...context, bases, argv: context.update ?? [], cwd: options.cwd, startedAt, stdout, stderr }
+    const provenance = { ...context, bases, cwd: options.cwd, startedAt, stdout, stderr }
     evidence(stdout, () => {
       writeFileSync(stdout, "")
     })
@@ -859,13 +1003,11 @@ export function createPostMerge<C extends Context>(
       atomicWriteFileSync(path, JSON.stringify({ ...provenance, status: "running" }) + "\n")
     })
     let issueActions: Array<Record<string, unknown>> = []
-    let settled: Record<string, unknown> = {
-      status: "skipped",
-      reason:
-        context.update === undefined ? "no issuesProvider.update declared" : "no provider update due for idle round",
-    }
+    // 29630 (@cto 5a66fb46): no provider update runs here; Yrd's own closer below is the only issue writer.
+    let settled: Record<string, unknown> =
+      context.merged.length === 0 ? { status: "skipped", reason: "nothing merged this round" } : { status: "succeeded" }
     let eventsFailed = false
-    /** Set when the failure names no branch: the update itself, or the attempt as a whole (37513). */
+    /** Set when the failure names no branch: the attempt as a whole (37513). */
     let failedWhole = false
     try {
       // Before the update and the close, so an issue reads merged, then closed. Never needs --project-root.
@@ -873,61 +1015,11 @@ export function createPostMerge<C extends Context>(
       issueActions = events.actions
       eventsFailed = events.failed
       // An event write that failed without a branch row names nobody, so it is charged to every branch (@dev/4).
-      if (events.failed && !events.actions.some(({ status, branch }) => failingStatus(status) && typeof branch === "string")) {
+      if (
+        events.failed &&
+        !events.actions.some(({ status, branch }) => failingStatus(status) && typeof branch === "string")
+      ) {
         failedWhole = true
-      }
-      try {
-        if (context.update !== undefined && context.updateDue !== false) {
-          const result = await process.run({
-            argv: context.update,
-            cwd: options.cwd,
-            timeoutMs: UPDATE_TIMEOUT_MS,
-            signal: options.stop,
-            onOutput: ({ stream, chunk }) => {
-              const output = stream === "stdout" ? stdout : stderr
-              evidence(output, () => {
-                appendFileSync(output, chunk)
-              })
-            },
-          })
-          const failed =
-            result.exitCode !== 0 ||
-            result.signal !== null ||
-            result.timedOut ||
-            result.stalled ||
-            result.escapedDescendant ||
-            result.sweepFailure !== undefined
-          settled = {
-            status: failed ? "failed" : "succeeded",
-            exitCode: result.exitCode,
-            signal: result.signal,
-            timedOut: result.timedOut,
-            stalled: result.stalled,
-            sweepFailure: result.sweepFailure,
-            escapedDescendant: result.escapedDescendant,
-          }
-          if (failed) {
-            failedWhole = true
-            options.report(
-              "issuesProvider.update " +
-                JSON.stringify(context.update) +
-                " failed: exit " +
-                result.exitCode +
-                ", signal " +
-                result.signal +
-                ", timeout " +
-                result.timedOut +
-                "; " +
-                stderr,
-            )
-          }
-        }
-      } catch (error) {
-        settled = { status: "unavailable", reason: String(error) }
-        failedWhole = true
-        options.report(
-          "issuesProvider.update " + JSON.stringify(context.update) + " unavailable: " + String(error) + "; " + stderr,
-        )
       }
       if (
         context.merged.length > 0 &&
@@ -1003,7 +1095,7 @@ export function createPostMerge<C extends Context>(
     ].join(", ")
     return { failed: chargedBranches(context.merged, issueActions, failedWhole), reason, evidence: path }
   }
-  /** Fold the carried branches into `pending`, whose newer context wins every field but `merged` and `updateDue`. */
+  /** Fold the carried branches into `pending`, whose newer context wins every field but `merged`. */
   const foldCarried = (): void => {
     if (carried === undefined) return
     pending =
@@ -1036,7 +1128,7 @@ export function createPostMerge<C extends Context>(
     }
     if (again.length > 0) {
       const bases = [...new Set(again.map((branch) => baseOf.get(branch)))]
-      const owed = { context: { ...next.context, merged: again, updateDue: true }, bases }
+      const owed = { context: { ...next.context, merged: again }, bases }
       carried =
         carried === undefined
           ? owed
@@ -1105,16 +1197,14 @@ export function createPostMerge<C extends Context>(
   }
   const close = async (): Promise<void> => {
     closing = true
-    // Production reload aborts first. Without abort, an active provider's
+    // Production reload aborts first. Without abort, an active attempt's
     // finally may still offer its own cleanup; both lifetimes drain below.
     if (options.stop !== undefined) {
       dropPending()
       dropCleanupPending()
-      await process.close()
     }
     await drain()
     while (cleanupActive !== undefined) await cleanupActive
-    await process.close()
   }
   return { nudge, recover, [Symbol.asyncDispose]: close }
 }
