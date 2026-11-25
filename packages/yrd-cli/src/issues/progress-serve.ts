@@ -183,6 +183,20 @@ export async function serveProgressReader(options: ProgressServeOptions): Promis
   let failureLogged = false
 
   const say = (text: string): void => options.log(text.endsWith("\n") ? text : `${text}\n`)
+  /**
+   * One provider conversation at a time: a request's line and the answer's line are one step, so a journal batch
+   * started for a frame and a page relayed for the client never read each other's answers. It is held per round trip,
+   * not for a whole rebuild, so a page read waits at most one batch.
+   */
+  let providerBusy: Promise<unknown> = Promise.resolve()
+  function withProvider<T>(work: () => Promise<T>): Promise<T> {
+    const run = providerBusy.then(work, work)
+    providerBusy = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
 
   /** Close the provider's request pipe and let it leave on its own: a clean end is not a killed reader. */
   async function endProvider(graceMs: number): Promise<number> {
@@ -218,13 +232,15 @@ export async function serveProgressReader(options: ProgressServeOptions): Promis
 
   async function journalRead(after: number, sinceTs: number | undefined): Promise<JournalAnswer> {
     const seq = `yrd-journal-${String(++internalSeq)}`
-    await send(
-      `${JSON.stringify({
-        seq,
-        request: { journal: { after, limit: JOURNAL_LIMIT, ...(sinceTs === undefined ? {} : { sinceTs }) } },
-      })}\n`,
-    )
-    const line = await answerLine(`journal request ${seq}`)
+    const line = await withProvider(async () => {
+      await send(
+        `${JSON.stringify({
+          seq,
+          request: { journal: { after, limit: JOURNAL_LIMIT, ...(sinceTs === undefined ? {} : { sinceTs }) } },
+        })}\n`,
+      )
+      return await answerLine(`journal request ${seq}`)
+    })
     let frame: unknown
     try {
       frame = JSON.parse(line)
@@ -382,6 +398,9 @@ export async function serveProgressReader(options: ProgressServeOptions): Promis
 
   /** The frame for one answer: the holds read now, the activity the reader holds, and how current it is. */
   async function progressFrame(): Promise<ServedProgress> {
+    // The start rebuild runs beside the relay: a page read that needs no frame must never wait for a 24 h window, and
+    // an answer that does need one waits for the one rebuild already under way instead of starting a second.
+    await startup
     const holds = await options.readHolds()
     const began = now()
     let source: "ok" | "unreadable" = "ok"
@@ -441,13 +460,15 @@ export async function serveProgressReader(options: ProgressServeOptions): Promis
   }
 
   async function relay(line: string, traverse: boolean): Promise<string> {
-    await send(`${line}\n`)
-    let answer: string
-    for (;;) {
-      answer = await answerLine("the page request")
-      if (terminal(answer, traverse)) return answer
-      output.write(`${answer}\n`)
-    }
+    return await withProvider(async () => {
+      await send(`${line}\n`)
+      let answer: string
+      for (;;) {
+        answer = await answerLine("the page request")
+        if (terminal(answer, traverse)) return answer
+        output.write(`${answer}\n`)
+      }
+    })
   }
 
   async function answerClient(frame: ClientFrame, line: string): Promise<void> {
@@ -506,14 +527,13 @@ export async function serveProgressReader(options: ProgressServeOptions): Promis
   })
 
   let exitCode = 0
+  let startup: Promise<void>
   try {
     // Once on start, so the first answer is incremental: a failure is not fatal (the next answer retries and says so),
     // because the provider may be a `km` that predates the journal kind and the page reads must keep working.
-    try {
-      await rebuild("the reader started")
-    } catch (error) {
+    startup = rebuild("the reader started").catch((error: unknown) => {
       say(`yrd issues list-page-serve: no activity window at start; the first progress answer retries: ${describe(error)}`)
-    }
+    })
     for await (const line of client) {
       if (line.trim() === "") continue
       let parsed: unknown

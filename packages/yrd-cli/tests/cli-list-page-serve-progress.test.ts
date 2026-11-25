@@ -29,7 +29,11 @@ import { appendFileSync, readFileSync } from "node:fs"
 const log = process.env.PROGRESS_LOG
 appendFileSync(log, "spawn\\n")
 const stateOf = () => JSON.parse(readFileSync(process.env.PROGRESS_STATE, "utf8"))
-const send = (frame) => process.stdout.write(JSON.stringify(frame) + "\\n")
+const send = (frame) => {
+  appendFileSync(log, "ans:" + String(frame.seq) + "@" + String(Date.now()) + "\\n")
+  process.stdout.write(JSON.stringify(frame) + "\\n")
+}
+const delayOf = (name) => Number(process.env[name] ?? 0)
 let held = ""
 process.stdin.on("data", (chunk) => {
   held += chunk.toString()
@@ -38,11 +42,12 @@ process.stdin.on("data", (chunk) => {
     held = held.slice(at + 1)
     if (line.trim() === "") continue
     const frame = JSON.parse(line)
+    appendFileSync(log, "req:" + String(frame.seq) + "@" + String(Date.now()) + "\\n")
     const request = frame.request ?? {}
     if (request.journal !== undefined) {
       const state = stateOf()
       appendFileSync(log, "journal:" + String(request.journal.after) + "\\n")
-      send({
+      const answer = () => send({
         seq: frame.seq,
         journal: {
           generation: state.generation,
@@ -52,6 +57,10 @@ process.stdin.on("data", (chunk) => {
           more: false,
         },
       })
+      // A journal answer the test can hold back, so a page asked after it would come home first.
+      const delay = delayOf("PROGRESS_JOURNAL_DELAY")
+      if (delay > 0) setTimeout(answer, delay)
+      else answer()
       continue
     }
     appendFileSync(log, "page:" + JSON.stringify(request) + "\\n")
@@ -81,7 +90,7 @@ type Runner = Readonly<{
   open(): Promise<Session>
 }>
 
-function runner(): Runner {
+function runner(delays: Readonly<{ journalMs?: number }> = {}): Runner {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-page-serve-progress-"))
   roots.push(root)
   const git = (...args: string[]): string => execFileSync("git", args, { cwd: root, encoding: "utf8" })
@@ -106,7 +115,12 @@ function runner(): Runner {
   const open = async (): Promise<Session> => {
     const child = spawn(process.execPath, [YRD, "issues", "list-page-serve", "--project-root", root], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, PROGRESS_LOG: log, PROGRESS_STATE: state },
+      env: {
+        ...process.env,
+        PROGRESS_LOG: log,
+        PROGRESS_STATE: state,
+        PROGRESS_JOURNAL_DELAY: String(delays.journalMs ?? 0),
+      },
     })
     let stderr = ""
     child.stderr.on("data", (chunk: Buffer) => {
@@ -257,5 +271,37 @@ describe("list-page-serve: the resident reader answers the progress frame itself
     const journal = run.lines().filter((line) => line.startsWith("journal:"))
     // start rebuild, the incremental read that discovered the new generation, then the rebuild it triggered
     expect(journal).toEqual(["journal:0", "journal:2", "journal:2", "journal:0"])
+  }, 60_000)
+
+  it("keeps one provider round trip at a time: a page asked during the start rebuild waits for it", async () => {
+    const run = runner({ journalMs: 250 })
+    run.write({
+      generation: "1:11",
+      head: 2,
+      lines: [{ seq: 2, ts: Date.now() - 30_000, actor: "@dev/3", data: { path: "@km/0002-half.md" } }],
+    })
+    const reader = await run.open()
+    try {
+      // The start rebuild is still waiting on its journal answer, so a page relayed now would cross it: the rebuild
+      // reads the page as its journal answer and the relay writes the journal frame out as a page with no rows.
+      const page = await reader.ask({ seq: 1, request: { page: { limit: 10 } } })
+      expect(page).toMatchObject({ seq: 1, page: { complete: true } })
+      const frame = await reader.ask({ seq: 2, request: { progress: true } })
+      expect(frame).toMatchObject({ seq: 2 })
+      expect((frame.progress as { seq?: unknown }).seq).toBe(2)
+    } finally {
+      await reader.close()
+    }
+    // And it is the provider's own log that proves it: no request was written while the previous one was unanswered.
+    let outstanding = 0
+    for (const event of run.lines().filter((line) => line.startsWith("req:") || line.startsWith("ans:"))) {
+      if (event.startsWith("req:")) {
+        outstanding += 1
+        expect(outstanding).toBe(1)
+      } else {
+        outstanding -= 1
+      }
+    }
+    expect(outstanding).toBe(0)
   }, 60_000)
 })
