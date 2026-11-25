@@ -48,8 +48,24 @@ function argument(name: string): string | undefined {
   return value
 }
 
+/**
+ * A tag may only cut the version it names: `yrd-issues-v<version>` and the package's own version are one fact, and a
+ * mismatch would publish today's bytes under tomorrow's name — the pin in Hightea names both, so it would fail there
+ * once and hide which side was wrong (@cto, 2026-11-25). The refusal names both versions.
+ */
+export function tagVersionRefusal(tag: string, version: string): string | null {
+  const named = /^yrd-issues-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$/u.exec(tag)
+  if (named === null) return `tag ${tag} is not yrd-issues-v<version>; this asset is cut only from a version tag`
+  return named[1] === version ? null : `tag ${tag} names version ${named[1]}, but packages/yrd-issues/package.json is ${version}`
+}
+
 function main(): void {
   const tag = argument("--tag") ?? refuse("--tag names the release tag this asset belongs to (e.g. yrd-issues-v0.1.0)")
+  const manifest = JSON.parse(readFileSync(join(PACKAGE_DIR, "package.json"), "utf8")) as { name: string; version: string }
+  // Before the tree and HEAD gates: a wrong name is answerable without looking at git at all, and its message is the
+  // whole fix.
+  const mismatch = tagVersionRefusal(tag, manifest.version)
+  if (mismatch !== null) refuse(mismatch)
 
   const dirty = git("status", "--porcelain")
   if (dirty !== "") refuse(`the tree is dirty; a release asset is cut from a committed tag, not a working tree:\n${dirty}`)
@@ -69,7 +85,6 @@ function main(): void {
     return refuse(`bun pm pack failed: ${packed.stderr.toString().trim() || packed.stdout.toString().trim() || "(no output)"}`)
   }
   // `bun pm pack` names the archive as npm does: scoped `@scope/name` becomes `scope-name-<version>.tgz`.
-  const manifest = JSON.parse(readFileSync(join(PACKAGE_DIR, "package.json"), "utf8")) as { name: string; version: string }
   const archive = `${manifest.name.replace(/^@([^/]+)\//u, "$1-")}-${manifest.version}.tgz`
   const path = join(outDir, archive)
   if (!existsSync(path)) return refuse(`bun pm pack did not produce ${archive} in ${outDir}`)
