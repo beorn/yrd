@@ -2019,6 +2019,108 @@ it("judges setup on the target with raised gitlinks rather than its bare pin", a
   ).rejects.toBeInstanceOf(SetupFailed)
 })
 
+/** @failure A bare raise that leaves the root lock alone composed, then failed a check on a tree no author wrote, and the queue billed the submitter instead of naming itself.
+ * @level l3 @consumer queue operator and submitter
+ * Row 3 of hh #38155: the stop must move no ref, name yrd-settled-base-check-failed with the repair step, and leave
+ * the change stuck rather than failed. Nothing about the composition changes here; the case drives the existing path.
+ */
+it("stops a bare raise as the queue's own defect, pushing nothing and billing no submitter", async () => {
+  const w = await world()
+  // The child needs its own remote: submit publishes a moved gitlink to the commit's origin before the queue runs.
+  // The submodule is added the way an author adds one, so the parent's checkout carries the origin submit reads.
+  // git-super freezes a push intent only for hosted remotes, so both remotes are named GitHub-shaped and rewritten
+  // to the fixture's bare repositories (the shape derive.test.ts uses).
+  const hostedRoot = "https://github.com/example/yrd-bare-raise-root.git"
+  const hostedChild = "https://github.com/example/yrd-bare-raise-child.git"
+  const childRemote = join(w.workdir, "child-remote.git")
+  await w.git(["init", "--quiet", "--bare", "--initial-branch=main", childRemote])
+  const childSeed = join(w.workdir, "child-seed")
+  await w.git(["init", "--quiet", "--initial-branch=main", childSeed])
+  const seedGit = gitIn(childSeed)
+  await seedGit(["config", "user.email", "queue@yrd.test"])
+  await seedGit(["config", "user.name", "yrd"])
+  await seedGit(["remote", "add", "origin", childRemote])
+  writeFileSync(join(childSeed, "version"), "0.1.0\n")
+  await seedGit(["add", "version"])
+  await seedGit(["commit", "--quiet", "-m", "child 0.1.0"])
+  await seedGit(["push", "--quiet", "origin", "main"])
+  await w.git(["config", "protocol.file.allow", "always"])
+  await w.git(["config", `url.${w.remote}.insteadOf`, hostedRoot])
+  await w.git(["remote", "set-url", "origin", hostedRoot])
+  await w.git(["config", `url.${childRemote}.insteadOf`, hostedChild])
+  await w.git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", hostedChild, "child"])
+  await gitIn(join(w.work, "child"))(["config", `url.${childRemote}.insteadOf`, hostedChild])
+  await gitIn(join(w.work, "child"))(["config", "protocol.file.allow", "always"])
+  writeFileSync(join(w.work, "bun.lock"), "child 0.1.0\n")
+  await w.git(["add", ".gitmodules", "bun.lock", "child"])
+  await w.git(["commit", "--quiet", "-m", "target pins child 0.1.0"])
+  await w.git(["push", "--quiet", "origin", "main"])
+  const target = (await w.git(["rev-parse", "HEAD"])).trim()
+  await createWorldEventQueue(w, target)
+  // The candidate moves the gitlink to a version its root lock does not describe, and leaves the lock alone.
+  await w.git(["checkout", "--quiet", "-b", "task/bare-raise", "main"])
+  const childGit = gitIn(join(w.work, "child"))
+  writeFileSync(join(w.work, "child", "version"), "0.2.0\n")
+  await childGit(["add", "version"])
+  await childGit(["commit", "--quiet", "-m", "child 0.2.0"])
+  await childGit(["push", "--quiet", "origin", "main"])
+  const raised = (await childGit(["rev-parse", "HEAD"])).trim()
+  await w.git(["update-index", "--cacheinfo", `160000,${raised},child`])
+  await w.git(["commit", "--quiet", "-m", "raise child to 0.2.0 without the root lock"])
+  await w.git(["checkout", "--quiet", "main"])
+  await submit(w.git, "origin", {
+    branch: "task/bare-raise",
+    submitter: "@dev/2",
+    target: { branch: "main", remote: "origin" },
+    issue: "@i/10-yrd/1",
+  })
+  // The real check is lockfile-agreement; this one states the same disagreement in one line.
+  const disagreement = join(w.workdir, "lock-disagreement.sh")
+  writeFileSync(
+    disagreement,
+    [
+      "#!/bin/sh",
+      "version=$(cat child/version 2>/dev/null || echo missing)",
+      'grep -q "child $version" bun.lock || { echo "the root lock does not name child $version, the version the gitlink pins"; exit 1; }',
+      "",
+    ].join("\n"),
+  )
+  chmodSync(disagreement, 0o755)
+
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [{ name: "verify", run: disagreement, timeoutMs: 30_000 }],
+    deriveRootPaths: ["bun.lock"],
+    env: {
+      ...(await w.options({ exit: 0 })).env,
+      GIT_CONFIG_COUNT: "3",
+      GIT_CONFIG_KEY_0: "protocol.file.allow",
+      GIT_CONFIG_VALUE_0: "always",
+      GIT_CONFIG_KEY_1: `url.${w.remote}.insteadOf`,
+      GIT_CONFIG_VALUE_1: hostedRoot,
+      GIT_CONFIG_KEY_2: `url.${childRemote}.insteadOf`,
+      GIT_CONFIG_VALUE_2: hostedChild,
+    },
+    notify: undefined,
+  })
+
+  // (a) nothing lands: the target still names the submitted head, and no merge happened.
+  expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/bare-raise"], failed: [], merged: [] })
+  expect((await w.git(["rev-parse", "origin/main"])).trim()).toBe(target)
+  // (b) the stop names the queue and the repair step; (c) the change is stuck, never sent back as failed.
+  expect(logRecords(outcome)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        decision: "stuck",
+        code: "yrd-settled-base-check-failed",
+        branch: "task/bare-raise",
+        next: expect.stringContaining("inspect the named settled-base check log"),
+      }),
+    ]),
+  )
+  expect(logRecords(outcome).filter((record) => record.decision === "failed")).toEqual([])
+})
+
 /** @failure A temporary remote setup outage stopped the event line before its one in-round retry.
  * @level l3 @consumer queue operator and submitter
  */
