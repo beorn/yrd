@@ -56,6 +56,7 @@ import { join } from "node:path"
 import { gunzipSync } from "node:zlib"
 import { incidentIn, type Incident } from "./incident.ts"
 import type { GitInvocation, GitInvocationOptions, GitOutputSink } from "./git.ts"
+import type { ProcessResult } from "@yrd/process"
 import type { LocalSource } from "./local.ts"
 
 /**
@@ -386,7 +387,7 @@ export function openLog(
       mkdirSync(gitDirectory, { recursive: true })
       const evidence =
         invocation.artifacts === undefined
-          ? join(gitDirectory, `${++invocationCount}.failed.json`)
+          ? join(gitDirectory, `${++invocationCount}.json`)
           : `${invocation.artifacts.stdout}.json`
       const result = invocation.result
       // Ordinary bytes are in the raw files. Keep loss/settlement metadata and
@@ -422,7 +423,15 @@ export function openLog(
         scope: invocation.selection?.scope,
         origin: invocation.selection?.origin,
         exit: result?.exitCode,
-        complete: invocation.artifacts?.complete ?? false,
+        ...(result === undefined ? {} : { ms: result.durationMs }),
+        ...(invocation.outputBytes === undefined
+          ? {}
+          : { stdoutBytes: invocation.outputBytes.stdout, stderrBytes: invocation.outputBytes.stderr }),
+        output: invocation.artifacts === undefined ? "not-kept" : "kept",
+        // A dropped capture has no gap to be incomplete about: its row carries the argv, the exit, the duration and
+        // the byte count, and `output: "not-kept"` says the file is absent on purpose.
+        complete:
+          invocation.artifacts?.complete ?? (invocation.outputBytes !== undefined && invocation.failure === undefined),
         failure: invocation.failure,
         refusal: invocation.protocol?.refusal?.kind,
       })
@@ -430,51 +439,190 @@ export function openLog(
   }
 }
 
-/** Run-owned raw artifacts; Process is still the only stream reader. `onClosed` sees each file once it is closed. */
-function openGitOutput(stdout: string, stderr: string, onClosed: (path: string) => void): GitOutputSink {
-  const out = openSync(stdout, "wx")
-  let err: number
-  try {
-    err = openSync(stderr, "wx")
-  } catch (error) {
-    try {
-      closeSync(out)
-    } catch (closeError) {
-      throw new AggregateError([error, closeError], `could not open raw Git output ${stderr} or close ${stdout}`)
+/**
+ * Raw output one invocation may hold in memory before it is spilled to its files (hh 38654). Measured on the live
+ * hh-dev queue: a round's largest capture is one full `ls-tree -r` listing of the repository, 16.4 MB, so this holds
+ * the ordinary case whole and spills only the pathological one — where correctness still wins over the saving.
+ */
+const GIT_OUTPUT_MEMORY_BYTES = 16 * 1024 * 1024
+
+/**
+ * The read-only queries whose stdout is a machine's input and nobody's reading (hh 38654). Measured on the hh-dev
+ * queue: one round spawns about 1,300 git processes for ONE candidate and writes 120-208 MiB of raw stdout, and 73%
+ * of those bytes are `ls-tree -r` listings — the whole repository tree, re-read for every store the round inspects,
+ * and never opened after the merge.
+ *
+ * Deliberately a list of what may be DROPPED, never a list of what must be kept: an unrecognised command keeps its
+ * output, so a new caller that needs its bytes is safe by default and only a reviewed entry can lose them.
+ */
+const PLUMBING_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  "cat-file",
+  "check-ignore",
+  "config",
+  "diff-files",
+  "diff-index",
+  "diff-tree",
+  "for-each-ref",
+  "hash-object",
+  "ls-files",
+  "ls-tree",
+  "merge-base",
+  "name-rev",
+  "rev-list",
+  "rev-parse",
+  "show-ref",
+  "symbolic-ref",
+])
+
+/** Global options that take a value, so `-c k=v ls-tree` still reads as `ls-tree`. */
+const GIT_GLOBAL_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
+  "-c",
+  "-C",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+  "--exec-path",
+])
+
+/** The subcommand a git argv runs, skipping the global options git accepts before it. */
+export function gitSubcommand(args: readonly string[]): string | undefined {
+  for (let at = 0; at < args.length; at++) {
+    const arg = args[at] as string
+    if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(arg)) {
+      at++
+      continue
     }
-    throw error
+    if (arg.startsWith("-")) continue
+    return arg
   }
+  return undefined
+}
+
+/**
+ * Whether one captured git invocation keeps its raw output (hh 38654, @cto 2026-11-25). A cleanly finished plumbing
+ * query keeps NO raw file: its journal row (argv, exit, duration, bytes out) is the record, and `yrd runs` says the
+ * output was not kept instead of showing an empty pane. Everything else keeps every byte as before — anything that did
+ * not settle cleanly (a failure is never harder to debug than it was), and every command a person reads: pushes,
+ * fetches, merges, commits, worktree and clean output, and any subcommand this list has never heard of.
+ *
+ * This is the ONE place the policy lives (22955 stays whole: a reader still opens every capture an older queue did
+ * write, and `readRetainedFile` resolves either form).
+ */
+export function keepGitOutput(
+  args: readonly string[],
+  result: ProcessResult | undefined,
+  failure: string | undefined,
+): boolean {
+  if (result === undefined) return true
+  const clean =
+    result.exitCode === 0 &&
+    result.signal === null &&
+    !result.timedOut &&
+    result.stalled !== true &&
+    result.sweepFailure === undefined &&
+    result.escapedDescendant !== true &&
+    (result.outputTruncation?.length ?? 0) === 0 &&
+    failure === undefined
+  if (!clean) return true
+  const subcommand = gitSubcommand(args)
+  return subcommand === undefined || !PLUMBING_GIT_SUBCOMMANDS.has(subcommand)
+}
+
+/**
+ * Run-owned raw artifacts; Process is still the only stream reader. The sink holds the capture in memory until the
+ * invocation settles, because only then is the keep policy answerable: a kept output is written to its files exactly
+ * as before (and `onClosed` deduplicates it), an unkept one opens no file and writes no byte. Past
+ * {@link GIT_OUTPUT_MEMORY_BYTES} the sink spills to the files as it goes; if that invocation then turns out not worth
+ * keeping, the spill is closed and removed, and the journal row says the output was not kept.
+ */
+function openGitOutput(stdout: string, stderr: string, onClosed: (path: string) => void): GitOutputSink {
+  const pending: Record<"stdout" | "stderr", Uint8Array[]> = { stdout: [], stderr: [] }
+  const bytes = { stdout: 0, stderr: 0 }
+  let held = 0
+  let fds: Readonly<{ stdout: number; stderr: number }> | undefined
   let closed = false
+  const openFiles = (): Readonly<{ stdout: number; stderr: number }> => {
+    if (fds !== undefined) return fds
+    const out = openSync(stdout, "wx")
+    let err: number
+    try {
+      err = openSync(stderr, "wx")
+    } catch (error) {
+      try {
+        closeSync(out)
+      } catch (closeError) {
+        throw new AggregateError([error, closeError], `could not open raw Git output ${stderr} or close ${stdout}`)
+      }
+      throw error
+    }
+    fds = { stdout: out, stderr: err }
+    return fds
+  }
+  const writeOne = (fd: number, stream: "stdout" | "stderr", chunk: Uint8Array): void => {
+    let at = 0
+    while (at < chunk.byteLength) {
+      const wrote = writeSync(fd, chunk, at, chunk.byteLength - at)
+      if (wrote === 0) throw new Error(`raw Git output ${stream} made no write progress`)
+      at += wrote
+    }
+  }
+  const flush = (): void => {
+    const open = openFiles()
+    for (const stream of ["stdout", "stderr"] as const) {
+      for (const chunk of pending[stream]) writeOne(open[stream], stream, chunk)
+      pending[stream].length = 0
+    }
+    held = 0
+  }
   return {
     stdout,
     stderr,
     onOutput({ stream, chunk }) {
       if (closed) throw new Error(`raw Git output ${stream} is already closed`)
-      const fd = stream === "stdout" ? out : err
-      let at = 0
-      while (at < chunk.byteLength) {
-        const wrote = writeSync(fd, chunk, at, chunk.byteLength - at)
-        if (wrote === 0) throw new Error(`raw Git output ${stream} made no write progress`)
-        at += wrote
+      bytes[stream] += chunk.byteLength
+      if (fds !== undefined) {
+        writeOne(fds[stream], stream, chunk)
+        return
       }
+      pending[stream].push(chunk)
+      held += chunk.byteLength
+      if (held > GIT_OUTPUT_MEMORY_BYTES) flush()
     },
-    close() {
-      if (closed) return
+    close({ keep }) {
+      const settled = (): Readonly<{ kept: boolean; stdoutBytes: number; stderrBytes: number }> => ({
+        kept: keep && fds !== undefined,
+        stdoutBytes: bytes.stdout,
+        stderrBytes: bytes.stderr,
+      })
+      if (closed) return settled()
       closed = true
+      if (keep) flush()
+      const open = fds
+      if (open === undefined) return settled()
       const errors: unknown[] = []
-      try {
-        closeSync(out)
-      } catch (error) {
-        errors.push(error)
-      }
-      try {
-        closeSync(err)
-      } catch (error) {
-        errors.push(error)
+      for (const stream of ["stdout", "stderr"] as const) {
+        try {
+          closeSync(open[stream])
+        } catch (error) {
+          errors.push(error)
+        }
       }
       if (errors.length > 0) throw new AggregateError(errors, `could not close raw Git output ${stdout}, ${stderr}`)
-      onClosed(stdout)
-      onClosed(stderr)
+      if (keep) {
+        onClosed(stdout)
+        onClosed(stderr)
+      } else {
+        for (const path of [stdout, stderr]) {
+          try {
+            rmSync(path, { force: true })
+          } catch (error) {
+            errors.push(error)
+          }
+        }
+        if (errors.length > 0)
+          throw new AggregateError(errors, `could not remove unkept raw Git output ${stdout}, ${stderr}`)
+      }
+      return settled()
     },
   }
 }
@@ -533,6 +681,14 @@ export type JournalCommand = Readonly<{
   stderr?: string
   /** Why there is no output: the invocation's own failure, as the row says it. */
   failure?: string
+  /**
+   * The row says its raw output was deliberately not kept: the invocation exited cleanly and its bytes were plumbing
+   * nothing reads after a merge (hh 38654). `args`, `exit` and `ms` are the record; a reader says so rather than
+   * showing an empty pane.
+   */
+  output?: "not-kept"
+  /** Milliseconds the command ran, when the row recorded it. */
+  ms?: number
 }>
 
 /**
@@ -1828,7 +1984,7 @@ function stepsIn(records: readonly LogRecord[]): Readonly<{
 
 /** A git row as a command, with its raw output files named by the evidence path; undefined for a row that is not one. */
 function commandOf(record: LogRecord): JournalCommand | undefined {
-  const { args, cwd, evidence, exit, failure } = record
+  const { args, cwd, evidence, exit, failure, ms, output } = record
   if (!Array.isArray(args) || !args.every((arg) => typeof arg === "string") || typeof cwd !== "string") return undefined
   const stdout =
     typeof evidence === "string" && evidence.endsWith(".stdout.bin.json")
@@ -1838,6 +1994,8 @@ function commandOf(record: LogRecord): JournalCommand | undefined {
     args: args as string[],
     cwd,
     ...(typeof exit === "number" ? { exit } : {}),
+    ...(typeof ms === "number" ? { ms } : {}),
+    ...(output === "not-kept" ? { output: "not-kept" as const } : {}),
     ...(stdout === undefined ? {} : { stdout, stderr: stdout.replace(/\.stdout\.bin$/u, ".stderr.bin") }),
     ...(typeof failure === "string" ? { failure } : {}),
   }

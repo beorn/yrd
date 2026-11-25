@@ -17,7 +17,7 @@ function capture(log: ReturnType<typeof openLog>, stdout: string, stderr = "") {
   const sink = log.openGitOutput({} as GitInvocation)
   if (stdout.length > 0) sink.onOutput({ stream: "stdout", chunk: Buffer.from(stdout) })
   if (stderr.length > 0) sink.onOutput({ stream: "stderr", chunk: Buffer.from(stderr) })
-  sink.close()
+  sink.close({ keep: true })
   return sink
 }
 
@@ -42,19 +42,24 @@ describe("a run's identical git outputs share one file (33388)", () => {
   it("keeps the written copy and journals a warning when the link cannot be made", () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-dedup-"))
     const log = openLog(join(root, "logs"))
-    const first = capture(log, "same bytes\n")
-    // The second output's folder refuses new names, so the temporary link fails after the file is written.
+    // The sink holds a capture in memory until the invocation settles, so these two spill (>16 MiB each) and their
+    // files exist before the folder starts refusing new names; the temporary LINK then fails after a write succeeded.
+    const big = Buffer.alloc(17 * 1024 * 1024, 0x61)
+    const firstSink = log.openGitOutput({} as GitInvocation)
+    firstSink.onOutput({ stream: "stdout", chunk: big })
+    firstSink.close({ keep: true })
+    const first = firstSink
     const gitDirectory = join(root, "logs", log.id, "git")
     const sink = log.openGitOutput({} as GitInvocation)
-    sink.onOutput({ stream: "stdout", chunk: Buffer.from("same bytes\n") })
+    sink.onOutput({ stream: "stdout", chunk: big })
     chmodSync(gitDirectory, 0o555)
     try {
-      sink.close()
+      sink.close({ keep: true })
     } finally {
       chmodSync(gitDirectory, 0o755)
     }
     expect(statSync(sink.stdout).ino).not.toBe(statSync(first.stdout).ino)
-    expect(readFileSync(sink.stdout, "utf8")).toBe("same bytes\n")
+    expect(readFileSync(sink.stdout).length).toBe(17 * 1024 * 1024)
     const warnings = readRunLog(join(root, "logs"), log.id).filter((record) => record.kind === "warning")
     expect(warnings).toEqual([
       expect.objectContaining({ subject: "git-output-dedup", reason: expect.stringContaining(sink.stdout) }),
