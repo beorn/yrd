@@ -26,7 +26,10 @@ export async function installWatchCrashRecord(): Promise<Disposable | undefined>
   // TypeScript refuses the structural assignment outright. Narrow here, once, instead of pinning the pane to one
   // silvery. Goes with the tolerance when the pins carry both functions (hh #35075).
   const silveryRuntime = silveryModule as SilveryRuntimeCrashRecord
-  const restore = silveryRuntime.recordAppCrash
+  // Presence is asked with `in`, never by reading the property: a module mock (and CI's own silvery sibling,
+  // which is older than recordAppCrash) throws on the read instead of answering undefined, so the optimistic
+  // read turned this tolerance into "yrd watch cannot start" against exactly the silvery it exists to tolerate.
+  const restore = "recordAppCrash" in silveryRuntime ? silveryRuntime.recordAppCrash : undefined
   // silent-fallback-allow: a silvery without recordAppCrash still owns its own crash listeners, so its record is kept.
   if (restore === undefined) return undefined
   if (loggily.installCrashHandler === undefined) {
