@@ -1570,6 +1570,17 @@ export async function coreQueueCommand(
   }
   // The binding IS the disposal slot; the object holds no state of its own.
   void housekeepingJournal
+  // 29630 (@cto 5a66fb46): Yrd's post-merge closer, through issues.yml, is the only writer closing issues from merge
+  // trailers. issuesProvider.update still parses until it leaves the parser, and is never run; a declaration in force
+  // that still holds it is told out loud, the way issuesProvider.read is (@cto 6a06588f).
+  if (
+    config.issuesProvider?.update !== undefined &&
+    (request.command === "up" || request.command === "run" || request.command === "merge")
+  ) {
+    io.stderr(
+      `yrd: .yrd.yml issuesProvider.update: retired and ignored; delete this key. Yrd's post-merge closer closes issues from merge trailers through issues.yml at --project-root (#29630).\n`,
+    )
+  }
   await using postMerge =
     request.command === "up" || request.command === "run" || request.command === "merge"
       ? createPostMerge({
@@ -1597,8 +1608,6 @@ export async function coreQueueCommand(
             target: string
             base: string
             merged: readonly string[]
-            update?: readonly string[]
-            updateDue?: boolean
             projectRoot?: string
             queueBranch: string
             remote: string
@@ -1979,8 +1988,6 @@ export async function coreQueueCommand(
             target: outcome.target,
             base: outcome.base,
             merged: outcome.merged,
-            update: declared.config.issuesProvider?.update,
-            updateDue: outcome.merged.length > 0 || startupCatchup,
             ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
             queueBranch: config.target.branch,
             remote: config.target.remote,
@@ -4468,7 +4475,6 @@ export async function coreQueueCommand(
                 target: declared.oid,
                 base: declared.oid,
                 merged,
-                update: declared.config.issuesProvider?.update,
                 ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
                 queueBranch: declared.config.target.branch,
                 remote: declared.config.target.remote,

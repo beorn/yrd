@@ -1,7 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { randomUUID } from "node:crypto"
-import { createProcess } from "@yrd/process"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   closingReferencesOf,
@@ -74,8 +73,6 @@ type Context = Readonly<{
   /** The target this round's judgements were made against; merged item events need it (#31194). */
   base?: string
   merged: readonly string[]
-  update?: readonly string[]
-  updateDue?: boolean
   projectRoot?: string
   queueBranch?: string
   /** The target's remote name; the `merged` item event names the repository by its URL. */
@@ -715,7 +712,6 @@ export function createPostMerge<C extends Context>(
       }
     }
   }
-  const process = createProcess({ cwd: options.cwd, env: options.env })
   /** The next attempt's context, and the base of every round coalesced into it: the attempt resolves the earliest. */
   let pending: Readonly<{ context: C; bases: ReadonlyArray<string | undefined> }> | undefined
   /** A failed attempt's branches, waiting for the next nudge (37513); folded into `pending` as soon as one exists. */
@@ -738,7 +734,6 @@ export function createPostMerge<C extends Context>(
       : {
           ...context,
           merged: [...new Set([...previous.merged, ...context.merged])],
-          updateDue: (context.updateDue ?? true) || (previous.updateDue ?? true),
         }
   // The existing service stays resident: keep only its last validated snapshot across sequential attempts.
   let completedQueue: Readonly<{ branch: string; value: EventQueue }> | undefined
@@ -848,7 +843,7 @@ export function createPostMerge<C extends Context>(
     const stdout = join(directory, id + ".stdout.log")
     const stderr = join(directory, id + ".stderr.log")
     const startedAt = new Date().toISOString()
-    const provenance = { ...context, bases, argv: context.update ?? [], cwd: options.cwd, startedAt, stdout, stderr }
+    const provenance = { ...context, bases, cwd: options.cwd, startedAt, stdout, stderr }
     evidence(stdout, () => {
       writeFileSync(stdout, "")
     })
@@ -859,13 +854,11 @@ export function createPostMerge<C extends Context>(
       atomicWriteFileSync(path, JSON.stringify({ ...provenance, status: "running" }) + "\n")
     })
     let issueActions: Array<Record<string, unknown>> = []
-    let settled: Record<string, unknown> = {
-      status: "skipped",
-      reason:
-        context.update === undefined ? "no issuesProvider.update declared" : "no provider update due for idle round",
-    }
+    // 29630 (@cto 5a66fb46): no provider update runs here; Yrd's own closer below is the only issue writer.
+    let settled: Record<string, unknown> =
+      context.merged.length === 0 ? { status: "skipped", reason: "nothing merged this round" } : { status: "succeeded" }
     let eventsFailed = false
-    /** Set when the failure names no branch: the update itself, or the attempt as a whole (37513). */
+    /** Set when the failure names no branch: the attempt as a whole (37513). */
     let failedWhole = false
     try {
       // Before the update and the close, so an issue reads merged, then closed. Never needs --project-root.
@@ -875,59 +868,6 @@ export function createPostMerge<C extends Context>(
       // An event write that failed without a branch row names nobody, so it is charged to every branch (@dev/4).
       if (events.failed && !events.actions.some(({ status, branch }) => failingStatus(status) && typeof branch === "string")) {
         failedWhole = true
-      }
-      try {
-        if (context.update !== undefined && context.updateDue !== false) {
-          const result = await process.run({
-            argv: context.update,
-            cwd: options.cwd,
-            timeoutMs: UPDATE_TIMEOUT_MS,
-            signal: options.stop,
-            onOutput: ({ stream, chunk }) => {
-              const output = stream === "stdout" ? stdout : stderr
-              evidence(output, () => {
-                appendFileSync(output, chunk)
-              })
-            },
-          })
-          const failed =
-            result.exitCode !== 0 ||
-            result.signal !== null ||
-            result.timedOut ||
-            result.stalled ||
-            result.escapedDescendant ||
-            result.sweepFailure !== undefined
-          settled = {
-            status: failed ? "failed" : "succeeded",
-            exitCode: result.exitCode,
-            signal: result.signal,
-            timedOut: result.timedOut,
-            stalled: result.stalled,
-            sweepFailure: result.sweepFailure,
-            escapedDescendant: result.escapedDescendant,
-          }
-          if (failed) {
-            failedWhole = true
-            options.report(
-              "issuesProvider.update " +
-                JSON.stringify(context.update) +
-                " failed: exit " +
-                result.exitCode +
-                ", signal " +
-                result.signal +
-                ", timeout " +
-                result.timedOut +
-                "; " +
-                stderr,
-            )
-          }
-        }
-      } catch (error) {
-        settled = { status: "unavailable", reason: String(error) }
-        failedWhole = true
-        options.report(
-          "issuesProvider.update " + JSON.stringify(context.update) + " unavailable: " + String(error) + "; " + stderr,
-        )
       }
       if (
         context.merged.length > 0 &&
@@ -1003,7 +943,7 @@ export function createPostMerge<C extends Context>(
     ].join(", ")
     return { failed: chargedBranches(context.merged, issueActions, failedWhole), reason, evidence: path }
   }
-  /** Fold the carried branches into `pending`, whose newer context wins every field but `merged` and `updateDue`. */
+  /** Fold the carried branches into `pending`, whose newer context wins every field but `merged`. */
   const foldCarried = (): void => {
     if (carried === undefined) return
     pending =
@@ -1036,7 +976,7 @@ export function createPostMerge<C extends Context>(
     }
     if (again.length > 0) {
       const bases = [...new Set(again.map((branch) => baseOf.get(branch)))]
-      const owed = { context: { ...next.context, merged: again, updateDue: true }, bases }
+      const owed = { context: { ...next.context, merged: again }, bases }
       carried =
         carried === undefined
           ? owed
@@ -1105,16 +1045,14 @@ export function createPostMerge<C extends Context>(
   }
   const close = async (): Promise<void> => {
     closing = true
-    // Production reload aborts first. Without abort, an active provider's
+    // Production reload aborts first. Without abort, an active attempt's
     // finally may still offer its own cleanup; both lifetimes drain below.
     if (options.stop !== undefined) {
       dropPending()
       dropCleanupPending()
-      await process.close()
     }
     await drain()
     while (cleanupActive !== undefined) await cleanupActive
-    await process.close()
   }
   return { nudge, recover, [Symbol.asyncDispose]: close }
 }
