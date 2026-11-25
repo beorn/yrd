@@ -18,10 +18,14 @@ interface LoggilyCrashHandler {
 
 /** Install the crash handler for one watch pane's lifetime; dispose it when the pane has exited. */
 export async function installWatchCrashRecord(): Promise<Disposable | undefined> {
-  const [silveryRuntime, loggily]: [SilveryRuntimeCrashRecord, LoggilyCrashHandler] = await Promise.all([
+  const [silveryModule, loggily]: [unknown, LoggilyCrashHandler] = await Promise.all([
     import("silvery/runtime"),
     import("loggily"),
   ])
+  // The bridge is the tolerance itself: a silvery older than `recordAppCrash` has no property to overlap with, and
+  // TypeScript refuses the structural assignment outright. Narrow here, once, instead of pinning the pane to one
+  // silvery. Goes with the tolerance when the pins carry both functions (hh #35075).
+  const silveryRuntime = silveryModule as SilveryRuntimeCrashRecord
   const restore = silveryRuntime.recordAppCrash
   // silent-fallback-allow: a silvery without recordAppCrash still owns its own crash listeners, so its record is kept.
   if (restore === undefined) return undefined

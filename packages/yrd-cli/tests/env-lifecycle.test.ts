@@ -311,7 +311,12 @@ it("retained drain uses the production CLI in dry-run mode and requires its name
     ),
     run.stderr(),
   ).toBe(0)
-  expect(JSON.parse(run.stdout())).toMatchObject({
+  // 34127: a default run reports in chunks, so the dry-run verdict and its rows are the single chunk's.
+  const report = JSON.parse(run.stdout()) as {
+    chunks?: readonly { apply: boolean; rows: readonly { entry: string; outcome: string }[] }[]
+  }
+  expect(report.chunks).toHaveLength(1)
+  expect(report.chunks?.[0]).toMatchObject({
     apply: false,
     rows: [{ entry: join(retain, "old"), outcome: "kept" }],
   })
@@ -355,10 +360,16 @@ it("retained drain forwards a cold-proof stop as exit 2 with its report", async 
     ),
     run.stderr(),
   ).toBe(2)
-  const report = JSON.parse(run.stdout()) as { apply: boolean; stopped?: string; owners?: { coldProofFailed: number } }
-  expect(report.apply).toBe(false)
+  const report = JSON.parse(run.stdout()) as {
+    stopped?: string
+    chunks?: readonly { apply: boolean; owners?: { coldProofFailed: number } }[]
+  }
+  // 34127: the batch runs in chunks by default, so the dry-run verdict and the owner census arrive on the chunk while
+  // the stop names the whole run. Both are the live contract; the assertions below read each where it is published.
   expect(report.stopped).toContain("@gate/retention-cold-proof: cold-proof-incomplete")
-  expect(report.owners?.coldProofFailed).toBe(1)
+  expect(report.chunks).toHaveLength(1)
+  expect(report.chunks?.[0]?.apply).toBe(false)
+  expect(report.chunks?.[0]?.owners?.coldProofFailed).toBe(1)
   expect(run.stderr()).toContain(`cannot prove cold owner ${owner}`)
   expect(existsSync(join(retain, "old", "manifest.json"))).toBe(true)
 })

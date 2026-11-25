@@ -22,20 +22,6 @@
         "vitest": "5.1.0",
       },
     },
-    "../bearly/packages/removely": {
-      "name": "removely",
-      "version": "0.6.0",
-      "bin": {
-        "removely": "./src/cli.ts",
-      },
-      "dependencies": {
-        "@bearly/process-sources": "0.1.0",
-      },
-      "devDependencies": {
-        "@types/node": "26.6.5",
-        "tsdown": "0.23.7",
-      },
-    },
     "packages/yrd-bay": {
       "name": "@yrd/bay",
       "version": "0.0.1",
@@ -54,13 +40,14 @@
         "@silvery/ansi": "0.27.0",
         "@silvery/commander": "0.27.0",
         "@yrd/bay": "workspace:*",
+        "@yrd/issues": "workspace:*",
         "@yrd/process": "workspace:*",
         "@yrd/queue-core": "workspace:*",
         "git-super": "0.9.0",
         "gitomic": "0.9.0",
         "loggily": "0.13.0",
         "react": "19.3.1",
-        "removely": "workspace:*",
+        "removely": "0.5.0",
         "silvery": "0.27.0",
       },
       "devDependencies": {
@@ -84,7 +71,7 @@
         "zod": "4.6.5",
       },
       "devDependencies": {
-        "removely": "workspace:*",
+        "removely": "0.5.0",
       },
     },
     "packages/yrd-queue-core": {
@@ -96,7 +83,7 @@
         "@yrd/process": "workspace:*",
         "git-super": "0.9.0",
         "gitomic": "0.9.0",
-        "removely": "workspace:*",
+        "removely": "0.5.0",
       },
     },
   },
@@ -522,7 +509,7 @@
 
     "regex-utilities": ["regex-utilities@2.3.0", "", {}, "sha512-8VhliFJAWRaUiVvREIiW2NXXTmHs4vMNnSzuJVhscgmGav3g9VDxLrQndI3dZZVVdp0ZO/5v0xmX516/7M9cng=="],
 
-    "removely": ["removely@workspace:../bearly/packages/removely"],
+    "removely": ["removely@0.5.0", "", { "dependencies": { "@bearly/process-sources": "^0.1.0" }, "bin": { "removely": "dist/cli.mjs" } }, "sha512-QIAP0uyXjK8Y3m5hDUqvW6ciyy0c879dwUPZNXSBKFFmZmkEuh4+BA0EUkZIyt9Q3wcaPgfENNKPW2Sf2+2a3w=="],
 
     "resolve-pkg-maps": ["resolve-pkg-maps@1.0.0", "", {}, "sha512-seS2Tj26TBVOC2NIc2rOe2y2ZO7efxITtLZcGSOnHHNOQ7CkiUBfw0Iw2ck6xkIhPwLhKNLS8BO+hEpngQlqzw=="],
 
