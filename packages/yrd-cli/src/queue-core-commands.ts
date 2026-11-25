@@ -2324,6 +2324,8 @@ export async function coreQueueCommand(
       const kept: Row[] = []
       const failed: Row[] = []
       let excluded = 0
+      /** Loud once in stderr and in the JSON report when a landed tip's binding resolved to no bead (@cto c95d0a0d). */
+      let bindingUnresolved: string | undefined
       try {
         for (const [ref, head] of heads) {
           const branch = ref.slice("refs/heads/".length)
@@ -2420,8 +2422,11 @@ export async function coreQueueCommand(
             reason: discardNote === undefined ? reason : `${reason} (${discardNote})`,
             dryRun: false,
             log,
-            protections: async () =>
-              (await readBranchProtections(io, { repo: authorRepo, branch, tip: head, issue: bound })).protections,
+            protections: async () => {
+              const read = await readBranchProtections(io, { repo: authorRepo, branch, tip: head, issue: bound })
+              bindingUnresolved = read.bindingUnresolved
+              return read.protections
+            },
             disposition: {
               kind: "closed",
               store: eventStore,
@@ -2462,6 +2467,7 @@ export async function coreQueueCommand(
       } finally {
         log.finish()
       }
+      if (bindingUnresolved !== undefined) io.stderr(`yrd: ${bindingUnresolved}\n`)
       if (kept.length > 0) {
         const { commonDirectory } = await inspectCheckoutGitMetadata(authorRepo)
         for (const row of kept) {
@@ -2479,6 +2485,7 @@ export async function coreQueueCommand(
         removed,
         kept,
         failed,
+        ...(bindingUnresolved === undefined ? {} : { bindingUnresolved }),
       }
       emit(
         io,

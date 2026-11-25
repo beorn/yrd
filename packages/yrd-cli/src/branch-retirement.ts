@@ -997,6 +997,8 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
   }
   let openedLog = request.dryRun ? undefined : openRetirementLog()
   const log = () => (openedLog ??= openRetirementLog())
+  /** Loud once in stderr and in the JSON report when a landed tip's binding resolved to no bead (@cto c95d0a0d). */
+  let bindingUnresolved: string | undefined
   let headMove: { before: { symbolic: string; tip: string }; after: { detached: string } } | undefined
   /** 30094: a worktree-less retained store keeps its own HEAD; move it in place at the verified tip
    * with the tip as the expected old value, so the branch ref can be removed without losing custody. */
@@ -1059,10 +1061,14 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
       }
     }
     const protections = async (): Promise<readonly string[]> => {
-      const held = (
-        await readBranchProtections(io, { repo, branch: request.branch, tip: request.tip, issue: request.issue })
-      ).protections
-      return discardProblem === undefined ? held : [...held, discardProblem]
+      const read = await readBranchProtections(io, {
+        repo,
+        branch: request.branch,
+        tip: request.tip,
+        issue: request.issue,
+      })
+      bindingUnresolved = read.bindingUnresolved
+      return discardProblem === undefined ? read.protections : [...read.protections, discardProblem]
     }
     if (destination === "origin") {
       const row = { repo, branch: request.branch, head: observedTip ?? request.tip }
@@ -1294,6 +1300,7 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
       removed: result.outcome === "removed" ? [row] : [],
       kept: result.outcome === "kept" ? [row] : [],
       failed: result.outcome === "failed" ? [row] : [],
+      ...(bindingUnresolved === undefined ? {} : { bindingUnresolved }),
     }
   } catch (cause) {
     let reason = `${repo}: ${cause instanceof Error ? cause.message : String(cause)}`
@@ -1327,8 +1334,10 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
         },
       ],
       ...(request.dryRun ? { dryRun: true as const, eligible: [] } : {}),
+      ...(bindingUnresolved === undefined ? {} : { bindingUnresolved }),
     }
   } finally {
+    if (bindingUnresolved !== undefined) io.stderr(`yrd: ${bindingUnresolved}\n`)
     openedLog?.finish()
   }
 }

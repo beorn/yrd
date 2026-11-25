@@ -40,6 +40,10 @@ export type YrdCliExitCode = 0 | 1 | 2 | 3 | 4
 export type LocalBranchProtectionResult = Readonly<{
   protections: readonly string[]
   evidence: readonly Readonly<{ kind: "malformed-lease"; path: string; reason: string }>[]
+  /** A landed tip (0 unique commits by ancestry in origin/main) whose recorded binding is free text no bead
+   * matches: issue-scoped holds were unreadable, so the drop proceeded on the branch-drop authority alone.
+   * Present only when that exception was taken; the report carries it loudly (@cto c95d0a0d). */
+  bindingUnresolved?: string
 }>
 
 export type YrdCliIO = {
