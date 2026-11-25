@@ -2763,11 +2763,13 @@ describe("yrd queue up, the service", () => {
             expect(inspection.notCompared, "complete native comparison").toEqual([])
             expect(inspection.borrowers, "no native borrower").toEqual([])
           }
-          const manifests = [...run.stderr().matchAll(/retained environment removal proof (.+)/g)].map((match) =>
-            JSON.parse(readFileSync(match[1]!, "utf8")),
+          // #38198: this environment's whole head is on origin/main and its worktree is clean, so git-super writes
+          // NO retained copy — there is no manifest, and the absence is a recorded receipt, never a silent gap.
+          expect(run.stderr(), "a published clean head writes no retained copy").not.toContain(
+            "retained environment removal proof ",
           )
-          expect(manifests).toContainEqual(
-            expect.objectContaining({ path: environment.path, head: environmentHead, notCompared: [] }),
+          expect(run.stderr()).toMatch(
+            /retained environment removal kept no copy: every head is on [^;]*refs\/remotes\/origin\/main and the worktree is clean/u,
           )
           await w.git(["fetch", "--quiet", "origin", "main"])
           expect(
