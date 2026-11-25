@@ -973,7 +973,10 @@ export function createPostMerge<C extends Context>(
       issueActions = events.actions
       eventsFailed = events.failed
       // An event write that failed without a branch row names nobody, so it is charged to every branch (@dev/4).
-      if (events.failed && !events.actions.some(({ status, branch }) => failingStatus(status) && typeof branch === "string")) {
+      if (
+        events.failed &&
+        !events.actions.some(({ status, branch }) => failingStatus(status) && typeof branch === "string")
+      ) {
         failedWhole = true
       }
       if (
