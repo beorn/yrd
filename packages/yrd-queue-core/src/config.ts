@@ -272,11 +272,10 @@ export function parseConfig(
   }
   if (!isRecord(raw)) throw new Error(`.yrd.yml at ${at.slice(0, 12)} is not a mapping`)
   const historical = Object.keys(raw).filter((key) => key in HISTORICAL)
-  if (historical.length > 0) {
-    historicalKeys?.(historical.map((key) => HISTORICAL[key] as string))
-    raw = Object.fromEntries(Object.entries(raw).filter(([key]) => !(key in HISTORICAL)))
-  }
-  const declared = newerKeys === undefined ? strictTop(raw) : withoutNewerKeys(raw, newerKeys)
+  if (historical.length > 0) historicalKeys?.(historical.map((key) => HISTORICAL[key] as string))
+  const current =
+    historical.length === 0 ? raw : Object.fromEntries(Object.entries(raw).filter(([key]) => !(key in HISTORICAL)))
+  const declared = newerKeys === undefined ? strictTop(current) : withoutNewerKeys(current, newerKeys)
   const notify = readNotify(declared.notify, unknownNotifyEvents)
   const setup = optionalString(declared, "setup")
   const derive = optionalString(declared, "derive")
