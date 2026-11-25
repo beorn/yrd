@@ -218,9 +218,26 @@ it("keeps failing a close that removed nothing, even after a writer-lock wait ra
     JSON.stringify({ executable: busyGit(dirname(w.work), "present"), contract: "native" }),
   ])
   const run = capture(w.work)
-  await expect(closeEnvironment(path, { json: true }, run.io)).rejects.toThrow(
-    "could not close through git super worktree remove",
+  const failure = await closeEnvironment(path, { json: true }, run.io).then(
+    () => undefined,
+    (error: unknown) => (error instanceof Error ? error.message : String(error)),
   )
+  // Two refusals keep this row's promise, and which one fires depends on the host: the worktree removal itself, or
+  // the same-UID census refusing because it could not read a sibling pid (a CI runner denies /proc/<pid> with
+  // EACCES while a local host reads it). Either way the close must be REFUSED, nothing removed, and the census
+  // variant must name the pid it could not read — an unknown holder is never assumed absent.
+  expect(failure, run.stdout() + run.stderr()).toBeDefined()
+  if (failure?.includes("could not close through git super worktree remove") === true) {
+    expect(failure, run.stdout() + run.stderr()).toContain("no plain-git fallback was attempted")
+  } else {
+    expect(failure, run.stdout() + run.stderr()).toMatch(
+      /same-UID process (CWD|fd) census /u,
+    )
+    expect(failure, run.stdout() + run.stderr()).toMatch(
+      /could not read pid \d+ \S+ \(EACCES\)|incomplete: no readable coverage/u,
+    )
+    expect(failure, run.stdout() + run.stderr()).toContain("a holder among them cannot be ruled out")
+  }
   expect(run.stdout()).toBe("")
   expect(existsSync(path)).toBe(true)
   expect(await w.git(["worktree", "list", "--porcelain"])).toContain(path)
