@@ -227,10 +227,12 @@ describe("expiredRoundOutput (selection, by name only)", () => {
     expect(found).toEqual([])
   })
 
-  it("defaults to the seven-day window and honours an explicit one", () => {
+  it("defaults to the two-day window and honours an explicit one", () => {
     const { logs } = tree("window")
-    expect(ROUND_OUTPUT_WINDOW_MS).toBe(7 * DAY)
+    expect(ROUND_OUTPUT_WINDOW_MS).toBe(2 * DAY)
     place(join(logs, round(ago(5))))
+    // The default is the window production runs, so the five-day round is past it without being named.
+    expect(expiredRoundOutput({ roots: [logs], now: NOW }).entries).toHaveLength(1)
     const fiveDays = expiredRoundOutput({ roots: [logs], now: NOW, windowMs: 3 * DAY }).entries
     expect(fiveDays).toHaveLength(1)
     expect(expiredRoundOutput({ roots: [logs], now: NOW, windowMs: 6 * DAY }).entries).toHaveLength(0)
@@ -375,7 +377,7 @@ describe("retentionHumanLines (the operator's rendering)", () => {
       },
       { roots: ["/x/logs", "/x/checks"], dryRun: true, listed: selected },
     )
-    expect(lines[0]).toContain("would remove 2 round-output directories older than 7 days")
+    expect(lines[0]).toContain("would remove 2 round-output directories older than 2 days")
     expect(lines[1]).toContain("searched /x/logs, /x/checks")
     expect(lines.slice(2)).toEqual(["/x/logs/q-a", "/x/logs/q-b"])
   })
@@ -385,7 +387,7 @@ describe("retentionHumanLines (the operator's rendering)", () => {
       { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], failuresOmitted: 0, remaining: [], missing: [] },
       { roots: ["/x/logs", "/x/checks"], dryRun: false, listed: [] },
     )
-    expect(lines[0]).toContain("removed 0 round-output directories older than 7 days")
+    expect(lines[0]).toContain("removed 0 round-output directories older than 2 days")
     expect(lines[1]).toContain("searched /x/logs, /x/checks")
     expect(lines).toHaveLength(2)
   })
@@ -788,7 +790,7 @@ const skipReasons = (result: Awaited<ReturnType<typeof sweepRoundOutputInRound>>
 describe("the round sweep gzips finished round output past 24 hours (34923 ruling 2, 3)", () => {
   it("converts a finished round's raw output and check logs; every reader returns the same text", async () => {
     const { workdir, logs, checks } = tree("gz-raw")
-    const log = finishedRound(logs, ago(2))
+    const log = finishedRound(logs, ago(1.5))
     const live = finishedRound(logs, ago(0.5))
     const git = join(logs, log.id, "git")
     const stdout = output(join(git, "1.stdout.bin"), body("out"))
@@ -838,7 +840,7 @@ describe("the round sweep gzips finished round output past 24 hours (34923 rulin
 
   it("proves a round with no projection finished when its header's writer pid is gone", async () => {
     const { workdir, logs } = tree("gz-pid-gone")
-    const log = unfinishedRound(logs, ago(3), exitedPid())
+    const log = unfinishedRound(logs, ago(1.5), exitedPid())
     finishedRound(logs, ago(0.5))
     const stdout = output(join(logs, log.id, "git", "1.stdout.bin"), body("dead"))
     const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
@@ -848,10 +850,12 @@ describe("the round sweep gzips finished round output past 24 hours (34923 rulin
 
   it("leaves the live, unproven and symlinked candidates untouched and names each one", async () => {
     const { workdir, logs, checks } = tree("gz-unproven")
-    const otherWriter = unfinishedRound(logs, ago(3), process.ppid)
-    const ownWriter = unfinishedRound(logs, ago(2.8), process.pid)
-    const noPid = unfinishedRound(logs, ago(2.6))
-    const linked = finishedRound(logs, ago(2.4))
+    // Every candidate sits past the 24-hour compression line and inside the two-day window (hh 38654); older ones
+    // would be expired before the sweep reached the question this test asks.
+    const otherWriter = unfinishedRound(logs, ago(1.9), process.ppid)
+    const ownWriter = unfinishedRound(logs, ago(1.85), process.pid)
+    const noPid = unfinishedRound(logs, ago(1.8))
+    const linked = finishedRound(logs, ago(1.75))
     // The newest round journal is the live round, however old it reads.
     const newest = finishedRound(logs, ago(1.5))
     const paths = {
@@ -859,9 +863,9 @@ describe("the round sweep gzips finished round output past 24 hours (34923 rulin
       ownWriter: output(join(logs, ownWriter.id, "git", "1.stdout.bin"), body("b")),
       noPid: output(join(logs, noPid.id, "git", "1.stdout.bin"), body("c")),
       linked: join(logs, linked.id, "git", "1.stdout.bin"),
-      orphan: output(join(checks, "fix", "y@def456", round(ago(2.2)), "attempt-1", "merge", "unit.log"), body("d")),
+      orphan: output(join(checks, "fix", "y@def456", round(ago(1.7)), "attempt-1", "merge", "unit.log"), body("d")),
       newest: output(join(logs, newest.id, "git", "1.stdout.bin"), body("e")),
-      environment: output(join(logs, "environments", "bay", round(ago(2)), "logs", "setup.log"), body("f")),
+      environment: output(join(logs, "environments", "bay", round(ago(1.6)), "logs", "setup.log"), body("f")),
     }
     const target = output(join(workdir, "elsewhere.bin"), body("target"))
     mkdirSync(dirname(paths.linked), { recursive: true })
@@ -884,7 +888,7 @@ describe("the round sweep gzips finished round output past 24 hours (34923 rulin
 
   it("resumes every interrupted state and never loses the sole readable copy", async () => {
     const { workdir, logs } = tree("gz-restart")
-    const log = finishedRound(logs, ago(2))
+    const log = finishedRound(logs, ago(1.5))
     finishedRound(logs, ago(0.5))
     const git = join(logs, log.id, "git")
     // gzip only: done; nothing to do.
@@ -923,7 +927,7 @@ describe("the round sweep gzips finished round output past 24 hours (34923 rulin
 
   it("abandons a source that changes while it is compressed and keeps the plain file", async () => {
     const { workdir, logs } = tree("gz-changing")
-    const log = finishedRound(logs, ago(2))
+    const log = finishedRound(logs, ago(1.5))
     finishedRound(logs, ago(0.5))
     // Incompressible bytes, so the stream runs long enough for the writer below to land mid-compression.
     const source = output(join(logs, log.id, "git", "1.stdout.bin"), randomBytes(24 * 1024 * 1024))
@@ -948,11 +952,12 @@ describe("the round sweep gzips finished round output past 24 hours (34923 rulin
 describe("the round sweep gzips journals past seven days, never the newest (34923 ruling 3, 4)", () => {
   it("converts old journals, keeps the newer and the newest plain, and their readers read the same runs", async () => {
     const { workdir, logs } = tree("gz-journals")
-    // Journals and raw output share the seven-day window since @chief narrowed it on 2026-11-23 (hh 34127): the 10-
-    // and 8-day rounds are past it, so their journals are gzipped and their directories removed; the 6-day stays.
+    // Journals compress at seven days and are never removed; raw output expires at the two-day round window (hh
+    // 38654). So the 10- and 8-day rounds lose their directories AND their journals gzip, while the 1.5-day round is
+    // inside both and stays plain — the one case that proves the two clocks are independent.
     const old = finishedRound(logs, ago(10))
     const eight = finishedRound(logs, ago(8))
-    const six = finishedRound(logs, ago(6))
+    const inside = finishedRound(logs, ago(1.5))
     output(join(logs, old.id, "git", "1.stdout.bin"), body("ten days"))
     output(join(logs, eight.id, "git", "1.stdout.bin"), body("eight days"))
     const ids = [old.id, eight.id]
@@ -964,7 +969,7 @@ describe("the round sweep gzips journals past seven days, never the newest (3492
     const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
     gone(old.path)
     gone(eight.path)
-    plain(six.path)
+    plain(inside.path)
     const removed = (result?.removed ?? []).map((entry) => entry.path).sort()
     expect(removed).toEqual([join(logs, eight.id), join(logs, old.id)].sort())
     expect(ids.map((id) => readRunLog(logs, id))).toEqual(before.logs)
@@ -988,7 +993,7 @@ describe("yrd logs prune only removes; compression is the queue round's (34923)"
   it("leaves finished output and old journals plain, and says so in its rendering", async () => {
     const { logs, checks } = tree("gz-prune-verb")
     const old = finishedRound(logs, ago(17))
-    const log = finishedRound(logs, ago(2))
+    const log = finishedRound(logs, ago(1.5))
     finishedRound(logs, ago(0.5))
     const stdout = output(join(logs, log.id, "git", "1.stdout.bin"), body("verb"))
     const result = await pruneRoundOutput({ roots: [logs, { path: checks, optional: true }], now: NOW })
@@ -1001,16 +1006,18 @@ describe("yrd logs prune only removes; compression is the queue round's (34923)"
 })
 
 describe("compressed output still expires by round name; journals never (34923 ruling 4)", () => {
-  it("removes a compressed round directory past seven days by its name, and keeps the compressed journal", async () => {
+  it("removes a compressed round directory past the window by its name, and keeps the compressed journal", async () => {
     const { workdir, logs } = tree("gz-expiry")
-    const log = finishedRound(logs, ago(6.5))
+    // Inside the two-day window but past the 24-hour compression line, so the first pass compresses it and keeps it.
+    const log = finishedRound(logs, ago(1.5))
     finishedRound(logs, ago(0.5))
     const stdout = output(join(logs, log.id, "git", "1.stdout.bin"), body("expiring"))
     const first = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
     expect(first?.compression?.compressed).toBe(1)
     gone(stdout)
-    // Eight days later the round is 14.5 days old: its directory goes by NAME, though the archive inside is newer.
-    const later = new Date(NOW.getTime() + 8 * DAY)
+    // A week later the round is 8.5 days old: its directory goes by NAME, though the archive inside is newer, and its
+    // journal is past the seven-day compression line too.
+    const later = new Date(NOW.getTime() + 7 * DAY)
     const second = await sweepRoundOutputInRound({ workdir, now: later, report: () => {} })
     expect(second?.removed.map((entry) => entry.path)).toEqual([join(logs, log.id)])
     expect(existsSync(join(logs, log.id))).toBe(false)
@@ -1030,7 +1037,7 @@ describe("compressed output still expires by round name; journals never (34923 r
 describe("compression work is bounded per round and later rounds progress (34923 ruling 4)", () => {
   it("converts at most ROUND_COMPRESSION_FILES files a round, counts the rest deferred, and finishes next round", async () => {
     const { workdir, logs } = tree("gz-bound-files")
-    const log = finishedRound(logs, ago(2))
+    const log = finishedRound(logs, ago(1.5))
     finishedRound(logs, ago(0.5))
     const files = Array.from({ length: ROUND_COMPRESSION_FILES + 3 }, (_, index) =>
       output(join(logs, log.id, "git", `${String(index + 1)}.stdout.bin`), body(`file ${String(index)}`, 500)),
@@ -1051,7 +1058,7 @@ describe("compression work is bounded per round and later rounds progress (34923
     // The service keeps one `settled` set for its life (queue-core-commands.ts): a finished round is not examined twice.
     const settled = new Set<string>()
     const rounds = Array.from({ length: ROUND_COMPRESSION_UNITS + 2 }, (_, index) =>
-      finishedRound(logs, new Date(ago(3).getTime() + index * 60_000)),
+      finishedRound(logs, new Date(ago(1.9).getTime() + index * 35_000)),
     )
     finishedRound(logs, ago(0.5))
     // Every round holds output so it stays a candidate, but only every 4th file is past the 4 KiB compression floor:
@@ -1096,7 +1103,7 @@ describe("compression work is bounded per round and later rounds progress (34923
     it("examines a 200-round backlog in one pass of a fresh service", async () => {
       const { workdir, logs } = tree("gz-units-walk")
       const files = Array.from({ length: 200 }, (_, index) => {
-        const log = finishedRound(logs, new Date(ago(3).getTime() + index * 60_000))
+        const log = finishedRound(logs, new Date(ago(1.5).getTime() + index * 60_000))
         return output(join(logs, log.id, "git", "1.stdout.bin"), body(log.id, 300))
       })
       finishedRound(logs, ago(0.5))
@@ -1107,7 +1114,7 @@ describe("compression work is bounded per round and later rounds progress (34923
 
     it("names a pass slower than ROUND_COMPRESSION_SLOW_MS in its row, and only that pass", async () => {
       const { workdir, logs } = tree("gz-slow-pass")
-      const log = finishedRound(logs, ago(2))
+      const log = finishedRound(logs, ago(1.5))
       output(join(logs, log.id, "git", "1.stdout.bin"), body(log.id, 300))
       finishedRound(logs, ago(0.5))
       let tick = 0
@@ -1130,16 +1137,16 @@ describe("compression work is bounded per round and later rounds progress (34923
     it("counts each unproven candidate apart from deferred, by its reason, in the result and the row", async () => {
       const { workdir, logs, checks } = tree("gz-unproven")
       // A journal that names no writer pid.
-      const noPid = unfinishedRound(logs, ago(3))
+      const noPid = unfinishedRound(logs, ago(1.5))
       output(join(logs, noPid.id, "git", "1.stdout.bin"), body(noPid.id, 300))
       // Round output under logs with no journal: its header cannot be read (live: 466 of the 11-21 samples).
-      const orphan = round(new Date(ago(3).getTime() + 60_000))
+      const orphan = round(new Date(ago(1.5).getTime() + 60_000))
       output(join(logs, orphan, "git", "1.stdout.bin"), body(orphan, 300))
       // A check round under checks that no run journal names (live: 143).
-      const unnamed = round(new Date(ago(3).getTime() + 180_000))
+      const unnamed = round(new Date(ago(1.5).getTime() + 180_000))
       output(join(checks, "task", `unnamed@${"a".repeat(40)}`, unnamed, "git", "1.stdout.bin"), body(unnamed, 300))
       // A journal already gzipped with no projection: its header cannot be read.
-      const zipped = unfinishedRound(logs, new Date(ago(3).getTime() + 120_000))
+      const zipped = unfinishedRound(logs, new Date(ago(1.5).getTime() + 120_000))
       writeFileSync(`${zipped.path}.gz`, gzipSync(readFileSync(zipped.path)))
       safeRemoveSync(zipped.path, { within: logs, allowedRoots: [logs] })
       output(join(logs, zipped.id, "git", "1.stdout.bin"), body(zipped.id, 300))
@@ -1160,7 +1167,7 @@ describe("compression work is bounded per round and later rounds progress (34923
     const stale = Array.from({ length: ROUND_COMPRESSION_UNITS + 2 }, (_, index) =>
       unfinishedRound(logs, new Date(ago(20).getTime() + index * 60_000)),
     )
-    const kept = finishedRound(logs, ago(2))
+    const kept = finishedRound(logs, ago(1.5))
     finishedRound(logs, ago(0.5))
     const stdout = output(join(logs, kept.id, "git", "1.stdout.bin"), body("kept"))
     const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
@@ -1240,12 +1247,12 @@ describe("compression work is bounded per round and later rounds progress (34923
     // bounds. Since units went to 2048 (@cto 340938a3) that is the files bound, so the backlogs keep their 1024-unit
     // sizes and their run time instead of doubling past the 30 s test timeout on a loaded host.
     const PASS_BUDGET = Math.min(ROUND_COMPRESSION_UNITS, ROUND_COMPRESSION_FILES)
-    // A minute apart from five days back: 3 x 1024 rounds span ~2.1 days, all past the 24-hour line and inside the
-    // seven-day window that @chief set on 2026-11-23 (hh 34127); from ten days back they would already be expired, so
-    // the removal budget — not this compression bound — would end the drain (37402).
+    // Twenty seconds apart from 1.9 days back: 3 x 1024 rounds span ~17 hours, all past the 24-hour compression line
+    // and inside the two-day round window (@cto 2026-11-25, hh 38654). From older than two days they would already be
+    // expired, so the removal budget — not this compression bound — would end the drain (37402).
     function backlog(logs: string, count: number): string[] {
       return Array.from({ length: count }, (_, index) => {
-        const log = finishedRound(logs, new Date(ago(5).getTime() + index * 60_000))
+        const log = finishedRound(logs, new Date(ago(1.9).getTime() + index * 20_000))
         return output(join(logs, log.id, "git", "1.stdout.bin"), body(log.id, 300))
       })
     }
@@ -1304,7 +1311,7 @@ describe("compression work is bounded per round and later rounds progress (34923
       big.write({ kind: "warning", subject: "pad", reason: "j".repeat(100_000) })
     }
     big.finish()
-    const kept = finishedRound(logs, ago(2))
+    const kept = finishedRound(logs, ago(1.5))
     finishedRound(logs, ago(0.5))
     const stdout = output(join(logs, kept.id, "git", "1.stdout.bin"), Buffer.alloc(size, 0x61))
     const first = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
@@ -1318,8 +1325,8 @@ describe("compression work is bounded per round and later rounds progress (34923
 
   it("a round's single file larger than the byte bound converts alone, and the next round waits a pass", async () => {
     const { workdir, logs } = tree("gz-bytes-first-file")
-    const huge = finishedRound(logs, ago(2.5))
-    const after = finishedRound(logs, ago(2))
+    const huge = finishedRound(logs, ago(1.9))
+    const after = finishedRound(logs, ago(1.5))
     finishedRound(logs, ago(0.5))
     const hugeFile = output(
       join(logs, huge.id, "git", "1.stdout.bin"),
@@ -1339,7 +1346,7 @@ describe("compression work is bounded per round and later rounds progress (34923
 
   it("reads at most ROUND_COMPRESSION_BYTES of source a round, a single larger file alone", async () => {
     const { workdir, logs } = tree("gz-bound-bytes")
-    const log = finishedRound(logs, ago(2))
+    const log = finishedRound(logs, ago(1.5))
     finishedRound(logs, ago(0.5))
     const size = Math.floor(ROUND_COMPRESSION_BYTES * 0.6)
     const first = output(join(logs, log.id, "git", "1.stdout.bin"), Buffer.alloc(size, 0x61))
@@ -1358,8 +1365,8 @@ describe("compression work is bounded per round and later rounds progress (34923
 describe("a compression failure is a result, never a failed round (34923 ruling 4)", () => {
   it("reports a gzip that cannot be written, keeps the plain file, still drains the rest, and retries next round", async () => {
     const { workdir, logs } = tree("gz-fail-write")
-    const stuck = finishedRound(logs, ago(3))
-    const fine = finishedRound(logs, ago(2))
+    const stuck = finishedRound(logs, ago(1.9))
+    const fine = finishedRound(logs, ago(1.5))
     finishedRound(logs, ago(0.5))
     const expired = place(join(logs, round(ago(16))))
     const stuckGit = join(logs, stuck.id, "git")
@@ -1388,7 +1395,7 @@ describe("a compression failure is a result, never a failed round (34923 ruling 
 
   it("reports a plain file that cannot be removed after its archive is installed, and the next round finishes it", async () => {
     const { workdir, logs } = tree("gz-fail-remove")
-    const log = finishedRound(logs, ago(2))
+    const log = finishedRound(logs, ago(1.5))
     finishedRound(logs, ago(0.5))
     const stdout = output(join(logs, log.id, "git", "1.stdout.bin"), body("kept"))
     removalFault.path = stdout
@@ -1493,9 +1500,9 @@ describe("a target's holds judge (34952)", () => {
 
   it("judges compression units with the removals: a held round keeps its plain output, an uncited one is gzipped", async () => {
     const { workdir, logs } = tree("holds-compress")
-    const cited = finishedRound(logs, ago(3))
+    const cited = finishedRound(logs, ago(1.9))
     const plainCited = output(join(logs, cited.id, "git", "1.stdout.bin"), body("cited"))
-    const free = finishedRound(logs, ago(2))
+    const free = finishedRound(logs, ago(1.5))
     const plainFree = output(join(logs, free.id, "git", "1.stdout.bin"), body("free"))
     finishedRound(logs, ago(0.5))
     const expired = place(join(logs, round(ago(20))))
@@ -1512,7 +1519,7 @@ describe("a target's holds judge (34952)", () => {
 
   it("a failed judge also keeps compression, and its row names the failure", async () => {
     const { workdir, logs } = tree("holds-compress-fail")
-    const round1 = finishedRound(logs, ago(3))
+    const round1 = finishedRound(logs, ago(1.9))
     const plain1 = output(join(logs, round1.id, "git", "1.stdout.bin"), body("kept"))
     finishedRound(logs, ago(0.5))
     const lines: string[] = []

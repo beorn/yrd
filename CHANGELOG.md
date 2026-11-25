@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Round-output retention (the raw `logs/q-*` trees) windows at two days, down from seven (hh 38654,
+  @cto 2026-11-25): the measured hh-dev stream is 27-45 GiB a day, so seven days held 113 GiB of raw output whose
+  panel nobody reads after a merge. Journals are still never removed, and now gzip at seven days independently of
+  the round window, so "why did this merge?" stays readable.
+
 - Round-output retention (the raw `logs/q-*` trees) windows at seven days again, down from fourteen (hh 34127,
   @chief 2026-11-23). Journals stay compressed, never removed, at the same seven days.
 

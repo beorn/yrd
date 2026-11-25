@@ -62,12 +62,13 @@ import { safeRemove } from "removely"
  */
 
 /**
- * Seven days: the round-output window, which is @cto's original ruling (28499). The operator's disk rule 2 widened it
- * to fourteen for queue logs (hh 33167, 2026-11-10, applied by @cto 08bcb1af / hh 34952); @chief narrowed it back to
- * seven on 2026-11-23 (d22a08f6, hh 34127) because non-production queue logs are covered by the operator's standing
- * permission and the fourteen-day hold was where the growth went. Journals are never windowed by this.
+ * Two days: the round-output window (@cto 2026-11-25, hh 38654). @cto's original ruling was seven (28499), widened to
+ * fourteen for queue logs (hh 33167, 2026-11-10, @cto 08bcb1af / hh 34952) and narrowed back to seven (@chief
+ * d22a08f6, hh 34127); the window then dropped to two because the measured hh-dev stream is 27-45 GiB a day, so seven
+ * days held 113 GiB of raw output for panels nobody reads after a merge. Journals are never windowed by this, so
+ * "why did this merge?" stays readable; only the raw output panel shortens.
  */
-export const ROUND_OUTPUT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+export const ROUND_OUTPUT_WINDOW_MS = 2 * 24 * 60 * 60 * 1000
 
 /**
  * How many round-output directories are removed per batch, oldest first. Two
@@ -99,9 +100,9 @@ export type RetentionPace = { last?: Date }
 export const ROUND_OUTPUT_COMPRESS_AFTER_MS = 24 * 60 * 60 * 1000
 
 /**
- * A run journal is compressed once its round NAME is older than seven days; it is never removed. Seven matches the
- * round-output window since @chief narrowed it back on 2026-11-23 (hh 34127), so a journal is compressed no later than
- * the round directory it points at is removed.
+ * A run journal is compressed once its round NAME is older than seven days; it is never removed. It deliberately no
+ * longer tracks the round-output window (two days since hh 38654): a journal may outlive the raw output it points at,
+ * and the seven days are how long its rows stay cheap to stream before gzip. `readRetainedFile` resolves either form.
  */
 export const JOURNAL_COMPRESS_AFTER_MS = 7 * 24 * 60 * 60 * 1000
 

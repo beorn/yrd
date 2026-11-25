@@ -115,7 +115,7 @@ describe("yrd logs prune journals its observation beside the run journals (28499
       .map((line) => JSON.parse(line) as Record<string, unknown>)
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ kind: "observation", scope: "log-retention", removed: 1, remaining: 0 })
-    expect(rows[0]?.windowDays).toBe(7)
+    expect(rows[0]?.windowDays).toBe(2)
 
     // The reader the run-shaped name broke: the runner's own facts read.
     const facts = await readRunnerFacts(workdir)
