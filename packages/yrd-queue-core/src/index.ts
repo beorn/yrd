@@ -98,6 +98,7 @@ export {
   readChangeEvents,
   readIssueEffect,
   issueProviderId,
+  trailerEffectId,
   readEventQueue,
   readEventOps,
   readEventOpsWithRefs,

@@ -14,7 +14,7 @@ import { join } from "node:path"
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest"
 import { safeRemoveSync } from "removely"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
-import { readPostMergeIssueDiagnostics } from "../src/post-merge.ts"
+import { createPostMerge, readPostMergeIssueDiagnostics } from "../src/post-merge.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { openEvents } from "../../yrd-queue-core/src/git.ts"
 import { changeInput } from "../../yrd-queue-core/src/events.ts"
@@ -89,7 +89,9 @@ const submoduleQueue = async () => {
     repo = join(root, "author"),
     workdir = join(root, "queue"),
     closeCalls = join(root, "close-calls.tsv"),
-    resolveCalls = join(root, "resolve-calls.txt")
+    resolveCalls = join(root, "resolve-calls.txt"),
+    // When present, resolve names every issue by a new key: the provider re-keyed it.
+    rekey = join(root, "rekey.txt")
   mkdirSync(workdir)
   await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
   await seed(["clone", "--quiet", remote, repo])
@@ -104,10 +106,11 @@ const submoduleQueue = async () => {
       resolve: [
         "sh",
         "-c",
-        'printf "%s\\n" "$1" >> "$2"; printf \'{"keys":["%s"]}\\n\' "$1"',
+        'k="$1"; [ -f "$3" ] && k="$k$(cat "$3")"; printf "%s\\n" "$1" >> "$2"; printf \'{"keys":["%s"]}\\n\' "$k"',
         "resolve",
         "<raw>",
         resolveCalls,
+        rekey,
       ],
       close: [
         "sh",
@@ -133,7 +136,7 @@ const submoduleQueue = async () => {
   const checkout = gitIn(join(repo, COMPONENT))
   await checkout(["config", "user.email", "component@yrd.test"])
   await checkout(["config", "user.name", "fixture"])
-  return { root, repo, workdir, closeCalls, resolveCalls, git, store, target, queueTip, checkout, upstream }
+  return { root, repo, workdir, closeCalls, resolveCalls, rekey, git, store, target, queueTip, checkout, upstream }
 }
 type SubmoduleQueue = Awaited<ReturnType<typeof submoduleQueue>>
 
@@ -307,4 +310,53 @@ it("fails the attempt by name when the queue clone's component store does not ho
   )
   expect(lines(world.resolveCalls)).toEqual([])
   expect(lines(world.closeCalls)).toEqual([])
+}, 60000)
+
+/** @failure A resend after a human reopened an issue closes it again once the provider names it by a new key. @level l2 @consumer hh 29630 no-resend keyed on the merge (@cto baa5a4f1) @testonly none */
+it("does not close a reopened issue again on a resend after the provider re-keys it", async () => {
+  const world = await submoduleQueue()
+  const pin = await componentCommit(world, "one: component work")
+  const branch = "task/raise-rekey"
+  await landRaise(world, branch, pin, "raise vendor/one\n\nCloses: issue-rekeyed")
+  await runQueue(world, branch, walked(branch))
+  expect(lines(world.resolveCalls)).toEqual(["issue-rekeyed"])
+  expect(lines(world.closeCalls).map((line) => line.split("\t")[0])).toEqual(["issue-rekeyed"])
+  // A human reopens it, and the provider now answers the same trailer value with another key.
+  writeFileSync(world.rekey, "-new")
+  const merge = (await readStatus(world.store, "main", branch)).merge!
+  const config = await readConfig(world.git, merge, { remote: "origin", branch: "main" })
+  if (config === undefined) throw Error("fixture queue lost config at the merge")
+  const resend = join(world.root, "resend"),
+    reports: string[] = []
+  mkdirSync(resend)
+  {
+    await using runner = createPostMerge({
+      workdir: resend,
+      cwd: world.repo,
+      git: world.git,
+      store: world.store,
+      cleanup: async () => {},
+      report: (message) => reports.push(message),
+    })
+    runner.nudge({
+      code: "fixture",
+      config: config.blob,
+      repo: world.repo,
+      queue: "origin#main",
+      target: merge,
+      base: world.target,
+      merged: [branch],
+      projectRoot: world.repo,
+      queueBranch: "main",
+      remote: "origin",
+    })
+  }
+  const [attempt] = attempts(resend)
+  expect(attempt?.status, reports.join(" ")).toBe("succeeded")
+  expect(issueActions(attempt!)).toContainEqual(
+    expect.objectContaining({ branch, mergeSha: merge, status: "fulfilled" }),
+  )
+  // Answered from the merge's own record: no resolve, no close.
+  expect(lines(world.resolveCalls)).toEqual(["issue-rekeyed"])
+  expect(lines(world.closeCalls)).toHaveLength(1)
 }, 60000)

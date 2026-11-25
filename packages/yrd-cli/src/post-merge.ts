@@ -11,6 +11,7 @@ import {
   readEventQueue,
   readIssueEffect,
   issueProviderId,
+  trailerEffectId,
   writeQueueEvent,
   isAncestor,
   normalizedRemote,
@@ -289,7 +290,8 @@ async function closeMergedIssues(
 ): Promise<Readonly<{ outcomes: Array<Record<string, unknown>>; queue?: EventQueue }>> {
   const outcomes: Array<Record<string, unknown>> = []
   let completed = input.knownQueue
-  const seen = new Set<string>()
+  // Each key's close in this round: true closed, false failed (29630).
+  const closedKeys = new Map<string, boolean>()
 
   for (const branch of new Set(input.branches)) {
     if (input.stop?.aborted) return { outcomes, queue: completed }
@@ -408,6 +410,26 @@ async function closeMergedIssues(
             }
             if (resolvedRaw.has(reference.value)) continue
             resolvedRaw.add(reference.value)
+            // 29630 (@cto baa5a4f1): the no-resend record is keyed on the merge and the trailer value it carries, and is
+            // read before resolve, so an issue the provider re-keyed after a human reopened it is not closed again.
+            const trailerId = trailerEffectId(mergeSha, "close", "completed", reference.value)
+            completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
+            const answered = completed.issueEffects[trailerId]
+            if (answered !== undefined) {
+              if (answered.effect.declaration.blob !== pinnedBlob) {
+                throw new Error(
+                  `${branch}@${mergeSha}: applied declaration blob ${answered.effect.declaration.blob} differs from pinned ${pinnedBlob}`,
+                )
+              }
+              outcomes.push({
+                branch,
+                mergedEvent: mergedEvent.id,
+                mergeSha,
+                providerId: trailerId,
+                status: "fulfilled",
+              })
+              continue
+            }
             const resolved = await runIssuesVerb({
               verb: "resolve",
               args: [reference.value],
@@ -445,11 +467,18 @@ async function closeMergedIssues(
               raw: reference.value,
               status: "fulfilled",
             })
+            let keysClosed = true
+            let declaration: Readonly<{ repository: string; commit: string }> | undefined
             for (const key of keys) {
+              // km's operation id stays per key, so a provider replay inside its window is still one close.
               const providerId = issueProviderId(mergeSha, "close", "completed", key)
-              if (seen.has(providerId)) continue
-              seen.add(providerId)
+              const earlier = closedKeys.get(providerId)
+              if (earlier !== undefined) {
+                if (!earlier) keysClosed = false
+                continue
+              }
               completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
+              // An effect recorded per key before 29630 still answers that key for this merge.
               const fulfilled = completed.issueEffects[providerId]
               if (fulfilled !== undefined) {
                 if (fulfilled.effect.declaration.blob !== pinnedBlob) {
@@ -457,6 +486,7 @@ async function closeMergedIssues(
                     `${branch}@${mergeSha}: applied declaration blob ${fulfilled.effect.declaration.blob} differs from pinned ${pinnedBlob}`,
                   )
                 }
+                closedKeys.set(providerId, true)
                 outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
                 continue
               }
@@ -474,6 +504,8 @@ async function closeMergedIssues(
               })
               if (!closed.ok) {
                 const diagnostic = closed.message
+                closedKeys.set(providerId, false)
+                keysClosed = false
                 outcomes.push({
                   branch,
                   mergedEvent: mergedEvent.id,
@@ -487,52 +519,62 @@ async function closeMergedIssues(
                 )
                 continue
               }
-              try {
-                const declarationBlob = (
-                  await input.git.at(closed.envelope.declaration.repository)([
-                    "rev-parse",
-                    `${closed.envelope.declaration.commit}:issues.yml`,
-                  ])
-                ).trim()
-                if (declarationBlob === "") {
-                  throw new Error(`issues.yml blob is unreadable at ${closed.envelope.declaration.commit}`)
-                }
-                const issueEffect: AppliedIssueEffect = {
-                  kind: "issue-effect-v1",
-                  mergedEvent: mergedEvent.id,
-                  mergeSha,
-                  mergeCommitterTime: committerTime,
-                  verb: "close",
-                  semanticEnding: "completed",
-                  issueKey: key,
-                  providerId,
-                  declaration: { path: "issues.yml", blob: declarationBlob },
-                }
-                try {
-                  await writeQueueEvent(input.store, input.queue, {
-                    type: "notified",
-                    at: new Date(),
-                    by: "yrd-run",
-                    issueEffect,
-                  })
-                } catch (error) {
-                  // A rival append or lost publication reply can already have fulfilled this identity.
-                  completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
-                  if (completed.issueEffects[providerId] === undefined) throw error
-                }
-                outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
-              } catch (error) {
-                const diagnostic = `provider succeeded but applied effect could not be recorded: ${String(error)}`
-                outcomes.push({
-                  branch,
-                  mergedEvent: mergedEvent.id,
-                  mergeSha,
-                  providerId,
-                  status: "record-failed",
-                  diagnostic,
-                })
-                input.report(`${branch}@${mergeSha}: ${diagnostic}`)
+              closedKeys.set(providerId, true)
+              declaration = closed.envelope.declaration
+              outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
+            }
+            // A key that failed leaves the trailer unanswered, so the retry resolves and closes it again.
+            if (!keysClosed) continue
+            try {
+              const declarationBlob =
+                declaration === undefined
+                  ? pinnedBlob
+                  : (
+                      await input.git.at(declaration.repository)(["rev-parse", `${declaration.commit}:issues.yml`])
+                    ).trim()
+              if (declarationBlob === "") throw new Error(`issues.yml blob is unreadable at ${declaration?.commit}`)
+              const issueEffect: AppliedIssueEffect = {
+                kind: "issue-effect-v1",
+                mergedEvent: mergedEvent.id,
+                mergeSha,
+                mergeCommitterTime: committerTime,
+                verb: "close",
+                semanticEnding: "completed",
+                issueKey: keys.join(" "),
+                trailer: reference.value,
+                providerId: trailerId,
+                declaration: { path: "issues.yml", blob: declarationBlob },
               }
+              try {
+                await writeQueueEvent(input.store, input.queue, {
+                  type: "notified",
+                  at: new Date(),
+                  by: "yrd-run",
+                  issueEffect,
+                })
+              } catch (error) {
+                // A rival append or lost publication reply can already have fulfilled this identity.
+                completed = await readEventQueue(input.store, input.queue, { knownQueue: completed })
+                if (completed.issueEffects[trailerId] === undefined) throw error
+              }
+              outcomes.push({
+                branch,
+                mergedEvent: mergedEvent.id,
+                mergeSha,
+                providerId: trailerId,
+                status: "fulfilled",
+              })
+            } catch (error) {
+              const diagnostic = `provider succeeded but applied effect could not be recorded: ${String(error)}`
+              outcomes.push({
+                branch,
+                mergedEvent: mergedEvent.id,
+                mergeSha,
+                providerId: trailerId,
+                status: "record-failed",
+                diagnostic,
+              })
+              input.report(`${branch}@${mergeSha}: ${diagnostic}`)
             }
           }
           if (input.stop?.aborted) return { outcomes, queue: completed }

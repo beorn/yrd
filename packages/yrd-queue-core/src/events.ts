@@ -260,10 +260,28 @@ export type AppliedIssueEffect = Readonly<{
   mergeCommitterTime: string
   verb: "close" | "comment"
   semanticEnding?: "completed" | "not_planned"
+  /** The key, or space-separated keys, the provider resolved; history only, never an identity when `trailer` is set. */
   issueKey: string
+  /**
+   * The closing trailer value this effect answers, as the parser read it (29630, @cto baa5a4f1). When set, the
+   * providerId is {@link trailerEffectId}, so a resend is refused by what the merge says, not by another store's ids.
+   */
+  trailer?: string
   providerId: string
   declaration: Readonly<{ path: "issues.yml"; blob: Oid }>
 }>
+
+/** A merge's effect identity for one closing trailer value: the merge and what it says, never a provider key (29630). */
+export function trailerEffectId(
+  mergeSha: string,
+  verb: AppliedIssueEffect["verb"],
+  semanticEnding: AppliedIssueEffect["semanticEnding"],
+  trailer: string,
+): string {
+  return `yrd1-${createHash("sha256")
+    .update(JSON.stringify([mergeSha, verb, semanticEnding ?? null, { trailer }]))
+    .digest("hex")}`
+}
 
 /** Stable provider replay identity, shared by the effect writer and stored-effect reader. */
 export function issueProviderId(
@@ -699,6 +717,9 @@ function checkedIssueEffect(value: unknown, where: string): AppliedIssueEffect {
     refuse("comment cannot carry semanticEnding")
   }
   if (typeof raw.issueKey !== "string" || raw.issueKey.trim() === "") refuse("issueKey must be nonempty")
+  if (raw.trailer !== undefined && (typeof raw.trailer !== "string" || raw.trailer.trim() === "")) {
+    refuse("trailer must be nonempty when present")
+  }
   if (typeof raw.providerId !== "string") refuse("providerId must be a string")
   if (typeof raw.declaration !== "object" || raw.declaration === null || Array.isArray(raw.declaration)) {
     refuse("declaration must name its committed source")
@@ -707,12 +728,20 @@ function checkedIssueEffect(value: unknown, where: string): AppliedIssueEffect {
   if (declaration.path !== "issues.yml" || typeof declaration.blob !== "string" || !COMMIT_OID.test(declaration.blob)) {
     refuse("declaration needs issues.yml and a blob id")
   }
-  const expectedId = issueProviderId(
-    raw.mergeSha as string,
-    raw.verb as AppliedIssueEffect["verb"],
-    raw.semanticEnding as AppliedIssueEffect["semanticEnding"],
-    raw.issueKey as string,
-  )
+  const expectedId =
+    raw.trailer === undefined
+      ? issueProviderId(
+          raw.mergeSha as string,
+          raw.verb as AppliedIssueEffect["verb"],
+          raw.semanticEnding as AppliedIssueEffect["semanticEnding"],
+          raw.issueKey as string,
+        )
+      : trailerEffectId(
+          raw.mergeSha as string,
+          raw.verb as AppliedIssueEffect["verb"],
+          raw.semanticEnding as AppliedIssueEffect["semanticEnding"],
+          raw.trailer as string,
+        )
   if (raw.providerId !== expectedId) refuse(`providerId must be ${expectedId}`)
   const expectedKeys = [
     "kind",
@@ -722,6 +751,7 @@ function checkedIssueEffect(value: unknown, where: string): AppliedIssueEffect {
     "verb",
     ...(raw.semanticEnding === undefined ? [] : ["semanticEnding"]),
     "issueKey",
+    ...(raw.trailer === undefined ? [] : ["trailer"]),
     "providerId",
     "declaration",
   ].sort()
@@ -739,6 +769,7 @@ function checkedIssueEffect(value: unknown, where: string): AppliedIssueEffect {
       ? {}
       : { semanticEnding: raw.semanticEnding as AppliedIssueEffect["semanticEnding"] }),
     issueKey: raw.issueKey as string,
+    ...(raw.trailer === undefined ? {} : { trailer: raw.trailer as string }),
     providerId: raw.providerId as string,
     declaration: { path: "issues.yml", blob: declaration.blob as Oid },
   }
