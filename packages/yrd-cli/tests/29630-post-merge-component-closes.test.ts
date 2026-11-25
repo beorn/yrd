@@ -14,6 +14,7 @@ import { join } from "node:path"
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest"
 import { safeRemoveSync } from "removely"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
+import { readPostMergeIssueDiagnostics } from "../src/post-merge.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { openEvents } from "../../yrd-queue-core/src/git.ts"
 import { changeInput } from "../../yrd-queue-core/src/events.ts"
@@ -300,6 +301,10 @@ it("fails the attempt by name when the queue clone's component store does not ho
     }),
   )
   expect(diagnostics.join(" ")).toContain(`${branch}@${merge}: ${COMPONENT} moved`)
+  // The diagnostic view keeps it: the segment's own fulfilled row must not share its identity.
+  expect(readPostMergeIssueDiagnostics(world.workdir)).toContainEqual(
+    expect.objectContaining({ branch, mergeSha: merge, providerId: `component:${COMPONENT}` }),
+  )
   expect(lines(world.resolveCalls)).toEqual([])
   expect(lines(world.closeCalls)).toEqual([])
 }, 60000)

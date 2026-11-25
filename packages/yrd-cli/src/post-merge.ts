@@ -187,14 +187,17 @@ export function readPostMergeIssueDiagnostics(
   return [...found.values()]
 }
 
-/** One component range a landing moved that its closer did not read, said by name (29630, @cto 5a66fb46). */
+/**
+ * What the closer did with one component range a landing moved, said by name (29630, @cto 5a66fb46). Its outcome's
+ * providerId is `component:<path>`, so a range read on a later attempt clears an earlier unresolved row.
+ */
 type ComponentUnread = Readonly<{
   unread: true
   component: string
   /** `unavailable` is a lost close until it is cured, so the attempt fails and is retried; `skipped` is a rule. */
-  status: "unavailable" | "skipped"
-  reason: "component-pin-unresolved" | "component-added" | "component-removed"
-  diagnostic: string
+  status: "unavailable" | "skipped" | "fulfilled"
+  reason: "component-pin-unresolved" | "component-added" | "component-removed" | "component-read"
+  diagnostic?: string
 }>
 
 type ClosingReference = Readonly<{ value: string; commit: string; trailer: string; component?: string }>
@@ -264,6 +267,7 @@ async function* componentClosingReferences(
     for await (const reference of closingReferencesOf(child, [`${old}..${row.sha}`], branch)) {
       yield { ...reference, component }
     }
+    yield { unread: true, component, status: "fulfilled", reason: "component-read" }
     yield* componentClosingReferences(child, checkout, old, row.sha, branch, component)
   }
 }
@@ -393,11 +397,11 @@ async function closeMergedIssues(
                 branch,
                 mergedEvent: mergedEvent.id,
                 mergeSha,
-                providerId: "",
+                providerId: `component:${reference.component}`,
                 status: reference.status,
                 reason: reference.reason,
                 component: reference.component,
-                diagnostic: reference.diagnostic,
+                ...(reference.diagnostic === undefined ? {} : { diagnostic: reference.diagnostic }),
               })
               if (reference.status === "unavailable") input.report(`${branch}@${mergeSha}: ${reference.diagnostic}`)
               continue
