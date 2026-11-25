@@ -18,7 +18,14 @@ import { createPostMerge, readPostMergeIssueDiagnostics } from "../src/post-merg
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { openEvents } from "../../yrd-queue-core/src/git.ts"
 import { changeInput } from "../../yrd-queue-core/src/events.ts"
-import { changesRef, createEventQueue, createEventStore, readConfig, readStatus } from "@yrd/queue-core"
+import {
+  changesRef,
+  createEventQueue,
+  createEventStore,
+  readConfig,
+  readStatus,
+  trailerEffectId,
+} from "@yrd/queue-core"
 
 const roots: string[] = []
 afterEach(() => {
@@ -178,11 +185,15 @@ const landRaise = async (world: SubmoduleQueue, branch: string, pin: string, roo
   return head
 }
 
-/** Runs `yrd queue up` with automatic close until `settled` holds for the finished attempts, then stops it. */
+/**
+ * Runs `yrd queue up` with automatic close until `settled` holds for the finished attempts, then stops it.
+ * `projectRoot` is the repository issues.yml is read from; the author clone unless a test names another.
+ */
 const runQueue = async (
   world: SubmoduleQueue,
   branch: string,
   settled: (finished: Array<Record<string, unknown>>) => boolean,
+  projectRoot: string = world.repo,
 ): Promise<string[]> => {
   const stop = new AbortController(),
     merged: string[] = [],
@@ -213,7 +224,7 @@ const runQueue = async (
             } else if (rounds > 4) stop.abort()
           },
         },
-        { workdir: world.workdir, json: true, projectRoot: world.repo },
+        { workdir: world.workdir, json: true, projectRoot },
       ),
       diagnostics.join(" "),
     ).toBe(0)
@@ -252,6 +263,43 @@ it("closes an issue named only by a component commit's Closes trailer, once, thr
     expect.objectContaining({ branch, mergeSha: merge, raw: "issue-component", status: "fulfilled" }),
   )
   expect(actions.filter(({ status }) => status === "failed" || status === "unavailable")).toEqual([])
+}, 60000)
+
+/** @failure A merge's `Closes:` issue stays open because the project root's local main lags the merge (yrd-issues-no-main, hh 38606). @level l2 @consumer hh 29630 post-merge close against a shared-main projection @testonly none */
+it("closes a root commit's Closes issue when the project root's local main still lags the merge", async () => {
+  const world = await submoduleQueue()
+  // The live project root is a shared-main projection: its own refs/heads/main trails origin, and it has no
+  // origin remote Yrd would read instead. It sees every object the queue writes (alternates on the remote's
+  // store), so only its main is behind.
+  const lagging = join(world.root, "lagging-root")
+  await gitIn(world.root)(["init", "--quiet", "--initial-branch=main", lagging])
+  writeFileSync(
+    join(lagging, ".git", "objects", "info", "alternates"),
+    `${join(world.root, "remote.git", "objects")}\n`,
+  )
+  const root = gitIn(lagging)
+  await root(["update-ref", "refs/heads/main", world.target])
+  await expect(root(["rev-parse", "--verify", "refs/remotes/origin/main"])).rejects.toThrow()
+  const pin = await componentCommit(world, "one: component work")
+  const branch = "task/raise-lagging"
+  await landRaise(world, branch, pin, "raise vendor/one\n\nCloses: issue-lagging")
+  await runQueue(world, branch, walked(branch), lagging)
+  const merge = (await readStatus(world.store, "main", branch)).merge!
+  // The merge is visible to the lagging root, yet its main never moved: the run really read a lagging main.
+  expect((await root(["rev-parse", `${merge}^{commit}`])).trim()).toBe(merge)
+  expect((await root(["rev-parse", "refs/heads/main"])).trim()).toBe(world.target)
+  const actions = attempts(world.workdir).flatMap(issueActions)
+  // First, so a regression names its diagnostic (yrd-issues-no-main) rather than an empty close log.
+  expect(actions.filter(({ status }) => status === "failed" || status === "unavailable")).toEqual([])
+  expect(lines(world.closeCalls).map((line) => line.split("\t").slice(0, 2))).toEqual([["issue-lagging", "completed"]])
+  expect(actions).toContainEqual(
+    expect.objectContaining({
+      branch,
+      mergeSha: merge,
+      providerId: trailerEffectId(merge, "close", "completed", "issue-lagging"),
+      status: "fulfilled",
+    }),
+  )
 }, 60000)
 
 /** @failure A component commit's `Refs:` mention is treated as closing intent. @level l2 @consumer hh 29630 component-range close @testonly none */

@@ -280,6 +280,11 @@ async function closeMergedIssues(
     store: QueueLocation
     git: GitRunner
     projectRoot: string
+    /**
+     * The target this round published; every merge it delivered is its ancestor. Each declaration's ancestry is
+     * proved against it, never the project root's local main, which a shared-main projection lets lag (hh 38606).
+     */
+    target: string
     workdir: string
     cwd: string
     env?: NodeJS.ProcessEnv
@@ -435,6 +440,7 @@ async function closeMergedIssues(
               args: [reference.value],
               projectRoot: input.projectRoot,
               declarationCommit: mergeSha,
+              targetCommit: input.target,
               cwd: input.cwd,
               env: input.env,
               timeoutMs: UPDATE_TIMEOUT_MS,
@@ -496,6 +502,7 @@ async function closeMergedIssues(
                 id: providerId,
                 projectRoot: input.projectRoot,
                 declarationCommit: mergeSha,
+                targetCommit: input.target,
                 cwd: input.cwd,
                 env: input.env,
                 signal: input.stop,
@@ -1034,6 +1041,7 @@ export function createPostMerge<C extends Context>(
           store: options.store,
           git: options.git,
           projectRoot: context.projectRoot,
+          target: context.target,
           workdir: options.workdir,
           cwd: options.cwd,
           env: options.env,
