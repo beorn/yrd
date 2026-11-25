@@ -31,6 +31,16 @@ function git(repo: string, ...args: readonly string[]): string {
   return execFileSync("git", ["-C", repo, ...args], { env: GIT_ENV, encoding: "utf8" }).trim()
 }
 
+/**
+ * The Git port's `stream` is optional, while this suite exists to exercise exactly that method: a port without one
+ * is a failure of what is being tested, not a reason to skip it.
+ */
+function streaming(adapted: ReturnType<typeof adaptProcessGit>): NonNullable<ReturnType<typeof adaptProcessGit>["stream"]> {
+  const stream = adapted.stream
+  if (stream === undefined) throw new Error("adaptProcessGit answered a Git port with no stream method")
+  return stream
+}
+
 /** A repository whose one blob is 4096 one-byte-per-character lines: 20 MiB, past the 16 MiB capture limit. */
 async function bigBlobRepo(): Promise<{ repo: string; sha: string; bytes: number }> {
   const repo = realpathSync(await mkdtemp(join(tmpdir(), "yrd-stream-")))
@@ -54,7 +64,7 @@ describe("adaptProcessGit stream", () => {
       const buffered = await adapted.run({ repo, args: ["cat-file", "blob", sha] })
       expect(buffered.failure).toContain("capture truncated")
 
-      const stream = adapted.stream({ repo, args: ["cat-file", "blob", sha] })
+      const stream = streaming(adapted)({ repo, args: ["cat-file", "blob", sha] })
       let lines = 0
       for await (const _line of stream.lines) lines += 1
       const outcome = await stream.outcome
@@ -72,7 +82,7 @@ describe("adaptProcessGit stream", () => {
     const adapted = adaptProcessGit(process)
     try {
       const highs: number[] = []
-      const stream = adapted.stream({
+      const stream = streaming(adapted)({
         repo,
         args: ["cat-file", "blob", sha],
         onQueueHighWater: (depth) => highs.push(depth),
@@ -94,7 +104,7 @@ describe("adaptProcessGit stream", () => {
     git(repo, "init", "--quiet", "-b", "main")
     await using process = createProcess({ cwd: repo })
     try {
-      const stream = adaptProcessGit(process).stream({ repo, args: ["rev-parse", "--verify", "refs/heads/nope"] })
+      const stream = streaming(adaptProcessGit(process))({ repo, args: ["rev-parse", "--verify", "refs/heads/nope"] })
       for await (const _line of stream.lines) {
         // nothing is expected; the outcome is the answer
       }
@@ -117,7 +127,7 @@ describe("adaptProcessGit stream", () => {
         },
       })
 
-    const complete = fake({ outputTruncation: [stdoutTruncation] }).stream({ repo: "/repo", args: ["ls-tree", "-r"] })
+    const complete = streaming(fake({ outputTruncation: [stdoutTruncation] }))({ repo: "/repo", args: ["ls-tree", "-r"] })
     expect(await (async () => {
       const lines: string[] = []
       for await (const line of complete.lines) lines.push(line)
@@ -125,13 +135,13 @@ describe("adaptProcessGit stream", () => {
     })()).toEqual(["one", "two"])
     expect(await complete.outcome).toMatchObject({ code: 0 })
 
-    const stderrTruncated = fake({ outputTruncation: [stderrTruncation] }).stream({ repo: "/repo", args: ["ls-tree"] })
+    const stderrTruncated = streaming(fake({ outputTruncation: [stderrTruncation] }))({ repo: "/repo", args: ["ls-tree"] })
     for await (const _line of stderrTruncated.lines) {
       // drained for the outcome
     }
     expect(await stderrTruncated.outcome).toMatchObject({ code: 1 })
 
-    const signaled = fake({ verdict: "SIGNALED" }).stream({ repo: "/repo", args: ["ls-tree"] })
+    const signaled = streaming(fake({ verdict: "SIGNALED" }))({ repo: "/repo", args: ["ls-tree"] })
     for await (const _line of signaled.lines) {
       // drained for the outcome
     }
@@ -139,11 +149,11 @@ describe("adaptProcessGit stream", () => {
   })
 
   test("a timeout and an abort both settle the framing as incomplete", async () => {
-    const timedOut = adaptProcessGit({
+    const timedOut = streaming(adaptProcessGit({
       async run() {
         return { exitCode: 0, signal: null, stdout: "", stderr: "", durationMs: 1, timedOut: true }
       },
-    }).stream({ repo: "/repo", args: ["ls-tree"] })
+    }))({ repo: "/repo", args: ["ls-tree"] })
     for await (const _line of timedOut.lines) {
       // drained for the outcome
     }
@@ -152,14 +162,14 @@ describe("adaptProcessGit stream", () => {
     expect(() => assertStreamComplete(timedOutOutcome, MESSAGES)).toThrow("timed out")
 
     const controller = new AbortController()
-    const aborted = adaptProcessGit({
+    const aborted = streaming(adaptProcessGit({
       async run(request) {
         request.onOutput?.({ stream: "stdout", chunk: new TextEncoder().encode("kept\n") })
         await new Promise((resolve) => setTimeout(resolve, 5))
         controller.abort()
         return { exitCode: 143, signal: "SIGKILL", stdout: "", stderr: "", durationMs: 5, timedOut: false }
       },
-    }).stream({ repo: "/repo", args: ["ls-tree"], signal: controller.signal })
+    }))({ repo: "/repo", args: ["ls-tree"], signal: controller.signal })
     const lines: string[] = []
     for await (const line of aborted.lines) lines.push(line)
     const abortedOutcome = await aborted.outcome
