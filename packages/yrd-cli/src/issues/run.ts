@@ -10,7 +10,7 @@
 import { realpathSync, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { fileURLToPath } from "node:url"
-import { cleanGitEnvironment, createProcess, spawnInherited } from "@yrd/process"
+import { cleanGitEnvironment, createProcess } from "@yrd/process"
 // Gitomic only through Yrd's one configured git seam (gitomic-boundary.test.ts): scrubbed env, bounded calls.
 import { createLegacyBackend, gitIn, isAncestor, openReader, resolveGitSelection } from "@yrd/queue-core"
 import {
@@ -37,6 +37,7 @@ import {
   type IssuesEnvironmentHold,
   type IssuesProgress,
 } from "./in-progress.ts"
+import { ProgressServeProviderMissing, ProgressServeRefusal, serveProgressReader } from "./progress-serve.ts"
 
 export type { IssuesActivityEvent, IssuesEnvironmentHold } from "./in-progress.ts"
 
@@ -541,6 +542,8 @@ export async function runIssuesVerb(
   } else if (!(await isRepositoryAt(root, env))) {
     return fail(1, ISSUES_CODES.notARepository, root, "--project-root is not the toplevel of a git repository")
   }
+  // Captured as a string: the closures below outlive the narrowing the reads above proved.
+  const projectRoot: string = root
   const repository = await repositoryToRead(root, env)
   if (typeof repository !== "string") return repository
 
@@ -598,9 +601,10 @@ export async function runIssuesVerb(
     return fail(1, ISSUES_CODES.unsupported, verb, `${verb} is not declared in ${where} (unsupported)`)
   }
 
-  // 38182 (@cto 17:49Z): a declared long-lived reader. The declaration and its pin resolve exactly as for
-  // `list-page`; then the provider gets THIS process's stdin, stdout and stderr and yrd stays its parent for its
-  // lifetime. Nothing here parses a frame: the protocol is the provider's, and a proxy would be a second contract.
+  // 38182 (@cto 17:49Z, 77dd37ea): a declared long-lived reader. The declaration and its pin resolve exactly as for
+  // `list-page`; then the provider gets THIS process as its parent for its lifetime. Yrd relays the client's frames
+  // unchanged and answers the one frame that is Yrd's own (the sparse activity projection), folded from the journal
+  // lines the same connection carries — no second process per refresh.
   if (verb === "list-page-serve") {
     // Only the CLI runs a reader: it hands over this process's stdio. An in-process caller asking for one is a bug,
     // named rather than answered with a value it would read as missing.
@@ -633,44 +637,50 @@ export async function runIssuesVerb(
   }
 
   /**
-   * Run a declared long-lived reader with this process's stdio, forwarding termination, and answer with its exit code.
-   * A child that cannot start is the same named failure a one-shot provider gets.
+   * Run a declared long-lived reader as the resident page-serve loop (#38182 row 1, @cto 77dd37ea): the provider still
+   * gets this process as its parent and its stderr, the client's frames still reach it unchanged, and Yrd answers the
+   * one frame that is Yrd's own — the sparse activity projection — from the journal lines it folds on that connection.
+   * Forwarding termination and answering with the provider's exit code are unchanged.
    */
   async function serveDeclared(
     argv: readonly string[],
     options: RunIssuesVerbOptions,
     env: NodeJS.ProcessEnv,
   ): Promise<IssuesCommandOutcome> {
-    const [executable, ...args] = argv
-    if (executable === undefined) {
-      return fail(1, ISSUES_CODES.providerMissing, options.verb, "the declaration's argv is empty")
-    }
-    let child: ReturnType<typeof spawnInherited>
+    const readEnvironments = options.environments
     try {
-      child = spawnInherited([executable, ...args], { cwd: options.cwd, env })
+      const served = await serveProgressReader({
+        argv,
+        cwd: options.cwd,
+        env,
+        readHolds: async () => {
+          if (readEnvironments === undefined) {
+            throw new ProgressServeRefusal(
+              "page-serve-no-environments",
+              "progress:true needs an environment source on this read; this caller supplied none, so no hold was read",
+            )
+          }
+          return await readEnvironments({ root: projectRoot, cwd: options.cwd })
+        },
+        log: (line) => writeStderr(line),
+      })
+      return { ok: true, served: { exitCode: served.exitCode } }
     } catch (error) {
+      if (error instanceof ProgressServeProviderMissing) {
+        return fail(
+          1,
+          ISSUES_CODES.providerMissing,
+          options.verb,
+          `command ${JSON.stringify(error.argv0)} not found: ${error.message}`,
+        )
+      }
       return fail(
         1,
-        ISSUES_CODES.providerMissing,
+        ISSUES_CODES.providerFailed,
         options.verb,
-        `command ${JSON.stringify(executable)} not found: ${error instanceof Error ? error.message : String(error)}`,
+        error instanceof ProgressServeRefusal ? `${error.code}: ${error.message}` : String(error),
       )
     }
-    const forward: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP"]
-    const handlers = forward.map((signal) => {
-      const handler = (): void => void child.kill(signal)
-      process.once(signal, handler)
-      return [signal, handler] as const
-    })
-    const exitCode = await child.exited
-    // Killed by a signal is not an exit status: name the signal rather than a plain 1.
-    const endingSignal = child.signalCode
-    for (const [signal, handler] of handlers) process.off(signal, handler)
-    if (endingSignal !== null) {
-      process.stderr.write(`yrd issues ${options.verb}: the declared reader was killed by ${endingSignal}\n`)
-      return { ok: true, served: { exitCode: 1 } }
-    }
-    return { ok: true, served: { exitCode } }
   }
 
   /** Run one declared argv and hand back its stdout, or the named failure the caller reports. */

@@ -230,17 +230,29 @@ export function readActivity(stdout: string): readonly IssuesActivityEvent[] {
         { cause: error },
       )
     }
-    if (!isRecord(record)) throw new Error(`activity line ${String(index + 1)} is not a journal record`)
-    const path = recordPath(record)
-    const actor = record.actor
-    const ts = record.ts
-    if (path === undefined || typeof actor !== "string" || actor === "") continue
-    if (typeof ts !== "number" || !Number.isFinite(ts)) {
-      throw new Error(`activity line ${String(index + 1)} names ${path} with no numeric ts`)
-    }
-    events.push({ path, actor, ts })
+    const event = activityEventOf(record, `activity line ${String(index + 1)}`)
+    if (event !== undefined) events.push(event)
   }
   return events
+}
+
+/**
+ * One journal record as the activity leg reads it: the issue it names, the actor and when. A record that is not a
+ * journal record at all, or one that names an issue with no numeric time, is the provider breaking its contract and
+ * throws; a record that names no issue (a vault-level write) is simply not this leg's. `where` names the record's
+ * position, so the message says which one broke. The resident reader (#38182 row 1) answers the same records in a
+ * `journal` frame, so both paths read them through here.
+ */
+export function activityEventOf(record: unknown, where: string): IssuesActivityEvent | undefined {
+  if (!isRecord(record)) throw new Error(`${where} is not a journal record`)
+  const path = recordPath(record)
+  const actor = record.actor
+  const ts = record.ts
+  if (path === undefined || typeof actor !== "string" || actor === "") return undefined
+  if (typeof ts !== "number" || !Number.isFinite(ts)) {
+    throw new Error(`${where} names ${path} with no numeric ts`)
+  }
+  return { path, actor, ts }
 }
 
 /**
@@ -367,11 +379,34 @@ export function progressOf(
     windowMs?: number
   }>,
 ): Readonly<{ ok: true; progress: IssuesProgress }> | Readonly<{ ok: false; detail: string }> {
-  const open = openHolds(holds, now)
-  if ("unreadable" in open) return { ok: false, detail: open.unreadable }
-  const active = activeByIssue(activity.events ?? [], now, activity.windowMs ?? OWNER_ACTIVITY_WINDOW_MS)
   const unreadable = activity.unknown === true && activity.events === undefined
   const source: IssuesProgressSource = unreadable ? "unreadable" : activity.events === undefined ? "undeclared" : "ok"
+  const windowMs = activity.windowMs ?? OWNER_ACTIVITY_WINDOW_MS
+  return progressFromActivity(holds, now, {
+    state: applyActivity(EMPTY_ACTIVITY, activity.events ?? [], now, windowMs),
+    source,
+    windowMs,
+  })
+}
+
+/**
+ * The same join, from the fold a resident reader already holds (#38182 row 1, @cto 77dd37ea): the serve loop keeps the
+ * activity state across reads, so it applies only new journal lines and hands the state in here. One implementation of
+ * the join, so a frame built by the reader and one built by the one-shot `list-page --progress` cannot disagree.
+ */
+export function progressFromActivity(
+  holds: readonly IssuesEnvironmentHold[],
+  now: number,
+  activity: Readonly<{
+    state: IssuesActivityState
+    /** `ok` when the journal answered; `unreadable` when the refresh failed and only the holds can speak. */
+    source: IssuesProgressSource
+    windowMs?: number
+  }>,
+): Readonly<{ ok: true; progress: IssuesProgress }> | Readonly<{ ok: false; detail: string }> {
+  const open = openHolds(holds, now)
+  if ("unreadable" in open) return { ok: false, detail: open.unreadable }
+  const active = activeViews(activity.state, now, activity.windowMs ?? OWNER_ACTIVITY_WINDOW_MS)
   const qualifying: IssuesProgressEntry[] = []
   for (const [identity, name] of [...open].sort(([left], [right]) => left.localeCompare(right))) {
     qualifying.push({ id: identity, reason: `environment ${name}` })
@@ -386,7 +421,7 @@ export function progressOf(
   }
   return {
     ok: true,
-    progress: { default: source === "unreadable" ? null : false, source, qualifying, complete: true },
+    progress: { default: activity.source === "unreadable" ? null : false, source: activity.source, qualifying, complete: true },
   }
 }
 
