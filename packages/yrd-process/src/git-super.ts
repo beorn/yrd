@@ -1,3 +1,4 @@
+import { createGitLineStream } from "git-super/process"
 import type { GitProcess, GitProcessResult } from "git-super/process"
 import type { OutputTruncation, Process } from "./index.ts"
 
@@ -58,7 +59,90 @@ export function adaptProcessGit(process: Pick<Process, "run">, defaults: GitProc
         ...(failure === "" ? {} : { failure }),
       }
     },
+    /**
+     * The same Git call, streamed instead of captured: every stdout byte reaches one {@link createGitLineStream}
+     * framer, so a read past the host's 16 MiB capture limit stays complete rather than arriving as a head and a
+     * tail with a hole between them. The run result settles the framing, and only failures that make the bytes
+     * themselves incomplete count: stdout capture truncation does not (the framer already saw those bytes), while
+     * stderr truncation still does, because a warning Git wrote there is evidence the read is short.
+     */
+    stream(request) {
+      const argv = ["git", "-C", request.repo, ...request.args]
+      const env = gitEnvironment(defaults.env ?? globalThis.process.env, request.env)
+      // One signal stops the child for both causes: the caller cancelling, and a framing bound being crossed.
+      const stop = new AbortController()
+      const outer = request.signal ?? defaults.signal
+      if (outer !== undefined) {
+        if (outer.aborted) stop.abort()
+        else outer.addEventListener("abort", () => stop.abort(), { once: true })
+      }
+      const framer = createGitLineStream({
+        ...(request.maxBytes === undefined ? {} : { maxBytes: request.maxBytes }),
+        ...(request.maxLines === undefined ? {} : { maxLines: request.maxLines }),
+        ...(request.framing === undefined ? {} : { framing: request.framing }),
+        ...(request.onQueueHighWater === undefined ? {} : { onQueueHighWater: request.onQueueHighWater }),
+        onCap: () => stop.abort(),
+      })
+      const timeoutMs = request.timeoutMs ?? defaults.timeoutMs
+      void process
+        .run({
+          argv,
+          cwd: request.repo,
+          env,
+          signal: stop.signal,
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
+          onOutput: (output) => (output.stream === "stdout" ? framer.write(output.chunk) : undefined),
+        })
+        .then(
+          async (result) => {
+            await framer.end()
+            const failure = streamSettlementFailure(argv, result)
+            framer.settle({
+              code: result.exitCode,
+              stderr: result.stderr,
+              ...(result.timedOut ? { timedOut: true } : {}),
+              ...(failure === undefined ? {} : { failure }),
+            })
+          },
+          (error: unknown) => {
+            framer.fail(error)
+          },
+        )
+      return framer
+    },
   }
+}
+
+/**
+ * The settlement failures that make a STREAMED read incomplete, as opposed to a captured one.
+ *
+ * A capture that ran past its limit drops the middle of the text, so `truncationFailure` names both streams there.
+ * In stream mode the observer already received every stdout byte, so a stdout truncation says nothing about the
+ * stream - counting it would turn a complete read into a false refusal. Stderr is different: it is still captured
+ * text, and Git writes an unusable alternate or a broken ref there without a non-zero exit.
+ */
+function streamSettlementFailure(
+  argv: readonly string[],
+  result: Readonly<{
+    verdict?: string
+    sweepFailure?: string
+    stalled?: boolean
+    escapedDescendant?: boolean
+    outputTruncation?: readonly OutputTruncation[]
+  }>,
+): string | undefined {
+  const parts: string[] = []
+  if (result.verdict !== undefined && result.verdict !== "EXITED") parts.push(`process verdict ${result.verdict}`)
+  if (result.sweepFailure !== undefined) parts.push(result.sweepFailure)
+  if (result.stalled === true) parts.push("the process stalled and was stopped")
+  if (result.escapedDescendant === true)
+    parts.push("a descendant held stdout open past the child's exit, so the drain was abandoned")
+  const stderrTruncation = truncationFailure(
+    argv,
+    (result.outputTruncation ?? []).filter((entry) => entry.stream === "stderr"),
+  )
+  if (stderrTruncation !== undefined) parts.push(stderrTruncation)
+  return parts.length === 0 ? undefined : parts.join("; ")
 }
 
 /**

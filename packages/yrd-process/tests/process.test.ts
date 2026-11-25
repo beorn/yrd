@@ -206,7 +206,9 @@ describe("Process", () => {
       ],
       timeoutMs: 2_000,
       stdin: new Uint8Array([7, 0, 252]),
-      onOutput: ({ stream, chunk }) => observed[stream].push(chunk.slice()),
+      onOutput: ({ stream, chunk }) => {
+        observed[stream].push(chunk.slice())
+      },
       extraStdio: {
         input: new Uint8Array([1, 0, 255, 10]),
         maxBytes: 4,
