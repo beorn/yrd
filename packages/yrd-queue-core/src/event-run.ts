@@ -44,6 +44,8 @@ import { assertPlainEventQueueRun } from "./event-config.ts"
 import { eventDirectMergeCommits } from "./direct.ts"
 import { createEventStore, selectionFor, listRefs, seamProcess, type Event } from "./git.ts"
 import {
+  boundKilledWithoutVerdict,
+  CHECK_RESULT_MARKER,
   checkLogPath,
   effectiveCheckTimeoutMs,
   readCheckTrailer,
@@ -2729,6 +2731,22 @@ export async function eventQueueRun(
               reason: "retried",
               remote: fault.signature,
               subject: fault.line,
+            })
+            continue
+          }
+          // #38739: the bound killed the check before it named a verdict — an
+          // unmeasured run, not a judgment. It gets the same single rerun a
+          // transport fault does; only the rerun's second verdictless kill stops
+          // the line, and a rerun that names pass/fail is the line's answer.
+          if (boundKilledWithoutVerdict(check)) {
+            attemptedRetry = true
+            log.write({
+              kind: "warning",
+              branch,
+              head,
+              reason: "retried",
+              check: check.name,
+              cause: `ran past its bound with no usable ${CHECK_RESULT_MARKER}`,
             })
             continue
           }

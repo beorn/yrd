@@ -73,6 +73,13 @@ export type CheckSpec = Readonly<{
 }>
 
 export const DEFAULT_CHECK_BOUND_MS = 30 * 60 * 1000
+
+/**
+ * How many reruns of an attempt are allowed when what stopped it was the
+ * queue's to explain rather than a verdict: a recognised transport fault, or
+ * (#38739) a bound kill that named no verdict. One rerun, never a ladder — the
+ * rerun's own verdict, or a second verdictless kill, is the line's answer.
+ */
 export const TRANSPORT_RETRY_LIMIT = 1
 
 /** The timeout the check runner will actually give this declaration and tier. */
@@ -201,6 +208,16 @@ export type CheckResult = Readonly<{
   projectedMs?: number
   boundMs?: number
 }>
+
+/**
+ * #38739: the bound ended this run before its log named a verdict, so the run
+ * is unmeasured rather than a judgment and the round reruns the check once.
+ * Only a second verdictless bound kill stops the line. A kill the log rescued
+ * with a verdict carries that verdict, so it is not this.
+ */
+export function boundKilledWithoutVerdict(run: Pick<CheckResult, "result" | "exit">): boolean {
+  return run.result === "stuck" && run.exit === "timeout"
+}
 
 /**
  * What the tree a program judges IS, read once when the worktree was prepared
