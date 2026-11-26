@@ -4374,6 +4374,9 @@ it.each(["notified", "notified then paused"] as const)(
         expect.objectContaining({ branch: "task/notified-race", expected: before, notified: 1 }),
       ])
       expect((await readStatus(store, "main", "task/notified-race")).status).toBe("merged")
+      // The retry runs the staged callback again; the change chain must still record ONE prepared merge (@cto e20c79a9).
+      const chain = await (await openEvents({ ...store, ref: changesRef("main", "task/notified-race") })).events()
+      expect(chain.filter((event) => event.type === "merged")).toHaveLength(1)
       return
     }
     expect(outcome).toMatchObject({ exitCode: 0, merged: [], stopped: { ring: "pause" } })
