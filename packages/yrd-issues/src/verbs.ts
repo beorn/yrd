@@ -57,8 +57,12 @@ export const ISSUES_WRITE_VERBS: ReadonlySet<IssuesVerb> = new Set<IssuesVerb>([
 /** GitHub's pair (`gh issue close --reason`). */
 export const ISSUES_CLOSE_REASONS = ["completed", "not-planned"] as const
 
-/** The change transitions an `event` records; never `closed`, whose one writer is the close path (#29630). */
-export const ISSUES_EVENT_KINDS = ["merged", "failed", "withdrawn"] as const
+/**
+ * The change transitions an `event` records; never `closed`, whose one writer is the close path (#29630).
+ * `submitted` joined them for hh #38766 (@cto e0638180): the timeline needs both ends of a change's life, and an
+ * untyped `comment` is not queryable by kind.
+ */
+export const ISSUES_EVENT_KINDS = ["submitted", "merged", "failed", "withdrawn"] as const
 
 export function isIssuesVerb(value: string): value is IssuesVerb {
   return Object.hasOwn(ISSUES_VERBS, value)

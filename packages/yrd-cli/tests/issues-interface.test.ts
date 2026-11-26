@@ -9,7 +9,7 @@
  * @testonly none
  * @consumer Yrd's issue reads (slice Y1, in-process) · Tent, staffing and tools through the CLI
  */
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -464,7 +464,7 @@ describe("yrd issues", () => {
   })
 
   // #31194, @cto 721b42d7: Yrd's merged item event. The provider resolves <raw>; `closed` stays the close path's.
-  it("passes event's four operands and <id> whole, and refuses a kind outside merged|failed|withdrawn (rule: event kinds)", async () => {
+  it("passes event's four operands and <id> whole, and refuses a kind outside submitted|merged|failed|withdrawn (rule: event kinds)", async () => {
     const root = project({
       "issues.yml": declare({ event: provider("json", "<raw>", "<kind>", "<source>", "<text>", "<id>") }),
     })
@@ -475,11 +475,182 @@ describe("yrd issues", () => {
     for (const kind of ["closed", "opened", ""]) {
       const refused = await yrd(root, "issues", "event", "--id", "i", "raw", kind, source, "text")
       expect(refused.exitCode, kind).toBe(2)
-      expect(refused.stderr).toContain("kind must be merged, failed, withdrawn")
+      expect(refused.stderr).toContain("kind must be submitted, merged, failed, withdrawn")
     }
+    // hh #38766 (@cto e0638180): `submitted` is the timeline's other end of a change and is accepted as its own kind.
+    const submitted = await yrd(
+      root,
+      "issues",
+      "event",
+      "--id",
+      "yrd-submitted-0123",
+      "--",
+      "-38766",
+      "submitted",
+      source,
+      "task/38766 submitted",
+    )
+    expect(submitted.exitCode, submitted.stderr).toBe(0)
+    expect(envelopeOf(submitted).result).toEqual({
+      argv: ["-38766", "submitted", source, "task/38766 submitted", "yrd-submitted-0123"],
+    })
     expect((await yrd(root, "issues", "event", "raw", "merged", source, "text")).stderr).toContain(
       "--id <id> is required",
     )
+  })
+
+  // hh #38766 (@cto 15f0394a): a launch may be detached, so the child that saw the failure is the only one left to say so.
+  it("writes the caller's fallback event when the declared write cannot land, and nothing extra when it lands", async () => {
+    const calls = join(scratch(), "event-calls.txt")
+    const script =
+      'k=$1; printf "%s\\t%s\\n" "$1" "$2" >> "$3"; ' +
+      'if [ "$k" = merged ]; then echo "km lane held" >&2; exit 3; fi; printf \'{"applied":true}\\n\''
+    const root = project({
+      "issues.yml": declare({ event: ["sh", "-c", script, "sh", "<kind>", "<id>", calls] }),
+    })
+    const source = "github.com/beorn/hh-dev@0123456789abcdef0123456789abcdef01234567"
+    const held = await yrd(
+      root,
+      "issues",
+      "event",
+      "--id",
+      "yrd-merged-abc",
+      "raw",
+      "merged",
+      source,
+      "task/x merged",
+      "--on-failure-kind",
+      "failed",
+      "--on-failure-text",
+      "task/x merged event did not land",
+    )
+    expect(held.exitCode, held.stderr).toBe(1)
+    expect(held.stderr).toContain("wrote the failed fallback event")
+    // The replay key is the failed write's own, so a retry of the launch never doubles the mark.
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual([
+      "merged\tyrd-merged-abc",
+      "failed\tyrd-merged-abc-failed",
+    ])
+
+    // A write that lands leaves exactly one row: the fallback is a failure's record, never a second copy.
+    const landed = await yrd(
+      root,
+      "issues",
+      "event",
+      "--id",
+      "yrd-submitted-abc",
+      "raw",
+      "submitted",
+      source,
+      "task/x submitted",
+      "--on-failure-kind",
+      "failed",
+    )
+    expect(landed.exitCode, landed.stderr).toBe(0)
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual([
+      "merged\tyrd-merged-abc",
+      "failed\tyrd-merged-abc-failed",
+      "submitted\tyrd-submitted-abc",
+    ])
+
+    const badKind = await yrd(
+      root,
+      "issues",
+      "event",
+      "--id",
+      "i",
+      "raw",
+      "merged",
+      source,
+      "t",
+      "--on-failure-kind",
+      "closed",
+    )
+    expect(badKind.exitCode).toBe(2)
+    expect(badKind.stderr).toContain("--on-failure-kind must be one of")
+  })
+
+  // hh #38766 (@cto e72bc1a0 REVISE 1): a merge before the declaration exists is a skip, not a failure. The
+  // in-process path called it "skipped", and a fallback written under the same missing declaration could only fail in
+  // turn — so no provider is asked and the skip is said out loud.
+  it("writes no fallback when the merge declares no event, and names the skip instead", async () => {
+    const source = "github.com/beorn/hh-dev@0123456789abcdef0123456789abcdef01234567"
+    const undeclaredVerb = project({ "issues.yml": declare({ view: provider("json", "x", "<key>") }) })
+    const noVerb = await yrd(
+      undeclaredVerb,
+      "issues",
+      "event",
+      "--id",
+      "yrd-merged-nv",
+      "raw",
+      "merged",
+      source,
+      "task/x merged",
+      "--on-failure-kind",
+      "failed",
+      "--on-failure-text",
+      "task/x merged event did not land",
+    )
+    expect(noVerb.exitCode, noVerb.stderr).toBe(1)
+    expect(noVerb.stderr).toContain("yrd-issues-verb-unsupported")
+    expect(noVerb.stderr).toContain("not yet declared at that merge: no provider was asked")
+    expect(noVerb.stderr).toContain("no failed fallback written")
+
+    const noDeclaration = project({ "README.md": "no declaration here\n" })
+    const missing = await yrd(
+      noDeclaration,
+      "issues",
+      "event",
+      "--id",
+      "yrd-merged-md",
+      "raw",
+      "merged",
+      source,
+      "task/x merged",
+      "--on-failure-kind",
+      "failed",
+    )
+    expect(missing.exitCode, missing.stderr).toBe(1)
+    expect(missing.stderr).toContain("yrd-issues-declaration-missing")
+    expect(missing.stderr).toContain("no failed fallback written")
+  })
+
+  // hh #38766 (@cto e72bc1a0 REVISE 2): a timed-out write may have landed. The branch's record says the outcome is
+  // unknown and carries the replay key, so a later read settles it instead of a second, contradicting event.
+  it("names a timed-out write as an outcome unknown, keeping its replay key", async () => {
+    const calls = join(scratch(), "event-calls.txt")
+    const script =
+      'log=$1; kind=$3; printf "%s\\t%s\\t%s\\t%s\\n" "$2" "$3" "$4" "$5" >> "$log"; ' +
+      'if [ "$kind" = merged ]; then sleep 10; fi; printf \'{"applied":true}\\n\''
+    const root = project({
+      "issues.yml": declare({
+        event: ["sh", "-c", script, "sh", calls, "<raw>", "<kind>", "<text>", "<id>"],
+      }),
+    })
+    const source = "github.com/beorn/hh-dev@0123456789abcdef0123456789abcdef01234567"
+    const slow = await yrd(
+      root,
+      "issues",
+      "event",
+      "--id",
+      "yrd-merged-slow",
+      "--timeout-ms",
+      "2000",
+      "raw",
+      "merged",
+      source,
+      "task/x merged",
+      "--on-failure-kind",
+      "failed",
+      "--on-failure-text",
+      "task/x merged event did not land",
+    )
+    expect(slow.exitCode, slow.stderr).toBe(1)
+    expect(slow.stderr).toContain("wrote the failed fallback event")
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual([
+      "raw\tmerged\ttask/x merged\tyrd-merged-slow",
+      "raw\tfailed\toutcome unknown: timed out after 2 s; replay key yrd-merged-slow\tyrd-merged-slow-failed",
+    ])
   })
 
   // #31194: a clone's main can lag the merge Yrd just published by seconds (2-44 s measured on /hh/dev).
