@@ -13,6 +13,7 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, expect, it } from "vitest"
 import { BUSY_PREFIX } from "git-super/exclusive"
+import { inspectProcessCensus, type ProcessCensus } from "removely"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { closeEnvironment, isWriterLockWaitFailure } from "../src/env-commands.ts"
@@ -181,6 +182,12 @@ it.each([
   expect(isWriterLockWaitFailure(error)).toBe(false)
 })
 
+/** An idle same-UID host: the real census shape with no rows and complete coverage. */
+async function idleCensus(): Promise<ProcessCensus<"same-uid">> {
+  const observed = await inspectProcessCensus({ scope: "same-uid", sources: ["cwd", "fd"], deadlineMs: 2_000 })
+  return { ...observed, rows: [], coverage: { ...observed.coverage, complete: true, unreadable: [] } }
+}
+
 it("settles a close whose writer-lock wait ran out after another writer removed the environment (37624)", async () => {
   const w = await world()
   await addMaterializedDependency(w)
@@ -193,7 +200,10 @@ it("settles a close whose writer-lock wait ran out after another writer removed 
     JSON.stringify({ executable: busyGit(dirname(w.work), "gone"), contract: "native" }),
   ])
   const run = capture(w.work)
-  const exit = await closeEnvironment(path, { json: true }, run.io)
+  // This row is about the writer-lock wait, not host process churn: a CI runner denies /proc/<pid> for a sibling
+  // bun (EACCES), and the same-UID census then refuses the close before the wait is reached (yrd CI #1011). Inject
+  // an idle host through the test-only census seam (28120): no rows, complete coverage.
+  const exit = await closeEnvironment(path, { json: true }, run.io, idleCensus)
   expect(existsSync(path), run.stdout() + run.stderr()).toBe(false)
   expect(await w.git(["worktree", "list", "--porcelain"])).not.toContain(path)
   // The other writer's removal is a fact; the retained copy this close never wrote is not, and says so.
@@ -230,9 +240,7 @@ it("keeps failing a close that removed nothing, even after a writer-lock wait ra
   if (failure?.includes("could not close through git super worktree remove") === true) {
     expect(failure, run.stdout() + run.stderr()).toContain("no plain-git fallback was attempted")
   } else {
-    expect(failure, run.stdout() + run.stderr()).toMatch(
-      /same-UID process (CWD|fd) census /u,
-    )
+    expect(failure, run.stdout() + run.stderr()).toMatch(/same-UID process (CWD|fd) census /u)
     expect(failure, run.stdout() + run.stderr()).toMatch(
       /could not read pid \d+ \S+ \(EACCES\)|incomplete: no readable coverage/u,
     )
