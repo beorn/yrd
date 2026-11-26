@@ -5822,6 +5822,8 @@ export async function coreQueueCommand(
         queueName: queue,
         scope,
         now: request.now,
+        /** #38870: the rounds this read did not open stay named, never counted as read. */
+        ...(reading.journals.unread === undefined ? {} : { unreadRounds: reading.journals.unread }),
       })
 
       if (options.json === true) {

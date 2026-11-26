@@ -10,9 +10,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { submit } from "@yrd/queue-core"
+import { openLog, submit } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { workdirOf } from "../src/workdir.ts"
 import { YRD_ENTRY } from "./support/yrd-entry.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
@@ -231,4 +232,19 @@ describe("yrd ls", () => {
     expect(result.stdout).toContain("ENDED IN THE LAST 24 H (0)")
     expect(result.stdout).toContain("Read event change chains in")
   })
+})
+
+/** @failure A narrowed listing left rounds unopened and said so only on stderr, so every --json script saw a complete read (#38870).
+ * @level l1 @consumer a scripted yrd ls reader
+ */
+it("reports the rounds a narrowed read left unopened as unreadRounds in --json", async () => {
+  const work = await queueWithGroupedChanges()
+  const complete = JSON.parse((await yrd(work, "ls", "--json")).stdout) as { unreadRounds?: number }
+  expect(complete.unreadRounds ?? 0).toBe(0)
+  const stray = openLog(join(await workdirOf(gitIn(work), { cwd: work }), "logs"))
+  stray.write({ kind: "run", target: "main" })
+  stray.finish()
+  const second = await yrd(work, "ls", "--json", "--fresh")
+  const narrowed = JSON.parse(second.stdout) as { unreadRounds?: number }
+  expect(narrowed.unreadRounds).toBeGreaterThanOrEqual(1)
 })

@@ -65,6 +65,8 @@ export type QueueLsResult = Readonly<{
   groups: readonly QueueLsGroup[]
   byStatus: Record<LsGroupStatus, readonly QueueLsItem[]>
   totalCount: number
+  /** Rounds in the journal window this read did not open, because no printed row names them (#38870). Absent when none.*/
+  unreadRounds?: number
 }>
 
 import { branchIssueId } from "./issues/branch-issue.ts"
@@ -151,6 +153,8 @@ export function queueLs<Run extends JournalSummary>(
     scope?: string
     now?: Date
     terms?: readonly string[]
+    /** Rounds the listing left unopened; the page says it on stderr, scripts need it here (#38870). */
+    unreadRounds?: number
   }>,
 ): QueueLsResult {
   const now = options.now ?? new Date()
@@ -225,6 +229,7 @@ export function queueLs<Run extends JournalSummary>(
     groups,
     byStatus: grouped,
     totalCount,
+    ...(options.unreadRounds === undefined || options.unreadRounds === 0 ? {} : { unreadRounds: options.unreadRounds }),
   }
 }
 
