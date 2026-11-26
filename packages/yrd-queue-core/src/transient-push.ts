@@ -8,6 +8,11 @@
  */
 
 import { setTimeout as delay } from "node:timers/promises"
+// The hold constants and their predicate live in retry-hold.ts, beside the bound-kill requeue's own, so the
+// two automatic retries are recognised by one decision and can never drift apart (@cto 5d7283e9).
+import { isTransientPushHold, TRANSIENT_PUSH_HOLD } from "./retry-hold.ts"
+
+export { isTransientPushHold, TRANSIENT_PUSH_HOLD }
 
 const MAX_LINE = 300
 const RETURNED_5XX = /returned error:\s*50\d\b/iu
@@ -42,9 +47,6 @@ function requestIdIn(text: string): string | undefined {
   return REQUEST_ID.exec(text)?.[1]
 }
 
-/** Phrase written on a 5xx hold so a later round can probe after Reason: truncation. */
-export const TRANSIENT_PUSH_HOLD = "transient GitHub 5xx"
-
 /** The first 5xx shape in `text`, or undefined when the failure is not transient. */
 export function matchTransientPush5xx(text: string): TransientPush5xx | undefined {
   const requestId = requestIdIn(text)
@@ -59,12 +61,6 @@ export function matchTransientPush5xx(text: string): TransientPush5xx | undefine
     }
   }
   return undefined
-}
-
-/** A standing stuck change this code wrote; other 5xx-quoting stucks keep a manual resume. */
-export function isTransientPushHold(reason: string | undefined): boolean {
-  if (reason === undefined || reason === "") return false
-  return reason.includes(TRANSIENT_PUSH_HOLD)
 }
 
 function errorText(error: unknown): string {

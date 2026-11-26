@@ -107,12 +107,34 @@ import {
   sameFailureReason,
 } from "./with-notify.ts"
 import { changeName } from "./refs.ts"
+import { BOUND_KILL_REQUEUE, isBoundKillRequeue } from "./retry-hold.ts"
 import { setupStuckCode, setupStuckNext, transportFaultIn } from "./setup-transport.ts"
 import { incidentTrailers, type Incident } from "./incident.ts"
 import { readRootChanges } from "./root-changes.ts"
 import { mergedBy } from "./git.ts"
 import { settledBaseCommit } from "./settled-base.ts"
 import { narrowingOf } from "./narrowing.ts"
+
+/**
+ * #38739 (c), @cto 31e669f6: a check the bound killed before it named a verdict is an environment result, not a
+ * code verdict. The first such kill on a head does not stop the line — the change is requeued once behind the next
+ * one, and the requeue is recorded on the change's own chain (the constant and its predicate live in
+ * retry-hold.ts) so a later round knows the head has spent it. A second verdictless bound kill at the same head
+ * stops the line and pages, exactly as before.
+ *
+ * Has this head already spent its one requeue? Read off the chain, never off round memory: a round that ends
+ * between the two attempts must not hand the same head a second grace next round.
+ */
+function boundKillRequeueSpent(history: Readonly<{ events: readonly Event[] }> | undefined, head: string): boolean {
+  return (
+    history?.events.some(
+      (event) =>
+        event.type === "stuck" &&
+        trailer(event, EVENT_TRAILERS.commit) === head &&
+        isBoundKillRequeue(trailer(event, EVENT_TRAILERS.retryReason)),
+    ) ?? false
+  )
+}
 
 function endingTime(event: Event, context: string): string {
   const time = event.props.find(([key]) => key === EVENT_TRAILERS.time)?.[1]
@@ -283,12 +305,23 @@ export function noticeSettledLocally(
  * `noticeSettledLocally` is the part of this answer that needs no ending; the rest needs it.
  */
 export function eventNoticeOwed(
-  ending: Pick<Event, "id" | "props">,
+  ending: Pick<Event, "id" | "props" | "type">,
   notices: EventChange["notices"],
   recipient: string,
   floor: Readonly<{ notBefore: Date; present: ReadonlySet<string> }>,
 ): boolean {
   if (ending.props.some(([key]) => key === "Migrated-From")) return false
+  // #38739 (c), @cto 5d7283e9: the requeue this queue wrote for itself is a change already moving again, so a
+  // page for it would be a false alarm. Recognised structurally, never by prose: the requeue record is the one
+  // stuck carrying a Retry-Reason and NO Check: row — the stop that follows a requeue carries its check row and
+  // still pages. A reworded reason does not match the constant, so it keeps a human's stop.
+  if (
+    ending.type === "stuck" &&
+    !ending.props.some(([key]) => key === EVENT_TRAILERS.check) &&
+    isBoundKillRequeue(ending.props.find(([key]) => key === EVENT_TRAILERS.retryReason)?.[1])
+  ) {
+    return false
+  }
   if (noticeSettledLocally(ending.id, notices, recipient, floor)) return false
   const time = ending.props.find(([key]) => key === EVENT_TRAILERS.time)?.[1]
   if (time === undefined || !Number.isFinite(Date.parse(time))) {
@@ -1619,9 +1652,13 @@ export async function eventQueueRun(
     const retryNamedStuck =
       options.foreground === true && options.only?.branch === standing.branch && options.only.head === standing.commit
     const retryTransient = isTransientPushHold(standing.reason)
+    // #38739 (c): the requeue this queue wrote itself is a held change, not a change waiting on a
+    // human — the next round re-runs it once, and its second verdictless bound kill stops the line.
+    const retryBoundRequeue = isBoundKillRequeue(standing.reason)
     if (
       !retryNamedStuck &&
       !retryTransient &&
+      !retryBoundRequeue &&
       !(await withRemoteSeamGap("resumeRead", () =>
         queueResumedAfter(store, queue, standing.branch, histories.get(standing.branch)),
       ))
@@ -1653,6 +1690,14 @@ export async function eventQueueRun(
         head: standing.commit,
         reason: standing.reason,
       })
+    } else if (retryBoundRequeue) {
+      log.write({
+        kind: "observation",
+        subject: "bound-kill-requeue",
+        branch: standing.branch,
+        head: standing.commit,
+        reason: standing.reason,
+      })
     } else {
       log.write({
         kind: "observation",
@@ -1666,6 +1711,10 @@ export async function eventQueueRun(
   const line =
     standing === undefined ? remaining : [standing, ...remaining.filter((change) => change.branch !== standing.branch)]
   const failed: string[] = []
+  /** #38739 (c): heads this round already requeued, so the copy it re-runs is the one that stops on a kill. */
+  const requeuedInRound = new Set<string>()
+  /** The attempt a requeued head resumes at: its own bound already came and went, so it is attempt 2. */
+  const requeuedAttempt = new Map<string, number>()
   const holdTransientPublication = async (
     branch: string,
     head: string,
@@ -2203,6 +2252,11 @@ export async function eventQueueRun(
       return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch])
     }
     let tip = selectedChange.tip
+    const requeueKey = `${branch}\u0000${head}`
+    let requeuedChange: typeof selectedChange | undefined
+    /** Read once for this change: the chain says whether this head has already spent its one requeue. */
+    const requeueSpentOnChain = boundKillRequeueSpent(histories.get(branch), head)
+    const startAttempt = requeuedAttempt.get(requeueKey) ?? (requeueSpentOnChain ? 2 : 1)
     if (options.stopAtMs !== undefined && (options.now?.() ?? Date.now()) >= options.stopAtMs) {
       return result(0, observedMerged, [], [], [branch])
     }
@@ -2385,7 +2439,17 @@ export async function eventQueueRun(
         run: log.id,
       })
       const results: EventCheck[] = []
-      let attemptedRetry = false
+      let attemptedRetry = startAttempt > 1
+      // A requeued head resumes at attempt 2, so this processing holds no attempt-1 row: the Retried
+      // trailer names the reason the first attempt is elsewhere instead (events.ts refuses one without
+      // either). Attempt 1 in place still carries both rows, exactly as before.
+      const retryDetail =
+        attemptedRetry && startAttempt > 1
+          ? ({
+              retried: 1 as const,
+              reason: `${BOUND_KILL_REQUEUE}; its first attempt is on the requeue event`,
+            } as const)
+          : undefined
       let decisionResults: EventCheck[] = []
       let skippedByOverride = new Set<string>()
       let setupDecision:
@@ -2513,7 +2577,7 @@ export async function eventQueueRun(
       // then the round's whole work, and skipping it would quietly make the
       // declaration inert rather than merely cheap.
       const setupIsTheOnlyWork = options.setup !== undefined && options.checks.length === 0
-      for (let attempt = 1; attempt <= 1 + TRANSPORT_RETRY_LIMIT; attempt++) {
+      for (let attempt = startAttempt; attempt <= 1 + TRANSPORT_RETRY_LIMIT; attempt++) {
         const startOfAttempt = results.length
         skippedByOverride = new Set()
         for (const phase of ["submit", "merge"] as const) {
@@ -2738,24 +2802,39 @@ export async function eventQueueRun(
             })
             continue
           }
-          // #38739: the bound killed the check before it named a verdict — an
-          // unmeasured run, not a judgment. It gets the same single rerun a
-          // transport fault does; only the rerun's second verdictless kill stops
-          // the line, and a rerun that names pass/fail is the line's answer.
+          // #38739 (c), @cto 31e669f6: the bound killed the check before it named a verdict — an
+          // environment result, not a judgment. The first such kill on a head does not spend the
+          // line's next bound inside this change: the change is requeued once behind the next one
+          // and the line keeps moving. The second kill at the same head falls through to the stuck
+          // stop below, which pages exactly as it always has.
           if (boundKilledWithoutVerdict(check)) {
-            attemptedRetry = true
-            log.write({
-              kind: "warning",
-              branch,
-              head,
-              reason: "retried",
-              check: check.name,
-              cause: `ran past its bound with no usable ${CHECK_RESULT_MARKER}`,
-            })
-            continue
+            const spent = requeuedInRound.has(requeueKey) || requeueSpentOnChain
+            if (!spent) {
+              const cause = `${check.name} ran past its bound with no usable ${CHECK_RESULT_MARKER}`
+              tip = await appendOwnedChange("boundKillRequeueWrite", store, queue, branch, tip, {
+                type: "stuck",
+                at: new Date(),
+                commit: head,
+                run: log.id,
+                reason: `${cause}; ${BOUND_KILL_REQUEUE} behind the next change`,
+                retry: {
+                  retried: 1 as const,
+                  reason: `${BOUND_KILL_REQUEUE}: ${cause} (${check.why ?? `exit ${String(check.exit)}`}; log ${check.log})`,
+                },
+              })
+              requeuedInRound.add(requeueKey)
+              requeuedAttempt.set(requeueKey, attempt + 1)
+              requeuedChange = { ...selectedChange, tip }
+              log.write({ kind: "warning", branch, head, reason: "requeued", check: check.name, cause })
+              break
+            }
           }
         }
         break
+      }
+      if (requeuedChange !== undefined) {
+        line.push(requeuedChange)
+        continue
       }
       const stopped = decisionResults.find(({ run }) => run.result !== "pass")
       const stoppedCheck = stopped?.run
@@ -2768,7 +2847,9 @@ export async function eventQueueRun(
           config: options.configBlob,
           checks: attemptedRetry && setupDecision.kind === "stuck" ? results : decisionResults,
           reason: setupDecision.reason,
-          ...(attemptedRetry && setupDecision.kind === "stuck" ? { retry: { retried: 1 as const } } : {}),
+          ...(attemptedRetry && setupDecision.kind === "stuck"
+            ? { retry: retryDetail ?? { retried: 1 as const } }
+            : {}),
         })
         if (setupDecision.kind === "stuck") {
           await writeStuckStop(branch, head, ended, setupDecision.reason, setupStuckNext(setupDecision.fault))
@@ -3002,7 +3083,7 @@ export async function eventQueueRun(
           type: "stuck",
           at: new Date(),
           ...evidence,
-          ...(attemptedRetry ? { retry: { retried: 1 as const } } : {}),
+          ...(attemptedRetry ? { retry: retryDetail ?? { retried: 1 as const } } : {}),
           // The change's reason is the composed diagnosis, so status says why it is stuck (26089);
           // the code travels on the stuck record below.
           reason,
