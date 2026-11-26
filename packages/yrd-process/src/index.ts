@@ -1,5 +1,6 @@
 import { createScope, type Scope } from "@silvery/scope"
 import { createFailure } from "./failure.ts"
+import { readRssAtKill, type RssAtKill } from "./rss-at-kill.ts"
 import { createLogger, type ConditionalLogger } from "loggily"
 import { accessSync, closeSync, constants, statSync, write, writeSync } from "node:fs"
 import { delimiter, isAbsolute, resolve } from "node:path"
@@ -16,6 +17,7 @@ export {
 export { adaptProcessGit, cleanGitEnvironment, gitFailure, type GitProcessDefaults } from "./git-super.ts"
 
 export { pidPresence, processStartIdentity, type ProcessStartIdentity } from "./pid-identity.ts"
+export { describeRssAtKill, readRssAtKill, type RssAtKill } from "./rss-at-kill.ts"
 
 export type ProcessRequest = Readonly<{
   argv: readonly string[]
@@ -105,6 +107,11 @@ type ProcessResultBase = Readonly<{
   }>
   durationMs: number
   timedOut: boolean
+  /**
+   * Set when the bound killed the run: the process group's resident memory read once from /proc at the moment of
+   * the kill (@cto dd0e43f2), or why it could not be read.
+   */
+  rssAtKill?: RssAtKill
   lastProgressAtMs?: number
   lastProgressBytes?: number
   /**
@@ -478,6 +485,7 @@ export function createProcess(
       ])
       const started = now()
       let timedOut = false
+      let rssAtKill: RssAtKill | undefined
       let stalled = false
       let lastProgressAtMs = started
       let lastProgressBytes = 0
@@ -643,6 +651,8 @@ export function createProcess(
         if (request.timeoutMs !== undefined) {
           cancelTimeout = runScope.timeout(() => {
             timedOut = true
+            // Only a tree this runner spawned and leads is measured; an injected spawn's pid names no real group.
+            if (groupSettlement) rssAtKill = readRssAtKill(child.pid)
             terminate()
           }, request.timeoutMs)
         }
@@ -739,6 +749,7 @@ export function createProcess(
           timedOut,
           stalled,
           verdict: stalled ? "STALLED" : timedOut ? "TIMED_OUT" : "EXITED",
+          ...(rssAtKill === undefined ? {} : { rssAtKill }),
           lastProgressAtMs,
           lastProgressBytes,
           ...(sweepFailure === undefined ? {} : { sweepFailure }),
