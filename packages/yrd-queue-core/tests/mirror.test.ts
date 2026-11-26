@@ -199,6 +199,26 @@ describe("refreshMirror", () => {
       join(created.path, MIRROR_REFRESHED_AT),
       `${JSON.stringify({ at: new Date().toISOString(), remote: "origin", refspecs: ["+refs/heads/main:refs/heads/main"] })}\n`,
     )
+    // #38711 moved heads to refs/yrd-mirror/heads/, so every store carries a scoped stamp from the old refs set. That
+    // stamp certifies nothing the caller asked for, yet refusing it deadlocks the upgrade — only a refresh rewrites the
+    // stamp — so it costs exactly one refresh and never a refusal. A stamp certified for ANOTHER remote still refuses.
+    const migrated = await refreshMirror({
+      path: created.path,
+      url,
+      gitIn: through(counted.env),
+      refspecs,
+      maxAgeMs: 60_000,
+    })
+    expect(migrated.outcome).toBe("fetched")
+    expect(readRemoteCalls(counted.dir).verbs.fetch).toBe(3)
+    const migratedStamp = JSON.parse(readFileSync(join(created.path, MIRROR_REFRESHED_AT), "utf8")) as {
+      refspecs: string[]
+    }
+    expect(migratedStamp.refspecs).toEqual(refspecs)
+    writeFileSync(
+      join(created.path, MIRROR_REFRESHED_AT),
+      `${JSON.stringify({ at: new Date().toISOString(), remote: "elsewhere", refspecs })}\n`,
+    )
     await expect(
       refreshMirror({ path: created.path, url, gitIn: through(counted.env), refspecs, maxAgeMs: 60_000 }),
     ).rejects.toThrow("does not cover")
