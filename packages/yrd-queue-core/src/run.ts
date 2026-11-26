@@ -20,6 +20,7 @@ import { EventRefsAcquireExhausted } from "./event-read.ts"
 import { removeEmptyWorktreeRunDirectory } from "./worktree.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { overrideLine, type OverrideEntry, type OverrideTable } from "./override.ts"
+import type { PauseRecord } from "./pause.ts"
 import { BEYOND_REFRESH_LIMIT, roundRemoteCallsRow, traceRemoteCalls } from "./remote-calls.ts"
 import { remoteUrl } from "./remote.ts"
 import type { Change } from "./refs.ts"
@@ -106,6 +107,13 @@ export type QueueRunOptions = Readonly<{
   notify?: readonly Notifier[]
   /** An explicit foreground round may work under the observed operator pause. */
   foreground?: boolean
+  /**
+   * The standing stop this round read from the line's ops record, reported
+   * before the round decides anything with it (#38740). The service states its
+   * health document from this reading and only this reading, so a page can
+   * never carry a stop that the round in force has already seen lifted.
+   */
+  onLineStop?: (stop: PauseRecord | undefined) => void | Promise<void>
 }>
 
 /** What a round read of its line, for the service's stall judgement (25669). */

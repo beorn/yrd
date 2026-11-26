@@ -1620,6 +1620,7 @@ export async function coreQueueCommand(
     noCheck?: boolean,
     onRecord?: (record: LogRecord) => void,
     onTerminalExit?: (kind: ServiceExitFact["kind"], detail: string) => void,
+    onLineStop?: (stop: PauseRecord | undefined) => void | Promise<void>,
   ): Promise<QueueRunOutcome | ReadFailedRound | RetryExhaustedRound | LegacyOverrideRound | undefined> => {
     let outcome: QueueRunOutcome
     try {
@@ -1651,6 +1652,7 @@ export async function coreQueueCommand(
         ...(tier === undefined ? {} : { tier }),
         ...(stopAtMs === undefined ? {} : { stopAtMs }),
         ...(noCheck === undefined ? {} : { noCheck }),
+        ...(onLineStop === undefined ? {} : { onLineStop }),
       })
       roundCleanup = async (merged) => {
         // The queue journal is complete. Housekeeping owns one shared log per
@@ -1875,6 +1877,7 @@ export async function coreQueueCommand(
       noCheck?: boolean
       onRecord?: (record: LogRecord) => void
       onTerminalExit?: (kind: ServiceExitFact["kind"], detail: string) => void
+      onLineStop?: (stop: PauseRecord | undefined) => void | Promise<void>
       waiting?: Readonly<{
         onWait: (wait: RoundLockWait) => void
         onStall: (wait: RoundLockWait & Readonly<{ waitedMs: number }>) => void
@@ -1964,6 +1967,7 @@ export async function coreQueueCommand(
           round.noCheck,
           round.onRecord,
           round.onTerminalExit,
+          round.onLineStop,
         )
       } finally {
         // An otherwise empty round can still publish queue observations or
@@ -4523,6 +4527,22 @@ export async function coreQueueCommand(
               })
               stated = exited
               persistHealth(exited)
+            },
+            // #38740: the page is the STOP IN FORCE, and the round in force is
+            // the only reader that can say what that is. A resume lands while
+            // this loop sleeps, so a stop read at the last round's end is not
+            // evidence about this one; when the round reports a different stop,
+            // the page is restated from it now and the heartbeats this round
+            // writes carry that, never the lifted queue-round-stuck page.
+            onLineStop: async (stop) => {
+              const previous = lastStop
+              lastStop = stop
+              if (previous?.sha === stop?.sha) return
+              // A lifted (or replaced) stop no longer holds the stuck set it
+              // named; the round end restates any change still stuck under it.
+              if (stop?.cause !== "stuck") lastStuck = []
+              const document = writeHealth(lineDocument(stop, interval))
+              await request.afterHealth?.(document)
             },
           })
           const afterRoundConflict = runnerConflictExit()

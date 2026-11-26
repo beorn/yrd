@@ -6758,6 +6758,103 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     expect(await readQueueHealth(w.workdir, SERVICE)).toEqual(seen.at(-1))
   })
 
+  /**
+   * @failure #38740: a resume lifted the stuck page while the loop slept, and
+   * the round that then ran restated it — `queue health` read `queue-round-stuck`
+   * for the merged change while the line was checking and merging. The page
+   * must state the stop the round in force read, not the one its sleep carried.
+   * @level l2 @consumer the supervisor reading the declared health probe
+   */
+  it("clears the stuck page from the stop the next round reads, not the one its sleep carried", async () => {
+    const w = await world()
+    const fault = brokenSetup(w.workdir)
+    // The check that runs only after the resume: it marks that the round is in
+    // force, then holds it open long enough for the probe's own reading to be
+    // taken while the line is working.
+    const started = join(w.workdir, "slow-check-started")
+    const slow = join(w.workdir, "slow-check.sh")
+    writeFileSync(slow, ["#!/bin/sh", `touch '${started}'`, "sleep 1", ""].join("\n"))
+    chmodSync(slow, 0o755)
+    await redeclare(w, `setup: ${fault.command}\nchecks:\n  - slow:\n      run: ${slow}\n      timeoutMs: 30000\n`)
+    await oneChange(w, "task/stuck")
+
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const safety = setTimeout(() => stop.abort(), 30_000)
+    const documents: QueueHealthDocument[] = []
+    /** The probe's own reading, taken while the resumed round is in force. */
+    const samples: QueueHealthDocument[] = []
+    let sampling = true
+    const sampler = (async () => {
+      while (sampling) {
+        if (existsSync(started)) samples.push(await readQueueHealth(w.workdir, SERVICE))
+        await delay(25)
+      }
+    })()
+    let resume: Promise<unknown> | undefined
+    try {
+      expect(
+        await queueCommand(
+          w.work,
+          run.io,
+          {
+            command: "up",
+            intervalSeconds: 1,
+            stop: stop.signal,
+            heartbeatIntervalMs: 100,
+            heartbeatGraceMs: 500,
+            afterHealth: (document) => {
+              documents.push(document)
+              // The line stopped on the broken setup. Repair it and lift the
+              // stop the way an operator does, while the loop sleeps.
+              if (document.error?.code === "queue-round-stuck" && resume === undefined) {
+                fault.clear()
+                resume = writeQueueEvent(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", {
+                  type: "resumed",
+                  reason: "the setup's lockfile is repaired",
+                  by: "@chief",
+                  at: new Date(),
+                })
+              }
+              // One round that ran after the resume ended with no page: the line moved.
+              if (
+                resume !== undefined &&
+                document.error === undefined &&
+                (document.facts?.flow as { roundOpen?: unknown } | undefined)?.roundOpen === undefined &&
+                documents.some((entry) => entry.error?.code === "queue-round-stuck")
+              ) {
+                stop.abort()
+              }
+            },
+          },
+          { json: true, workdir: w.workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+    } finally {
+      sampling = false
+      clearTimeout(safety)
+      stop.abort()
+      await sampler
+      await resume
+    }
+
+    // The resume landed and the line moved: the change was judged again and merged.
+    expect(
+      records(run).some((outcome) => Array.isArray(outcome.merged) && outcome.merged.includes("task/stuck")),
+      run.stderr(),
+    ).toBe(true)
+    expect(samples.length, run.stderr()).toBeGreaterThan(0)
+    // THE PROBE, while that round was in force: no page, no stop. The stale
+    // queue-round-stuck page and its "stopped by yrd" fact are exactly what a
+    // reader saw while the line was checking and merging.
+    expect(samples.filter((page) => page.error?.code === "queue-round-stuck")).toEqual([])
+    expect(samples.filter((page) => page.facts?.stopped != null)).toEqual([])
+    // And the round-end document states the line running.
+    expect(documents.at(-1)?.error).toBeUndefined()
+    expect(documents.at(-1)?.facts?.stopped).toBeNull()
+  }, 40_000)
+
   /** @failure 25041: a process can die after writing the stuck change event and before writing its queue stop.
    * @level l2 @consumer Hab's yrd service and queue list
    */

@@ -1287,6 +1287,10 @@ export async function eventQueueRun(
     operational = await withRemoteSeam("afterDirect", () => readOps())
     queueState = operational.queue
   }
+  // #38740: the stop this round read, reported before the round acts on it, so
+  // the service's page states the stop in force rather than the one its sleep
+  // carried in. A resume lands here: this read says none, and the page clears.
+  await options.onLineStop?.(operational.stop)
   if (operational.stop !== undefined && options.foreground !== true) {
     log.write({ kind: "pause", reason: operational.stop.reason, by: operational.stop.by, sha: operational.stop.sha })
     const pendingStuck: string[] = []
