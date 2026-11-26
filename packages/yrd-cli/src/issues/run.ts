@@ -405,20 +405,64 @@ type ListPageRead = Readonly<{
  * continuation was no longer that checkout's tree. One provider process streaming from one loaded snapshot read
  * 22,224 rows in 23 pages in 71 s; a provider that answers one page in one JSON object still works unchanged.
  */
-async function readListPages(
-  input: ListPageRead,
-): Promise<Readonly<{ ok: true; pages: readonly (Record<string, unknown> & { rows: unknown[] })[] }> | IssuesFailure> {
+async function readListPages(input: ListPageRead): Promise<PageTraversalRead | IssuesFailure> {
   const ran = await input.runDeclared(substituteArgv(input.declared, input.values), input.command)
   if (!ran.ok) return ran
   const pages = readPageStream(ran.stdout, input.verb, input.command)
-  if (!("pages" in pages)) return pages
+  if (!pages.ok) return pages
+  return validatePageTraversal(pages.pages, { verb: input.verb, command: input.command, bound: input.bound })
+}
+
+type PageDocument = Record<string, unknown> & { rows: unknown[] }
+type PageTraversalRead = Readonly<{ ok: true; pages: readonly PageDocument[] }>
+
+/**
+ * True when a one-JSON `list` answer is a page document from the interface's page contract rather than the flat list
+ * shape every caller already reads: it carries the page's rows AND names the snapshot it was read at.
+ */
+function isPageDocument(value: unknown): value is PageDocument {
+  return (
+    isPlainObject(value) &&
+    Array.isArray(value.rows) &&
+    (typeof value.snapshot === "string" || typeof value.generation === "string")
+  )
+}
+
+/**
+ * A validated traversal as ONE `list` answer: its row payloads in page order, unwrapped from the page contract's
+ * `{path, version, row}` envelope. That is the shape a `list` provider already answers with — its own array of rows —
+ * so @cto's d233f499 rule holds: `list`'s output is a contract its readers depend on, and a provider that reads km's
+ * index through `--page` maps its pages back into exactly that. Yrd unwraps the envelope and nothing else; it never
+ * maps one provider's row fields into another's.
+ */
+function assembleListAnswer(pages: readonly PageDocument[]): unknown[] {
+  return pages.flatMap((page) => page.rows.map(unwrapPageRow))
+}
+
+/** A page row is `{path, version, row}`; a provider that answers bare row objects is passed through untouched. */
+function unwrapPageRow(entry: unknown): unknown {
+  return isPlainObject(entry) && isPlainObject(entry.row) ? entry.row : entry
+}
+
+/**
+ * The refusals every page traversal makes, whatever verb carried it (#38775): every page must describe the same
+ * snapshot, head, generation and population as the first, a change refuses the whole read rather than serving two
+ * cuts, the page bound refuses instead of returning a partial set, and the terminal page must say `complete:true`
+ * with a count matching the rows read. One implementation, so `list-page` traverse and a `list` whose provider
+ * streams pages cannot disagree about what a cut is.
+ */
+function validatePageTraversal(
+  documents: readonly PageDocument[],
+  where: Readonly<{ verb: IssuesVerb; command: string; bound: number }>,
+): PageTraversalRead | IssuesFailure {
+  const { verb, command, bound } = where
   let pageIndex = 1
   let rowsRead = 0
   let cursor: string | null = null
   let first: Record<string, unknown> | undefined
-  const kept: (Record<string, unknown> & { rows: unknown[] })[] = []
+  const kept: PageDocument[] = []
   let complete = false
-  for (const page of pages.pages) {
+  for (const page of documents) {
     if (first === undefined) {
       first = page
     } else {
@@ -436,7 +480,7 @@ async function readListPages(
         return fail(
           1,
           ISSUES_CODES.pageSourceMoved,
-          `${input.verb} ${input.command}`,
+          `${verb} ${command}`,
           `${moved} at page ${pageIndex} after ${rowsRead} rows (last cursor ${String(cursor)}); no rows served, read again for a fresh cut`,
         )
       }
@@ -452,16 +496,16 @@ async function readListPages(
       return fail(
         1,
         ISSUES_CODES.providerInvalidResult,
-        `${input.verb} ${input.command}`,
+        `${verb} ${command}`,
         `page ${pageIndex} is incomplete but names no next cursor`,
       )
     }
-    if (pageIndex >= input.bound) {
+    if (pageIndex >= bound) {
       return fail(
         1,
         ISSUES_CODES.pageBound,
-        `${input.verb} ${input.command}`,
-        `stopped at the ${input.bound}-page bound after ${pageIndex} pages and ${rowsRead} rows (last cursor ${next}); no rows served`,
+        `${verb} ${command}`,
+        `stopped at the ${bound}-page bound after ${pageIndex} pages and ${rowsRead} rows (last cursor ${next}); no rows served`,
       )
     }
     cursor = next
@@ -471,19 +515,19 @@ async function readListPages(
     return fail(
       1,
       ISSUES_CODES.providerInvalidResult,
-      `${input.verb} ${input.command}`,
+      `${verb} ${command}`,
       `the last page (${pageIndex}) is incomplete and the provider sent no page after it; no rows served`,
     )
   }
   // @cto f8d9b5b1: the snapshot stays private until EXACTLY ONE terminal frame. A provider that keeps writing
   // after complete:true is not publishing a cut this reader can vouch for, so the trailing window cannot be
   // silently dropped in its favour.
-  if (kept.length < pages.pages.length) {
+  if (kept.length < documents.length) {
     return fail(
       1,
       ISSUES_CODES.providerInvalidResult,
-      `${input.verb} ${input.command}`,
-      `the terminal page (${pageIndex}) says complete but the provider sent ${pages.pages.length - kept.length} more page(s) after it; no rows served`,
+      `${verb} ${command}`,
+      `the terminal page (${pageIndex}) says complete but the provider sent ${documents.length - kept.length} more page(s) after it; no rows served`,
     )
   }
   const last = kept[kept.length - 1] as Record<string, unknown>
@@ -491,7 +535,7 @@ async function readListPages(
     return fail(
       1,
       ISSUES_CODES.providerInvalidResult,
-      `${input.verb} ${input.command}`,
+      `${verb} ${command}`,
       `the pages read ${rowsRead} rows but the terminal page declares population ${last.population}; no rows served`,
     )
   }
@@ -503,11 +547,7 @@ async function readListPages(
  * The provider's stdout as page documents: one JSON object (a single-page answer) or one compact JSON object per
  * line (a streaming traversal). Anything else is refused by name rather than guessed at.
  */
-function readPageStream(
-  stdout: string,
-  verb: IssuesVerb,
-  command: string,
-): Readonly<{ pages: readonly (Record<string, unknown> & { rows: unknown[] })[] }> | IssuesFailure {
+function readPageStream(stdout: string, verb: IssuesVerb, command: string): PageTraversalRead | IssuesFailure {
   const invalid = (detail: string): IssuesFailure =>
     fail(1, ISSUES_CODES.providerInvalidResult, `${verb} ${command}`, detail)
   const asPage = (
@@ -524,7 +564,7 @@ function readPageStream(
   if (text === "") return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "exit 0 but stdout is empty")
   try {
     const whole = asPage(JSON.parse(text), 1)
-    return "failure" in whole ? whole.failure : { pages: [whole.page] }
+    return "failure" in whole ? whole.failure : { ok: true, pages: [whole.page] }
   } catch (error) {
     if (!(error instanceof SyntaxError)) throw error
   }
@@ -547,7 +587,7 @@ function readPageStream(
     pages.push(document.page)
   }
   if (pages.length === 0) return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "no page documents")
-  return { pages }
+  return { ok: true, pages }
 }
 
 /** Run one verb end to end and return the envelope or a named failure. Never throws for a provider's fault. */
@@ -826,10 +866,31 @@ export async function runIssuesVerb(
   } else {
     const ran = await runDeclared(substituteArgv(declared, providerValues), command)
     if (!ran.ok) return ran
+    // #38775 (@cto 0716effc, venue (a)): `list` is the read every caller makes, and a provider may answer it from km's
+    // INDEXED store by reading its own `--page` request — the request is the provider's, baked into the declared argv,
+    // so the verb keeps its zero-operand contract and no caller learns page semantics. Such an answer is a page
+    // traversal: the pages of ONE cut (one compact JSON object per line, or the single page document a population that
+    // fits its page produces), carrying the refusals `list-page` traverse already makes and assembled into the one
+    // list answer. The discriminator is the page contract's own identity — an answer that names the snapshot it was
+    // read at — so a bare array, a flat `{rows: [...]}`, or any other one-JSON answer stays byte-identical.
+    let pageAnswer: readonly PageDocument[] | undefined
     try {
       parsed = JSON.parse(ran.stdout)
+      if (verb === "list" && isPageDocument(parsed)) pageAnswer = [parsed]
     } catch {
-      return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "exit 0 but stdout is not JSON")
+      // Only an answer shaped like a page stream (compact JSON objects, one per line) is re-read as pages: anything
+      // else keeps the interface's one refusal for a `list` that is not JSON at all.
+      if (verb !== "list" || !ran.stdout.trimStart().startsWith("{")) {
+        return fail(1, ISSUES_CODES.providerNotJson, `${verb} ${command}`, "exit 0 but stdout is not JSON")
+      }
+      const stream = readPageStream(ran.stdout, verb, command)
+      if (!stream.ok) return stream
+      pageAnswer = stream.pages
+    }
+    if (pageAnswer !== undefined) {
+      const traversal = validatePageTraversal(pageAnswer, { verb, command, bound: LIST_PAGE_TRAVERSE_BOUND })
+      if (!traversal.ok) return traversal
+      parsed = assembleListAnswer(traversal.pages)
     }
   }
   if (verb === "resolve") {

@@ -421,7 +421,12 @@ export function progressFromActivity(
   }
   return {
     ok: true,
-    progress: { default: activity.source === "unreadable" ? null : false, source: activity.source, qualifying, complete: true },
+    progress: {
+      default: activity.source === "unreadable" ? null : false,
+      source: activity.source,
+      qualifying,
+      complete: true,
+    },
   }
 }
 
