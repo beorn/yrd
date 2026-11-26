@@ -93,7 +93,16 @@ export function launchIssueEvent(input: IssueEventLaunchInput): IssueEventLaunch
     ((command: readonly string[], options: Record<string, unknown>) => Bun.spawn([...command], options as never))
   try {
     const executable = resolveExecutable(argv[0] ?? "", env)
-    spawn([executable, ...argv.slice(1)], { cwd: input.cwd, env, stdio: ["ignore", descriptor, descriptor] })
+    // `detached` and `unref` are the whole point (@cto e72bc1a0): a live Subprocess keeps the parent's event loop
+    // alive, so without both the submit would sit here until the write ended — while a detached child also leaves the
+    // submit's process group, so a Ctrl-C on the submit does not reach the write it started.
+    const started = spawn([executable, ...argv.slice(1)], {
+      cwd: input.cwd,
+      env,
+      stdio: ["ignore", descriptor, descriptor],
+      detached: true,
+    }) as { unref?: () => void }
+    started.unref?.()
   } catch (error) {
     closeSync(descriptor)
     return { launched: false, why: `the write could not be started: ${messageOf(error)}` }

@@ -23,13 +23,20 @@ import {
 } from "@yrd/queue-core"
 import { ISSUES_CODES, ISSUES_DECLARATION_PATH, parseIssuesDeclaration } from "./issues/declaration.ts"
 import { runIssuesVerb } from "./issues/run.ts"
-import { ISSUE_EVENT_EDGE_TIMEOUT_MS, issueEventOperationId, issueEventSource } from "./issue-event-edge.ts"
+import { issueEventOperationId, issueEventSource } from "./issue-event-edge.ts"
 
 // Real public Km CLI trial (2026-10-16, km-cli-trial.json): 1.246s for one
 // closing action across two introduced commits, 0.739s unchanged catch-up.
 // Allow 50/run at that measured whole-command cost (~62.3s), with nearly 2x
 // margin. This is a bounded attempt, not a claim about worst-case workloads.
 const UPDATE_TIMEOUT_MS = 120_000
+
+/**
+ * The merged item event's own bound (hh #38766, @cto e72bc1a0): short on purpose, because one merge round is serial and
+ * the provider write is slow (35 s measured against km) and unbounded under a km lane hold. A write this bound cuts is
+ * recorded as that branch's failed event, by name; the merge has already landed and never fails on it.
+ */
+const MERGED_EVENT_TIMEOUT_MS = 10_000
 
 /**
  * How many attempts one merged branch's post-merge issue update gets (37513, @cto 68bee3e1). A failed attempt's
@@ -785,6 +792,11 @@ async function recordMergedEvents(
         else record({ ...identity, status: "skipped", reason: "issues.yml declares no event at the merge" })
         continue
       }
+      // hh #38766 (@cto e72bc1a0): 10 s, deliberately short. The provider write costs ~35 s against a healthy km and is
+      // unbounded while km holds its write lane, and a merge round is serial — so this attempt never outlives a short
+      // bound, and a write the bound cuts is recorded as this branch's failed event, by name, in the round's report.
+      // Detaching this writer (and moving its failure notify into the child) is #38766's next item; until then the
+      // merged mark lands only when the provider answers inside the bound, and says so when it does not.
       const written = await runIssuesVerb({
         verb: "event",
         args: [issue, "merged", mergedEventSource(url, mergeSha), `${branch} merged`],
@@ -795,11 +807,8 @@ async function recordMergedEvents(
         cwd: input.cwd,
         env: input.env,
         signal: input.stop,
-        // hh #38766 (@cto e0638180): the same rule as the submit edge — best-effort under a bounded timeout, so a km
-        // lane hold cannot park the merge round behind it. A write the bound cuts is recorded as this branch's failed
-        // event below, by name; the merge itself has already landed and never fails on it.
-        timeoutMs: ISSUE_EVENT_EDGE_TIMEOUT_MS,
-        noProgressTimeoutMs: ISSUE_EVENT_EDGE_TIMEOUT_MS,
+        timeoutMs: MERGED_EVENT_TIMEOUT_MS,
+        noProgressTimeoutMs: MERGED_EVENT_TIMEOUT_MS,
       })
       if (written.ok) {
         recorded++

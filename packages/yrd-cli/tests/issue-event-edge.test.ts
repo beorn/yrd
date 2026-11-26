@@ -5,7 +5,7 @@
  * @consumer hh #38766 — the Fleet timeline's `submitted` mark, and @cto e0638180's rule that the edge is best-effort
  *          under a bound and never slows or fails a submit.
  */
-import { mkdtempSync, readFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -116,5 +116,34 @@ describe("the issue-event edge's launch", () => {
     })
     expect(outcome.launched).toBe(false)
     expect(outcome.launched ? "" : outcome.why).toMatch(/could not be opened/u)
+  })
+
+  it("a launched write never keeps the caller's process alive", () => {
+    // The real spawn, not the injected one (@cto e72bc1a0): a live Subprocess keeps the parent's event loop alive, so
+    // without `detached`+`unref` the caller would wait for a km write it never looks at. A 5 s child makes that visible.
+    const dir = tmp()
+    const fixture = join(dir, "launch.ts")
+    const modulePath = join(import.meta.dirname, "..", "src", "issue-event-edge.ts")
+    writeFileSync(
+      fixture,
+      [
+        `import { launchIssueEvent } from ${JSON.stringify(modulePath)}`,
+        "const outcome = launchIssueEvent({",
+        '  kind: "submitted", issue: "#1", source: "github.com/beorn/hh-dev@abc", text: "x",',
+        '  opId: "yrd-submitted-detachprobe", projectRoot: "/tmp", cwd: "/tmp",',
+        `  workdir: ${JSON.stringify(dir)}, env: {}, self: ["/bin/sh", "-c", "sleep 5"],`,
+        "})",
+        'if (!outcome.launched) { console.error("not launched: " + outcome.why); process.exit(2) }',
+        'console.log("returned")',
+      ].join("\n"),
+    )
+    const started = Date.now()
+    const ran = Bun.spawnSync([process.execPath, fixture], { stdout: "pipe", stderr: "pipe" })
+    const elapsed = Date.now() - started
+    expect(ran.exitCode, new TextDecoder().decode(ran.stderr)).toBe(0)
+    expect(elapsed).toBeLessThan(3000)
+    expect(readFileSync(join(dir, "logs", "issue-events", "yrd-submitted-detachprobe.log"), "utf8")).toContain(
+      "yrd-submitted-detachprobe launched",
+    )
   })
 })
