@@ -263,7 +263,11 @@ it("keeps failing a close whose waiter only printed the contention line (37624)"
     JSON.stringify({ executable: busyGit(dirname(w.work), "progress"), contract: "native" }),
   ])
   const run = capture(w.work)
-  await expect(closeEnvironment(path, { json: true }, run.io)).rejects.toThrow(
+  // This row is about the waiter's contention line, not host process churn. A live same-UID process seen under the
+  // environment makes close keep it and resolve 0 ("wait for its owner to leave"), which failed this row about one
+  // run in five (yrd CI run 45881168598). Inject the idle host through the test-only census seam (28120), as the
+  // settle row does.
+  await expect(closeEnvironment(path, { json: true }, run.io, idleCensus)).rejects.toThrow(
     "could not close through git super worktree remove",
   )
   expect(existsSync(path)).toBe(true)
