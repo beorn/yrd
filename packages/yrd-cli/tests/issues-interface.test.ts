@@ -570,6 +570,89 @@ describe("yrd issues", () => {
     expect(badKind.stderr).toContain("--on-failure-kind must be one of")
   })
 
+  // hh #38766 (@cto e72bc1a0 REVISE 1): a merge before the declaration exists is a skip, not a failure. The
+  // in-process path called it "skipped", and a fallback written under the same missing declaration could only fail in
+  // turn — so no provider is asked and the skip is said out loud.
+  it("writes no fallback when the merge declares no event, and names the skip instead", async () => {
+    const source = "github.com/beorn/hh-dev@0123456789abcdef0123456789abcdef01234567"
+    const undeclaredVerb = project({ "issues.yml": declare({ view: provider("json", "x", "<key>") }) })
+    const noVerb = await yrd(
+      undeclaredVerb,
+      "issues",
+      "event",
+      "--id",
+      "yrd-merged-nv",
+      "raw",
+      "merged",
+      source,
+      "task/x merged",
+      "--on-failure-kind",
+      "failed",
+      "--on-failure-text",
+      "task/x merged event did not land",
+    )
+    expect(noVerb.exitCode, noVerb.stderr).toBe(1)
+    expect(noVerb.stderr).toContain("yrd-issues-verb-unsupported")
+    expect(noVerb.stderr).toContain("not yet declared at that merge: no provider was asked")
+    expect(noVerb.stderr).toContain("no failed fallback written")
+
+    const noDeclaration = project({ "README.md": "no declaration here\n" })
+    const missing = await yrd(
+      noDeclaration,
+      "issues",
+      "event",
+      "--id",
+      "yrd-merged-md",
+      "raw",
+      "merged",
+      source,
+      "task/x merged",
+      "--on-failure-kind",
+      "failed",
+    )
+    expect(missing.exitCode, missing.stderr).toBe(1)
+    expect(missing.stderr).toContain("yrd-issues-declaration-missing")
+    expect(missing.stderr).toContain("no failed fallback written")
+  })
+
+  // hh #38766 (@cto e72bc1a0 REVISE 2): a timed-out write may have landed. The branch's record says the outcome is
+  // unknown and carries the replay key, so a later read settles it instead of a second, contradicting event.
+  it("names a timed-out write as an outcome unknown, keeping its replay key", async () => {
+    const calls = join(scratch(), "event-calls.txt")
+    const script =
+      'log=$1; kind=$3; printf "%s\\t%s\\t%s\\t%s\\n" "$2" "$3" "$4" "$5" >> "$log"; ' +
+      'if [ "$kind" = merged ]; then sleep 10; fi; printf \'{"applied":true}\\n\''
+    const root = project({
+      "issues.yml": declare({
+        event: ["sh", "-c", script, "sh", calls, "<raw>", "<kind>", "<text>", "<id>"],
+      }),
+    })
+    const source = "github.com/beorn/hh-dev@0123456789abcdef0123456789abcdef01234567"
+    const slow = await yrd(
+      root,
+      "issues",
+      "event",
+      "--id",
+      "yrd-merged-slow",
+      "--timeout-ms",
+      "2000",
+      "raw",
+      "merged",
+      source,
+      "task/x merged",
+      "--on-failure-kind",
+      "failed",
+      "--on-failure-text",
+      "task/x merged event did not land",
+    )
+    expect(slow.exitCode, slow.stderr).toBe(1)
+    expect(slow.stderr).toContain("wrote the failed fallback event")
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual([
+      "raw\tmerged\ttask/x merged\tyrd-merged-slow",
+      "raw\tfailed\toutcome unknown: timed out after 2 s; replay key yrd-merged-slow\tyrd-merged-slow-failed",
+    ])
+  })
+
   // #31194: a clone's main can lag the merge Yrd just published by seconds (2-44 s measured on /hh/dev).
   it("proves a declaration commit against targetCommit while main lags, and still refuses one outside it (rule: target ancestry)", async () => {
     const root = project({ "issues.yml": declare({ view: provider("json", "lagging", "<key>") }) })

@@ -2083,32 +2083,41 @@ function buildProgram(
       if (verb === "event" && options.onFailureKind !== undefined) {
         // hh #38766 (@cto 15f0394a): the caller may be a round that has already moved on, so a failed write must leave
         // its mark where the issue's readers look. This child is the only one that still knows the write failed.
-        const fallback = await runIssuesVerb({
-          serve: true,
-          verb: "event",
-          args: [
-            args[0] as string,
-            options.onFailureKind,
-            args[2] as string,
-            options.onFailureText ?? (args[3] as string),
-          ],
-          cwd: cwd(),
-          env,
-          stderr: (text) => io.stderr(text),
-          id: `${options.id ?? "unkeyed"}-failed`,
-          ...(options.declarationRepository === undefined
-            ? {}
-            : { declarationRepository: options.declarationRepository }),
-          ...(options.declarationCommit === undefined ? {} : { declarationCommit: options.declarationCommit }),
-          ...(options.targetCommit === undefined ? {} : { targetCommit: options.targetCommit }),
-          ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
-          ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-        })
-        io.stderr(
-          `yrd issues: ${fallback.ok ? "wrote" : "could not write"} the ${options.onFailureKind} fallback event for ${String(args[0])}${
-            fallback.ok ? "" : `: ${fallback.message}`
-          }\n`,
-        )
+        if (outcome.code === ISSUES_CODES.unsupported || outcome.code === ISSUES_CODES.declarationMissing) {
+          // @cto e72bc1a0 REVISE 1: nothing was asked of a provider, so nothing failed. In-process post-merge recorded
+          // this as "skipped", and a fallback written under the same missing declaration could only fail in turn.
+          io.stderr(
+            `yrd issues: ${outcome.code}: not yet declared at that merge: no provider was asked, so nothing failed; no ${options.onFailureKind} fallback written\n`,
+          )
+        } else {
+          // @cto e72bc1a0 REVISE 2: a timeout is not a refusal. The write may have landed, so the record says so and
+          // keeps the replay key: a later read settles it rather than a second, contradicting event.
+          const timedOut = outcome.code === ISSUES_CODES.providerTimedOut
+          const fallbackText = timedOut
+            ? `outcome unknown: timed out after ${Math.round((options.timeoutMs ?? 60_000) / 1000)} s; replay key ${options.id ?? "unkeyed"}`
+            : (options.onFailureText ?? (args[3] as string))
+          const fallback = await runIssuesVerb({
+            serve: true,
+            verb: "event",
+            args: [args[0] as string, options.onFailureKind, args[2] as string, fallbackText],
+            cwd: cwd(),
+            env,
+            stderr: (text) => io.stderr(text),
+            id: `${options.id ?? "unkeyed"}-failed`,
+            ...(options.declarationRepository === undefined
+              ? {}
+              : { declarationRepository: options.declarationRepository }),
+            ...(options.declarationCommit === undefined ? {} : { declarationCommit: options.declarationCommit }),
+            ...(options.targetCommit === undefined ? {} : { targetCommit: options.targetCommit }),
+            ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
+            ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+          })
+          io.stderr(
+            `yrd issues: ${fallback.ok ? "wrote" : "could not write"} the ${options.onFailureKind} fallback event for ${String(args[0])}${
+              fallback.ok ? "" : `: ${fallback.message}`
+            }\n`,
+          )
+        }
       }
       io.stderr(`yrd issues: ${outcome.message}\n`)
       setExit(outcome.exitCode)
