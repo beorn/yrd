@@ -2717,6 +2717,23 @@ export async function appendNumberedPublishedMerge(
   return { event: result.event, number: result.number }
 }
 
+/**
+ * The queue events written above `from` up to and including `to`, oldest first, read from the local copy of the
+ * queue ref a fresh ops read just fetched. Undefined when `from` is not among the newest `limit` events at `to`
+ * (the ref was rewritten, or more moved than a caller should weigh): the caller treats that as an unknown mover.
+ */
+export async function queueEventsAbove(
+  store: QueueReadStore,
+  queue: string,
+  from: Oid,
+  to: Oid,
+  limit = 32,
+): Promise<readonly Event[] | undefined> {
+  const events = await readEventChain(await openEvents({ ...store, ref: queueRef(queue) }), to, limit)
+  const at = events.findIndex((event) => event.id === from)
+  return at < 0 ? undefined : events.slice(at + 1)
+}
+
 async function publishedMergeDecision(
   store: QueueLocation,
   queue: string,

@@ -4313,6 +4313,80 @@ it.each(["resume", "override"] as const)(
   },
 )
 
+/** @failure 2026-11-26: 19 of 192 green runs lost their merge to queue-lease-lost when the only rows that moved
+ *           the queue ref while they judged were the previous merge's `notified` rows, which change no authority.
+ *           A pause riding in beside a notified row still loses the lease exactly as before.
+ * @level l3 @consumer queue operator and submitter
+ */
+it.each(["notified", "notified then paused"] as const)(
+  "publishes over a %s move of the queue ref only when every mover is notified",
+  async (movers) => {
+    const w = await world()
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createWorldEventQueue(w)
+    // A direct merge the queue already observed: the anchor a later `notified` row names.
+    const direct = await pushAroundQueue(w, "direct-notified.txt")
+    const observed = await writeQueueEvent(store, "main", {
+      type: "observed",
+      by: QUEUE_RUN_WRITER,
+      at: new Date(),
+      commit: direct,
+    })
+    await submitCommit(w, "task/notified-race", "one.txt")
+    const verify = verifying.verifyCandidate
+    let entered!: () => void
+    const composing = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    let release!: () => void
+    const continueRun = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    using _held = vi.spyOn(verifying, "verifyCandidate").mockImplementation(async (options) => {
+      const outcome = await verify(options)
+      entered()
+      await continueRun
+      return outcome
+    })
+
+    const running = queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
+    await composing
+    const before = (await gitIn(w.remote)(["rev-parse", queueRef("main")])).trim()
+    await writeQueueEvent(store, "main", {
+      type: "notified",
+      by: QUEUE_RUN_WRITER,
+      at: new Date(),
+      notice: { for: observed, to: "recorder", key: `${observed}:recorder`, result: "delivered" },
+    })
+    if (movers === "notified then paused") {
+      await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "hold", at: new Date() })
+    }
+    release()
+
+    const outcome = await running
+    const records = logRecords(outcome)
+    const leaseLost = records.filter((row) => row.kind === "warning" && row.subject === "queue-lease-lost")
+    const retried = records.filter((row) => row.kind === "warning" && row.subject === "queue-notified-retry")
+    if (movers === "notified") {
+      expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/notified-race"], failed: [], stuck: [] })
+      expect(leaseLost).toEqual([])
+      expect(retried).toEqual([
+        expect.objectContaining({ branch: "task/notified-race", expected: before, notified: 1 }),
+      ])
+      expect((await readStatus(store, "main", "task/notified-race")).status).toBe("merged")
+      // The retry runs the staged callback again; the change chain must still record ONE prepared merge (@cto e20c79a9).
+      const chain = await (await openEvents({ ...store, ref: changesRef("main", "task/notified-race") })).events()
+      expect(chain.filter((event) => event.type === "merged")).toHaveLength(1)
+      return
+    }
+    expect(outcome).toMatchObject({ exitCode: 0, merged: [], stopped: { ring: "pause" } })
+    expect(retried).toEqual([])
+    expect(leaseLost).toEqual([expect.objectContaining({ expected: before, actual: expect.any(String) })])
+    expect(await remoteTarget(w)).toBe(direct)
+    expect((await readStatus(store, "main", "task/notified-race")).status).not.toBe("merged")
+  },
+)
+
 /** @failure A drop during composition threw from the stale event write and abandoned the next change.
  * @level l3 @consumer queue operator and submitter
  */

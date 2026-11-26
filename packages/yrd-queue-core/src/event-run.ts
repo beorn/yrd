@@ -26,6 +26,7 @@ import {
   EVENT_TRAILERS,
   listChangeHistories,
   readChangeEvents,
+  queueEventsAbove,
   queueResumedAfter,
   queueRef,
   readEventOps,
@@ -173,6 +174,8 @@ import { isActive } from "./override.ts"
 import { QueuePaused, stuckCures } from "./pause.ts"
 
 const DEFAULT_QUEUE_RUN_RETRY_BUDGET_MS = 5_000
+// A merge republishes over queue-ref movers that are only `notified` rows at most this many times per publish.
+const NOTIFIED_PUBLISH_RETRIES = 3
 // If all journals are live service rounds at its 120s interval, 128 cover
 // 4h16m, over 42 times the three-refusal page threshold. Manual runs and check
 // journals can shorten the span, so exhaustion is named, never a clean reset.
@@ -1719,6 +1722,54 @@ export async function eventQueueRun(
     })
     return result(0, observedMerged, failed, [branch])
   }
+  /**
+   * Publish one judged merge on the round's queue tip. When the queue-ref lease is lost and EVERY row written above
+   * that tip is a `notified` row (a prior merge's notice or issue close), no authority changed, so the round takes
+   * the fresh ops read as its own and publishes again on the fresh tip, at most NOTIFIED_PUBLISH_RETRIES times.
+   * Any other mover, an unreadable span, or one retry too many rethrows the Conflict to the queue-lease-lost path.
+   */
+  const publishOverNotified = async <T>(
+    branch: string,
+    head: string,
+    attempt: (queueTip: string) => Promise<T>,
+  ): Promise<T> => {
+    for (let retries = 0; ; retries++) {
+      try {
+        return await attempt(queueState.tip)
+      } catch (error) {
+        if (
+          retries >= NOTIFIED_PUBLISH_RETRIES ||
+          !(error instanceof Conflict) ||
+          !error.refs.includes(queueRef(queue)) ||
+          error.refs.includes(changesRef(queue, branch))
+        ) {
+          throw error
+        }
+        const fresh = await readOps("notifiedRetryOpsRead")
+        if (fresh.queue.tip === queueState.tip) throw error
+        const movers = await withRemoteSeamGap("notifiedRetryMovers", () =>
+          queueEventsAbove(store, queue, queueState.tip, fresh.queue.tip),
+        )
+        if (movers === undefined || movers.length === 0 || movers.some((event) => event.type !== "notified")) {
+          throw error
+        }
+        log.write({
+          kind: "warning",
+          subject: "queue-notified-retry",
+          branch,
+          head,
+          ref: queueRef(queue),
+          expected: queueState.tip,
+          actual: fresh.queue.tip,
+          notified: movers.length,
+          attempt: retries + 1,
+          reason: `${queueRef(queue)} advanced from ${queueState.tip} to ${fresh.queue.tip} by ${String(movers.length)} notified event(s) only while judging ${branch}; publishing again on the fresh tip`,
+        })
+        operational = fresh
+        queueState = fresh.queue
+      }
+    }
+  }
   const publish = async (
     branch: string,
     head: string,
@@ -1890,23 +1941,25 @@ export async function eventQueueRun(
       const stagedMerge = await publishWithTransientRetry<StagedEvent>(
         (prepared) =>
           seamStep({ branch, head, name: "merge", phase: "merge" }, () =>
-            appendOwnedMergeOnce(
-              (staged) => {
-                preparedMerge = staged.oid
-                prepared(staged)
-              },
-              store,
-              queue,
-              branch,
-              marker,
-              {
-                at: new Date(),
-                commit: candidate,
-                targetExpect: parent,
-                queueTip: queueState.tip,
-                run: log.id,
-                ...(reason === undefined ? {} : { reason }),
-              },
+            publishOverNotified(branch, head, (queueTip) =>
+              appendOwnedMergeOnce(
+                (staged) => {
+                  preparedMerge = staged.oid
+                  prepared(staged)
+                },
+                store,
+                queue,
+                branch,
+                marker,
+                {
+                  at: new Date(),
+                  commit: candidate,
+                  targetExpect: parent,
+                  queueTip,
+                  run: log.id,
+                  ...(reason === undefined ? {} : { reason }),
+                },
+              ),
             ),
           ),
         {
