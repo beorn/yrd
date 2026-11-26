@@ -274,7 +274,7 @@ import { runnerOf } from "./watch-runner-reading.ts"
 import { readPublishedRunner, readRunnerLiveness, RunnerPublisher, type RunnerLiveness } from "./runner-publication.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import { formatQueueStats, parseSince, queueStats, type SinceOrigin, type StatsBy } from "./queue-stats.ts"
-import { formatQueueLs, queueLs, filterLsRows, LS_FILTER_FIELDS } from "./queue-ls.ts"
+import { formatQueueLs, groupOfRow, queueLs, filterLsRows, LS_FILTER_FIELDS } from "./queue-ls.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { SERVICE, writeQueueHealth } from "./queue-health.ts"
 
@@ -2176,12 +2176,12 @@ export async function coreQueueCommand(
       // 388xx: --repo names the author store, so the branch is resolved in the checkout that owns it, not in the
       // queue s clone or in whatever directory the caller happened to stand in.
       const named =
-        request.command === "drop-local" && request.authorRepo !== undefined
-          ? resolve(request.authorRepo)
-          : undefined
+        request.command === "drop-local" && request.authorRepo !== undefined ? resolve(request.authorRepo) : undefined
       const authorRepo = named ?? repositoryHere(io.cwd)
       if (authorRepo === undefined) {
-        throw new Error(`${NAMED[request.command]} requires the authoring repository as cwd, or name it with --repo <path>`)
+        throw new Error(
+          `${NAMED[request.command]} requires the authoring repository as cwd, or name it with --repo <path>`,
+        )
       }
       const authorGit = gitIn(authorRepo, undefined, selection, { env })
       const sameIssue = issueComparer({
@@ -5789,11 +5789,19 @@ export async function coreQueueCommand(
         all: true,
         drafts: true,
         draftWindow: "all",
+        // #38870: the listing prints no command or step, so a summary read serves it — and a summary read is served by
+        // the compact projection instead of the raw journal, which is 1/16th the bytes (8 kB against 129 kB here).
+        // It was `include`, so every round in the window paid a full raw read: 1.1 GB per call on a 14-row queue.
+        journalDetail: "omit",
+        // #38870: and it opens only the rounds its PRINTED rows name — the fold sees 14,445 changes, the page shows
+        // 288. A round the page cannot draw is counted as unread by the narration, never read to prove it absent.
+        journalRowIncluded: (row) => groupOfRow(row, request.now ?? new Date()) !== undefined,
+        issueDiagnosticsNotBefore: new Date((request.now ?? new Date()).getTime() - READ_HORIZON_MS),
       })
       if (options.json !== true) narrateJournalReading(io, reading.journals, new Set())
       if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") return 2
 
-      const unfiltered = watchRows(reading.all, { journals: reading.journals })
+      const unfiltered = watchRows<JournalSummary>(reading.all, { journals: reading.journals })
       const filtered = filterLsRows(unfiltered, request.terms ?? [])
 
       const queue = queueName(config.target, await remoteUrl(git, config.target.remote))
@@ -7876,6 +7884,19 @@ type EventListingOptions = Readonly<{
   journalDetail?: "include" | "omit"
   /** Compact history uses only the event chains and their IDs. */
   skipJournals?: boolean
+  /**
+   * The rows this listing will print, when it knows them (#38870). Handing them over is also how a caller asks for a
+   * narrow journal read: only the rounds these rows name are opened, and the rest are counted in `unread`, never read
+   * to prove them absent. A listing reads the folds of every change it can see (14,445 here) but prints 288, so
+   * without this every round in the window pays a read it cannot draw. Absent, every round in the window is read,
+   * which is what a reader that must judge rounds no listed row names (a summary, `show --all`) needs.
+   */
+  journalRowIncluded?: (row: Row) => boolean
+  /**
+   * The oldest post-merge attempt a listing opens for its issue diagnostics (#38870). A listing that prints 24 h of
+   * changes cannot show a diagnostic from an older merge; absent, every attempt file is read.
+   */
+  issueDiagnosticsNotBefore?: Date
   /** How far back an unwindowed read reads run journals; absent, {@link FULL_READ_RUNS_MS}. */
   journalSinceMs?: number
 }>
@@ -7977,7 +7998,11 @@ export async function readEventListing(
       runTerminal?: (id: string) => boolean,
     ): Readonly<{ journals: Journals<JournalSummary>; source: LocalSource<Journals<JournalSummary>> }> => {
       const judged = runTerminal === undefined ? {} : { runTerminal }
-      const listed = new Set(rows.map((row) => row.branch))
+      const listed = new Set(
+        rows
+          .filter((row) => options.journalRowIncluded === undefined || options.journalRowIncluded(row))
+          .map((row) => row.branch),
+      )
       const segments =
         options.branch === undefined
           ? [...history].filter(([branch]) => listed.has(branch)).flatMap(([, entries]) => entries.slice(0, 1))
@@ -7989,7 +8014,7 @@ export async function readEventListing(
         }),
       )
       const source: LocalSource<Journals<JournalSummary>> =
-        options.branch === undefined && recent === undefined
+        options.branch === undefined && recent === undefined && options.journalRowIncluded === undefined
           ? readJournalSource(dir, { detail, sinceMs: options.journalSinceMs ?? FULL_READ_RUNS_MS, ...judged })
           : readJournalSource(dir, { runIds: ids, branch: options.branch, detail, ...judged })
       const journals: Journals<JournalSummary> =
@@ -8542,15 +8567,25 @@ export async function readEventListing(
     draftWindow,
   })
 
-  return withPostMergeIssueDiagnostics(reading, workdir, options?.onIssueDiagnosticsUnavailable)
+  return withPostMergeIssueDiagnostics(
+    reading,
+    workdir,
+    options?.onIssueDiagnosticsUnavailable,
+    options?.issueDiagnosticsNotBefore,
+  )
 }
 
 function withPostMergeIssueDiagnostics<Run extends JournalSummary>(
   reading: EventListingResult<Run>,
   workdir: string,
   reportUnavailable?: (message: string) => void,
+  diagnosticsNotBefore?: Date,
 ): EventListingResult<Run> {
-  const failures = readPostMergeIssueDiagnostics(workdir, reportUnavailable)
+  const failures = readPostMergeIssueDiagnostics(
+    workdir,
+    reportUnavailable,
+    diagnosticsNotBefore === undefined ? {} : { notBefore: diagnosticsNotBefore },
+  )
   if (failures.length === 0) return reading
   const byBranch = new Map<string, typeof failures>()
   for (const failure of failures) byBranch.set(failure.branch, [...(byBranch.get(failure.branch) ?? []), failure])

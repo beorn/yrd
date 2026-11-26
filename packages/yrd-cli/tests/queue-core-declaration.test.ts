@@ -2088,6 +2088,47 @@ describe("a queue is the selected origin branch carrying config", () => {
     ])
   }, 20_000)
 
+  /** @failure A status listing read every round in the journal window, so a 288-row page paid 1.1 GB of raw journals (#38870).
+   * @level l2 @consumer yrd ls read cost
+   * Handing readEventListing the rows it will print narrows the read to their rounds; the rest are counted, never opened.
+   */
+  it("opens only the rounds a listing will print, and counts the rest as unread", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, head, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture declaration absent")
+    const now = new Date()
+    const queueTip = await createQueue(repo, "main", head, now)
+    const workdir = await workdirOf(git, { cwd: repo })
+    for (const [index, branch] of ["task/one", "task/two"].entries()) {
+      const journal = openLog(join(workdir, "logs"), () => new Date(now.getTime() + index * 60_000))
+      journal.write({ kind: "run", target: "main" })
+      journal.write({ kind: "change", branch, head, decision: "merged" })
+      journal.finish()
+      await (
+        await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+      ).append(
+        [
+          changeInput("opened", { queueTip, at: now, commit: head, by: "yrd", run: journal.id }),
+          changeInput("merged", { queueTip, at: now, commit: head, reason: "merged" }),
+        ],
+        { expect: null },
+      )
+    }
+    const options = { all: true, drafts: true, draftWindow: "all" as const, journalDetail: "omit" as const }
+    const whole = await readEventListing(git, config, repo, workdir, head, store, { ...options, forceFresh: true })
+    expect([...whole.journals.runs.keys()].sort()).toEqual([`task/one@${head}`, `task/two@${head}`])
+    const narrowed = await readEventListing(git, config, repo, workdir, head, store, {
+      ...options,
+      forceFresh: true,
+      journalRowIncluded: (row) => row.branch === "task/one",
+    })
+    expect([...narrowed.journals.runs.keys()]).toEqual([`task/one@${head}`])
+    expect(narrowed.journals.unread).toBe(1)
+  })
+
   /** @failure Final ops reuse decodes twice or masks a queue move after the listing's earlier fences.
    * @level l2 @consumer actual queue list reading (28925 AC2/AC3)
    * The earlier pure fence test never reaches final acquisition or the listing retry error.

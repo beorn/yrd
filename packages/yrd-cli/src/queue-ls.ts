@@ -3,12 +3,12 @@
  * with issue number, title, and owner seat (#27093).
  */
 
-import type { Row, WatchRow } from "@yrd/queue-core"
+import type { JournalSummary, Row, WatchRow } from "@yrd/queue-core"
 import { stateWord } from "./watch-format.ts"
 
 export const LS_FILTER_FIELDS = "branch, subject, issue, submitter, run, failure and state" as const
 
-export function matchesLsTerm(row: WatchRow, term: string): boolean {
+export function matchesLsTerm<Run extends JournalSummary>(row: WatchRow<Run>, term: string): boolean {
   const wanted = term.trim().toLocaleLowerCase()
   if (wanted === "") return true
   return [
@@ -25,7 +25,10 @@ export function matchesLsTerm(row: WatchRow, term: string): boolean {
   ].some((field) => field?.toLocaleLowerCase().includes(wanted) === true)
 }
 
-export function filterLsRows(rows: readonly WatchRow[], terms: readonly string[]): readonly WatchRow[] {
+export function filterLsRows<Run extends JournalSummary>(
+  rows: readonly WatchRow<Run>[],
+  terms: readonly string[],
+): readonly WatchRow<Run>[] {
   const wanted = terms.map((term) => term.trim()).filter((term) => term !== "")
   if (wanted.length === 0) return rows
   return rows.filter((row) => wanted.some((term) => matchesLsTerm(row, term)))
@@ -141,8 +144,8 @@ function timeAgo(date: Date, now: Date): string {
 /**
  * Builds the grouped changes result from the raw queue rows.
  */
-export function queueLs(
-  rows: readonly WatchRow[],
+export function queueLs<Run extends JournalSummary>(
+  rows: readonly WatchRow<Run>[],
   options: Readonly<{
     queueName: string
     scope?: string

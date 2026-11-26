@@ -159,9 +159,19 @@ function readPostMergeAttempt(
 }
 
 /** Read-only projection; unread derived attempts are reported, never replay authority. */
+/** The creation instant an attempt file's name carries (`2026-10-24T08-57-45.354Z-…json`), or undefined. */
+function postMergeAttemptOpenedAt(name: string): Date | undefined {
+  const matched = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})\.(\d{3})Z/u.exec(name)
+  if (matched === null) return undefined
+  const [, day, hour, minute, second, millis] = matched
+  const at = new Date(`${day}T${hour}:${minute}:${second}.${millis}Z`)
+  return Number.isNaN(at.getTime()) ? undefined : at
+}
+
 export function readPostMergeIssueDiagnostics(
   workdir: string,
   reportUnavailable?: (message: string) => void,
+  options: Readonly<{ notBefore?: Date }> = {},
 ): readonly IssueDiagnostic[] {
   const directory = join(workdir, "post-merge")
   if (!existsSync(directory)) return []
@@ -177,6 +187,11 @@ export function readPostMergeIssueDiagnostics(
   }
   for (const name of names) {
     if (!name.endsWith(".json")) continue
+    // #38870: a listing that prints 24 h of changes cannot show a diagnostic from an older merge, so it does not
+    // open one. The attempt's own creation time is its file name; an unreadable name is still read, never skipped
+    // on a guess.
+    const openedAt = postMergeAttemptOpenedAt(name)
+    if (options.notBefore !== undefined && openedAt !== undefined && openedAt < options.notBefore) continue
     const path = join(directory, name)
     let attempt: ReturnType<typeof readPostMergeAttempt>
     try {

@@ -1824,3 +1824,36 @@ it("charges a failed attempt to the branch its failure names, and to every branc
   expect(chargedBranches(merged, [{ branch: "task/elsewhere", status: "failed" }], false)).toEqual(merged)
   expect(chargedBranches(merged, [], false)).toEqual(merged)
 })
+
+/** @failure A status listing opened every post-merge attempt ever written — 38 MB on a queue holding 13,917 (#38870).
+ * @level l2 @consumer yrd ls read cost
+ */
+it("reads only post-merge attempts opened inside the listing's horizon, and never skips on an unreadable name", () => {
+  const root = mkdtempSync(join(tmpdir(), "yrd-38870-post-merge-"))
+  roots.push(root)
+  mkdirSync(join(root, "post-merge"))
+  const attempt = (diagnostic: string, providerId: string) =>
+    JSON.stringify({
+      issueActions: [
+        {
+          status: "failed",
+          branch: "task/one",
+          mergedEvent: "m1",
+          mergeSha: "a".repeat(40),
+          providerId,
+          diagnostic,
+        },
+      ],
+    })
+  writeFileSync(join(root, "post-merge", "2026-10-24T08-57-45.354Z-old.json"), attempt("old failure", "p1"))
+  writeFileSync(join(root, "post-merge", "2026-11-26T22-00-00.000Z-new.json"), JSON.stringify({ issueActions: [] }))
+  writeFileSync(join(root, "post-merge", "hand-made.json"), attempt("unreadable name kept", "p2"))
+  const notBefore = new Date("2026-11-26T00:00:00.000Z")
+  expect(readPostMergeIssueDiagnostics(root, undefined, { notBefore }).map((row) => row.diagnostic)).toEqual([
+    "unreadable name kept",
+  ])
+  expect(readPostMergeIssueDiagnostics(root).map((row) => row.diagnostic)).toEqual([
+    "old failure",
+    "unreadable name kept",
+  ])
+})
