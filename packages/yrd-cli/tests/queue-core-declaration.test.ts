@@ -541,6 +541,67 @@ it("refreshes local status after an event queue write in the same workdir (25626
   }
 })
 
+// @failure 38711: the local status refresh force-updated refs/heads/* in the shared mirror, so any listing reset a
+// branch an author had advanced there and deleted one they had never pushed. The fetch writes yrd's own namespace
+// now, and the listing re-keys it, so heads still render without owning the author's ref namespace.
+it("refreshes a local status mirror without touching the branches an author owns there (38711)", async () => {
+  const repo = await world("{}\n")
+  const git = gitIn(repo)
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  await createQueue(repo, "main", target, new Date("2026-09-22T14:00:00.000Z"))
+  // A head only the remote knows: the listing must still read mirrored heads after the refresh.
+  await git(["checkout", "--quiet", "-b", "task/mirror-draft", "main"])
+  writeFileSync(join(repo, "draft.txt"), "draft\n")
+  await git(["add", "draft.txt"])
+  await git(["commit", "--quiet", "-m", "draft"])
+  const draftHead = (await git(["rev-parse", "HEAD"])).trim()
+  await git(["push", "--quiet", "origin", "task/mirror-draft", "task/mirror-draft:refs/heads/task/mirror-diverged"])
+  await git(["checkout", "--quiet", "main"])
+  const root = dirname(repo)
+  const remote = join(root, "remote.git")
+  const owned = join(root, "owned")
+  await gitIn(root)(["clone", "--quiet", "--no-checkout", remote, owned])
+  const mirror = gitIn(owned)
+  await mirror(["config", "user.name", "yrd test author"])
+  await mirror(["config", "user.email", "author@test.invalid"])
+  const tree = (await mirror(["rev-parse", "main^{tree}"])).trim()
+  // Never pushed: `fetch --prune +refs/heads/*:refs/heads/*` deleted it.
+  const localOnly = (
+    await mirror(["commit-tree", tree, "-p", (await mirror(["rev-parse", "main"])).trim(), "-m", "unpushed work"])
+  ).trim()
+  await mirror(["branch", "task/mirror-unpushed", localOnly])
+  // Pushed once, then advanced here only: the forced fetch reset it to the remote's older head.
+  await mirror(["branch", "task/mirror-diverged", "origin/task/mirror-diverged"])
+  const advanced = (
+    await mirror([
+      "commit-tree",
+      tree,
+      "-p",
+      (await mirror(["rev-parse", "task/mirror-diverged"])).trim(),
+      "-m",
+      "unpushed amendment",
+    ])
+  ).trim()
+  await mirror(["branch", "-f", "task/mirror-diverged", advanced])
+  const options = {
+    json: true,
+    queue: "main",
+    workdir: join(root, "queue"),
+    localStatusStore: { path: owned, transport: remote },
+  } as const
+  const listed = capture(repo)
+  expect(await coreQueueCommand(repo, listed.io, { command: "list", drafts: true }, options), listed.stderr()).toBe(0)
+  expect(JSON.parse(listed.stdout())).toMatchObject({ source: "local" })
+  const rows = (
+    JSON.parse(listed.stdout()) as {
+      published: { changes: readonly { branch: string; state?: string; head?: string }[] }
+    }
+  ).published.changes
+  expect(rows.find((row) => row.branch === "task/mirror-draft")).toMatchObject({ state: "draft", head: draftHead })
+  expect((await mirror(["rev-parse", "task/mirror-unpushed"])).trim()).toBe(localOnly)
+  expect((await mirror(["rev-parse", "task/mirror-diverged"])).trim()).toBe(advanced)
+}, 60_000)
+
 describe("a queue is the selected origin branch carrying config", () => {
   // Direct core calls already covered closing, but could not catch a lost CLI opt-in.
   it.each(["run", "merge", "up"] as const)(

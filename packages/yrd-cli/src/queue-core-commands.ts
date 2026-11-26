@@ -887,13 +887,16 @@ export async function coreQueueCommand(
       throw new Error(`queue status store ${repo} has ${remote} ${actual}, expected ${localStatus.transport}`)
     }
     // Hot and cold event prefixes plus all heads include the target, every chain and every draft.
+    // Heads land in yrd's own namespace, NEVER in refs/heads/: the mirror is the shared queue repository, and the
+    // author worktrees share its ref namespace, so a forced refs/heads/* update deletes an author's unpushed commit
+    // (#38711, measured: a branch was reset twice mid-work).
     // A 60 s window is below ADR-0022's 120 s age disclosure, matches watch's
     // process cache, and is shorter than the measured queue round cadence.
     const refspecs = [
       `+refs/heads/${queue}:refs/heads/${queue}`,
       `+${queueRefPrefix(queue)}/*:${queueRefPrefix(queue)}/*`,
       `+${archivedChangesPrefix(queue)}*:${archivedChangesPrefix(queue)}*`,
-      "+refs/heads/*:refs/heads/*",
+      `+refs/heads/*:${MIRROR_HEADS_PREFIX}*`,
     ]
     const refreshed = await refreshMirror({
       path: repo,
@@ -7765,6 +7768,22 @@ type EventListingOptions = Readonly<{
   journalSinceMs?: number
 }>
 
+/**
+ * Where a local status mirror keeps origin's branch heads (#38711). Never `refs/heads/`: the mirror repository is
+ * shared with the author worktrees, so updating `refs/heads/*` there force-resets whatever an author has not pushed.
+ */
+const MIRROR_HEADS_PREFIX = "refs/yrd-mirror/heads/"
+
+/**
+ * The branch heads a listing reads. A remote store advertises them directly; a local mirror has them under yrd's own
+ * namespace and they are re-keyed to `refs/heads/<branch>` so every reader below keeps one ref shape.
+ */
+async function listQueueHeads(store: QueueReadStore): Promise<ReadonlyMap<string, string>> {
+  if (store.remote !== undefined) return listRefs("refs/heads/", store)
+  const mirrored = await listRefs(MIRROR_HEADS_PREFIX, store)
+  return new Map([...mirrored].map(([ref, oid]) => [`refs/heads/${ref.slice(MIRROR_HEADS_PREFIX.length)}`, oid]))
+}
+
 /** Read an event queue through Gitomic and project its change chains and draft branch heads. */
 export function readEventListing(
   git: GitRunner,
@@ -8080,7 +8099,7 @@ export async function readEventListing(
     openBranchDeleted ||
     draftWindowChanged
   ) {
-    branchRefs = options.branch === undefined && recent === undefined ? await listRefs("refs/heads/", store) : new Map()
+    branchRefs = options.branch === undefined && recent === undefined ? await listQueueHeads(store) : new Map()
     headListingAt = nowMs
   } else {
     branchRefs = cache.branchRefs
