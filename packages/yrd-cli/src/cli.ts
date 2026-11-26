@@ -2039,6 +2039,8 @@ function buildProgram(
       }
       if (options.projectRoot === undefined) unaddressedRepository(cwd())
       const { parseIssuesAssignmentAudit, runIssuesVerb } = await import("./issues/run.ts")
+      // @cto e72bc1a0 nit: the bound a timeout message names is the one the edge declares, never a second literal.
+      const { ISSUE_EVENT_EDGE_TIMEOUT_MS } = await import("./issue-event-edge.ts")
       let assignmentAudit: ReturnType<typeof parseIssuesAssignmentAudit>
       try {
         assignmentAudit = parseIssuesAssignmentAudit(options.expectedOwner, options.requestedBy)
@@ -2094,7 +2096,7 @@ function buildProgram(
           // keeps the replay key: a later read settles it rather than a second, contradicting event.
           const timedOut = outcome.code === ISSUES_CODES.providerTimedOut
           const fallbackText = timedOut
-            ? `outcome unknown: timed out after ${Math.round((options.timeoutMs ?? 60_000) / 1000)} s; replay key ${options.id ?? "unkeyed"}`
+            ? `outcome unknown: timed out after ${Math.round((options.timeoutMs ?? ISSUE_EVENT_EDGE_TIMEOUT_MS) / 1000)} s; replay key ${options.id ?? "unkeyed"}`
             : (options.onFailureText ?? (args[3] as string))
           const fallback = await runIssuesVerb({
             serve: true,
