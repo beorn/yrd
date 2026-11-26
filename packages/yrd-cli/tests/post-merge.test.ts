@@ -1556,6 +1556,41 @@ it("launches one merged item event per delivered change and returns without wait
 }, 60000)
 
 /**
+ * @failure The closer writes `launched` rows (hh #38766) and the union, the projection and the writer all accept that
+ *   status, but the decoder's status check did not: `yrd queue show <branch> --json` threw "unknown issue action status
+ *   launched" on every attempt holding a launched write, so the per-change view went blind while the queue was busy. The
+ *   reader must accept what the writer emits, and still refuse a launched row that names no log.
+ * @level l2 @consumer Yrd post-merge evidence read back into `yrd queue show` (#38766 launched rows) @testonly none
+ */
+it("reads the launched status the closer writes, and still refuses a launched row with no log", () => {
+  const workdir = world()
+  const directory = join(workdir, "post-merge")
+  mkdirSync(directory, { recursive: true })
+  const identity = {
+    branch: "task/launched",
+    mergedEvent: "event-1",
+    mergeSha: "a".repeat(40),
+    providerId: "yrd-merged-a",
+  }
+  writeFileSync(
+    join(directory, "attempt-1.json"),
+    JSON.stringify({
+      issueActions: [
+        { ...identity, verb: "event", status: "launched", log: join(workdir, "logs", "issue-events", "one.log") },
+        { ...identity, status: "failed", diagnostic: "provider ended with exit 1" },
+      ],
+    }),
+  )
+  // A launched write is not this process's outcome to report: only the failed row stays a diagnostic.
+  expect(readPostMergeIssueDiagnostics(workdir)).toEqual([{ ...identity, diagnostic: "provider ended with exit 1" }])
+  writeFileSync(
+    join(directory, "attempt-2.json"),
+    JSON.stringify({ issueActions: [{ ...identity, status: "launched" }] }),
+  )
+  expect(() => readPostMergeIssueDiagnostics(workdir)).toThrow(/launched issue action lacks log/)
+})
+
+/**
  * @failure A .yrd.yml still holding the retired issuesProvider.update has it run on a landing, beside Yrd's own closer
  *   (the old provider closed issues first on every landing), or the retired key is ignored without a word.
  * @level l2 @consumer Yrd's post-merge closer as the only writer closing issues from merge trailers (29630, @cto 5a66fb46)

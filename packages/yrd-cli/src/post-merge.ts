@@ -140,6 +140,14 @@ function readPostMergeAttempt(
       )
     }
     if (item.status === "skipped" || item.status === "fulfilled") continue
+    // The closer's launched writes (hh #38766) are read back here before the per-change view is built; a launched row
+    // names the child's own log and has no diagnostic of its own, so it is a valid status, not a malformed one.
+    if (item.status === "launched") {
+      if (typeof item.log !== "string") {
+        throw new Error(`post-merge attempt evidence malformed at ${path}: launched issue action lacks log`)
+      }
+      continue
+    }
     if (item.status !== "failed" && item.status !== "unavailable" && item.status !== "record-failed") {
       throw new Error(`post-merge attempt evidence malformed at ${path}: unknown issue action status ${item.status}`)
     }
