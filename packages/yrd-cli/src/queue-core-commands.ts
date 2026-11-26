@@ -18,7 +18,7 @@ import { inspectCheckoutGitMetadata } from "git-super"
 import { readCommitPath } from "git-super/commit-graph"
 import { existsSync, appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { hostname, tmpdir } from "node:os"
-import { dirname, isAbsolute, join, relative, sep } from "node:path"
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
@@ -546,6 +546,7 @@ export type CoreQueueCommand =
       by: string
       reason?: string
       recipient?: string
+      authorRepo?: string
     }>
   | Readonly<{ command: "ignore"; branch: string; by: string; reason: string }>
   | Readonly<{ command: "unignore"; branch: string; by: string }>
@@ -1074,8 +1075,13 @@ export async function coreQueueCommand(
   ) {
     const tip = request.command === "drop-local" ? request.tip : request.retire?.tip
     if (tip !== undefined) {
-      const authorRepo = retainedComponentStoreHere(io.cwd) ?? repositoryHere(io.cwd)
-      if (authorRepo === undefined) throw new Error("drop --local requires the authoring repository as cwd")
+      // 388xx: --repo names the author store; the branch lives in the checkout that names it, not in the queue clone.
+      const namedAuthorRepo =
+        request.command === "drop-local" && request.authorRepo !== undefined ? resolve(request.authorRepo) : undefined
+      const authorRepo = namedAuthorRepo ?? retainedComponentStoreHere(io.cwd) ?? repositoryHere(io.cwd)
+      if (authorRepo === undefined) {
+        throw new Error("drop --local requires the authoring repository as cwd, or name it with --repo <path>")
+      }
       const report = await retireComponentBranch({
         repo: authorRepo,
         git: gitIn(authorRepo, undefined, selection, { env }),
@@ -2167,9 +2173,15 @@ export async function coreQueueCommand(
     }
     case "drop-local":
     case "drop-issue": {
-      const authorRepo = repositoryHere(io.cwd)
+      // 388xx: --repo names the author store, so the branch is resolved in the checkout that owns it, not in the
+      // queue s clone or in whatever directory the caller happened to stand in.
+      const named =
+        request.command === "drop-local" && request.authorRepo !== undefined
+          ? resolve(request.authorRepo)
+          : undefined
+      const authorRepo = named ?? repositoryHere(io.cwd)
       if (authorRepo === undefined) {
-        throw new Error(`${NAMED[request.command]} requires the authoring repository as cwd`)
+        throw new Error(`${NAMED[request.command]} requires the authoring repository as cwd, or name it with --repo <path>`)
       }
       const authorGit = gitIn(authorRepo, undefined, selection, { env })
       const sameIssue = issueComparer({

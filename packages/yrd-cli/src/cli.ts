@@ -159,6 +159,8 @@ const ISSUE_HELP =
   "the issue; needed only when the commits carry no Refs/Resolves binding; checked against the branch's first such binding; unbound legacy name fallback is reported"
 const DRY_RUN_HELP = "preview admission and push nothing; fetches the queue tip into refs/gitomic/fetched/"
 const QUEUE_HELP = "a branch at origin or <repo>#<branch> address; defaults to origin/HEAD inside a clone"
+const REPO_HELP =
+  "the authoring repository whose local branch is dropped, when it is not this checkout; the queue still comes from --queue or this checkout s own declaration"
 
 const SUBMIT_HELP: [string, string][] = [
   [
@@ -288,6 +290,7 @@ function buildProgram(
       submodules?: boolean
       dryRun?: boolean
       apply?: boolean
+      repo?: string
     },
     command: "withdraw" | "drop",
   ): Promise<void> => {
@@ -352,6 +355,7 @@ function buildProgram(
       for (const [flag, value] of [
         ["--issue", options.issue],
         ["--queue", options.queue],
+        ["--repo", options.repo],
         ["--submitter", options.submitter],
         ["--reason", options.reason],
         ["--notify", options.notify],
@@ -418,6 +422,7 @@ function buildProgram(
     if (command === "drop" && options.local === true && branch !== undefined && options.tip !== undefined) {
       subject = {
         command: "drop-local",
+        ...(options.repo === undefined ? {} : { authorRepo: options.repo }),
         discard: options.discard,
         releaseCheckout: options.releaseCheckout,
         submodules: options.submodules,
@@ -465,7 +470,9 @@ function buildProgram(
         )
       }
     }
-    const dropRepo = retainedStore ?? location?.repo
+    // 388xx: a named --repo is the author store, so a drop aimed at another checkout does not resolve the branch in
+    // the queue s own clone; without the flag nothing changes.
+    const dropRepo = retainedStore ?? (options.repo === undefined ? location?.repo : resolve(options.repo))
     if (dropRepo === undefined) throw new Error(`${cwd()}: drop resolved no repository`)
     setExit(
       await coreQueueCommand(
@@ -1611,6 +1618,7 @@ function buildProgram(
         "retire an ended origin branch, or end a draft whose exact tip is already accepted by fresh origin main; requires --tip and --reason. A branch the merge already removed needs no retire: the merge commit names its tip as a parent and is the custody proof",
       )
       .option("--tip <commit>", "expected full current commit for --local or --retire")
+      .option("--repo <path>", REPO_HELP)
       .option(
         "--issue <id>",
         "retire issue-bound refs in the author store and the components that issue names; with --local or --retire --discard, carry the reviewed issue identity",

@@ -10,7 +10,7 @@
  * reader of that store keeps paging on a branch the queue already retired.
  * @testonly none
  */
-import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, expect, it, vi } from "vitest"
@@ -511,3 +511,63 @@ it("names the component that holds a branch absent in the superproject, and fail
   expect(absentCode, absent.stderr()).toBe(0)
   expect((JSON.parse(absent.stdout()) as { detail?: string }).detail).toContain("already gone")
 }, 60_000)
+
+it("--repo names the author store, so a drop aimed at another checkout retires that checkout's branch", async () => {
+  const root = mkdtempSync(join(tmpdir(), "yrd-drop-repo-flag-"))
+  roots.push(root)
+  const remote = join(root, "remote.git")
+  const repo = join(root, "repo")
+  const elsewhere = join(root, "elsewhere")
+  mkdirSync(elsewhere)
+  const seed = gitIn(root)
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["clone", "--quiet", remote, repo])
+  const git = gitIn(repo)
+  await git(["config", "user.name", "yrd test"])
+  await git(["config", "user.email", "yrd@test.invalid"])
+  writeFileSync(join(repo, ".yrd.yml"), 'checks:\n  - verify: {run: "true"}\n')
+  await git(["add", "."])
+  await git(["commit", "--quiet", "-m", "queue"])
+  await git(["push", "--quiet", "origin", "main"])
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+  if (config === undefined) throw new Error("fixture lost .yrd.yml")
+  await createEventQueue(createEventStore(repo, "origin", git.selection), "main", target, config, new Date(0))
+  await git(["checkout", "--quiet", "-b", "task/elsewhere"])
+  writeFileSync(join(repo, "held.txt"), "held\n")
+  await git(["add", "."])
+  await git(["commit", "--quiet", "-m", "held"])
+  const tip = (await git(["rev-parse", "HEAD"])).trim()
+  await git(["checkout", "--quiet", "main"])
+
+  // Reproduced from a directory that owns no repository at all: the author store comes from --repo, the
+  // declaration from --queue. Without --repo this resolved the branch in the queue's own clone.
+  const observed = capture(elsewhere)
+  const code = await runYrdProcess(
+    [
+      "bun",
+      "yrd",
+      "drop",
+      "task/elsewhere",
+      "--local",
+      "--tip",
+      tip,
+      "--repo",
+      repo,
+      "--queue",
+      `${remote}#main`,
+      "--submitter",
+      "fixture",
+      "--json",
+    ],
+    observed.io,
+  )
+  if (code !== 0) throw new Error(`exit ${code}: ${observed.stderr()}`)
+  expect((await git(["for-each-ref", "refs/heads/task/elsewhere"])).trim()).toBe("")
+  const { history } = await readBranchHistory(
+    createEventStore(repo, "origin", git.selection),
+    "main",
+    "task/elsewhere",
+  )
+  expect(history?.state).toMatchObject({ status: "cancelled", reason: "dropped", commit: tip })
+})
