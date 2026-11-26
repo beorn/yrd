@@ -206,8 +206,12 @@ export async function refreshMirror(options: RefreshMirrorOptions): Promise<Mirr
     refreshedAt,
     asOf,
   })
+  // A stamp naming this remote but another refs set is not certification — the refs it omits may be absent — but it is
+  // also not a refusal: the fetch below is scoped to the caller refspecs and, since #38711, touches no other namespace,
+  // so refreshing is how the store earns the wider stamp. Refusing here would make every namespace move (#38711 moved
+  // heads to yrd-mirror/heads/) a manual stamp deletion on every host; a stamp certified for ANOTHER remote still refuses.
   const before = recordedScope(path, options.path === undefined)
-  if (options.path !== undefined && before !== undefined && !covers(before, remote, refspecs)) {
+  if (options.path !== undefined && before !== undefined && before.remote !== remote) {
     throw new MirrorUnavailable(
       options.url,
       path,
@@ -224,7 +228,7 @@ export async function refreshMirror(options: RefreshMirrorOptions): Promise<Mirr
   }
   using _lock = await lockMirror(options.url, path, options.lockWaitMs ?? MIRROR_LOCK_WAIT_MS, options.onWait)
   const meanwhile = recordedScope(path, options.path === undefined)
-  if (options.path !== undefined && meanwhile !== undefined && !covers(meanwhile, remote, refspecs)) {
+  if (options.path !== undefined && meanwhile !== undefined && meanwhile.remote !== remote) {
     throw new MirrorUnavailable(
       options.url,
       path,
