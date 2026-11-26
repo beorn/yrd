@@ -14,7 +14,6 @@ import {
   trailerEffectId,
   writeQueueEvent,
   isAncestor,
-  normalizedRemote,
   remoteUrl,
   trailer,
   type AppliedIssueEffect,
@@ -22,8 +21,15 @@ import {
   type GitRunner,
   type QueueLocation,
 } from "@yrd/queue-core"
-import { ISSUES_CODES, ISSUES_DECLARATION_PATH, parseIssuesDeclaration } from "./issues/declaration.ts"
+import { ISSUES_DECLARATION_PATH, parseIssuesDeclaration } from "./issues/declaration.ts"
 import { runIssuesVerb } from "./issues/run.ts"
+import {
+  issueEventOperationId,
+  issueEventSource,
+  launchIssueEvent,
+  type IssueEventLaunch,
+  type IssueEventLaunchInput,
+} from "./issue-event-edge.ts"
 
 // Real public Km CLI trial (2026-10-16, km-cli-trial.json): 1.246s for one
 // closing action across two introduced commits, 0.739s unchanged catch-up.
@@ -94,6 +100,8 @@ type IssueAction = Omit<IssueDiagnostic, "diagnostic"> &
   (
     | { status: "fulfilled" }
     | { status: "skipped" }
+    /** The write left with a detached child (hh #38766); `log` is where that child's own outcome lands. */
+    | { status: "launched"; log: string }
     | { status: "failed" | "unavailable" | "record-failed"; diagnostic: string }
   )
 
@@ -172,7 +180,9 @@ export function readPostMergeIssueDiagnostics(
     }
     for (const item of attempt.actions) {
       const identity = JSON.stringify([item.branch, item.mergedEvent, item.mergeSha, item.providerId])
-      if (item.status === "skipped" || item.status === "fulfilled") {
+      // A launched write has no outcome here to report (hh #38766): the detached child owns it, and its own `failed`
+      // event on the issue is the notify. Only rows this process judged stay diagnostics.
+      if (item.status === "skipped" || item.status === "fulfilled" || item.status === "launched") {
         found.delete(identity)
         continue
       }
@@ -620,7 +630,7 @@ async function declaresEvent(git: GitRunner, commit: string): Promise<boolean> {
  * parser; #31194 acceptance row 6 holds the test that proves this form against it.
  */
 export function mergedEventSource(url: string, mergeSha: string): string {
-  return `${normalizedRemote(url)}@${mergeSha}`
+  return issueEventSource(url, mergeSha)
 }
 
 /**
@@ -629,7 +639,7 @@ export function mergedEventSource(url: string, mergeSha: string): string {
  * spelled with dashes; #31194 acceptance row 4 holds the test that proves this id against km's rule.
  */
 export function mergedEventOperationId(mergeSha: string): string {
-  return `yrd-merged-${mergeSha}`
+  return issueEventOperationId("merged", mergeSha)
 }
 
 /** The base every other one descends from, or undefined when two are unrelated: then none is earliest. */
@@ -674,7 +684,10 @@ async function recordMergedEvents(
     bases: readonly string[]
     projectRoot?: string
     cwd: string
+    /** Where the queue keeps its log tree: each launched write's own log is `<workdir>/logs/issue-events/<id>.log`. */
+    workdir: string
     env?: NodeJS.ProcessEnv
+    launchEvent: (input: IssueEventLaunchInput) => IssueEventLaunch
     report: (message: string) => void
     stop?: AbortSignal
   }>,
@@ -788,28 +801,28 @@ async function recordMergedEvents(
         else record({ ...identity, status: "skipped", reason: "issues.yml declares no event at the merge" })
         continue
       }
-      const written = await runIssuesVerb({
-        verb: "event",
-        args: [issue, "merged", mergedEventSource(url, mergeSha), `${branch} merged`],
-        id: providerId,
-        ...(input.projectRoot === undefined ? {} : { projectRoot: input.projectRoot }),
-        declarationRepository: input.store.repo,
-        declarationCommit: mergeSha,
-        targetCommit: input.target,
+      // hh #38766 (@cto 15f0394a, e72bc1a0): the write is launched, never awaited. One provider write costs ~35 s
+      // against a healthy km and is unbounded while km holds its write lane; a merge round is serial, so waiting on it
+      // slowed every merge. The child owns the outcome and says so itself: on failure it writes this branch's `failed`
+      // event, by name, under `<id>-failed`, so the abandoned-issue rail hears it without the round holding still.
+      const launched = input.launchEvent({
+        kind: "merged",
+        issue,
+        source: mergedEventSource(url, mergeSha),
+        text: `${branch} merged at ${mergeSha}`,
+        opId: providerId,
+        projectRoot: input.projectRoot ?? input.cwd,
+        declaration: { repository: input.store.repo, commit: mergeSha, target: input.target },
         cwd: input.cwd,
-        env: input.env,
-        signal: input.stop,
-        timeoutMs: UPDATE_TIMEOUT_MS,
-        noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
+        workdir: input.workdir,
+        env: input.env ?? process.env,
+        fallback: { kind: "failed", text: `${branch} merged event for ${mergeSha} did not land` },
       })
-      if (written.ok) {
+      if (launched.launched) {
         recorded++
-        record({ ...identity, status: "fulfilled", issue })
-      } else if (written.code === ISSUES_CODES.unsupported || written.code === ISSUES_CODES.declarationMissing) {
-        // Not yet declared at that merge: no provider was asked, so nothing failed; the evidence says why.
-        record({ ...identity, status: "skipped", reason: written.message, issue })
+        record({ ...identity, status: "launched", issue, log: launched.log })
       } else {
-        record({ ...identity, status: "failed", issue, diagnostic: written.message }, written.message)
+        record({ ...identity, status: "failed", issue, diagnostic: launched.why }, launched.why)
       }
     }
   }
@@ -830,6 +843,11 @@ export function createPostMerge<C extends Context>(
     report: (message: string) => void
     git?: GitRunner
     store?: QueueLocation
+    /**
+     * How a merged item event is started (hh #38766): production launches a detached child, and the fixtures inject a
+     * recorder so a unit test proves the launch without spawning one.
+     */
+    launchEvent?: (input: IssueEventLaunchInput) => IssueEventLaunch
     /** Told the branches given up on after {@link POST_MERGE_ATTEMPTS} failures; a throw here is reported, never raised. */
     abandoned?: (context: C, abandoned: readonly AbandonedPostMerge[]) => Promise<void>
   }>,
@@ -987,7 +1005,9 @@ export function createPostMerge<C extends Context>(
         bases,
         ...(context.projectRoot === undefined ? {} : { projectRoot: context.projectRoot }),
         cwd: options.cwd,
+        workdir: options.workdir,
         env: options.env,
+        launchEvent: options.launchEvent ?? launchIssueEvent,
         report: options.report,
         stop: options.stop,
       })

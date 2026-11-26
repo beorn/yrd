@@ -1982,6 +1982,12 @@ function buildProgram(
             : `the declared ${verb}${write ? "" : " (a read)"}`,
       )
       .option("--project-root <path>", "the project root; default the toplevel of the current repository")
+      .option(
+        "--declaration-repository <path>",
+        "read issues.yml and its pinned commit from this repository instead of the project root (hh 38780: the queue's own clone always holds the delivered merge)",
+      )
+      .option("--declaration-commit <rev>", "read this exact ancestor of main; a delivered merge uses its own commit")
+      .option("--target-commit <rev>", "with --declaration-commit, prove its ancestry against this commit")
       .option("--timeout-ms <n>", "kill the provider after this many milliseconds (yrd-issues-provider-timed-out)", int)
     // NO OPTION IS ACCEPTED AND IGNORED: a read takes no replay key, so --id is refused on it.
     if (write) command.option("--id <id>", "the event's replay key; required, the provider dedupes on it")
@@ -1997,6 +2003,16 @@ function buildProgram(
         .option("--expected-owner <json>", "owner observed before assignment, as a JSON string or null")
         .option("--requested-by <json>", "requester audit identity as a JSON object with authority and subject")
     }
+    if (verb === "event") {
+      // hh #38766 (@cto 15f0394a): a caller that launches this write detached cannot see its outcome, so the failing
+      // child says so itself, on the issue, by name.
+      command
+        .option(
+          "--on-failure-kind <kind>",
+          `record this event kind, under the id's own -failed replay key, when the declared write fails (one of ${ISSUES_EVENT_KINDS.join(", ")})`,
+        )
+        .option("--on-failure-text <text>", "the fallback event's text; defaults to the failed write's own text")
+    }
     command.action(async (...received: unknown[]) => {
       const args = received.slice(0, operands.length) as string[]
       const options = received[operands.length] as Readonly<{
@@ -2005,7 +2021,22 @@ function buildProgram(
         timeoutMs?: number
         expectedOwner?: string
         requestedBy?: string
+        onFailureKind?: string
+        onFailureText?: string
+        declarationRepository?: string
+        declarationCommit?: string
+        targetCommit?: string
       }>
+      if (
+        options.onFailureKind !== undefined &&
+        !(ISSUES_EVENT_KINDS as readonly string[]).includes(options.onFailureKind)
+      ) {
+        io.stderr(
+          `yrd issues: ${ISSUES_CODES.badArguments}: event: --on-failure-kind must be one of ${ISSUES_EVENT_KINDS.join(", ")}\n`,
+        )
+        setExit(2)
+        return
+      }
       if (options.projectRoot === undefined) unaddressedRepository(cwd())
       const { parseIssuesAssignmentAudit, runIssuesVerb } = await import("./issues/run.ts")
       let assignmentAudit: ReturnType<typeof parseIssuesAssignmentAudit>
@@ -2028,6 +2059,11 @@ function buildProgram(
         stderr: (text) => io.stderr(text),
         // #37838: the computed in_progress columns come from this repository's own open environments.
         environments: ({ root, cwd: at }) => openIssueEnvironments({ root, cwd: at, env }),
+        ...(options.declarationRepository === undefined
+          ? {}
+          : { declarationRepository: options.declarationRepository }),
+        ...(options.declarationCommit === undefined ? {} : { declarationCommit: options.declarationCommit }),
+        ...(options.targetCommit === undefined ? {} : { targetCommit: options.targetCommit }),
         ...(options.id === undefined ? {} : { id: options.id }),
         ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
@@ -2043,6 +2079,36 @@ function buildProgram(
         // call answers its one envelope, byte for byte.
         for (const envelope of outcome.stream ?? [outcome.envelope]) io.stdout(`${JSON.stringify(envelope)}\n`)
         return
+      }
+      if (verb === "event" && options.onFailureKind !== undefined) {
+        // hh #38766 (@cto 15f0394a): the caller may be a round that has already moved on, so a failed write must leave
+        // its mark where the issue's readers look. This child is the only one that still knows the write failed.
+        const fallback = await runIssuesVerb({
+          serve: true,
+          verb: "event",
+          args: [
+            args[0] as string,
+            options.onFailureKind,
+            args[2] as string,
+            options.onFailureText ?? (args[3] as string),
+          ],
+          cwd: cwd(),
+          env,
+          stderr: (text) => io.stderr(text),
+          id: `${options.id ?? "unkeyed"}-failed`,
+          ...(options.declarationRepository === undefined
+            ? {}
+            : { declarationRepository: options.declarationRepository }),
+          ...(options.declarationCommit === undefined ? {} : { declarationCommit: options.declarationCommit }),
+          ...(options.targetCommit === undefined ? {} : { targetCommit: options.targetCommit }),
+          ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
+          ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        })
+        io.stderr(
+          `yrd issues: ${fallback.ok ? "wrote" : "could not write"} the ${options.onFailureKind} fallback event for ${String(args[0])}${
+            fallback.ok ? "" : `: ${fallback.message}`
+          }\n`,
+        )
       }
       io.stderr(`yrd issues: ${outcome.message}\n`)
       setExit(outcome.exitCode)

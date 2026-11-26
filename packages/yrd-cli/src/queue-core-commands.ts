@@ -292,6 +292,13 @@ import {
   formatUnknownNotifyEventWarning,
   formatUnknownTopLevelKeyWarning,
 } from "./version.ts"
+import {
+  issueEventOperationId,
+  issueEventSource,
+  launchIssueEvent,
+  type IssueEventLaunch,
+  type IssueEventLaunchInput,
+} from "./issue-event-edge.ts"
 
 function issueOutput(io: YrdCliIO, branch: string, resolution: IssueResolution | undefined) {
   if (resolution === undefined) {
@@ -302,6 +309,54 @@ function issueOutput(io: YrdCliIO, branch: string, resolution: IssueResolution |
     issue: resolution.issue,
     issueSource: resolution.source,
     ...(resolution.commit === undefined ? {} : { issueCommit: resolution.commit }),
+  }
+}
+
+/**
+ * hh #38766 (@cto e0638180): a change that was just submitted records one `submitted` fact on the issue it names, so
+ * the timeline has both ends of the change and not only the merge. The provider write costs ~35 s against a healthy km
+ * and is unbounded while km holds its write lane, so it runs in a detached child (issue-event-edge.ts) and this returns
+ * at once: the submit never waits for it and never fails on it. A launch that could not start is said here, by name.
+ */
+async function launchSubmitEvent(input: {
+  readonly io: YrdCliIO
+  readonly git: GitRunner
+  readonly repo: string
+  readonly workdir: string
+  readonly env: NodeJS.ProcessEnv | undefined
+  readonly targetRemote: string
+  readonly submitted: Readonly<{ branch: string; head: string; issue?: IssueResolution }>
+}): Promise<void> {
+  const { submitted } = input
+  if (submitted.issue === undefined) {
+    input.io.stderr(`yrd: ${submitted.branch} names no issue, so no submitted event was written for it\n`)
+    return
+  }
+  const issue = submitted.issue.issue
+  let url: string
+  try {
+    url = await remoteUrl(input.git, input.targetRemote)
+  } catch (error) {
+    input.io.stderr(
+      `yrd: submitted event for ${issue} not launched: remote ${input.targetRemote} has no readable URL: ${
+        error instanceof Error ? error.message : String(error)
+      }\n`,
+    )
+    return
+  }
+  const outcome = launchIssueEvent({
+    kind: "submitted",
+    issue,
+    source: issueEventSource(url, submitted.head),
+    text: `${submitted.branch} submitted at ${submitted.head}`,
+    opId: issueEventOperationId("submitted", submitted.head),
+    projectRoot: input.repo,
+    cwd: input.repo,
+    workdir: input.workdir,
+    env: input.env ?? process.env,
+  })
+  if (!outcome.launched) {
+    input.io.stderr(`yrd: submitted event for ${issue} not launched: ${outcome.why}\n`)
   }
 }
 
@@ -732,6 +787,11 @@ export async function coreQueueCommand(
      * to automatic issue closing. Absent, neither display reads nor automatic closes run.
      */
     projectRoot?: string
+    /**
+     * How a merged item event starts (hh #38766): production leaves this absent and the detached child is launched.
+     * A test names its own launcher so a merge round is proven without spawning a CLI.
+     */
+    launchEvent?: (input: IssueEventLaunchInput) => IssueEventLaunch
     /**
      * Whether `repo` is the queue's own clone (`QueueLocation.owned`). Only
      * then may a compose populate the submodule stores it borrows from;
@@ -1587,6 +1647,8 @@ export async function coreQueueCommand(
           stop: postMergeSignal,
           git,
           store: eventStore,
+          // hh #38766: production launches the detached child; a caller may name its own launcher, as the fixtures do.
+          ...(options.launchEvent === undefined ? {} : { launchEvent: options.launchEvent }),
           report: (message) => io.stderr("yrd: " + message + "\n"),
           // A branch whose issue update failed every carried attempt reaches a reader over the notify rail
           // (37513, @cto 68bee3e1): the declaration's post-merge-abandoned entry decides who.
@@ -3099,6 +3161,15 @@ export async function coreQueueCommand(
         }
         await notifyAdmissionWarning(submitted, request.submitter)
         const { stop: acceptedUnder, ...accepted } = submitted
+        await launchSubmitEvent({
+          io,
+          git,
+          repo,
+          workdir,
+          env,
+          targetRemote: config.target.remote,
+          submitted,
+        })
         emit(
           io,
           options.json,
@@ -3185,6 +3256,15 @@ export async function coreQueueCommand(
       }
       const submitted = await submitWithInspection(git, config.target.remote, submission)
       await notifyAdmissionWarning(submitted, request.submitter)
+      await launchSubmitEvent({
+        io,
+        git,
+        repo,
+        workdir,
+        env,
+        targetRemote: config.target.remote,
+        submitted,
+      })
       const { stop: acceptedUnder, ...accepted } = submitted
       emit(
         io,
