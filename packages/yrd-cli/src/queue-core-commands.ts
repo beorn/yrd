@@ -521,7 +521,7 @@ export type CoreQueueCommand =
       by: string
       reason?: string
       recipient?: string
-      retire?: Readonly<{ tip: string; discard?: boolean; issue?: string; dryRun?: true }>
+      retire?: Readonly<{ tip: string; discard?: boolean; issue?: string; supersededBy?: string; dryRun?: true }>
     }>
   | Readonly<{
       command: "drop-issue"
@@ -1113,6 +1113,7 @@ export async function coreQueueCommand(
                 reason: request.reason,
                 ...(request.retire?.discard ? { discard: true } : {}),
                 ...(request.retire?.issue === undefined ? {} : { issue: request.retire.issue }),
+                ...(request.retire?.supersededBy === undefined ? {} : { supersededBy: request.retire.supersededBy }),
                 ...(request.retire?.dryRun ? { dryRun: true as const } : {}),
               },
       }).catch((cause: unknown) => {
@@ -2176,12 +2177,12 @@ export async function coreQueueCommand(
       // 388xx: --repo names the author store, so the branch is resolved in the checkout that owns it, not in the
       // queue s clone or in whatever directory the caller happened to stand in.
       const named =
-        request.command === "drop-local" && request.authorRepo !== undefined
-          ? resolve(request.authorRepo)
-          : undefined
+        request.command === "drop-local" && request.authorRepo !== undefined ? resolve(request.authorRepo) : undefined
       const authorRepo = named ?? repositoryHere(io.cwd)
       if (authorRepo === undefined) {
-        throw new Error(`${NAMED[request.command]} requires the authoring repository as cwd, or name it with --repo <path>`)
+        throw new Error(
+          `${NAMED[request.command]} requires the authoring repository as cwd, or name it with --repo <path>`,
+        )
       }
       const authorGit = gitIn(authorRepo, undefined, selection, { env })
       const sameIssue = issueComparer({

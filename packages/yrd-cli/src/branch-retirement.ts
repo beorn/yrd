@@ -876,6 +876,8 @@ type ComponentRetirementInput = Readonly<{
     issue?: string
     reason?: string
     discard?: boolean
+    /** The full commit that superseded a discarded origin tip; recorded beside it (@cto, task/incident-clear-body). */
+    supersededBy?: string
     dryRun?: true
   }>
 }>
@@ -976,6 +978,25 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
   if (request.branch === targetBranch || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(request.tip)) {
     throw new Error(`${repo}: drop retirement requires a non-target branch and a full expected commit oid`)
   }
+  const supersededBy = request.supersededBy
+  if (supersededBy !== undefined) {
+    if (
+      destination !== "origin" ||
+      request.discard !== true ||
+      !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(supersededBy)
+    ) {
+      throw new Error(
+        `${repo}: --superseded-by needs drop --retire --discard and a full commit oid; received ${supersededBy}`,
+      )
+    }
+    // An undo pointer the object store cannot resolve could never restore the discard, so it is refused before any decision.
+    try {
+      await git(["cat-file", "-e", `${supersededBy}^{commit}`])
+    } catch (cause) {
+      throw new Error(`--superseded-by ${supersededBy} is not a commit in ${repo}: ${String(cause)}`, { cause })
+    }
+  }
+  const supersededRow = supersededBy === undefined ? {} : { supersededBy }
   const remote = await remoteUrl(git, "origin")
   const publicRemote = remote.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s]*@/giu, "$1")
   const target = await readRemoteCommit(git, remote, `refs/heads/${targetBranch}`)
@@ -1066,6 +1087,12 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
         branch: request.branch,
         tip: request.tip,
         issue: request.issue,
+        // @cto ruling (task/incident-clear-body): tell the host this is the reviewed origin discard and which --issue it
+        // carries, so a free-text binding equal to it exactly reads only the branch-drop authority; the exact-tip
+        // binding, actor and reason checks here still decide.
+        ...(destination === "origin" && request.discard === true && !merged && request.issue !== undefined
+          ? { discard: { issue: request.issue } }
+          : {}),
       })
       bindingUnresolved = read.bindingUnresolved
       return discardProblem === undefined ? read.protections : [...read.protections, discardProblem]
@@ -1123,7 +1150,9 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
             removed: [],
             kept: [],
             failed: [],
-            eligible: [{ ...row, reason: discardReason, intent: "origin-discard" as const, uniqueCommits }],
+            eligible: [
+              { ...row, reason: discardReason, intent: "origin-discard" as const, uniqueCommits, ...supersededRow },
+            ],
           }
         }
         let decision: LogRecord
@@ -1142,6 +1171,7 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
             target,
             targetRef,
             uniqueCommits,
+            ...supersededRow,
             pid: process.pid,
           })
           const fd = openSync(log().path, "r")
@@ -1208,6 +1238,7 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
           target,
           targetRef,
           uniqueCommits,
+          ...supersededRow,
           outcome: "removed",
         })
         const output = {
@@ -1217,6 +1248,7 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
           actor: request.by,
           ...(request.issue === undefined ? {} : { issue: request.issue }),
           uniqueCommits,
+          ...supersededRow,
         }
         return {
           removed: [output],

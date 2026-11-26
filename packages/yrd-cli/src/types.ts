@@ -42,7 +42,9 @@ export type LocalBranchProtectionResult = Readonly<{
   evidence: readonly Readonly<{ kind: "malformed-lease"; path: string; reason: string }>[]
   /** A landed tip (0 unique commits by ancestry in origin/main) whose recorded binding is free text no bead
    * matches: issue-scoped holds were unreadable, so the drop proceeded on the branch-drop authority alone.
-   * Present only when that exception was taken; the report carries it loudly (@cto c95d0a0d). */
+   * Present only when that exception was taken; the report carries it loudly (@cto c95d0a0d). An explicit
+   * reviewed `--retire --discard` whose --issue equals that free-text binding exactly takes the same exception
+   * on an unlanded tip. */
   bindingUnresolved?: string
 }>
 
@@ -74,10 +76,19 @@ export type YrdCliIO = {
   /** Fresh host holds, leases and live/dirty work associated with this exact local branch.
    * Rejections preserve the branch. null explicitly selects a standalone repository with no host holds.
    * Explicit retained-checkout release requires the callback and records its non-blocking evidence.
+   * `discard` is present only on an explicit reviewed `drop --retire --discard` and carries its supplied --issue,
+   * so a host may tell an exact-binding discard from a bare drop; Yrd still checks the exact-tip binding itself.
    */
   localBranchProtections:
     | ((
-        input: Readonly<{ repo: string; branch: string; tip: string; issue?: string; retainedCheckout?: string }>,
+        input: Readonly<{
+          repo: string
+          branch: string
+          tip: string
+          issue?: string
+          retainedCheckout?: string
+          discard?: Readonly<{ issue?: string }>
+        }>,
         budget?: CloseExecutionBudget,
       ) => Promise<LocalBranchProtectionResult>)
     | null
