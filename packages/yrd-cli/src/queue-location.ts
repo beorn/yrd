@@ -26,6 +26,7 @@ import {
   type QueueAddress,
 } from "./address.ts"
 import { repositoryHere, unaddressedRepository } from "./declaration.ts"
+import { mainCheckoutOf, outermostRepository } from "./main-checkout.ts"
 
 /**
  * A cold component store: a bare Git directory kept for custody (a retained module
@@ -149,65 +150,38 @@ export type WorkdirResolution = Readonly<{
   tried: readonly string[]
 }>
 
-/**
- * Names the directory that stands for where the running Yrd ships, instead of this module's own location. The test
- * pin sets it (tests/support/state-home.ts) so no fixture inherits the live host's `yrd.workdir`.
- */
-export const YRD_OWN_REPOSITORY = "YRD_OWN_REPOSITORY"
-
-/** The directory the running Yrd ships from: this module's real path (a node_modules symlink resolved), or the pin. */
-export function yrdOwnLocation(env: NodeJS.ProcessEnv): string {
-  const named = env[YRD_OWN_REPOSITORY]
-  if (named !== undefined) {
-    if (named.trim() === "") throw new Error(`${YRD_OWN_REPOSITORY} must name a directory`)
-    return resolve(named)
-  }
+/** The directory the running Yrd ships from: this module's real path, a node_modules symlink resolved. */
+export function yrdOwnLocation(): string {
   return dirname(realpathSync(fileURLToPath(import.meta.url)))
 }
 
 /**
  * The MAIN checkout of the repository the running Yrd ships in, or why there is none.
  *
- * Yrd usually ships as a submodule (`<host>/vendor/yrd`), so the outermost superproject is the repository, and its
- * main checkout is the one that declares the host's `yrd.workdir`. The main-checkout rule is the host launcher's
- * landed root (`tools/yrd-runtime.mjs` `landedRootOf`, itself `tools/@in`'s `resolve_code_root`): the COMMON git dir of
- * any worktree is `<main>/.git`, else `git worktree list`'s first entry; a root that cannot be derived refuses by name.
- * The launcher keeps its own copy because it must find its root before any Yrd module can load.
+ * Yrd usually ships as a submodule (`<host>/vendor/yrd`), so the outermost repository holding it is the host, and the
+ * host's main checkout is the one that declares its `yrd.workdir`. Both rules live once, in main-checkout.ts, which
+ * the host launcher imports too (@cto 1444899a D2).
  */
-async function ownRepository(env: NodeJS.ProcessEnv): Promise<Readonly<{ repository: string } | { none: string }>> {
-  const location = yrdOwnLocation(env)
+function ownRepository(location: string): Readonly<{ repository: string } | { none: string }> {
   if (!existsSync(location)) return { none: `${location} does not exist` }
-  let top = repositoryHere(location)
-  if (top === undefined) return { none: `${location} is in no repository` }
-  const selection = await resolveGitSelection(top, { env })
-  const at = (directory: string) => gitIn(directory, undefined, selection, { env })
-  for (;;) {
-    const superproject = (await at(top)(["rev-parse", "--show-superproject-working-tree"])).trim()
-    if (superproject === "" || resolve(superproject) === resolve(top)) break
-    top = superproject
-  }
-  const common = (await at(top)(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
-  let main = common.endsWith("/.git") ? dirname(common) : ""
-  if (main === "" || !existsSync(join(main, ".git"))) {
-    const first = (await at(top)(["worktree", "list", "--porcelain"]))
-      .split("\n")
-      .find((line) => line.startsWith("worktree "))
-    main = first === undefined ? "" : first.slice("worktree ".length).trim()
-  }
-  if (main === "") {
-    throw new Error(
-      `yrd: cannot derive the main checkout of yrd's own repository from ${top} — no main worktree in \`git worktree list\` there`,
-    )
-  }
-  return { repository: realpathSync(main) }
+  if (repositoryHere(location) === undefined) return { none: `${location} is in no repository` }
+  return { repository: mainCheckoutOf(outermostRepository(location)) }
 }
 
 /**
  * ONE root resolution (hh 38659, @cto 23049856): `YRD_WORKDIR`, then `yrd.workdir` as the caller's repository reads it
  * (every scope git reads), then the `yrd.workdir` the repository Yrd ships in declares, then `$XDG_STATE_HOME/yrd`.
  * The third arm is what the host launcher used to inject; here it reaches the bare `node_modules/.bin/yrd` entry too.
+ *
+ * `ownLocation` is where Yrd ships from — this module, unless a test passes a fixture repository; it is a parameter,
+ * never a setting (@cto 1444899a D1). A test that must not inherit its host's declared root sets `YRD_WORKDIR`.
  */
-async function resolveHostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git: Git): Promise<WorkdirResolution> {
+async function resolveHostWorkdir(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  git: Git,
+  ownLocation: string = yrdOwnLocation(),
+): Promise<WorkdirResolution> {
   const override = env.YRD_WORKDIR
   if (override !== undefined) {
     if (override.trim() === "") throw new Error("YRD_WORKDIR must name a directory")
@@ -220,7 +194,7 @@ async function resolveHostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git: Git)
     return { root: resolve(caller, declared), kind: "yrd.workdir", source: "yrd.workdir", tried }
   }
   tried.push(`git config yrd.workdir unset at ${caller}`)
-  const own = await ownRepository(env)
+  const own = ownRepository(ownLocation)
   if ("repository" in own) {
     const ownGit = gitIn(own.repository, undefined, await resolveGitSelection(own.repository, { env }), { env })
     const inherited = await configValue(ownGit, "yrd.workdir")
@@ -245,8 +219,13 @@ async function resolveHostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git: Git)
   }
 }
 
-export async function hostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git: Git): Promise<string> {
-  return (await resolveHostWorkdir(cwd, env, git)).root
+export async function hostWorkdir(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  git: Git,
+  ownLocation?: string,
+): Promise<string> {
+  return (await resolveHostWorkdir(cwd, env, git, ownLocation)).root
 }
 
 /**
@@ -263,9 +242,9 @@ export async function hostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git: Git)
  * :253) before any inside-repository check. The XDG fallback is right only when NO scope declares the key,
  * never because the caller happened to stand outside a repository (@cto 044d3ffd change 1).
  */
-export async function hostWorkdirHere(cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
+export async function hostWorkdirHere(cwd: string, env: NodeJS.ProcessEnv, ownLocation?: string): Promise<string> {
   const git = gitIn(repositoryHere(cwd) ?? cwd, undefined, await resolveGitSelection(cwd, { env }), { env })
-  return hostWorkdir(cwd, env, git)
+  return hostWorkdir(cwd, env, git, ownLocation)
 }
 
 /**
@@ -436,9 +415,10 @@ export async function resolveQueueWorkdir(
   cwd: string,
   value: string | undefined,
   env: NodeJS.ProcessEnv,
+  ownLocation?: string,
 ): Promise<Readonly<{ workdir: string; resolution: WorkdirResolution }>> {
   const { git, address } = await resolveQueueAddress(cwd, value, env, "queue", true)
-  const resolution = await resolveHostWorkdir(cwd, env, git)
+  const resolution = await resolveHostWorkdir(cwd, env, git, ownLocation)
   return { workdir: queueRoot(resolution.root, address), resolution }
 }
 
@@ -449,9 +429,10 @@ export async function resolveQueueLocation(
   env: NodeJS.ProcessEnv,
   context: "queue" | "reader" | "submit" = "queue",
   reportWorkdir?: (workdir: string, resolution: WorkdirResolution) => void,
+  ownLocation?: string,
 ): Promise<QueueLocation> {
   const { inside, addressed, selection, git, address } = await resolveQueueAddress(cwd, value, env, context, false)
-  const resolution = await resolveHostWorkdir(cwd, env, git)
+  const resolution = await resolveHostWorkdir(cwd, env, git, ownLocation)
   const host = resolution.root
   const workdir = queueRoot(host, address)
   reportWorkdir?.(workdir, resolution)

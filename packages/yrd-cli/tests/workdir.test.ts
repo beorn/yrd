@@ -3,9 +3,9 @@ import { describe, expect, it } from "vitest"
 import { parseQueueAddress, queueRoot } from "../src/address.ts"
 import { queueTempRoot, workdirOf } from "../src/workdir.ts"
 
-// No arm declares a root: yrd's own location names no repository, so the host checkout running this test (which may
-// declare its live `yrd.workdir`) cannot answer instead of the default (hh 38659).
-const UNDECLARED = { XDG_STATE_HOME: "/custom/state", YRD_OWN_REPOSITORY: "/custom/no-own-repository" }
+// The host root is named, so the checkout running this test (whose own repository may declare its live
+// `yrd.workdir`, hh 38659) cannot answer for it.
+const UNDECLARED = { YRD_WORKDIR: "/custom/state/yrd" }
 
 describe("workdirOf (25716 row 9)", () => {
   it("resolves to the queue root under hostWorkdir for the given address", async () => {

@@ -18,6 +18,12 @@
  * Workers inherit the main process's env, so a pin that precedes them reaches
  * every spawn shape. A test that pins its own `XDG_STATE_HOME` or `HOME`
  * keeps it. The root is removed by the paired globalSetup teardown.
+ *
+ * Since hh 38659 a fixture that declares no `yrd.workdir` first reaches the `yrd.workdir` that yrd's OWN repository
+ * declares, and from a host checkout that is the live queue root, so the XDG pin alone no longer isolates it. The pin
+ * therefore also sets `YRD_WORKDIR` (an existing setting) to a temporary directory; a test that exercises a lower arm
+ * unsets it and declares its own `yrd.workdir`, or passes a fixture own repository to the resolver as a parameter.
+ * No yrd setting exists for tests alone (@cto 1444899a D1).
  */
 
 import { rmSync } from "node:fs"
@@ -44,10 +50,10 @@ export function pinYrdTestStateHome(env: NodeJS.ProcessEnv = process.env): strin
   // (/hh/var/wt) and a test would create worktrees inside the live pool
   // (@cto 0590fb81, P1 pool-path). Workers inherit this before they exist.
   env.HH_WORKTREE_HOME = join(root, "worktrees")
-  // The root resolution's third arm reads the `yrd.workdir` that yrd's OWN repository declares (hh 38659). Run from
-  // a host checkout, that is the host's live queue root, so a fixture declaring nothing would clone beside the real
-  // queue. Pinned to a path that never exists: the arm finds no repository and says so, and XDG above answers.
-  env.YRD_OWN_REPOSITORY = join(root, "no-own-repository")
+  // hh 38659: a fixture that declares no `yrd.workdir` would otherwise reach the root yrd's OWN repository declares —
+  // from a host checkout, the live queue root. YRD_WORKDIR, the existing first arm, names the same directory the XDG
+  // default above names, so every undeclared fixture lands where it always did. A test exercising a lower arm unsets it.
+  env.YRD_WORKDIR = join(root, "state", "yrd")
   return root
 }
 

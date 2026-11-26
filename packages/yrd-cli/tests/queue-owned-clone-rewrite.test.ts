@@ -57,6 +57,8 @@ async function fixture(): Promise<Fixture> {
     XDG_CONFIG_HOME: join(home, ".config"),
     // Its own state root, so the test never reads or writes the machine's queue.
     XDG_STATE_HOME: join(root, "state"),
+    // The workdir that state root names, over the test pin's YRD_WORKDIR (hh 38659).
+    YRD_WORKDIR: join(root, "state", "yrd"),
   }
   const outside = join(root, "outside")
   mkdirSync(outside, { recursive: true })

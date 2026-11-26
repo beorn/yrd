@@ -23,6 +23,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { parseQueueAddress, queueRoot } from "../src/address.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
+import { resolveQueueLocation } from "../src/queue-location.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { workdirOf } from "../src/workdir.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
@@ -94,12 +95,17 @@ describe("the queue workdir is git configuration, never a declaration key", () =
   // 25716 row 9: the workdir is the queue's root under the host state dir, never beside the repository (25848).
   it("is the queue root under the host state dir when the repository configures none", async () => {
     const w = await world()
+    // The host root is named: a repository configuring none otherwise inherits the root yrd's OWN repository
+    // declares, which from a host checkout is the live queue root (hh 38659).
+    const host = join(dirname(w.work), "state", "yrd")
+    vi.stubEnv("YRD_WORKDIR", host)
 
     const run = capture(w.work)
     expect(await coreQueueCommand(w.work, run.io, { command: "check", names: ["no-marker"] })).toBe(0)
 
     const workdir = await workdirOf(w.git, { cwd: w.work })
-    expect(workdir.startsWith(join(process.env.XDG_STATE_HOME ?? "", "yrd") + "/")).toBe(true)
+    vi.unstubAllEnvs()
+    expect(workdir.startsWith(host + "/")).toBe(true)
     expect(existsSync(join(workdir, "checks"))).toBe(true)
     const common = (await w.git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
     expect(existsSync(join(common, "yrd"))).toBe(false)
@@ -109,11 +115,14 @@ describe("the queue workdir is git configuration, never a declaration key", () =
     const w = await world()
     const elsewhere = join(w.workdir, "declared")
     await w.git(["config", "yrd.workdir", elsewhere])
+    // The test pin's YRD_WORKDIR outranks git config; this row is about the config arm.
+    vi.stubEnv("YRD_WORKDIR", undefined)
 
     const run = capture(w.work)
     expect(await coreQueueCommand(w.work, run.io, { command: "check", names: ["no-marker"] })).toBe(0)
 
     const workdir = await workdirOf(w.git, { cwd: w.work })
+    vi.unstubAllEnvs()
     expect(workdir.startsWith(elsewhere + "/")).toBe(true)
     expect(existsSync(join(workdir, "checks"))).toBe(true)
     const common = (await w.git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
@@ -126,7 +135,9 @@ describe("yrd queue run workdir precedence", () => {
 
   // A successful round has a queue-owned clone. At the notice that directory
   // must still be absent, and the other possible hosts must never be touched.
-  it.each(["--workdir", "YRD_WORKDIR", "yrd.workdir", "default"] as const)(
+  // The default arm is not a CLI row: below `yrd.workdir` the root yrd's own repository declares answers first,
+  // and from a host checkout that is the live queue root. Its row passes a fixture own repository below (38659).
+  it.each(["--workdir", "YRD_WORKDIR", "yrd.workdir"] as const)(
     "reports the workdir selected by %s before preparing the queue",
     async (source) => {
       const w = await world()
@@ -138,7 +149,7 @@ describe("yrd queue run workdir precedence", () => {
         "yrd.workdir": join(root, "configured"),
         default: join(stateHome, "yrd"),
       }
-      if (source !== "default") await w.git(["config", "yrd.workdir", hosts["yrd.workdir"]])
+      await w.git(["config", "yrd.workdir", hosts["yrd.workdir"]])
       vi.stubEnv("GIT_CONFIG_GLOBAL", join(root, "no-global-config"))
       vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1")
       vi.stubEnv("XDG_STATE_HOME", stateHome)
@@ -172,6 +183,37 @@ describe("yrd queue run workdir precedence", () => {
       expect(records).not.toHaveLength(0)
     },
   )
+
+  it("reports the default root, and clones there, when no arm declares one (yrd's own repository passed in, 38659)", async () => {
+    const w = await world()
+    const root = dirname(w.work)
+    const stateHome = join(root, "state")
+    vi.stubEnv("GIT_CONFIG_GLOBAL", join(root, "no-global-config"))
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1")
+    vi.stubEnv("XDG_STATE_HOME", stateHome)
+    vi.stubEnv("YRD_WORKDIR", undefined)
+    // A repository that declares no `yrd.workdir` stands for the one yrd ships in, so the arm falls through.
+    const ownRepository = join(root, "own-repository")
+    await gitIn(root)(["init", "--quiet", ownRepository])
+    const expected = queueRoot(join(stateHome, "yrd"), parseQueueAddress(`${join(root, "remote.git")}#main`))
+    let reported: string | undefined
+    let existedAtReport: boolean | undefined
+    const location = await resolveQueueLocation(
+      w.work,
+      undefined,
+      process.env,
+      "queue",
+      (workdir, resolution) => {
+        reported = `${workdir} (from ${resolution.kind})`
+        existedAtReport = existsSync(workdir)
+      },
+      ownRepository,
+    )
+    expect(reported).toBe(`${expected} (from default)`)
+    expect(existedAtReport).toBe(false)
+    expect(location.workdir).toBe(expected)
+    expect(existsSync(join(expected, "repo", ".git", "HEAD"))).toBe(true)
+  })
 
   it("uses the queue override when listing environments", async () => {
     const w = await world()

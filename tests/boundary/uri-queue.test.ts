@@ -111,6 +111,8 @@ describe("a queue started by address on a host with no checkout", () => {
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "yrd.workdir",
         GIT_CONFIG_VALUE_0: workdir,
+        // The same root through YRD_WORKDIR, which outranks git config and which the test pin sets (hh 38659).
+        YRD_WORKDIR: workdir,
       },
       stdout: "pipe",
       stderr: "pipe",
@@ -197,6 +199,8 @@ describe("a queue started by address on a host with no checkout", () => {
             GIT_CONFIG_COUNT: "1",
             GIT_CONFIG_KEY_0: "yrd.workdir",
             GIT_CONFIG_VALUE_0: workdir,
+            // The same root through YRD_WORKDIR, which outranks git config and which the test pin sets (hh 38659).
+            YRD_WORKDIR: workdir,
           },
           stdout: "pipe",
           stderr: "pipe",
@@ -220,6 +224,8 @@ describe("a queue started by address on a host with no checkout", () => {
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "yrd.workdir",
         GIT_CONFIG_VALUE_0: workdir,
+        // The same root through YRD_WORKDIR, which outranks git config and which the test pin sets (hh 38659).
+        YRD_WORKDIR: workdir,
       },
       stderr: "pipe",
       stdout: "pipe",
@@ -305,6 +311,8 @@ describe("a queue started by address on a host with no checkout", () => {
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "yrd.workdir",
         GIT_CONFIG_VALUE_0: workdir,
+        // The same root through YRD_WORKDIR, which outranks git config and which the test pin sets (hh 38659).
+        YRD_WORKDIR: workdir,
       },
       stdout: "pipe",
       stderr: "pipe",
@@ -346,6 +354,8 @@ describe("a queue started by address on a host with no checkout", () => {
             GIT_CONFIG_COUNT: "1",
             GIT_CONFIG_KEY_0: "yrd.workdir",
             GIT_CONFIG_VALUE_0: workdir,
+            // The same root through YRD_WORKDIR, which outranks git config and which the test pin sets (hh 38659).
+            YRD_WORKDIR: workdir,
           },
           stdout: "pipe",
           stderr: "pipe",

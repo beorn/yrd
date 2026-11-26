@@ -27,7 +27,10 @@ import { execFileSync } from "node:child_process"
 import { afterAll, afterEach, describe, expect, it } from "vitest"
 import { parseQueueAddress, queueRoot } from "../src/address.ts"
 import { runYrdProcess } from "../src/cli.ts"
-import { hostWorkdirHere, yrdOwnLocation } from "../src/queue-location.ts"
+import { hostWorkdirHere, resolveQueueWorkdir, yrdOwnLocation } from "../src/queue-location.ts"
+import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
+import { mainCheckoutOf, outermostRepository } from "../src/main-checkout.ts"
+import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 import { YRD_ENTRY } from "./support/yrd-entry.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
@@ -41,7 +44,6 @@ const VARIABLES = [
   "HOME",
   "XDG_STATE_HOME",
   "YRD_WORKDIR",
-  "YRD_OWN_REPOSITORY",
   "GIT_CONFIG_GLOBAL",
   "GIT_CONFIG_NOSYSTEM",
   "GIT_ALLOW_PROTOCOL",
@@ -172,27 +174,44 @@ function gitCalls(host: Host): string[] {
 const ADDRESS = "https://yrd.invalid/owner/repo.git#main"
 const address = parseQueueAddress(ADDRESS)
 
+/** The absent document's `why` for an in-process probe whose own repository is the fixture's (the D1 seam). */
+async function probeWhy(caller: string, ownLocation: string): Promise<string> {
+  const { workdir, resolution } = await resolveQueueWorkdir(caller, ADDRESS, process.env, ownLocation)
+  const document = await readQueueHealth(workdir, SERVICE, undefined, resolution)
+  expect(document.state).toBe("absent")
+  return String(document.facts?.why ?? "")
+}
+
 describe("one workdir root for the bare yrd entry (38659)", () => {
   it("knows where it ships: its own location is this package's real path", () => {
-    expect(yrdOwnLocation({})).toBe(realpathSync(join(dirname(YRD_ENTRY), "..", "packages", "yrd-cli", "src")))
+    expect(yrdOwnLocation()).toBe(realpathSync(join(dirname(YRD_ENTRY), "..", "packages", "yrd-cli", "src")))
+  })
+
+  it("one main-checkout rule answers the same main from the main checkout, a linked worktree and its submodule", () => {
+    // A linked worktree is also the /hh/dev-rev/<sha> shape: its .git file points into <main>/.git/worktrees.
+    const host = fixture()
+    const linked = dirname(dirname(host.ownLocation))
+    expect(mainCheckoutOf(host.host)).toBe(host.host)
+    expect(mainCheckoutOf(linked)).toBe(host.host)
+    expect(outermostRepository(host.ownLocation)).toBe(linked)
+    expect(mainCheckoutOf(outermostRepository(host.ownLocation))).toBe(host.host)
+    const outside = outsideRepositoryRoot("yrd-main-checkout-outside-")
+    roots.push(outside)
+    expect(() => outermostRepository(outside)).toThrow(/is in no git repository/u)
   })
 
   it("reaches the root declared by yrd's own repository from a caller that declares none", async () => {
     const host = fixture()
-    process.env.YRD_OWN_REPOSITORY = host.ownLocation
     // The linked worktree's submodule resolves to its superproject's MAIN checkout, whose relative value
-    // resolves against that checkout, exactly as the launcher's landed root did.
-    expect(await hostWorkdirHere(host.caller, process.env)).toBe(host.declared)
+    // resolves against that checkout, exactly as the launcher's landed root does (one rule, main-checkout.ts).
+    expect(await hostWorkdirHere(host.caller, process.env, host.ownLocation)).toBe(host.declared)
   })
 
   it("names the root and its source when the health document is absent", async () => {
     const host = fixture()
-    process.env.YRD_OWN_REPOSITORY = host.ownLocation
     mkdirSync(queueRoot(host.declared, address), { recursive: true })
-    const own = await yrd(host.caller, "queue", "health", "--queue", ADDRESS)
-    expect(own.exitCode, own.report).toBe(1)
     const path = join(queueRoot(host.declared, address), "service-health.json")
-    expect(why(own)).toContain(
+    expect(await probeWhy(host.caller, host.ownLocation)).toContain(
       `no health document at ${path} (root ${host.declared} from yrd.workdir (yrd's own repository ${host.host}))`,
     )
 
@@ -207,11 +226,8 @@ describe("one workdir root for the bare yrd entry (38659)", () => {
   it("says the default root holds no queue, and that no declared root was found, instead of a quiet stopped", async () => {
     const host = fixture()
     const plain = repository(join(host.root, "plain"))
-    process.env.YRD_OWN_REPOSITORY = plain
-    const ran = await yrd(host.caller, "queue", "health", "--queue", ADDRESS)
-    expect(ran.exitCode, ran.report).toBe(1)
     const xdgRoot = join(host.xdg, "yrd")
-    const text = why(ran)
+    const text = await probeWhy(host.caller, plain)
     expect(text).toContain(`no queue at ${queueRoot(xdgRoot, address)} (${xdgRoot} is the default)`)
     expect(text).toContain("declared roots: none found")
     expect(text).toContain(`yrd's own repository ${plain}`)
@@ -219,7 +235,6 @@ describe("one workdir root for the bare yrd entry (38659)", () => {
 
   it("never clones: a missing workdir answers absent naming the path, and creates nothing", async () => {
     const host = fixture()
-    process.env.YRD_OWN_REPOSITORY = host.ownLocation
     const workdir = join(host.root, "fresh")
     process.env.YRD_WORKDIR = workdir
     const local = `${repository(join(host.root, "remote"))}#main`
@@ -233,11 +248,12 @@ describe("one workdir root for the bare yrd entry (38659)", () => {
 
   it("never clones for an ssh address either, and reads it at its https twin's workdir", async () => {
     const host = fixture()
-    process.env.YRD_OWN_REPOSITORY = host.ownLocation
+    const workdir = join(host.root, "ssh")
+    process.env.YRD_WORKDIR = workdir
     const ran = await yrd(host.caller, "queue", "health", "--queue", "git@yrd.invalid:owner/repo.git#main")
     expect(ran.exitCode, ran.report).toBe(1)
-    expect(why(ran)).toContain(`no queue at ${queueRoot(host.declared, address)}`)
-    expect(existsSync(host.declared), "the probe created the declared root").toBe(false)
+    expect(why(ran)).toContain(`no queue at ${queueRoot(workdir, address)}`)
+    expect(existsSync(workdir), "the probe created the workdir").toBe(false)
     expect(gitCalls(host).filter((call) => /^(clone|fetch|ls-remote)\b/u.test(call))).toEqual([])
   })
 })
