@@ -12,6 +12,7 @@
 import { closeSync, mkdirSync, openSync, writeSync } from "node:fs"
 import { join } from "node:path"
 import { normalizedRemote } from "@yrd/queue-core"
+import type { ISSUES_EVENT_KINDS } from "@yrd/issues"
 import { resolveExecutable } from "@yrd/process"
 
 /** The bound the detached child hands its provider: generous, because the submit never waits for it. */
@@ -19,6 +20,13 @@ export const ISSUE_EVENT_EDGE_TIMEOUT_MS = 60_000
 
 /** The change transitions this edge writes. Both replay under a key named after the head they were observed at. */
 export type IssueEventEdgeKind = "submitted" | "merged"
+
+/**
+ * What the child records when its own write cannot land (hh #38766, @cto 15f0394a). A detached child owns an outcome
+ * the round can no longer see, so the one reader that can still say "this write failed" is the child: it writes this
+ * second event, under its own replay key, before it exits non-zero.
+ */
+export type IssueEventFallback = Readonly<{ kind: (typeof ISSUES_EVENT_KINDS)[number]; text: string }>
 
 /**
  * The replay key, so a re-submit of the same head writes nothing. km keys its replay record by a ref named after the id,
@@ -48,6 +56,8 @@ export type IssueEventLaunchInput = Readonly<{
   /** Where the queue keeps its log tree; this event's file is `<workdir>/logs/issue-events/<opId>.log`. */
   readonly workdir: string
   readonly env: NodeJS.ProcessEnv
+  /** Written by the child when the primary write fails; omitted, a failure reaches only the log. */
+  readonly fallback?: IssueEventFallback
   /** Tests name the argv that re-enters this CLI; production derives it from how this process was started. */
   readonly self?: readonly string[]
   readonly spawn?: (argv: readonly string[], options: Record<string, unknown>) => unknown
@@ -86,6 +96,9 @@ export function launchIssueEvent(input: IssueEventLaunchInput): IssueEventLaunch
     input.projectRoot,
     "--timeout-ms",
     String(ISSUE_EVENT_EDGE_TIMEOUT_MS),
+    ...(input.fallback === undefined
+      ? []
+      : ["--on-failure-kind", input.fallback.kind, "--on-failure-text", input.fallback.text]),
   ]
   const env = definedEnv(input.env)
   const spawn =

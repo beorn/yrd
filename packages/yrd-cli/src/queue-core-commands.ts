@@ -292,7 +292,13 @@ import {
   formatUnknownNotifyEventWarning,
   formatUnknownTopLevelKeyWarning,
 } from "./version.ts"
-import { issueEventOperationId, issueEventSource, launchIssueEvent } from "./issue-event-edge.ts"
+import {
+  issueEventOperationId,
+  issueEventSource,
+  launchIssueEvent,
+  type IssueEventLaunch,
+  type IssueEventLaunchInput,
+} from "./issue-event-edge.ts"
 
 function issueOutput(io: YrdCliIO, branch: string, resolution: IssueResolution | undefined) {
   if (resolution === undefined) {
@@ -781,6 +787,11 @@ export async function coreQueueCommand(
      * to automatic issue closing. Absent, neither display reads nor automatic closes run.
      */
     projectRoot?: string
+    /**
+     * How a merged item event starts (hh #38766): production leaves this absent and the detached child is launched.
+     * A test names its own launcher so a merge round is proven without spawning a CLI.
+     */
+    launchEvent?: (input: IssueEventLaunchInput) => IssueEventLaunch
     /**
      * Whether `repo` is the queue's own clone (`QueueLocation.owned`). Only
      * then may a compose populate the submodule stores it borrows from;
@@ -1636,6 +1647,8 @@ export async function coreQueueCommand(
           stop: postMergeSignal,
           git,
           store: eventStore,
+          // hh #38766: production launches the detached child; a caller may name its own launcher, as the fixtures do.
+          ...(options.launchEvent === undefined ? {} : { launchEvent: options.launchEvent }),
           report: (message) => io.stderr("yrd: " + message + "\n"),
           // A branch whose issue update failed every carried attempt reaches a reader over the notify rail
           // (37513, @cto 68bee3e1): the declaration's post-merge-abandoned entry decides who.

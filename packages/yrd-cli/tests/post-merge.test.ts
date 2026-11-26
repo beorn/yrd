@@ -10,13 +10,9 @@ import { tmpdir } from "node:os"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
-import {
-  chargedBranches,
-  createPostMerge,
-  MERGED_ISSUE_EVENTS_OFF,
-  readPostMergeIssueDiagnostics,
-} from "../src/post-merge.ts"
+import { chargedBranches, createPostMerge, readPostMergeIssueDiagnostics } from "../src/post-merge.ts"
 import { coreQueueCommand, readEventListing } from "../src/queue-core-commands.ts"
+import type { IssueEventLaunch, IssueEventLaunchInput } from "../src/issue-event-edge.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { Conflict, openEvents } from "../../yrd-queue-core/src/git.ts"
 import { changeInput } from "../../yrd-queue-core/src/events.ts"
@@ -82,6 +78,7 @@ it.each(["drain", "stop"] as const)(
     let maxActive = 0
     const runner = createPostMerge({
       workdir: root,
+      launchEvent: testLauncher,
       cwd: root,
       ...(ending === "stop" ? { stop: stop.signal } : {}),
       cleanup: async (c) => {
@@ -146,9 +143,9 @@ it.each(["drain", "stop", "close", "abort"] as const)(
     const stop = new AbortController()
     await using runner = createPostMerge({
       workdir: root,
+      launchEvent: testLauncher,
       cwd: root,
       // Only the first round reads Git: its merged-event write is the hold. Later rounds name no queueBranch.
-      mergedIssueEvents: true,
       git: holdingGit(fixtureGit, context.target, ready, release.promise),
       store: createEventStore(root, "origin", fixtureGit.selection),
       ...(ending === "drain" ? {} : { stop: stop.signal }),
@@ -210,6 +207,7 @@ it("labels interrupted evidence and starts a fresh catch-up without consulting o
   {
     await using runner = createPostMerge({
       workdir: root,
+      launchEvent: testLauncher,
       cwd: root,
       cleanup: async (c) => {
         cleaned.push(c.target)
@@ -228,6 +226,7 @@ it("labels interrupted evidence and starts a fresh catch-up without consulting o
   writeFileSync(path, JSON.stringify({ ...old, status: "running", endedAt: undefined }))
   await using restarted = createPostMerge({
     workdir: root,
+    launchEvent: testLauncher,
     cwd: root,
     cleanup: async (c) => {
       cleaned.push(c.target)
@@ -247,6 +246,7 @@ it("records every missing input for explicitly enabled automatic issue closing",
   const cleaned: string[] = []
   await using runner = createPostMerge({
     workdir: root,
+    launchEvent: testLauncher,
     cwd: root,
     cleanup: async (c) => {
       cleaned.push(c.target)
@@ -274,6 +274,7 @@ it("attempts the issue close and cleanup even when its derived artifact director
     reports: string[] = []
   await using runner = createPostMerge({
     workdir: root,
+    launchEvent: testLauncher,
     cwd: root,
     cleanup: async (c) => {
       cleaned.push(c.target)
@@ -591,6 +592,7 @@ it.each([
           {
             workdir,
             json: true,
+            launchEvent: testLauncher,
             ...(reconcileAfterQueue ? {} : { projectRoot: repo }),
           },
         ),
@@ -610,8 +612,8 @@ it.each([
       expect((await readStatus(store, "main", "task/aa-stacked")).merge).toBe(firstObservedMerge)
       await using runner = createPostMerge({
         workdir,
+        launchEvent: testLauncher,
         cwd: repo,
-        mergedIssueEvents: true,
         git,
         store,
         cleanup: async () => {},
@@ -648,6 +650,7 @@ it.each([
       ).toBeUndefined()
       await using runner = createPostMerge({
         workdir,
+        launchEvent: testLauncher,
         cwd: repo,
         git,
         store,
@@ -697,6 +700,7 @@ it.each([
       for (let retry = 0; retry < 2; retry++) {
         await using runner = createPostMerge({
           workdir,
+          launchEvent: testLauncher,
           cwd: repo,
           git: retry === 0 ? faultGit : git,
           store: retry === 0 ? faultStore : store,
@@ -743,6 +747,7 @@ it.each([
       for (let retry = 0; retry < 2; retry++) {
         await using runner = createPostMerge({
           workdir,
+          launchEvent: testLauncher,
           cwd: repo,
           git,
           store,
@@ -790,6 +795,7 @@ it.each([
       for (let restart = 0; restart < 3; restart++) {
         await using runner = createPostMerge({
           workdir,
+          launchEvent: testLauncher,
           cwd: repo,
           git,
           store,
@@ -842,6 +848,7 @@ it.each([
       const previousAttempts = new Set(readdirSync(join(workdir, "post-merge")))
       await using runner = createPostMerge({
         workdir,
+        launchEvent: testLauncher,
         cwd: repo,
         git,
         store,
@@ -928,6 +935,7 @@ it.each([
     if (mode === "concurrent") {
       await using first = createPostMerge({
         workdir,
+        launchEvent: testLauncher,
         cwd: repo,
         git,
         store,
@@ -936,6 +944,7 @@ it.each([
       })
       await using second = createPostMerge({
         workdir,
+        launchEvent: testLauncher,
         cwd: repo,
         git,
         store,
@@ -1007,6 +1016,7 @@ it.each([
       }
       await using runner = createPostMerge({
         workdir,
+        launchEvent: testLauncher,
         cwd: repo,
         git,
         store: faultStore,
@@ -1123,7 +1133,7 @@ it.each([
               retryStop.abort()
             },
           },
-          { workdir, json: true, projectRoot: repo },
+          { workdir, json: true, launchEvent: testLauncher, projectRoot: repo },
         ),
         diagnostics.join(" "),
       ).toBe(0)
@@ -1154,7 +1164,7 @@ it.each([
                 localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
               },
               { command: "list" },
-              { workdir, json: true },
+              { workdir, json: true, launchEvent: testLauncher },
             ),
             unread.join(" "),
           ).toBe(0)
@@ -1173,7 +1183,7 @@ it.each([
               localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
             },
             { command: "merge", branch: "task/after-corrupt", submitter: "fixture" },
-            { workdir, json: true, projectRoot: repo },
+            { workdir, json: true, launchEvent: testLauncher, projectRoot: repo },
           ),
           unread.join(" "),
         ).toBe(0)
@@ -1344,7 +1354,7 @@ it.each([
             replayStop.abort()
           },
         },
-        { workdir, json: true, projectRoot: repo },
+        { workdir, json: true, launchEvent: testLauncher, projectRoot: repo },
       ),
       diagnostics.join(" "),
     ).toBe(0)
@@ -1396,6 +1406,7 @@ it.each([
       const closesBefore = readFileSync(closeCalls, "utf8")
       await using runner = createPostMerge({
         workdir,
+        launchEvent: testLauncher,
         cwd: repo,
         git,
         store,
@@ -1482,6 +1493,15 @@ const submitChange = async (
   await queue.git(["checkout", "--quiet", "main"])
 }
 
+/**
+ * The launcher every round in this file gets (hh #38766): production launches a detached CLI child, and a unit test
+ * injects this so the round's decision is proven without spawning one. The child's own argv has its own test.
+ */
+const testLauncher: (input: IssueEventLaunchInput) => IssueEventLaunch = (input) => ({
+  launched: true,
+  log: `${String(input.workdir)}/logs/issue-events/${input.opId}.log`,
+})
+
 /** The `event` rows of every finished post-merge attempt under `workdir`. */
 const eventActionsIn = (workdir: string): Array<Record<string, unknown>> =>
   readdirSync(join(workdir, "post-merge"))
@@ -1492,21 +1512,38 @@ const eventActionsIn = (workdir: string): Array<Record<string, unknown>> =>
     .filter((action) => action.verb === "event")
 
 /**
- * @failure A merged change writes an item event the host cannot afford: a bound under km's healthy write time fails by
- *   design on nearly every merge, and each cut lands in the round's log as if the branch were abandoned (hh #38766,
- *   @cto 15f0394a). The writer is suspended until its detached, child-notified replacement lands.
- * @level l2 @consumer Yrd post-merge merged item events, suspended (#38766) @testonly none
+ * @failure A merged change makes the merge round wait for a provider write that costs ~35 s against a healthy km and is
+ *   unbounded under a lane hold — a serial queue paying it on every merge (hh #38766, @cto 15f0394a, e72bc1a0). The
+ *   round must launch the write and return, and the launched row must say where the child's own evidence lands.
+ * @level l2 @consumer Yrd post-merge merged item events, launched (#38766) @testonly none
  */
-it("leaves merged issue events off: one line per round, no provider call, no failed event", async () => {
+it("launches one merged item event per delivered change and returns without waiting for it", async () => {
   const queue = await eventQueue((calls) => eventDeclared(calls))
-  const { merge, diagnostics } = await mergeOnce(queue)
-  // This round ran through the CLI path, where production constructs the runner with the writer off.
+  const launched: Array<{ issue: string; opId: string; text: string; fallback?: { kind: string; text: string } }> = []
+  const { merge, diagnostics } = await mergeOnce(queue, (input) => {
+    launched.push({
+      issue: input.issue,
+      opId: input.opId,
+      text: input.text,
+      ...(input.fallback === undefined ? {} : { fallback: { ...input.fallback } }),
+    })
+    return { launched: true, log: join(queue.workdir, "logs", "issue-events", `${input.opId}.log`) }
+  })
   expect(merge).toBeTruthy()
+  // No provider ran in this process: the write left with the child.
   expect(existsSync(queue.calls) ? readFileSync(queue.calls, "utf8").trim() : "").toBe("")
-  expect(eventActionsIn(queue.workdir)).toEqual([])
-  // The line is said once per round that would have written, and never as a per-branch failure.
-  const said = diagnostics.filter((message) => message.includes(MERGED_ISSUE_EVENTS_OFF))
-  expect(said, diagnostics.join(" | ")).toHaveLength(1)
+  // One launch per delivered change, named after the branch that merged.
+  expect(launched.map((one) => one.text.split(" ")[0])).toEqual([TWICE])
+  const row = eventActionsIn(queue.workdir).find((action) => action.status === "launched")
+  expect(row, diagnostics.join(" | ")).toMatchObject({
+    verb: "event",
+    status: "launched",
+    issue: "@i/16-work-lifecycle/31194-item-events",
+    log: expect.stringContaining("logs/issue-events/yrd-merged-"),
+  })
+  // The child carries the branch's own failure notify, so a write that does not land never reads as an abandoned branch.
+  expect(launched[0]?.fallback).toMatchObject({ kind: "failed" })
+  expect(launched[0]?.fallback?.text).toContain("did not land")
 }, 60000)
 
 /**
@@ -1552,7 +1589,7 @@ it("never runs a retired issuesProvider.update on a merge, says so on stderr, an
         localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
       },
       { command: "merge", branch, submitter: "fixture" },
-      { workdir, json: true, projectRoot: repo },
+      { workdir, json: true, launchEvent: testLauncher, projectRoot: repo },
     ),
     stderr.join(""),
   ).toBe(0)
@@ -1583,6 +1620,7 @@ const fixtureIo = (repo: string, diagnostics: string[]) => ({
  */
 const mergeOnce = async (
   queue: Awaited<ReturnType<typeof eventQueue>>,
+  launchEvent?: (input: IssueEventLaunchInput) => IssueEventLaunch,
 ): Promise<Readonly<{ merge: string; base: string; diagnostics: string[] }>> => {
   await submitChange(queue, TWICE, ISSUE_31194, "first")
   const stop = new AbortController(),
@@ -1608,7 +1646,7 @@ const mergeOnce = async (
             } else if (rounds > 12) stop.abort()
           },
         },
-        { workdir: queue.workdir, json: true },
+        { workdir: queue.workdir, json: true, ...(launchEvent === undefined ? {} : { launchEvent }) },
       ),
       diagnostics.join(" "),
     ).toBe(0)
@@ -1636,6 +1674,7 @@ it("carries a failed attempt's branches into the next attempt, and names them af
   const pass = {}
   await using runner = createPostMerge({
     workdir: root,
+    launchEvent: testLauncher,
     cwd: root,
     cleanup: async () => {},
     report: (message) => reports.push(message),
@@ -1696,6 +1735,7 @@ it("keeps a still-owed branch's earlier round base when it merges again, and sta
   const fail = { projectRoot: root }
   await using runner = createPostMerge({
     workdir: root,
+    launchEvent: testLauncher,
     cwd: root,
     cleanup: async () => {},
     report: () => {},

@@ -9,7 +9,7 @@
  * @testonly none
  * @consumer Yrd's issue reads (slice Y1, in-process) · Tent, staffing and tools through the CLI
  */
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -497,6 +497,77 @@ describe("yrd issues", () => {
     expect((await yrd(root, "issues", "event", "raw", "merged", source, "text")).stderr).toContain(
       "--id <id> is required",
     )
+  })
+
+  // hh #38766 (@cto 15f0394a): a launch may be detached, so the child that saw the failure is the only one left to say so.
+  it("writes the caller's fallback event when the declared write cannot land, and nothing extra when it lands", async () => {
+    const calls = join(scratch(), "event-calls.txt")
+    const script =
+      'k=$1; printf "%s\\t%s\\n" "$1" "$2" >> "$3"; ' +
+      'if [ "$k" = merged ]; then echo "km lane held" >&2; exit 3; fi; printf \'{"applied":true}\\n\''
+    const root = project({
+      "issues.yml": declare({ event: ["sh", "-c", script, "sh", "<kind>", "<id>", calls] }),
+    })
+    const source = "github.com/beorn/hh-dev@0123456789abcdef0123456789abcdef01234567"
+    const held = await yrd(
+      root,
+      "issues",
+      "event",
+      "--id",
+      "yrd-merged-abc",
+      "raw",
+      "merged",
+      source,
+      "task/x merged",
+      "--on-failure-kind",
+      "failed",
+      "--on-failure-text",
+      "task/x merged event did not land",
+    )
+    expect(held.exitCode, held.stderr).toBe(1)
+    expect(held.stderr).toContain("wrote the failed fallback event")
+    // The replay key is the failed write's own, so a retry of the launch never doubles the mark.
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual([
+      "merged\tyrd-merged-abc",
+      "failed\tyrd-merged-abc-failed",
+    ])
+
+    // A write that lands leaves exactly one row: the fallback is a failure's record, never a second copy.
+    const landed = await yrd(
+      root,
+      "issues",
+      "event",
+      "--id",
+      "yrd-submitted-abc",
+      "raw",
+      "submitted",
+      source,
+      "task/x submitted",
+      "--on-failure-kind",
+      "failed",
+    )
+    expect(landed.exitCode, landed.stderr).toBe(0)
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual([
+      "merged\tyrd-merged-abc",
+      "failed\tyrd-merged-abc-failed",
+      "submitted\tyrd-submitted-abc",
+    ])
+
+    const badKind = await yrd(
+      root,
+      "issues",
+      "event",
+      "--id",
+      "i",
+      "raw",
+      "merged",
+      source,
+      "t",
+      "--on-failure-kind",
+      "closed",
+    )
+    expect(badKind.exitCode).toBe(2)
+    expect(badKind.stderr).toContain("--on-failure-kind must be one of")
   })
 
   // #31194: a clone's main can lag the merge Yrd just published by seconds (2-44 s measured on /hh/dev).

@@ -80,6 +80,37 @@ describe("the issue-event edge's launch", () => {
     expect(header).toContain("#38766")
   })
 
+  it("carries the branch's own failure notify into the child when a caller names one", () => {
+    // hh #38766 (@cto 15f0394a): a detached child owns an outcome the round can no longer see, so the failing write
+    // must record its own `failed` event rather than leave the round to report a branch it never watched.
+    const workdir = tmp()
+    const spawned: Array<{ argv: readonly string[] }> = []
+    const outcome = launchIssueEvent({
+      kind: "merged",
+      issue: "#38766",
+      source: "github.com/beorn/hh-dev@abc",
+      text: "task/38766 merged at abc",
+      opId: "yrd-merged-abc",
+      projectRoot: "/hh/dev",
+      cwd: "/hh/dev",
+      workdir,
+      env: { PATH: "/usr/bin" },
+      fallback: { kind: "failed", text: "task/38766 merged event for abc did not land" },
+      self: ["/usr/bin/bun"],
+      spawn: (argv) => {
+        spawned.push({ argv })
+        return {}
+      },
+    })
+    expect(outcome.launched).toBe(true)
+    expect(spawned[0]?.argv.slice(-4)).toEqual([
+      "--on-failure-kind",
+      "failed",
+      "--on-failure-text",
+      "task/38766 merged event for abc did not land",
+    ])
+  })
+
   it("a write that cannot be started is named, never swallowed", () => {
     const outcome = launchIssueEvent({
       kind: "merged",

@@ -21,30 +21,21 @@ import {
   type GitRunner,
   type QueueLocation,
 } from "@yrd/queue-core"
-import { ISSUES_CODES, ISSUES_DECLARATION_PATH, parseIssuesDeclaration } from "./issues/declaration.ts"
+import { ISSUES_DECLARATION_PATH, parseIssuesDeclaration } from "./issues/declaration.ts"
 import { runIssuesVerb } from "./issues/run.ts"
-import { issueEventOperationId, issueEventSource } from "./issue-event-edge.ts"
+import {
+  issueEventOperationId,
+  issueEventSource,
+  launchIssueEvent,
+  type IssueEventLaunch,
+  type IssueEventLaunchInput,
+} from "./issue-event-edge.ts"
 
 // Real public Km CLI trial (2026-10-16, km-cli-trial.json): 1.246s for one
 // closing action across two introduced commits, 0.739s unchanged catch-up.
 // Allow 50/run at that measured whole-command cost (~62.3s), with nearly 2x
 // margin. This is a bounded attempt, not a claim about worst-case workloads.
 const UPDATE_TIMEOUT_MS = 120_000
-
-/**
- * The merged item event's own bound (hh #38766, @cto e72bc1a0): short on purpose, because one merge round is serial and
- * the provider write is slow (35 s measured against km) and unbounded under a km lane hold. A write this bound cuts is
- * recorded as that branch's failed event, by name; the merge has already landed and never fails on it.
- */
-const MERGED_EVENT_TIMEOUT_MS = 10_000
-
-/**
- * hh #38766 (@cto 15f0394a): the merged writer is OFF in production until its detached, child-notified replacement lands.
- * A bound under km's healthy write time would fail by design on nearly every merge, and a failed event says nothing true
- * about the branch. One line per round says so; when it is on (the merged-event fixtures turn it on), the bound above
- * applies. The close and assign updates in this step are untouched, so the abandoned-issue rail keeps today's inputs.
- */
-export const MERGED_ISSUE_EVENTS_OFF = "merged issue events off until #38766's child-side notify lands"
 
 /**
  * How many attempts one merged branch's post-merge issue update gets (37513, @cto 68bee3e1). A failed attempt's
@@ -109,6 +100,8 @@ type IssueAction = Omit<IssueDiagnostic, "diagnostic"> &
   (
     | { status: "fulfilled" }
     | { status: "skipped" }
+    /** The write left with a detached child (hh #38766); `log` is where that child's own outcome lands. */
+    | { status: "launched"; log: string }
     | { status: "failed" | "unavailable" | "record-failed"; diagnostic: string }
   )
 
@@ -187,7 +180,9 @@ export function readPostMergeIssueDiagnostics(
     }
     for (const item of attempt.actions) {
       const identity = JSON.stringify([item.branch, item.mergedEvent, item.mergeSha, item.providerId])
-      if (item.status === "skipped" || item.status === "fulfilled") {
+      // A launched write has no outcome here to report (hh #38766): the detached child owns it, and its own `failed`
+      // event on the issue is the notify. Only rows this process judged stay diagnostics.
+      if (item.status === "skipped" || item.status === "fulfilled" || item.status === "launched") {
         found.delete(identity)
         continue
       }
@@ -686,17 +681,14 @@ async function recordMergedEvents(
     bases: readonly string[]
     projectRoot?: string
     cwd: string
-    /** Off unless a caller turns it on (hh #38766, @cto 15f0394a): production constructs this step without it. */
-    mergedEvents: boolean
+    /** Where the queue keeps its log tree: each launched write's own log is `<workdir>/logs/issue-events/<id>.log`. */
+    workdir: string
     env?: NodeJS.ProcessEnv
+    launchEvent: (input: IssueEventLaunchInput) => IssueEventLaunch
     report: (message: string) => void
     stop?: AbortSignal
   }>,
 ): Promise<Array<Record<string, unknown>>> {
-  if (!input.mergedEvents) {
-    input.report(MERGED_ISSUE_EVENTS_OFF)
-    return []
-  }
   const outcomes: Array<Record<string, unknown>> = []
   const unrecorded: string[] = []
   const record = (outcome: Record<string, unknown>, why?: string): void => {
@@ -806,32 +798,27 @@ async function recordMergedEvents(
         else record({ ...identity, status: "skipped", reason: "issues.yml declares no event at the merge" })
         continue
       }
-      // hh #38766 (@cto e72bc1a0): 10 s, deliberately short. The provider write costs ~35 s against a healthy km and is
-      // unbounded while km holds its write lane, and a merge round is serial — so this attempt never outlives a short
-      // bound, and a write the bound cuts is recorded as this branch's failed event, by name, in the round's report.
-      // Detaching this writer (and moving its failure notify into the child) is #38766's next item; until then the
-      // merged mark lands only when the provider answers inside the bound, and says so when it does not.
-      const written = await runIssuesVerb({
-        verb: "event",
-        args: [issue, "merged", mergedEventSource(url, mergeSha), `${branch} merged`],
-        id: providerId,
-        ...(input.projectRoot === undefined ? {} : { projectRoot: input.projectRoot }),
-        declarationCommit: mergeSha,
-        targetCommit: input.target,
+      // hh #38766 (@cto 15f0394a, e72bc1a0): the write is launched, never awaited. One provider write costs ~35 s
+      // against a healthy km and is unbounded while km holds its write lane; a merge round is serial, so waiting on it
+      // slowed every merge. The child owns the outcome and says so itself: on failure it writes this branch's `failed`
+      // event, by name, under `<id>-failed`, so the abandoned-issue rail hears it without the round holding still.
+      const launched = input.launchEvent({
+        kind: "merged",
+        issue,
+        source: mergedEventSource(url, mergeSha),
+        text: `${branch} merged at ${mergeSha}`,
+        opId: providerId,
+        projectRoot: input.projectRoot ?? input.cwd,
         cwd: input.cwd,
-        env: input.env,
-        signal: input.stop,
-        timeoutMs: MERGED_EVENT_TIMEOUT_MS,
-        noProgressTimeoutMs: MERGED_EVENT_TIMEOUT_MS,
+        workdir: input.workdir,
+        env: input.env ?? process.env,
+        fallback: { kind: "failed", text: `${branch} merged event for ${mergeSha} did not land` },
       })
-      if (written.ok) {
+      if (launched.launched) {
         recorded++
-        record({ ...identity, status: "fulfilled", issue })
-      } else if (written.code === ISSUES_CODES.unsupported || written.code === ISSUES_CODES.declarationMissing) {
-        // Not yet declared at that merge: no provider was asked, so nothing failed; the evidence says why.
-        record({ ...identity, status: "skipped", reason: written.message, issue })
+        record({ ...identity, status: "launched", issue, log: launched.log })
       } else {
-        record({ ...identity, status: "failed", issue, diagnostic: written.message }, written.message)
+        record({ ...identity, status: "failed", issue, diagnostic: launched.why }, launched.why)
       }
     }
   }
@@ -850,13 +837,13 @@ export function createPostMerge<C extends Context>(
     stop?: AbortSignal
     cleanup: (context: C) => Promise<void>
     report: (message: string) => void
-    /**
-     * hh #38766 (@cto 15f0394a): the merged item-event writer, OFF unless a caller turns it on. Production leaves it off
-     * until the detached, child-notified replacement lands; the merged-event fixtures turn it on to keep their coverage.
-     */
-    mergedIssueEvents?: boolean
     git?: GitRunner
     store?: QueueLocation
+    /**
+     * How a merged item event is started (hh #38766): production launches a detached child, and the fixtures inject a
+     * recorder so a unit test proves the launch without spawning one.
+     */
+    launchEvent?: (input: IssueEventLaunchInput) => IssueEventLaunch
     /** Told the branches given up on after {@link POST_MERGE_ATTEMPTS} failures; a throw here is reported, never raised. */
     abandoned?: (context: C, abandoned: readonly AbandonedPostMerge[]) => Promise<void>
   }>,
@@ -1014,8 +1001,9 @@ export function createPostMerge<C extends Context>(
         bases,
         ...(context.projectRoot === undefined ? {} : { projectRoot: context.projectRoot }),
         cwd: options.cwd,
-        mergedEvents: options.mergedIssueEvents === true,
+        workdir: options.workdir,
         env: options.env,
+        launchEvent: options.launchEvent ?? launchIssueEvent,
         report: options.report,
         stop: options.stop,
       })
