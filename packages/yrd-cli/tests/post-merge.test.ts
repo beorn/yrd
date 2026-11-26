@@ -529,6 +529,15 @@ it.each([
     const stop = new AbortController(),
       merged: string[] = [],
       diagnostics: string[] = []
+    // Each follow-on branch is queued exactly once. The rounds are fast now that the merged event leaves with a child
+    // (hh #38766), so an afterRound can fire again between a submit and its merge; without this the fixture tried to
+    // create the same branch twice and failed on its own name.
+    const queued = new Set<string>()
+    const queueOnce = async (branch: string, message: string): Promise<void> => {
+      if (queued.has(branch)) return
+      queued.add(branch)
+      await queue(branch, message)
+    }
     let rounds = 0
     try {
       expect(
@@ -551,10 +560,10 @@ it.each([
                 expect((await readStatus(store, "main", "task/first")).merge).toBe(firstObservedMerge)
               }
               if (merged.includes("task/first") && !merged.includes("task/second")) {
-                await queue("task/second", "second\n\nCloses: issue-second")
+                await queueOnce("task/second", "second\n\nCloses: issue-second")
               }
               if (merged.includes("task/second") && !merged.includes("task/refs")) {
-                await queue(
+                await queueOnce(
                   "task/refs",
                   "mentions only\n\nFixes everything\n\nCloses issue-colonless\n\nRefs: issue-refs",
                 )
