@@ -571,3 +571,45 @@ it("--repo names the author store, so a drop aimed at another checkout retires t
   )
   expect(history?.state).toMatchObject({ status: "cancelled", reason: "dropped", commit: tip })
 })
+
+it("--repo refuses a path that is not a git repository instead of reporting the branch already gone", async () => {
+  const root = mkdtempSync(join(tmpdir(), "yrd-drop-repo-invalid-"))
+  roots.push(root)
+  const plain = join(root, "plain")
+  mkdirSync(plain)
+  const observed = capture(root)
+  const code = await runYrdProcess(
+    [
+      "bun",
+      "yrd",
+      "drop",
+      "task/whatever",
+      "--local",
+      "--tip",
+      "0".repeat(40),
+      "--repo",
+      plain,
+      "--submitter",
+      "fixture",
+      "--json",
+    ],
+    observed.io,
+  )
+  // A mistyped path would otherwise resolve no branch and answer "already gone; nothing was removed": a false all-clear.
+  expect(code).not.toBe(0)
+  expect(observed.stderr()).toContain("is not a git repository")
+})
+
+it("--repo on a drop that is not local is refused, never silently ignored", async () => {
+  const root = mkdtempSync(join(tmpdir(), "yrd-drop-repo-nonlocal-"))
+  roots.push(root)
+  const plain = join(root, "plain")
+  mkdirSync(plain)
+  const observed = capture(root)
+  const code = await runYrdProcess(
+    ["bun", "yrd", "drop", "task/whatever", "--repo", plain, "--submitter", "fixture", "--json"],
+    observed.io,
+  )
+  expect(code).not.toBe(0)
+  expect(observed.stderr()).toContain("--repo applies to a local drop only")
+})

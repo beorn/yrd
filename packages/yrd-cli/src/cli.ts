@@ -29,6 +29,7 @@
  */
 
 import { Command as CliCommand, CommanderError, Option, int } from "@silvery/commander"
+import { realpathSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { drainOutput } from "loggily"
 import {
@@ -340,6 +341,28 @@ function buildProgram(
         "drop --retire needs a branch, --tip <full-commit> and --reason <why>; choose origin retirement or local cleanup",
       )
     }
+    if (options.repo !== undefined) {
+      // 38854 (@cto ec92a905): a drop that is not a local one never reads --repo, so accepting the flag there would
+      // silently drop it. Refuse instead of ignoring it, and refuse a path that cannot be the author store: an
+      // unchecked path would resolve no branch and report "already gone", a false all-clear.
+      if (options.local !== true) {
+        throw new Error(
+          `--repo applies to a local drop only; a drop of another checkout's branch is drop <branch> --local --repo <path>`,
+        )
+      }
+      const named = resolve(options.repo)
+      let namedTopLevel: string | undefined
+      try {
+        namedTopLevel = realpathSync(named)
+      } catch {
+        namedTopLevel = undefined
+      }
+      if (namedTopLevel === undefined || repositoryHere(namedTopLevel) !== namedTopLevel) {
+        throw new Error(
+          `--repo ${options.repo} is not a git repository; name that checkout's top level, or drop the flag to use this checkout`,
+        )
+      }
+    }
     if (options.tip !== undefined && options.local !== true && options.retire !== true) {
       throw new Error("--tip requires drop --local or --retire")
     }
@@ -470,7 +493,7 @@ function buildProgram(
         )
       }
     }
-    // 388xx: a named --repo is the author store, so a drop aimed at another checkout does not resolve the branch in
+    // 38854: a named --repo is the author store, so a drop aimed at another checkout does not resolve the branch in
     // the queue s own clone; without the flag nothing changes.
     const dropRepo = retainedStore ?? (options.repo === undefined ? location?.repo : resolve(options.repo))
     if (dropRepo === undefined) throw new Error(`${cwd()}: drop resolved no repository`)
