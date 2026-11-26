@@ -14,7 +14,6 @@ import {
   trailerEffectId,
   writeQueueEvent,
   isAncestor,
-  normalizedRemote,
   remoteUrl,
   trailer,
   type AppliedIssueEffect,
@@ -24,6 +23,7 @@ import {
 } from "@yrd/queue-core"
 import { ISSUES_CODES, ISSUES_DECLARATION_PATH, parseIssuesDeclaration } from "./issues/declaration.ts"
 import { runIssuesVerb } from "./issues/run.ts"
+import { ISSUE_EVENT_EDGE_TIMEOUT_MS, issueEventOperationId, issueEventSource } from "./issue-event-edge.ts"
 
 // Real public Km CLI trial (2026-10-16, km-cli-trial.json): 1.246s for one
 // closing action across two introduced commits, 0.739s unchanged catch-up.
@@ -617,7 +617,7 @@ async function declaresEvent(git: GitRunner, commit: string): Promise<boolean> {
  * parser; #31194 acceptance row 6 holds the test that proves this form against it.
  */
 export function mergedEventSource(url: string, mergeSha: string): string {
-  return `${normalizedRemote(url)}@${mergeSha}`
+  return issueEventSource(url, mergeSha)
 }
 
 /**
@@ -626,7 +626,7 @@ export function mergedEventSource(url: string, mergeSha: string): string {
  * spelled with dashes; #31194 acceptance row 4 holds the test that proves this id against km's rule.
  */
 export function mergedEventOperationId(mergeSha: string): string {
-  return `yrd-merged-${mergeSha}`
+  return issueEventOperationId("merged", mergeSha)
 }
 
 /** The base every other one descends from, or undefined when two are unrelated: then none is earliest. */
@@ -795,8 +795,11 @@ async function recordMergedEvents(
         cwd: input.cwd,
         env: input.env,
         signal: input.stop,
-        timeoutMs: UPDATE_TIMEOUT_MS,
-        noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
+        // hh #38766 (@cto e0638180): the same rule as the submit edge — best-effort under a bounded timeout, so a km
+        // lane hold cannot park the merge round behind it. A write the bound cuts is recorded as this branch's failed
+        // event below, by name; the merge itself has already landed and never fails on it.
+        timeoutMs: ISSUE_EVENT_EDGE_TIMEOUT_MS,
+        noProgressTimeoutMs: ISSUE_EVENT_EDGE_TIMEOUT_MS,
       })
       if (written.ok) {
         recorded++

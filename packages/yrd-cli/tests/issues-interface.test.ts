@@ -464,7 +464,7 @@ describe("yrd issues", () => {
   })
 
   // #31194, @cto 721b42d7: Yrd's merged item event. The provider resolves <raw>; `closed` stays the close path's.
-  it("passes event's four operands and <id> whole, and refuses a kind outside merged|failed|withdrawn (rule: event kinds)", async () => {
+  it("passes event's four operands and <id> whole, and refuses a kind outside submitted|merged|failed|withdrawn (rule: event kinds)", async () => {
     const root = project({
       "issues.yml": declare({ event: provider("json", "<raw>", "<kind>", "<source>", "<text>", "<id>") }),
     })
@@ -475,8 +475,25 @@ describe("yrd issues", () => {
     for (const kind of ["closed", "opened", ""]) {
       const refused = await yrd(root, "issues", "event", "--id", "i", "raw", kind, source, "text")
       expect(refused.exitCode, kind).toBe(2)
-      expect(refused.stderr).toContain("kind must be merged, failed, withdrawn")
+      expect(refused.stderr).toContain("kind must be submitted, merged, failed, withdrawn")
     }
+    // hh #38766 (@cto e0638180): `submitted` is the timeline's other end of a change and is accepted as its own kind.
+    const submitted = await yrd(
+      root,
+      "issues",
+      "event",
+      "--id",
+      "yrd-submitted-0123",
+      "--",
+      "-38766",
+      "submitted",
+      source,
+      "task/38766 submitted",
+    )
+    expect(submitted.exitCode, submitted.stderr).toBe(0)
+    expect(envelopeOf(submitted).result).toEqual({
+      argv: ["-38766", "submitted", source, "task/38766 submitted", "yrd-submitted-0123"],
+    })
     expect((await yrd(root, "issues", "event", "raw", "merged", source, "text")).stderr).toContain(
       "--id <id> is required",
     )
