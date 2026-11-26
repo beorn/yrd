@@ -2240,7 +2240,8 @@ it("reruns a check the bound killed before it named a verdict", async () => {
       expect.objectContaining({
         kind: "warning",
         branch: "task/bound-kill-retry",
-        reason: "retried",
+        // #38739 (c): the first verdictless kill requeues the change rather than rerunning it in place.
+        reason: "requeued",
         check: "verify",
         cause: expect.stringContaining("no usable YRD-CHECK-RESULT"),
       }),
@@ -2273,12 +2274,89 @@ it("stops the line when the rerun is also a verdictless bound kill", async () =>
 
   expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/bound-kill-stuck"] })
   const events = await (await openEvents({ ...store, ref: changesRef("main", "task/bound-kill-stuck") })).events()
-  const stuck = events.find((event) => event.type === "stuck")
-  expect(stuck?.props).toContainEqual(["Retried", "1"])
-  expect(stuck?.props.filter(([key]) => key === "Check")).toEqual([
-    ["Check", expect.stringMatching(/^verify exit=timeout .*result=stuck attempt=1 phase=merge /u)],
+  const stucks = events.filter((event) => event.type === "stuck")
+  // The first kill is the requeue record: it spends the head's one grace and carries no verdict row.
+  expect(stucks[0]?.props).toEqual(
+    expect.arrayContaining([
+      ["Retried", "1"],
+      ["Retry-Reason", expect.stringContaining("requeued once after a verdictless bound kill")],
+    ]),
+  )
+  expect(stucks[0]?.props.filter(([key]) => key === "Check")).toEqual([])
+  // The requeued attempt is attempt 2 of the same head, and this kill is the line's answer.
+  expect(stucks[1]?.props).toContainEqual(["Retried", "1"])
+  expect(stucks[1]?.props.filter(([key]) => key === "Check")).toEqual([
     ["Check", expect.stringMatching(/^verify exit=timeout .*result=stuck attempt=2 phase=merge /u)],
   ])
+})
+
+/** @failure #38739 (c), @cto 31e669f6: the first verdictless bound kill stopped the line instead of
+ *   requeueing the change once behind the next one, so every change after it waited out another bound.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("requeues a verdictless bound kill behind the next change and keeps the line moving", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const head = await submitCommit(w, "task/bound-kill-first", "one.txt")
+  await submitCommit(w, "task/bound-kill-next", "next.txt")
+  // Only the first change hangs past its bound, and only on its first attempt.
+  const marker = join(w.workdir, "bound-kill-first-marker")
+  const script = join(w.workdir, "bound-kill-first.sh")
+  writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      `if [ -f next.txt ]; then echo 'YRD-CHECK-RESULT {"result":"pass","exit":0}'; exit 0; fi`,
+      `if [ ! -e '${marker}' ]; then touch '${marker}'; sleep 30; fi`,
+      `echo 'YRD-CHECK-RESULT {"result":"pass","exit":0}'`,
+      "",
+    ].join("\n"),
+  )
+  chmodSync(script, 0o755)
+
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [{ name: "verify", run: script, timeoutMs: 500 }],
+    notify: undefined,
+  })
+
+  // The round keeps moving: the next change merges, and the requeued one is still open, never stopped.
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/bound-kill-next"], stuck: [] })
+  const records = logRecords(outcome)
+  const requeuedAt = records.findIndex(
+    (record) => record.kind === "warning" && record.reason === "requeued" && record.branch === "task/bound-kill-first",
+  )
+  expect(requeuedAt).toBeGreaterThanOrEqual(0)
+  const nextMergedAt = records.findIndex(
+    (record) => record.kind === "change" && record.branch === "task/bound-kill-next" && record.decision === "merged",
+  )
+  expect(nextMergedAt).toBeGreaterThan(requeuedAt)
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/bound-kill-first") })).events()
+  const stuck = events.find((event) => event.type === "stuck")
+  expect(stuck?.props).toEqual(
+    expect.arrayContaining([
+      ["Commit", head],
+      ["Retried", "1"],
+      ["Retry-Reason", expect.stringContaining("requeued once after a verdictless bound kill")],
+    ]),
+  )
+  // The next round retries the requeued change by itself: the held requeue is not a human's stop.
+  const retried = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [{ name: "verify", run: script, timeoutMs: 500 }],
+    notify: undefined,
+  })
+  expect(retried).toMatchObject({ exitCode: 0, merged: ["task/bound-kill-first"] })
+  expect(logRecords(retried)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        kind: "observation",
+        subject: "bound-kill-requeue",
+        branch: "task/bound-kill-first",
+      }),
+    ]),
+  )
 })
 
 /** @failure A program-root check was accepted without its protected program root and still landed.
