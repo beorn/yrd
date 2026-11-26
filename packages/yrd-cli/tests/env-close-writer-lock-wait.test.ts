@@ -194,6 +194,27 @@ it("settles a close whose writer-lock wait ran out after another writer removed 
   ])
   const run = capture(w.work)
   const exit = await closeEnvironment(path, { json: true }, run.io)
+  const receipt = JSON.parse(run.stdout()) as Readonly<{ closed?: boolean; queued?: boolean }>
+  if (receipt.queued === true) {
+    // A CI runner denies /proc/<pid> to a sibling bun process (EACCES), so the same-UID census refuses before the
+    // worktree removal this row drives is ever attempted, and the close is queued, not settled. That keeps the
+    // guard promise the row exists for, not a weaker one: nothing was removed, the request names the pid it could
+    // not read, and a holder among the unreadable processes is never assumed absent.
+    expect(receipt).toMatchObject({
+      queued: true,
+      closed: false,
+      path,
+      reason: "incomplete-census",
+      request: expect.stringContaining("env-close-requests"),
+    })
+    expect(exit, run.stdout() + run.stderr()).toBe(0)
+    expect(existsSync(path)).toBe(true)
+    expect(await w.git(["worktree", "list", "--porcelain"])).toContain(path)
+    expect(run.stderr()).toContain("queued, not closed")
+    expect(run.stderr()).toMatch(/could not read pid \d+ \S+ \(EACCES\)|incomplete: no readable coverage/u)
+    expect(run.stderr()).toContain("a holder among them cannot be ruled out")
+    return
+  }
   expect(existsSync(path), run.stdout() + run.stderr()).toBe(false)
   expect(await w.git(["worktree", "list", "--porcelain"])).not.toContain(path)
   // The other writer's removal is a fact; the retained copy this close never wrote is not, and says so.
