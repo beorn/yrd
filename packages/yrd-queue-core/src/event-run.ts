@@ -2997,7 +2997,11 @@ export async function eventQueueRun(
         continue
       }
       if (stoppedCheck?.result === "stuck") {
-        const reason = `${stoppedCheck.name} could not judge (${stoppedCheck.why ?? `exit ${String(stoppedCheck.exit)}`}; log ${stoppedCheck.log})`
+        // A bound kill is named as one (@cto dd0e43f2): "<check> killed at the 420 s bound…", never "could not judge".
+        const reason =
+          stoppedCheck.exit === "timeout" && stoppedCheck.why !== undefined
+            ? `${stoppedCheck.name} ${stoppedCheck.why} (log ${stoppedCheck.log})`
+            : `${stoppedCheck.name} could not judge (${stoppedCheck.why ?? `exit ${String(stoppedCheck.exit)}`}; log ${stoppedCheck.log})`
         const ended = await appendOwnedChange("retriedStuckWrite", store, queue, branch, tip, {
           type: "stuck",
           at: new Date(),

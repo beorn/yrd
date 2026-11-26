@@ -582,6 +582,44 @@ describe("a check log and the text the queue read", () => {
     expect(result.why).not.toContain("raw-byte proof")
   })
 
+  /**
+   * @failure 2026-11-26: terminfo-merge was killed twice at its 420 s bound at 10.7 GB, and the queue said only
+   *          "could not judge (ran past its bound…)". A bound kill names itself, the stage the check last reported, and
+   *          the resident memory read at the kill, or why that could not be read (@cto dd0e43f2).
+   * @level l1 @consumer the queue's stuck reason for a bound-killed check
+   */
+  it.each([
+    [
+      "a readable tree",
+      {
+        readable: true,
+        processes: 3,
+        totalBytes: 11 * 1024 ** 3,
+        largest: { pid: 7, comm: "bun", bytes: 10 * 1024 ** 3 },
+      },
+      "RSS at kill 10.0 GiB (largest bun; 3 process(es), 11.0 GiB total)",
+    ],
+    ["an unreadable /proc", { readable: false, error: "EACCES" }, "RSS unreadable: EACCES"],
+    ["a runner that measured nothing", undefined, "RSS unreadable: not measured by this process runner"],
+  ] as const)("a bound kill names its stage and the RSS at kill: %s", async (_name, rssAtKill, rss) => {
+    const result = await runCheck({
+      ...place("bound"),
+      spec: { name: "terminfo-merge", run: "unused", timeoutMs: 420_000 },
+      process: scriptedRun(['YRD-CHECK-PROGRESS {"stage":"site-build full"}\n'], undefined, {
+        ...exitedResult({ durationMs: 420_000 }),
+        exitCode: null,
+        signal: "SIGTERM",
+        timedOut: true,
+        verdict: "TIMED_OUT",
+        ...(rssAtKill === undefined ? {} : { rssAtKill }),
+      } as unknown as ProcessResult),
+    })
+    expect(result).toMatchObject({ result: "stuck", exit: "timeout" })
+    expect(result.why).toBe(
+      `killed at the 420 s bound in stage site-build full, ${rss}; log named no usable YRD-CHECK-RESULT`,
+    )
+  })
+
   it("propagates a reader exception and closes its partial log", async () => {
     const close = vi.spyOn(fs, "closeSync")
     const driver = scriptedRun([])

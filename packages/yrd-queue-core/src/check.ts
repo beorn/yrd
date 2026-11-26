@@ -39,7 +39,7 @@
 
 import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
-import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
+import { createProcess, describeRssAtKill, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import type { JournalCheck } from "./log.ts"
 import type { RunnerClaimState } from "./runner-claim.ts"
 
@@ -1002,13 +1002,19 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
       }
       return { ...base, exit: rescued.result === "pass" ? 0 : 1, result: rescued.result }
     }
+    // @cto dd0e43f2: a bound kill says so by name, with the stage the check last reported and the tree's resident
+    // memory read once at the kill (never blank: an unreadable /proc names its errno). It stays "stuck", so the
+    // single verdictless-kill rerun (#38739) still applies.
     const progress = checkProgressFromLog(log)
-    const named = progress === undefined ? "" : `; last progress ${progress}`
+    const stage = progress === undefined ? "" : ` in stage ${progress.replace(/^stage=/u, "")}`
     return {
       ...base,
       exit: "timeout",
       result: "stuck",
-      why: why(`ran past its bound of ${timeoutMs} ms; log named no usable ${CHECK_RESULT_MARKER}${named}`),
+      why: why(
+        `killed at the ${String(Math.round(timeoutMs / 1000))} s bound${stage}, ${describeRssAtKill(result.rssAtKill)}; ` +
+          `log named no usable ${CHECK_RESULT_MARKER}`,
+      ),
     }
   }
   if (result.signal !== null) {
