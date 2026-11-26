@@ -194,6 +194,7 @@ async function releaseFixtures(): Promise<void> {
 
 afterEach(async () => {
   await releaseFixtures()
+  vi.unstubAllEnvs()
   if (idleCensus !== undefined) vi.mocked(removely.inspectProcessCensus).mockRestore()
 })
 afterAll(async () => {
@@ -1525,6 +1526,8 @@ describe("yrd queue up, the service", () => {
     async (coverage) => {
       const w = await world()
       await w.git(["config", "yrd.workdir", w.workdir])
+      // The test pin's YRD_WORKDIR outranks git config; cleanupRows reads the declared root (hh 38659).
+      vi.stubEnv("YRD_WORKDIR", undefined)
       await redeclare(w, "setup: ':'\n")
       await w.git(["fetch", "--quiet", "origin", "main"])
       await w.git(["merge", "--quiet", "--ff-only", "origin/main"])

@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync } from "node:fs"
+import { existsSync, mkdirSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
+import { fileURLToPath } from "node:url"
 import { shellQuote } from "git-super/shell-command"
 import { dirname, join, resolve } from "node:path"
 import {
@@ -25,6 +26,7 @@ import {
   type QueueAddress,
 } from "./address.ts"
 import { repositoryHere, unaddressedRepository } from "./declaration.ts"
+import { mainCheckoutOf, outermostRepository } from "./main-checkout.ts"
 
 /**
  * A cold component store: a bare Git directory kept for custody (a retained module
@@ -122,32 +124,108 @@ export async function resolveDeclaredQueueLocations(
  * health` resolves it on every tick, and asking the remote each time was 156 GitHub sessions an hour
  * (hh 25626). Only a clone that recorded none asks the remote, and that failure stays loud.
  */
-export async function originHead(git: Git, remote = "origin"): Promise<string> {
+export async function originHead(git: Git, remote = "origin", offline = false): Promise<string> {
   const recorded = (await git(["for-each-ref", "--format=%(symref)", `refs/remotes/${remote}/HEAD`])).trim()
   const prefix = `refs/remotes/${remote}/`
   if (recorded.startsWith(prefix) && recorded.length > prefix.length) return recorded.slice(prefix.length)
+  if (offline) {
+    throw new Error(
+      `this clone records no refs/remotes/${remote}/HEAD and queue health reads no network; ` +
+        `run \`git remote set-head ${remote} --auto\` or pass --queue <repo>@<branch>`,
+    )
+  }
   return remoteHead(git, remote)
 }
 
-type WorkdirSource = "YRD_WORKDIR" | "yrd.workdir" | "default"
+/**
+ * Where the queue workdir root came from, said for a reader: a probe that finds nothing must name the root it looked
+ * in and why that root, or a third copy of the state answers "stopped" quietly (hh 38659).
+ */
+export type WorkdirResolution = Readonly<{
+  root: string
+  kind: "YRD_WORKDIR" | "yrd.workdir" | "own-repository" | "default"
+  /** e.g. `YRD_WORKDIR`, `yrd.workdir`, `yrd.workdir (yrd's own repository /hh/dev)`, `default ($XDG_STATE_HOME/yrd)`. */
+  source: string
+  /** What each arm consulted before the answering one found, in order: the declared roots that were looked for. */
+  tried: readonly string[]
+}>
 
+/** The directory the running Yrd ships from: this module's real path, a node_modules symlink resolved. */
+export function yrdOwnLocation(): string {
+  return dirname(realpathSync(fileURLToPath(import.meta.url)))
+}
+
+/**
+ * The MAIN checkout of the repository the running Yrd ships in, or why there is none.
+ *
+ * Yrd usually ships as a submodule (`<host>/vendor/yrd`), so the outermost repository holding it is the host, and the
+ * host's main checkout is the one that declares its `yrd.workdir`. Both rules live once, in main-checkout.ts, which
+ * the host launcher imports too (@cto 1444899a D2).
+ */
+function ownRepository(location: string): Readonly<{ repository: string } | { none: string }> {
+  if (!existsSync(location)) return { none: `${location} does not exist` }
+  if (repositoryHere(location) === undefined) return { none: `${location} is in no repository` }
+  return { repository: mainCheckoutOf(outermostRepository(location)) }
+}
+
+/**
+ * ONE root resolution (hh 38659, @cto 23049856): `YRD_WORKDIR`, then `yrd.workdir` as the caller's repository reads it
+ * (every scope git reads), then the `yrd.workdir` the repository Yrd ships in declares, then `$XDG_STATE_HOME/yrd`.
+ * The third arm is what the host launcher used to inject; here it reaches the bare `node_modules/.bin/yrd` entry too.
+ *
+ * `ownLocation` is where Yrd ships from — this module, unless a test passes a fixture repository; it is a parameter,
+ * never a setting (@cto 1444899a D1). A test that must not inherit its host's declared root sets `YRD_WORKDIR`.
+ */
 async function resolveHostWorkdir(
   cwd: string,
   env: NodeJS.ProcessEnv,
   git: Git,
-): Promise<Readonly<{ root: string; source: WorkdirSource }>> {
+  ownLocation: string = yrdOwnLocation(),
+): Promise<WorkdirResolution> {
   const override = env.YRD_WORKDIR
   if (override !== undefined) {
     if (override.trim() === "") throw new Error("YRD_WORKDIR must name a directory")
-    return { root: resolve(cwd, override), source: "YRD_WORKDIR" }
+    return { root: resolve(cwd, override), kind: "YRD_WORKDIR", source: "YRD_WORKDIR", tried: [] }
   }
+  const tried = ["YRD_WORKDIR unset"]
+  const caller = repositoryHere(cwd) ?? cwd
   const declared = await configValue(git, "yrd.workdir")
-  if (declared !== undefined) return { root: resolve(repositoryHere(cwd) ?? cwd, declared), source: "yrd.workdir" }
-  return { root: join(env.XDG_STATE_HOME ?? join(env.HOME ?? homedir(), ".local", "state"), "yrd"), source: "default" }
+  if (declared !== undefined) {
+    return { root: resolve(caller, declared), kind: "yrd.workdir", source: "yrd.workdir", tried }
+  }
+  tried.push(`git config yrd.workdir unset at ${caller}`)
+  const own = ownRepository(ownLocation)
+  if ("repository" in own) {
+    const ownGit = gitIn(own.repository, undefined, await resolveGitSelection(own.repository, { env }), { env })
+    const inherited = await configValue(ownGit, "yrd.workdir")
+    if (inherited !== undefined) {
+      return {
+        root: resolve(own.repository, inherited),
+        kind: "own-repository",
+        source: `yrd.workdir (yrd's own repository ${own.repository})`,
+        tried,
+      }
+    }
+    tried.push(`git config yrd.workdir unset in yrd's own repository ${own.repository}`)
+  } else {
+    tried.push(`yrd's own repository: none, ${own.none}`)
+  }
+  const state = env.XDG_STATE_HOME
+  return {
+    root: join(state ?? join(env.HOME ?? homedir(), ".local", "state"), "yrd"),
+    kind: "default",
+    source: state === undefined ? "default (~/.local/state/yrd)" : "default ($XDG_STATE_HOME/yrd)",
+    tried,
+  }
 }
 
-export async function hostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git: Git): Promise<string> {
-  return (await resolveHostWorkdir(cwd, env, git)).root
+export async function hostWorkdir(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  git: Git,
+  ownLocation?: string,
+): Promise<string> {
+  return (await resolveHostWorkdir(cwd, env, git, ownLocation)).root
 }
 
 /**
@@ -164,9 +242,9 @@ export async function hostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git: Git)
  * :253) before any inside-repository check. The XDG fallback is right only when NO scope declares the key,
  * never because the caller happened to stand outside a repository (@cto 044d3ffd change 1).
  */
-export async function hostWorkdirHere(cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
+export async function hostWorkdirHere(cwd: string, env: NodeJS.ProcessEnv, ownLocation?: string): Promise<string> {
   const git = gitIn(repositoryHere(cwd) ?? cwd, undefined, await resolveGitSelection(cwd, { env }), { env })
-  return hostWorkdir(cwd, env, git)
+  return hostWorkdir(cwd, env, git, ownLocation)
 }
 
 /**
@@ -262,14 +340,25 @@ export async function ownedQueueClone(cwd: string, env: NodeJS.ProcessEnv): Prom
   return queueDirectory(await hostWorkdir(cwd, env, git), await originQueueAddress(git, recorded.slice(prefix.length)))
 }
 
-/** Resolve the one queue selector; only submission retains the author's checkout. */
-export async function resolveQueueLocation(
+type ResolvedAddress = Readonly<{
+  inside: string | undefined
+  addressed: boolean
+  selection: GitSelection
+  git: Git
+  address: QueueAddress
+}>
+
+/**
+ * The queue a selector names, before anything is cloned. `offline` is `yrd queue health`'s contract — it reads a file
+ * and nothing else — so a selector that could only be completed by asking a remote is refused by name instead.
+ */
+async function resolveQueueAddress(
   cwd: string,
   value: string | undefined,
   env: NodeJS.ProcessEnv,
-  context: "queue" | "reader" | "submit" = "queue",
-  reportWorkdir?: (workdir: string, source: WorkdirSource) => void,
-): Promise<QueueLocation> {
+  context: "queue" | "reader" | "submit",
+  offline: boolean,
+): Promise<ResolvedAddress> {
   const addressed =
     value !== undefined &&
     (value.includes("#") ||
@@ -286,7 +375,7 @@ export async function resolveQueueLocation(
   const git = gitIn(inside ?? cwd, undefined, selection, { env })
   let address: QueueAddress
   if (inside !== undefined && !addressed) {
-    address = await originQueueAddress(git, value ?? (await originHead(git)))
+    address = await originQueueAddress(git, value ?? (await originHead(git, "origin", offline)))
   } else {
     if (value === undefined || !addressed) {
       throw new Error(
@@ -295,6 +384,12 @@ export async function resolveQueueLocation(
     }
     let selected = value
     if (!selected.includes("#") && !hasHumanQueueBranch(selected)) {
+      if (offline) {
+        throw new Error(
+          `queue health reads no network, so it cannot ask ${selected} for its default branch; ` +
+            `name the branch: --queue ${selected}@<branch>`,
+        )
+      }
       selected = `${selected}#${await remoteHead(git, selected)}`
     }
     const split = selected.indexOf("#")
@@ -308,9 +403,39 @@ export async function resolveQueueLocation(
     }
     address = parseQueueAddress(selected)
   }
-  const { root: host, source } = await resolveHostWorkdir(cwd, env, git)
+  return { inside, addressed, selection, git, address }
+}
+
+/**
+ * The queue root a selector names, and how its host root was chosen — computed, never created: no clone, no fetch, no
+ * remote. `yrd queue health` reads its document here; an address whose root does not exist is the probe's answer to
+ * report, not a clone to make (hh 38659).
+ */
+export async function resolveQueueWorkdir(
+  cwd: string,
+  value: string | undefined,
+  env: NodeJS.ProcessEnv,
+  ownLocation?: string,
+): Promise<Readonly<{ workdir: string; resolution: WorkdirResolution }>> {
+  const { git, address } = await resolveQueueAddress(cwd, value, env, "queue", true)
+  const resolution = await resolveHostWorkdir(cwd, env, git, ownLocation)
+  return { workdir: queueRoot(resolution.root, address), resolution }
+}
+
+/** Resolve the one queue selector; only submission retains the author's checkout. */
+export async function resolveQueueLocation(
+  cwd: string,
+  value: string | undefined,
+  env: NodeJS.ProcessEnv,
+  context: "queue" | "reader" | "submit" = "queue",
+  reportWorkdir?: (workdir: string, resolution: WorkdirResolution) => void,
+  ownLocation?: string,
+): Promise<QueueLocation> {
+  const { inside, addressed, selection, git, address } = await resolveQueueAddress(cwd, value, env, context, false)
+  const resolution = await resolveHostWorkdir(cwd, env, git, ownLocation)
+  const host = resolution.root
   const workdir = queueRoot(host, address)
-  reportWorkdir?.(workdir, source)
+  reportWorkdir?.(workdir, resolution)
   if (inside !== undefined && (context === "submit" || (context === "reader" && !addressed))) {
     return {
       address,

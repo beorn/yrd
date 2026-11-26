@@ -18,6 +18,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { YRD_ENTRY } from "./support/yrd-entry.ts"
 import { workdirOf } from "../src/workdir.ts"
+import { hostWorkdirHere } from "../src/queue-location.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
@@ -300,7 +301,9 @@ describe("`yrd queue show` and the merge-line position (#29342)", () => {
     const work = await queueWithTwoChanges()
     // A second COPY of the queue state, so the isolated read holds the same clone and
     // the same refs, and differs only in the journal directory it looks in.
-    const hostWorkdir = join(dirname(work), "queue")
+    // The root the queue resolved here, whichever arm named it (the test pin's YRD_WORKDIR outranks the fixture's
+    // yrd.workdir, hh 38659).
+    const hostWorkdir = await hostWorkdirHere(work, process.env)
     const isolated = join(dirname(work), "isolated-workdir")
     cpSync(hostWorkdir, isolated, { recursive: true })
     const shared = await yrd(work, "queue", "show", "--all", "--json")

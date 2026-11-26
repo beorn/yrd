@@ -54,7 +54,7 @@ function offlineClone(): { root: string; clone: string; state: string } {
 describe("ownedQueueClone (hh 25626)", () => {
   it("names the queue-owned clone from local records alone, as the queue resolves it", async () => {
     const { clone, state } = offlineClone()
-    const env = offlineEnv({ XDG_STATE_HOME: state })
+    const env = offlineEnv({ YRD_WORKDIR: join(state, "yrd") })
 
     const owned = await ownedQueueClone(clone, env)
 
@@ -68,16 +68,19 @@ describe("ownedQueueClone (hh 25626)", () => {
     const { root, clone } = offlineClone()
     const workdir = join(root, "declared-workdir")
     git(clone, "config", "yrd.workdir", workdir)
+    // The test pin's YRD_WORKDIR outranks the declaration this row is about.
+    const env = offlineEnv()
+    delete env.YRD_WORKDIR
 
-    await expect(ownedQueueClone(clone, offlineEnv())).resolves.toBe(
-      join(workdir, "github.com", "beorn", "hh-dev~main", "repo"),
-    )
+    await expect(ownedQueueClone(clone, env)).resolves.toBe(join(workdir, "github.com", "beorn", "hh-dev~main", "repo"))
   })
 
   it("fails loud, naming the fix, when the clone records no origin/HEAD, rather than asking GitHub", async () => {
     const { root, clone, state } = offlineClone()
     git(clone, "remote", "set-head", "origin", "-d")
-    const refusal = await ownedQueueClone(clone, offlineEnv({ XDG_STATE_HOME: state })).catch((error: unknown) => error)
+    const refusal = await ownedQueueClone(clone, offlineEnv({ YRD_WORKDIR: join(state, "yrd") })).catch(
+      (error: unknown) => error,
+    )
     expect(refusal).toBeInstanceOf(Error)
     expect(String(refusal)).toContain("records no refs/remotes/origin/HEAD")
     const command = /run `([^`]+)`/u.exec(String(refusal))?.[1]
@@ -92,7 +95,7 @@ describe("ownedQueueClone (hh 25626)", () => {
     })
     expect(repaired.status, repaired.stderr).toBe(0)
     expect(git(clone, "symbolic-ref", "refs/remotes/origin/HEAD")).toBe("refs/remotes/origin/main")
-    await expect(ownedQueueClone(clone, offlineEnv({ XDG_STATE_HOME: state }))).resolves.toBe(
+    await expect(ownedQueueClone(clone, offlineEnv({ YRD_WORKDIR: join(state, "yrd") }))).resolves.toBe(
       join(state, "yrd", "github.com", "beorn", "hh-dev~main", "repo"),
     )
   })
@@ -130,16 +133,20 @@ describe("container repository with nested checkout (hh 30719)", () => {
     writeFileSync(join(dev, ".yrd.yml"), "target:\n  branch: main\n")
 
     const previousState = process.env.XDG_STATE_HOME
+    const previousWorkdir = process.env.YRD_WORKDIR
     process.env.XDG_STATE_HOME = state
+    process.env.YRD_WORKDIR = join(state, "yrd")
     try {
       for (const cwd of [container, join(container, "pm")]) {
-        await expect(resolveQueueLocation(cwd, undefined, offlineEnv({ XDG_STATE_HOME: state }))).rejects.toThrow(
+        await expect(
+          resolveQueueLocation(cwd, undefined, offlineEnv({ YRD_WORKDIR: join(state, "yrd") })),
+        ).rejects.toThrow(
           new RegExp(
             `is inside container repository .* \\(no \\.yrd\\.yml\\), not the nested checkout .*; run from .*, or address the queue with --queue <repo>#<branch>`,
             "u",
           ),
         )
-        await expect(ownedQueueClone(cwd, offlineEnv({ XDG_STATE_HOME: state }))).rejects.toThrow(
+        await expect(ownedQueueClone(cwd, offlineEnv({ YRD_WORKDIR: join(state, "yrd") }))).rejects.toThrow(
           /run from .*, or address the queue with --queue <repo>#<branch>/u,
         )
 
@@ -172,12 +179,14 @@ describe("container repository with nested checkout (hh 30719)", () => {
       // Proves ensureOwnedClone never ran against the container repo's origin.
       expect(existsSync(state)).toBe(false)
       // And from the nested dev checkout itself, resolution succeeds.
-      await expect(ownedQueueClone(dev, offlineEnv({ XDG_STATE_HOME: state }))).resolves.toBe(
+      await expect(ownedQueueClone(dev, offlineEnv({ YRD_WORKDIR: join(state, "yrd") }))).resolves.toBe(
         join(state, "yrd", "github.com", "beorn", "hh-dev~main", "repo"),
       )
     } finally {
       if (previousState === undefined) delete process.env.XDG_STATE_HOME
       else process.env.XDG_STATE_HOME = previousState
+      if (previousWorkdir === undefined) delete process.env.YRD_WORKDIR
+      else process.env.YRD_WORKDIR = previousWorkdir
     }
   })
 
@@ -192,7 +201,9 @@ describe("container repository with nested checkout (hh 30719)", () => {
     git(root, "init", "-q", "-b", "main", nested)
     writeFileSync(join(nested, ".yrd.yml"), "target:\n  branch: main\n")
 
-    await expect(resolveQueueLocation(container, undefined, offlineEnv({ XDG_STATE_HOME: state }))).rejects.toThrow(
+    await expect(
+      resolveQueueLocation(container, undefined, offlineEnv({ YRD_WORKDIR: join(state, "yrd") })),
+    ).rejects.toThrow(
       `${container} is inside container repository ${container} (no .yrd.yml), not the nested checkout ${nested}; run from ${nested}, or address the queue with --queue <repo>#<branch>`,
     )
     expect(existsSync(state)).toBe(false)

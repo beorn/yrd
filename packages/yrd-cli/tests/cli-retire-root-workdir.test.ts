@@ -31,9 +31,11 @@ const pinned = {
   configGlobal: process.env.GIT_CONFIG_GLOBAL,
   noSystem: process.env.GIT_CONFIG_NOSYSTEM,
   state: process.env.XDG_STATE_HOME,
+  workdir: process.env.YRD_WORKDIR,
 }
 afterEach(() => {
   restore("XDG_STATE_HOME", pinned.state)
+  restore("YRD_WORKDIR", pinned.workdir)
   restore("GIT_CONFIG_GLOBAL", pinned.configGlobal)
   restore("GIT_CONFIG_NOSYSTEM", pinned.noSystem)
 })
@@ -100,6 +102,8 @@ describe("`yrd queue retire-root` host workdir (28601)", () => {
     const { retired } = plant(declared)
 
     // A decoy the fallback would have used: nothing is planted under it.
+    // The test pin's YRD_WORKDIR outranks every git config scope; these rows are about the config arms.
+    delete process.env.YRD_WORKDIR
     const decoy = join(root, "xdg-state")
     process.env.XDG_STATE_HOME = decoy
 
@@ -120,18 +124,24 @@ describe("`yrd queue retire-root` host workdir (28601)", () => {
     process.env.GIT_CONFIG_NOSYSTEM = "1"
     const decoy = join(root, "xdg-state")
     process.env.XDG_STATE_HOME = decoy
+    delete process.env.YRD_WORKDIR
 
     const run = await yrd(root, "queue", "retire-root", "github.com/beorn/hh#main", "--dry-run", "--json")
     expect(retirementOf(run, declared, decoy)).toBe(retired)
   })
 
-  it("keeps the XDG fallback when NO config scope declares yrd.workdir", async () => {
+  // With no config scope declaring one, the next arm is the root yrd's OWN repository declares (hh 38659) — from a
+  // host checkout the live root, which no test may touch. So this row names the root through YRD_WORKDIR, the first
+  // arm, and proves the verb refuses AT the resolved root by name; the own-repository and XDG arms are proven with a
+  // fixture own repository passed in (queue-health-root, queue-core-check).
+  it("refuses at the resolved root, by name, when NO config scope declares yrd.workdir", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-retire-noscope-"))
     roots.push(root)
     process.env.GIT_CONFIG_GLOBAL = join(root, "absent-gitconfig")
     process.env.GIT_CONFIG_NOSYSTEM = "1"
     const decoy = join(root, "xdg-state")
     process.env.XDG_STATE_HOME = decoy
+    process.env.YRD_WORKDIR = join(decoy, "yrd")
 
     const run = await yrd(root, "queue", "retire-root", "github.com/beorn/hh#main", "--dry-run", "--json")
     expect(run.exitCode, run.report).not.toBe(0)

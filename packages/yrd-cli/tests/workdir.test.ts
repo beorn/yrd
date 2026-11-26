@@ -3,11 +3,15 @@ import { describe, expect, it } from "vitest"
 import { parseQueueAddress, queueRoot } from "../src/address.ts"
 import { queueTempRoot, workdirOf } from "../src/workdir.ts"
 
+// The host root is named, so the checkout running this test (whose own repository may declare its live
+// `yrd.workdir`, hh 38659) cannot answer for it.
+const UNDECLARED = { YRD_WORKDIR: "/custom/state/yrd" }
+
 describe("workdirOf (25716 row 9)", () => {
   it("resolves to the queue root under hostWorkdir for the given address", async () => {
     const git = async () => ""
     const address = parseQueueAddress("beorn/hh#main")
-    const env = { XDG_STATE_HOME: "/custom/state" }
+    const env = UNDECLARED
     const workdir = await workdirOf(git, { address, env })
     expect(workdir).toBe(queueRoot("/custom/state/yrd", address))
     expect(workdir).toBe(join("/custom/state/yrd", "github.com", "beorn", "hh~main"))
@@ -20,14 +24,14 @@ describe("workdirOf (25716 row 9)", () => {
       if (args[0] === "config" && args[3] === "remote.origin.url") return "https://github.com/beorn/hh.git\0"
       return ""
     }
-    const env = { XDG_STATE_HOME: "/custom/state" }
+    const env = UNDECLARED
     const workdir = await workdirOf(git, { env })
     const expectedAddress = parseQueueAddress("github.com/beorn/hh#main")
     expect(workdir).toBe(queueRoot("/custom/state/yrd", expectedAddress))
   })
 
   it("is the host workdir when the repository has no origin, and fails loud when origin cannot be read (25843)", async () => {
-    const env = { XDG_STATE_HOME: "/custom/state" }
+    const env = UNDECLARED
     const unaddressed = async (args: readonly string[]) => {
       if (args[0] === "ls-remote") throw new Error("a repository without origin has no remote to ask")
       return ""
@@ -57,9 +61,7 @@ describe("queueTempRoot (27721: one generic temp root from the supplied TMPDIR)"
 
   it("fails loud, naming the queried value, rather than silently falling back to <workdir>/tmp", () => {
     const where = "/custom/state/yrd/q"
-    expect(() => queueTempRoot(where, { TMPDIR: "relative/tmp" })).toThrow(
-      /TMPDIR.*relative\/tmp/u,
-    )
+    expect(() => queueTempRoot(where, { TMPDIR: "relative/tmp" })).toThrow(/TMPDIR.*relative\/tmp/u)
     expect(() => queueTempRoot(where, { TMPDIR: "/custom/state/yrd/../elsewhere" })).toThrow(
       /TMPDIR.*\/custom\/state\/yrd\/\.\.\/elsewhere/u,
     )

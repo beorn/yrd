@@ -25,7 +25,7 @@ import * as fs from "node:fs"
 import * as removely from "removely"
 import { dirname, join, resolve } from "node:path"
 import { gzipSync } from "node:zlib"
-import { afterAll, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
 import {
   CHANGE_STATUSES,
   archivedChangesPrefix,
@@ -101,6 +101,7 @@ function localExecution<T>(execution: ExecutionDocument<T>): T {
   if (execution.local !== true) throw new Error(execution.why)
   return execution.value
 }
+afterEach(() => vi.unstubAllEnvs())
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
@@ -6196,6 +6197,8 @@ describe("a queue is the selected origin branch carrying config", () => {
     writeFileSync(fetchHead, "another command's fetch result\n")
     const operand = mode === "default" ? [] : ["--queue", "release/1.x"]
     await git(["config", "yrd.workdir", "relative-state"])
+    // The test pin's YRD_WORKDIR outranks git config; this row is about the config arm (hh 38659).
+    vi.stubEnv("YRD_WORKDIR", undefined)
     const nested = join(repo, "nested")
     mkdirSync(nested)
     const paused = capture(nested)
@@ -6330,6 +6333,8 @@ describe("a queue is the selected origin branch carrying config", () => {
     await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
     const state = join(dirname(repo), "state")
     await gitIn(repo)(["config", "yrd.workdir", state])
+    // The test pin's YRD_WORKDIR outranks git config; this row is about the config arm (hh 38659).
+    vi.stubEnv("YRD_WORKDIR", undefined)
     const yrd = async (...args: string[]) => {
       const run = capture(repo)
       const code = await runYrdProcess(["bun", "yrd", "queue", "override", "--queue", "main", ...args], run.io)
@@ -7422,6 +7427,8 @@ describe("exact-tip origin retirement of a draft", () => {
       await component(["checkout", "--quiet", childBase])
       const workdir = join(dirname(repo), "queue-workdir")
       await git(["config", "yrd.workdir", workdir])
+      // The test pin's YRD_WORKDIR outranks git config; this row is about the config arm (hh 38659).
+      vi.stubEnv("YRD_WORKDIR", undefined)
       const origin = (await git(["config", "--get", "remote.origin.url"])).trim()
       // The public CLI selects this queue-owned path, not the author checkout's graph.
       const repoReader = queueDirectory(workdir, parseQueueAddress(`${origin}#main`))

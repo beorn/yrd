@@ -715,7 +715,11 @@ it.each(["released", "notified", "reopened", "resubmitted", "held", "advanced", 
     const w = await world(":")
     const configuredWorkdir = join(dirname(w.work), "configured-queue")
     const closeWorkdir = join(dirname(w.work), "isolated-close")
-    if (mode === "released") await w.git(["config", "yrd.workdir", configuredWorkdir])
+    if (mode === "released") {
+      await w.git(["config", "yrd.workdir", configuredWorkdir])
+      // The test pin's YRD_WORKDIR outranks git config; this mode is about the config arm (hh 38659).
+      vi.stubEnv("YRD_WORKDIR", undefined)
+    }
     await birthEventQueue(w.work, "main", { localStore: false })
     const opened = capture(w.work)
     expect(
@@ -1190,17 +1194,24 @@ describe("yrd env open prepares the retained environment", () => {
   it("resolves a configured relative workdir against the repository, not the caller's subdirectory", async () => {
     const w = await world(":")
     await w.git(["config", "yrd.workdir", "relative-state"])
+    // The test pin's YRD_WORKDIR outranks git config; this row is about the config arm (hh 38659).
+    const configArm = { ...process.env }
+    delete configArm.YRD_WORKDIR
     const nested = join(w.work, "nested")
     mkdirSync(nested)
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
     const cli = join(dirname(fileURLToPath(import.meta.url)), "../../../bin/yrd.ts")
-    const run = await command(nested, [process.execPath, cli, "env", "open", selected, "--json", "--expires", "1d"])
+    const run = await command(
+      nested,
+      [process.execPath, cli, "env", "open", selected, "--json", "--expires", "1d"],
+      configArm,
+    )
     expect(run, run.stderr).toMatchObject({ exit: 0 })
     const { path } = JSON.parse(run.stdout) as { path: string }
     // The queue root sits under the configured workdir since 25716 row 9; the root is what resolves (25848).
     expect(path.startsWith(join(w.work, "relative-state") + "/")).toBe(true)
     expect(path).toContain(`${sep}environments${sep}`)
-    const listed = await command(nested, [process.execPath, cli, "env", "list", "--json"])
+    const listed = await command(nested, [process.execPath, cli, "env", "list", "--json"], configArm)
     expect(listed, listed.stderr).toMatchObject({ exit: 0 })
     expect(JSON.parse(listed.stdout)).toMatchObject({ environments: [{ path, head: selected }] })
   })

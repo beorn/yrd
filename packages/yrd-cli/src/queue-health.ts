@@ -8,7 +8,7 @@
  * reader it owns (@i/4-supervision/24523 D1).
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 import {
@@ -21,6 +21,7 @@ import {
   type QueueHealthDocument,
 } from "@yrd/queue-core"
 
+import type { WorkdirResolution } from "./queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 
 /**
@@ -63,11 +64,17 @@ export function writeQueueHealth(workdir: string, document: QueueHealthDocument)
  * no file (nothing started, or a starting service has not written yet), a file
  * that is not a health document (a defect in the writer), and a document (the
  * loop's own verdict). Collapsing any two of these is the silent-error shape.
+ *
+ * Given the `resolution` that chose the workdir, an absent answer names the root and where it came from, and a
+ * default root that holds no queue at all says so and lists the declared roots it looked for — the absent document's
+ * `facts.why`, never an `error` (see `absentHealthDocument`): a probe reading a third copy of the state must not
+ * answer "stopped" quietly (hh 38659).
  */
 export async function readQueueHealth(
   workdir: string,
   service: string,
   now: Date = new Date(),
+  resolution?: WorkdirResolution,
 ): Promise<QueueHealthDocument> {
   const path = join(workdir, QUEUE_HEALTH_DOCUMENT)
   let text: string
@@ -75,7 +82,14 @@ export async function readQueueHealth(
     text = readFileSync(path, "utf8")
   } catch (error) {
     const why = error instanceof Error ? error.message : String(error)
-    return absentHealthDocument(service, `no health document at ${path}: ${why}`)
+    if (resolution === undefined) return absentHealthDocument(service, `no health document at ${path}: ${why}`)
+    const origin = `root ${resolution.root} from ${resolution.source}`
+    if (existsSync(workdir)) return absentHealthDocument(service, `no health document at ${path} (${origin}): ${why}`)
+    if (resolution.kind !== "default") return absentHealthDocument(service, `no queue at ${workdir} (${origin})`)
+    return absentHealthDocument(
+      service,
+      `no queue at ${workdir} (${resolution.root} is the default); declared roots: none found — looked for ${resolution.tried.join("; ")}`,
+    )
   }
   const document = parseQueueHealthDocument(text)
   // A DOCUMENT IS ONLY EVIDENCE UNTIL ITS OWN DEADLINE. Past the instant the
@@ -102,8 +116,9 @@ export async function queueHealthCommand(
   service: string,
   io: YrdCliIO,
   now: Date = new Date(),
+  resolution?: WorkdirResolution,
 ): Promise<YrdCliExitCode> {
-  const document = await readQueueHealth(workdir, service, now)
+  const document = await readQueueHealth(workdir, service, now, resolution)
   io.stdout(`${JSON.stringify(document)}\n`)
   return queueHealthExitCode(document.state)
 }
