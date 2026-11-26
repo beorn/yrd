@@ -2206,6 +2206,81 @@ it("retains both setup attempts when a remote-class outage stops the event line"
   ])
 })
 
+/** @failure #38739: a merge check SIGTERMed at its bound with no verdict stopped the line instead of rerunning that one check.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("reruns a check the bound killed before it named a verdict", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/bound-kill-retry", "one.txt")
+  // The first attempt hangs past its bound with no verdict; the second names one.
+  const marker = join(w.workdir, "bound-kill-retried")
+  const script = join(w.workdir, "bound-kill-retry.sh")
+  writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      `if [ ! -e '${marker}' ]; then touch '${marker}'; sleep 30; fi`,
+      `echo 'YRD-CHECK-RESULT {"result":"pass","exit":0}'`,
+      "",
+    ].join("\n"),
+  )
+  chmodSync(script, 0o755)
+
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [{ name: "verify", run: script, timeoutMs: 1000 }],
+    notify: undefined,
+  })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/bound-kill-retry"], stuck: [] })
+  expect(logRecords(outcome)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        kind: "warning",
+        branch: "task/bound-kill-retry",
+        reason: "retried",
+        check: "verify",
+        cause: expect.stringContaining("no usable YRD-CHECK-RESULT"),
+      }),
+    ]),
+  )
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/bound-kill-retry") })).events()
+  expect(events.find((event) => event.type === "merging")?.props).toContainEqual([
+    "Check",
+    expect.stringMatching(/^verify exit=0 .*result=pass attempt=2 phase=merge /u),
+  ])
+})
+
+/** @failure #38739: a second verdictless bound kill was not the line's answer, or the first attempt's evidence was lost.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("stops the line when the rerun is also a verdictless bound kill", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/bound-kill-stuck", "one.txt")
+  const script = join(w.workdir, "bound-kill-always.sh")
+  writeFileSync(script, ["#!/bin/sh", "sleep 30", ""].join("\n"))
+  chmodSync(script, 0o755)
+
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [{ name: "verify", run: script, timeoutMs: 500 }],
+    notify: undefined,
+  })
+
+  expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/bound-kill-stuck"] })
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/bound-kill-stuck") })).events()
+  const stuck = events.find((event) => event.type === "stuck")
+  expect(stuck?.props).toContainEqual(["Retried", "1"])
+  expect(stuck?.props.filter(([key]) => key === "Check")).toEqual([
+    ["Check", expect.stringMatching(/^verify exit=timeout .*result=stuck attempt=1 phase=merge /u)],
+    ["Check", expect.stringMatching(/^verify exit=timeout .*result=stuck attempt=2 phase=merge /u)],
+  ])
+})
+
 /** @failure A program-root check was accepted without its protected program root and still landed.
  * @level l3 @consumer queue operator and declaration author
  */
