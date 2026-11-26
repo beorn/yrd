@@ -143,7 +143,21 @@ const submoduleQueue = async () => {
   const checkout = gitIn(join(repo, COMPONENT))
   await checkout(["config", "user.email", "component@yrd.test"])
   await checkout(["config", "user.name", "fixture"])
-  return { root, repo, workdir, closeCalls, resolveCalls, rekey, git, store, target, queueTip, checkout, upstream }
+  return {
+    root,
+    remote,
+    repo,
+    workdir,
+    closeCalls,
+    resolveCalls,
+    rekey,
+    git,
+    store,
+    target,
+    queueTip,
+    checkout,
+    upstream,
+  }
 }
 type SubmoduleQueue = Awaited<ReturnType<typeof submoduleQueue>>
 
@@ -300,6 +314,30 @@ it("closes a root commit's Closes issue when the project root's local main still
       status: "fulfilled",
     }),
   )
+}, 60000)
+
+/** @failure A merge's `Closes:` issue stays open because the project root has not fetched the merge commit at all — live 2026-11-26, /hh/hightea fetched it six seconds after the attempt, so the close was never retried. @level l2 @consumer hh 38780 post-merge close reads the pinned declaration from the queue clone @testonly none */
+it("closes a root commit's Closes issue when the project root has not fetched the merge commit", async () => {
+  const world = await submoduleQueue()
+  // A real project root: a second clone of the same remote, made before the merge lands. It shares no objects with
+  // the queue clone, so the merge commit is absent there rather than the branch merely lagging — the live shape.
+  const unfetched = join(world.root, "unfetched-root")
+  await gitIn(world.root)(["clone", "--quiet", world.remote, unfetched])
+  // A remote-URL origin is the live shape (/hh/hightea): the closer reads the project root itself rather than a local
+  // remote that already holds the merge, so the unfetched clone is the repository the declaration must come from.
+  await gitIn(unfetched)(["remote", "set-url", "origin", "https://example.invalid/hightea.git"])
+  const pin = await componentCommit(world, "one: component work")
+  const branch = "task/raise-unfetched"
+  await landRaise(world, branch, pin, "raise vendor/one\n\nCloses: issue-unfetched")
+  const merge = (await readStatus(world.store, "main", branch)).merge!
+  // The precondition this fixture exists for: the project root cannot resolve the merge at all.
+  await expect(gitIn(unfetched)(["rev-parse", "--verify", `${merge}^{commit}`])).rejects.toThrow()
+  await runQueue(world, branch, walked(branch), unfetched)
+  const actions = attempts(world.workdir).flatMap(issueActions)
+  expect(actions.filter(({ status }) => status === "failed" || status === "unavailable")).toEqual([])
+  expect(lines(world.closeCalls).map((line) => line.split("\t").slice(0, 2))).toEqual([
+    ["issue-unfetched", "completed"],
+  ])
 }, 60000)
 
 /** @failure A component commit's `Refs:` mention is treated as closing intent. @level l2 @consumer hh 29630 component-range close @testonly none */

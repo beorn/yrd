@@ -86,6 +86,12 @@ export type RunIssuesVerbOptions = Readonly<{
   /** Read this exact ancestor of main; automatic effects use their delivered merge commit. */
   declarationCommit?: string
   /**
+   * The repository the declaration and its pinned commit are read from, when that is not the project root. Yrd's
+   * post-merge passes the queue's own clone: it always holds the delivered merge, while a project root that is a
+   * shared-main projection may not have fetched it yet (hh 38780). The provider still runs from `cwd`.
+   */
+  declarationRepository?: string
+  /**
    * With {@link declarationCommit}: prove its ancestry against this commit instead of the project's main. Yrd's
    * post-merge passes the target its own round published, which a clone's main can lag by seconds (#31194).
    */
@@ -568,7 +574,15 @@ export async function runIssuesVerb(
   }
   // Captured as a string: the closures below outlive the narrowing the reads above proved.
   const projectRoot: string = root
-  const repository = await repositoryToRead(root, env)
+  if (options.declarationRepository !== undefined && !(await isRepositoryAt(options.declarationRepository, env))) {
+    return fail(
+      1,
+      ISSUES_CODES.notARepository,
+      options.declarationRepository,
+      "--declaration-repository is not the toplevel of a git repository",
+    )
+  }
+  const repository = options.declarationRepository ?? (await repositoryToRead(root, env))
   if (typeof repository !== "string") return repository
 
   let commit: string

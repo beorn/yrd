@@ -52,6 +52,11 @@ export type IssueEventLaunchInput = Readonly<{
   readonly opId: string
   /** The project whose `issues.yml` declares `event`. */
   readonly projectRoot: string
+  /**
+   * Where the declaration and its pinned commit are read from, when that is not the project root (hh 38780): Yrd's
+   * post-merge names the queue's own clone, which always holds the delivered merge.
+   */
+  readonly declaration?: Readonly<{ repository: string; commit: string; target: string }>
   readonly cwd: string
   /** Where the queue keeps its log tree; this event's file is `<workdir>/logs/issue-events/<opId>.log`. */
   readonly workdir: string
@@ -99,6 +104,16 @@ export function launchIssueEvent(input: IssueEventLaunchInput): IssueEventLaunch
     ...(input.fallback === undefined
       ? []
       : ["--on-failure-kind", input.fallback.kind, "--on-failure-text", input.fallback.text]),
+    ...(input.declaration === undefined
+      ? []
+      : [
+          "--declaration-repository",
+          input.declaration.repository,
+          "--declaration-commit",
+          input.declaration.commit,
+          "--target-commit",
+          input.declaration.target,
+        ]),
   ]
   const env = definedEnv(input.env)
   const spawn =

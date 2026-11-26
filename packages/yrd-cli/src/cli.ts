@@ -1982,6 +1982,12 @@ function buildProgram(
             : `the declared ${verb}${write ? "" : " (a read)"}`,
       )
       .option("--project-root <path>", "the project root; default the toplevel of the current repository")
+      .option(
+        "--declaration-repository <path>",
+        "read issues.yml and its pinned commit from this repository instead of the project root (hh 38780: the queue's own clone always holds the delivered merge)",
+      )
+      .option("--declaration-commit <rev>", "read this exact ancestor of main; a delivered merge uses its own commit")
+      .option("--target-commit <rev>", "with --declaration-commit, prove its ancestry against this commit")
       .option("--timeout-ms <n>", "kill the provider after this many milliseconds (yrd-issues-provider-timed-out)", int)
     // NO OPTION IS ACCEPTED AND IGNORED: a read takes no replay key, so --id is refused on it.
     if (write) command.option("--id <id>", "the event's replay key; required, the provider dedupes on it")
@@ -2017,6 +2023,9 @@ function buildProgram(
         requestedBy?: string
         onFailureKind?: string
         onFailureText?: string
+        declarationRepository?: string
+        declarationCommit?: string
+        targetCommit?: string
       }>
       if (
         options.onFailureKind !== undefined &&
@@ -2050,6 +2059,11 @@ function buildProgram(
         stderr: (text) => io.stderr(text),
         // #37838: the computed in_progress columns come from this repository's own open environments.
         environments: ({ root, cwd: at }) => openIssueEnvironments({ root, cwd: at, env }),
+        ...(options.declarationRepository === undefined
+          ? {}
+          : { declarationRepository: options.declarationRepository }),
+        ...(options.declarationCommit === undefined ? {} : { declarationCommit: options.declarationCommit }),
+        ...(options.targetCommit === undefined ? {} : { targetCommit: options.targetCommit }),
         ...(options.id === undefined ? {} : { id: options.id }),
         ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
@@ -2082,6 +2096,11 @@ function buildProgram(
           env,
           stderr: (text) => io.stderr(text),
           id: `${options.id ?? "unkeyed"}-failed`,
+          ...(options.declarationRepository === undefined
+            ? {}
+            : { declarationRepository: options.declarationRepository }),
+          ...(options.declarationCommit === undefined ? {} : { declarationCommit: options.declarationCommit }),
+          ...(options.targetCommit === undefined ? {} : { targetCommit: options.targetCommit }),
           ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
           ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
         })
