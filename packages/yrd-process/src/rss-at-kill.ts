@@ -12,7 +12,10 @@ export type RssAtKill =
       /** Processes in the group (or the direct child alone) that /proc still listed. */
       processes: number
       totalBytes: number
-      largest?: Readonly<{ pid: number; comm: string; bytes: number }>
+      /** VmSwap summed over the same processes: under memory pressure RSS alone hides what the tree holds. */
+      swapBytes: number
+      /** The process holding the most memory (resident plus swapped), with its own two figures. */
+      largest?: Readonly<{ pid: number; comm: string; bytes: number; swapBytes: number }>
     }>
   | Readonly<{ readable: false; error: string }>
 
@@ -29,7 +32,8 @@ export function readRssAtKill(pgid: number, procRoot = "/proc"): RssAtKill {
   }
   let processes = 0
   let totalBytes = 0
-  let largest: { pid: number; comm: string; bytes: number } | undefined
+  let swapBytes = 0
+  let largest: { pid: number; comm: string; bytes: number; swapBytes: number } | undefined
   for (const entry of entries) {
     if (!/^\d+$/u.test(entry)) continue
     const pid = Number(entry)
@@ -43,22 +47,29 @@ export function readRssAtKill(pgid: number, procRoot = "/proc"): RssAtKill {
     if (pgrp !== pgid && pid !== pgid) continue
     const status = readOrNull(join(procRoot, entry, "status"))
     if (status === null) continue
-    const kb = /^VmRSS:\s+(\d+)\s+kB$/mu.exec(status)?.[1]
-    // A zombie or kernel thread has no VmRSS line: it is in the group but holds no resident memory.
-    const bytes = kb === undefined ? 0 : Number(kb) * 1024
+    // A zombie or kernel thread has no VmRSS/VmSwap line: it is in the group but holds no memory.
+    const bytes = statusKib(status, "VmRSS") * 1024
     processes += 1
     totalBytes += bytes
-    if (largest === undefined || bytes > largest.bytes) largest = { pid, comm, bytes }
+    const swapped = statusKib(status, "VmSwap") * 1024
+    swapBytes += swapped
+    if (largest === undefined || bytes + swapped > largest.bytes + largest.swapBytes) {
+      largest = { pid, comm, bytes, swapBytes: swapped }
+    }
   }
-  return { readable: true, processes, totalBytes, ...(largest === undefined ? {} : { largest }) }
+  return { readable: true, processes, totalBytes, swapBytes, ...(largest === undefined ? {} : { largest }) }
 }
 
-/** "RSS at kill 10.0 GiB (largest bun)", or "RSS unreadable: EACCES" — the clause a bound-kill reason carries. */
+/** "RSS at kill 10.0 GiB + swap 0.5 GiB (largest bun; …)", or "RSS unreadable: EACCES" — the clause a bound-kill reason carries. */
 export function describeRssAtKill(rss: RssAtKill | undefined): string {
   if (rss === undefined) return "RSS unreadable: not measured by this process runner"
   if (!rss.readable) return `RSS unreadable: ${rss.error}`
-  if (rss.largest === undefined) return "RSS at kill 0.0 GiB (no process left in its group)"
-  return `RSS at kill ${gib(rss.largest.bytes)} GiB (largest ${rss.largest.comm}; ${String(rss.processes)} process(es), ${gib(rss.totalBytes)} GiB total)`
+  if (rss.largest === undefined) return "RSS at kill 0.0 GiB + swap 0.0 GiB (no process left in its group)"
+  const { largest } = rss
+  return (
+    `RSS at kill ${gib(largest.bytes)} GiB + swap ${gib(largest.swapBytes)} GiB (largest ${largest.comm}; ` +
+    `${String(rss.processes)} process(es), ${gib(rss.totalBytes)} GiB RSS + ${gib(rss.swapBytes)} GiB swap total)`
+  )
 }
 
 function gib(bytes: number): string {
@@ -77,4 +88,9 @@ function readOrNull(path: string): string | null {
     // silent-fallback-allow: a process that exits between readdir and this read holds no memory; it is not a failure
     return null
   }
+}
+
+function statusKib(status: string, field: "VmRSS" | "VmSwap"): number {
+  const kib = new RegExp(`^${field}:\\s+(\\d+)\\s+kB$`, "mu").exec(status)?.[1]
+  return kib === undefined ? 0 : Number(kib)
 }

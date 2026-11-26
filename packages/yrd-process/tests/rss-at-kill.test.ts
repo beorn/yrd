@@ -46,7 +46,9 @@ describe("RSS at kill", () => {
     expect(result.rssAtKill.largest?.pid).toBe(hogPid)
     expect(result.rssAtKill.largest?.bytes).toBeGreaterThan(0)
     expect(result.rssAtKill.totalBytes).toBeGreaterThanOrEqual(result.rssAtKill.largest?.bytes ?? 0)
-    expect(describeRssAtKill(result.rssAtKill)).toMatch(/^RSS at kill \d+\.\d GiB \(largest \S+; \d+ process\(es\), /u)
+    expect(describeRssAtKill(result.rssAtKill)).toMatch(
+      /^RSS at kill \d+\.\d GiB \+ swap \d+\.\d GiB \(largest \S+; \d+ process\(es\), /u,
+    )
   }, 60_000)
 
   test("a run that exits on its own carries no RSS reading", async () => {
@@ -59,7 +61,8 @@ describe("RSS at kill", () => {
   test("reads only the named group from a /proc tree, and skips a process with no VmRSS", () => {
     const proc = mkdtempSync(join(tmpdir(), "rss-at-kill-proc-"))
     temporary.push(proc)
-    const add = (pid: number, comm: string, pgrp: number, kb: number | undefined): void => {
+    const GiB_KB = 1024 * 1024
+    const add = (pid: number, comm: string, pgrp: number, kb?: number, swapKb?: number): void => {
       mkdirSync(join(proc, String(pid)))
       writeFileSync(
         join(proc, String(pid), "stat"),
@@ -67,22 +70,27 @@ describe("RSS at kill", () => {
       )
       writeFileSync(
         join(proc, String(pid), "status"),
-        kb === undefined ? "Name:\tz\n" : `Name:\tx\nVmRSS:\t ${String(kb)} kB\n`,
+        "Name:\tx\n" +
+          (kb === undefined ? "" : `VmRSS:\t ${String(kb)} kB\n`) +
+          (swapKb === undefined ? "" : `VmSwap:\t ${String(swapKb)} kB\n`),
       )
     }
-    add(100, "sh", 100, 1024)
-    add(101, "bun build (x)", 100, 3 * 1024 * 1024)
-    add(102, "zombie", 100, undefined)
-    add(200, "other", 200, 9 * 1024 * 1024)
+    add(100, "sh", 100, 1024, 0)
+    add(101, "bun build (x)", 100, 3 * GiB_KB, GiB_KB / 2)
+    // Mostly swapped out: by resident memory alone it would hide behind the build, yet it holds the most.
+    add(103, "worker", 100, GiB_KB, 4 * GiB_KB)
+    add(102, "zombie", 100)
+    add(200, "other", 200, 9 * GiB_KB, 9 * GiB_KB)
     mkdirSync(join(proc, "self"))
     expect(readRssAtKill(100, proc)).toEqual({
       readable: true,
-      processes: 3,
-      totalBytes: (1024 + 3 * 1024 * 1024) * 1024,
-      largest: { pid: 101, comm: "bun build (x)", bytes: 3 * 1024 * 1024 * 1024 },
+      processes: 4,
+      totalBytes: (1024 + 4 * GiB_KB) * 1024,
+      swapBytes: 4.5 * GiB_KB * 1024,
+      largest: { pid: 103, comm: "worker", bytes: GiB_KB * 1024, swapBytes: 4 * GiB_KB * 1024 },
     })
     expect(describeRssAtKill(readRssAtKill(100, proc))).toBe(
-      "RSS at kill 3.0 GiB (largest bun build (x); 3 process(es), 3.0 GiB total)",
+      "RSS at kill 1.0 GiB + swap 4.0 GiB (largest worker; 4 process(es), 4.0 GiB RSS + 4.5 GiB swap total)",
     )
   })
 
