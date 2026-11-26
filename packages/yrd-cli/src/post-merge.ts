@@ -39,6 +39,14 @@ const UPDATE_TIMEOUT_MS = 120_000
 const MERGED_EVENT_TIMEOUT_MS = 10_000
 
 /**
+ * hh #38766 (@cto 15f0394a): the merged writer is OFF in production until its detached, child-notified replacement lands.
+ * A bound under km's healthy write time would fail by design on nearly every merge, and a failed event says nothing true
+ * about the branch. One line per round says so; when it is on (the merged-event fixtures turn it on), the bound above
+ * applies. The close and assign updates in this step are untouched, so the abandoned-issue rail keeps today's inputs.
+ */
+export const MERGED_ISSUE_EVENTS_OFF = "merged issue events off until #38766's child-side notify lands"
+
+/**
  * How many attempts one merged branch's post-merge issue update gets (37513, @cto 68bee3e1). A failed attempt's
  * branches ride the service's next attempt instead of waiting for a restart's catch-up; after this many failures the
  * service stops carrying the branch and names it to `abandoned`, so a person reruns the close.
@@ -678,11 +686,17 @@ async function recordMergedEvents(
     bases: readonly string[]
     projectRoot?: string
     cwd: string
+    /** Off unless a caller turns it on (hh #38766, @cto 15f0394a): production constructs this step without it. */
+    mergedEvents: boolean
     env?: NodeJS.ProcessEnv
     report: (message: string) => void
     stop?: AbortSignal
   }>,
 ): Promise<Array<Record<string, unknown>>> {
+  if (!input.mergedEvents) {
+    input.report(MERGED_ISSUE_EVENTS_OFF)
+    return []
+  }
   const outcomes: Array<Record<string, unknown>> = []
   const unrecorded: string[] = []
   const record = (outcome: Record<string, unknown>, why?: string): void => {
@@ -836,6 +850,11 @@ export function createPostMerge<C extends Context>(
     stop?: AbortSignal
     cleanup: (context: C) => Promise<void>
     report: (message: string) => void
+    /**
+     * hh #38766 (@cto 15f0394a): the merged item-event writer, OFF unless a caller turns it on. Production leaves it off
+     * until the detached, child-notified replacement lands; the merged-event fixtures turn it on to keep their coverage.
+     */
+    mergedIssueEvents?: boolean
     git?: GitRunner
     store?: QueueLocation
     /** Told the branches given up on after {@link POST_MERGE_ATTEMPTS} failures; a throw here is reported, never raised. */
@@ -995,6 +1014,7 @@ export function createPostMerge<C extends Context>(
         bases,
         ...(context.projectRoot === undefined ? {} : { projectRoot: context.projectRoot }),
         cwd: options.cwd,
+        mergedEvents: options.mergedIssueEvents === true,
         env: options.env,
         report: options.report,
         stop: options.stop,

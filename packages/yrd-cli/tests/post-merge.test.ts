@@ -13,7 +13,7 @@ import { afterEach, expect, it, vi } from "vitest"
 import {
   chargedBranches,
   createPostMerge,
-  POST_MERGE_ATTEMPTS,
+  MERGED_ISSUE_EVENTS_OFF,
   readPostMergeIssueDiagnostics,
 } from "../src/post-merge.ts"
 import { coreQueueCommand, readEventListing } from "../src/queue-core-commands.ts"
@@ -23,7 +23,6 @@ import { changeInput } from "../../yrd-queue-core/src/events.ts"
 import {
   createEventQueue,
   changesRef,
-  appendChangeEvent,
   createEventStore,
   readBranchHistory,
   readEventQueue,
@@ -149,6 +148,7 @@ it.each(["drain", "stop", "close", "abort"] as const)(
       workdir: root,
       cwd: root,
       // Only the first round reads Git: its merged-event write is the hold. Later rounds name no queueBranch.
+      mergedIssueEvents: true,
       git: holdingGit(fixtureGit, context.target, ready, release.promise),
       store: createEventStore(root, "origin", fixtureGit.selection),
       ...(ending === "drain" ? {} : { stop: stop.signal }),
@@ -611,6 +611,7 @@ it.each([
       await using runner = createPostMerge({
         workdir,
         cwd: repo,
+        mergedIssueEvents: true,
         git,
         store,
         cleanup: async () => {},
@@ -1490,126 +1491,23 @@ const eventActionsIn = (workdir: string): Array<Record<string, unknown>> =>
     .flatMap((attempt) => (attempt.issueActions ?? []) as Array<Record<string, unknown>>)
     .filter((action) => action.verb === "event")
 
-/** @failure A delivered change's merged item event is lost, keyed off its merge, written as a close, or a failed provider call holds the merge; or, with no event declared, a provider is called or the round records a failure. @level l2 @consumer Yrd post-merge item events (#31194, @cto 721b42d7) @testonly none */
-it.each(["recorded", "provider-fails", "undeclared"] as const)(
-  "writes one merged item event per delivered change through the issues declaration: %s",
-  async (mode) => {
-    const { remote, repo, workdir, calls, seed, git, store } = await eventQueue((calls) =>
-      // Production's shape today: other verbs declared, no `event`. A call of any verb lands in `calls`.
-      mode === "undeclared"
-        ? { comment: ["sh", "-c", EVENT_WRITE + "exit 9", "comment", "<key>", "<text>", "<id>", "-", "-", calls] }
-        : eventDeclared(calls, mode === "provider-fails" ? "exit 3" : undefined),
-    )
-    const issue = "@i/16-work-lifecycle/31194-item-events"
-    for (const [branch, named] of [
-      ["task/with-issue", issue],
-      ["task/no-issue", undefined],
-    ] as const) {
-      await submitChange({ repo, git }, branch, named, branch.replaceAll("/", "-"))
-    }
-    const eventActions = (): Array<Record<string, unknown>> => eventActionsIn(workdir)
-    const stop = new AbortController(),
-      merged: string[] = [],
-      diagnostics: string[] = []
-    let rounds = 0
-    try {
-      expect(
-        await coreQueueCommand(
-          repo,
-          {
-            cwd: repo,
-            stdout: (s) => diagnostics.push(s),
-            stderr: (s) => diagnostics.push(s),
-            localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
-          },
-          {
-            command: "up",
-            intervalSeconds: 0,
-            stop: stop.signal,
-            afterRound: async (outcome) => {
-              rounds++
-              merged.push(...outcome.merged)
-              if (merged.includes("task/with-issue") && merged.includes("task/no-issue")) {
-                await vi.waitFor(() => expect(new Set(eventActions().map((action) => action.branch)).size).toBe(2), {
-                  timeout: 10000,
-                })
-                stop.abort()
-              } else if (rounds > 4) stop.abort()
-            },
-          },
-          { workdir, json: true },
-        ),
-        diagnostics.join(" "),
-      ).toBe(0)
-    } finally {
-      stop.abort()
-    }
-    if (mode === "undeclared") {
-      // Nothing is called, each merged branch says why at the round's target, and nothing counts as failed.
-      expect(existsSync(calls)).toBe(false)
-      const actions = eventActions()
-      for (const branch of ["task/with-issue", "task/no-issue"]) {
-        expect(actions).toContainEqual(
-          expect.objectContaining({
-            branch,
-            mergeSha: "",
-            status: "skipped",
-            reason: expect.stringMatching(/^issues\.yml declares no event at target [0-9a-f]{40}$/),
-          }),
-        )
-      }
-      expect(actions.filter(({ status }) => status !== "skipped")).toEqual([])
-      return
-    }
-    const withIssue = (await readStatus(store, "main", "task/with-issue")).merge!
-    const noIssue = (await readStatus(store, "main", "task/no-issue")).merge!
-    // Provider calls only for the change that names an issue: its value as held, kind merged, the replay key. A failed
-    // write rides the next attempt under the same replay key (37513), at most POST_MERGE_ATTEMPTS times.
-    const call = [issue, "merged", `${remote}@${withIssue}`, "task/with-issue merged", `yrd-merged-${withIssue}`].join(
-      "\t",
-    )
-    const called = readFileSync(calls, "utf8").trim().split("\n")
-    expect([...new Set(called)]).toEqual([call])
-    expect(called.length).toBeLessThanOrEqual(mode === "provider-fails" ? POST_MERGE_ATTEMPTS : 1)
-    const actions = eventActions()
-    expect(actions).toContainEqual(
-      expect.objectContaining({
-        branch: "task/no-issue",
-        mergeSha: noIssue,
-        providerId: `yrd-merged-${noIssue}`,
-        status: "skipped",
-        reason: "no-issue",
-      }),
-    )
-    const report = diagnostics.join(" ")
-    expect(report).toContain(`task/no-issue@${noIssue} (names no issue)`)
-    // The merge is published whatever the provider did.
-    await seed(["--git-dir", remote, "merge-base", "--is-ancestor", withIssue, "main"])
-    if (mode === "recorded") {
-      expect(actions).toContainEqual(
-        expect.objectContaining({ branch: "task/with-issue", status: "fulfilled", issue, mergeSha: withIssue }),
-      )
-      return
-    }
-    expect(actions).toContainEqual(
-      expect.objectContaining({
-        branch: "task/with-issue",
-        status: "failed",
-        providerId: `yrd-merged-${withIssue}`,
-        diagnostic: expect.stringContaining("provider ended with exit 3"),
-      }),
-    )
-    expect(report).toContain(`task/with-issue@${withIssue} (yrd-issues-provider-failed: event sh -c`)
-    expect(readPostMergeIssueDiagnostics(workdir)).toContainEqual(
-      expect.objectContaining({
-        branch: "task/with-issue",
-        mergeSha: withIssue,
-        providerId: `yrd-merged-${withIssue}`,
-      }),
-    )
-  },
-  60000,
-)
+/**
+ * @failure A merged change writes an item event the host cannot afford: a bound under km's healthy write time fails by
+ *   design on nearly every merge, and each cut lands in the round's log as if the branch were abandoned (hh #38766,
+ *   @cto 15f0394a). The writer is suspended until its detached, child-notified replacement lands.
+ * @level l2 @consumer Yrd post-merge merged item events, suspended (#38766) @testonly none
+ */
+it("leaves merged issue events off: one line per round, no provider call, no failed event", async () => {
+  const queue = await eventQueue((calls) => eventDeclared(calls))
+  const { merge, diagnostics } = await mergeOnce(queue)
+  // This round ran through the CLI path, where production constructs the runner with the writer off.
+  expect(merge).toBeTruthy()
+  expect(existsSync(queue.calls) ? readFileSync(queue.calls, "utf8").trim() : "").toBe("")
+  expect(eventActionsIn(queue.workdir)).toEqual([])
+  // The line is said once per round that would have written, and never as a per-branch failure.
+  const said = diagnostics.filter((message) => message.includes(MERGED_ISSUE_EVENTS_OFF))
+  expect(said, diagnostics.join(" | ")).toHaveLength(1)
+}, 60000)
 
 /**
  * @failure A .yrd.yml still holding the retired issuesProvider.update has it run on a landing, beside Yrd's own closer
@@ -1671,26 +1569,7 @@ it("never runs a retired issuesProvider.update on a merge, says so on stderr, an
 
 const ISSUE_31194 = "@i/16-work-lifecycle/31194-item-events"
 const TWICE = "task/twice"
-/** The branch of the attempt `coalescedAttempt` holds open while its rounds coalesce. */
-const HELD = "task/held"
-/** The provider call a `merged` event of TWICE at `merge` makes: issue as held, kind, source, text, replay key. */
-const mergedCall = (remote: string, merge: string): string =>
-  [ISSUE_31194, "merged", `${remote}@${merge}`, `${TWICE} merged`, `yrd-merged-${merge}`].join("\t")
-/** The provider calls logged so far, one per line; none when the log was never written. */
-const callLines = (calls: string): string[] =>
-  existsSync(calls)
-    ? readFileSync(calls, "utf8")
-        .split("\n")
-        .filter((line) => line !== "")
-    : []
-/** The row an earlier delivery of TWICE leaves when an attempt does not write it again. */
-const notRewritten = (merge: string) =>
-  expect.objectContaining({
-    branch: TWICE,
-    mergeSha: merge,
-    status: "skipped",
-    reason: `not rewritten: merged at ${merge} before this round's base`,
-  })
+/** The IO a CLI-path round is given: every line it prints lands in `diagnostics`. */
 const fixtureIo = (repo: string, diagnostics: string[]) => ({
   cwd: repo,
   stdout: (s: string) => diagnostics.push(s),
@@ -1699,182 +1578,18 @@ const fixtureIo = (repo: string, diagnostics: string[]) => ({
 })
 
 /**
- * Runs `up` until TWICE has merged twice, each merge's own attempt ending before the next submit, so the two rounds
- * never share one attempt; returns each merge and the base its round was judged against.
+ * Merges TWICE once through the CLI path production uses, and names what the round said: the merge it delivered, the
+ * base it judged against, and every line it printed.
  */
-const mergeTwice = async (
+const mergeOnce = async (
   queue: Awaited<ReturnType<typeof eventQueue>>,
-): Promise<Readonly<{ merges: readonly [string, string]; bases: readonly [string, string] }>> => {
-  await submitChange(queue, TWICE, ISSUE_31194, "first")
-  const merges: string[] = [],
-    bases: string[] = [],
-    stop = new AbortController(),
-    diagnostics: string[] = []
-  let rounds = 0
-  try {
-    expect(
-      await coreQueueCommand(
-        queue.repo,
-        fixtureIo(queue.repo, diagnostics),
-        {
-          command: "up",
-          intervalSeconds: 0,
-          stop: stop.signal,
-          afterRound: async (outcome) => {
-            rounds++
-            if (outcome.merged.includes(TWICE)) {
-              const merge = (await readStatus(queue.store, "main", TWICE)).merge!
-              merges.push(merge)
-              bases.push(outcome.base)
-              await vi.waitFor(
-                () =>
-                  expect(eventActionsIn(queue.workdir)).toContainEqual(
-                    expect.objectContaining({ mergeSha: merge, status: "fulfilled" }),
-                  ),
-                { timeout: 10000 },
-              )
-              if (merges.length === 1) await submitChange(queue, TWICE, ISSUE_31194, "second")
-              else stop.abort()
-            } else if (rounds > 12) stop.abort()
-          },
-        },
-        { workdir: queue.workdir, json: true },
-      ),
-      diagnostics.join(" "),
-    ).toBe(0)
-  } finally {
-    stop.abort()
-  }
-  expect(merges).toHaveLength(2)
-  return { merges: [merges[0]!, merges[1]!], bases: [bases[0]!, bases[1]!] }
-}
-
-/**
- * One post-merge runner over `queue`, in a fresh workdir: a held attempt runs first, so every round in `rounds` waits
- * as one pending attempt and coalesces; then it is released and drained. Returns that workdir's event rows and the
- * runner's reports.
- */
-const coalescedAttempt = async (
-  queue: Awaited<ReturnType<typeof eventQueue>>,
-  rounds: ReadonlyArray<Readonly<{ target: string; base: string }>>,
-): Promise<Readonly<{ actions: Array<Record<string, unknown>>; reports: string[] }>> => {
-  const workdir = mkdtempSync(join(queue.root, "attempt-"))
-  const held = join(workdir, "held"),
-    reports: string[] = []
-  const release = Promise.withResolvers<void>()
-  const runner = createPostMerge({
-    workdir,
-    cwd: queue.repo,
-    git: holdingGit(queue.git, "held", held, release.promise),
-    store: queue.store,
-    cleanup: async () => {},
-    report: (message) => reports.push(message),
-  })
-  try {
-    runner.nudge({ ...context, target: "held", base: "held", merged: [HELD], queueBranch: "main", remote: "origin" })
-    await vi.waitFor(() => expect(existsSync(held)).toBe(true), { timeout: 10000 })
-    for (const round of rounds) {
-      runner.nudge({ ...context, ...round, merged: [TWICE], queueBranch: "main", remote: "origin" })
-    }
-  } finally {
-    release.resolve()
-    await runner[Symbol.asyncDispose]()
-  }
-  // The held attempt's own rows (its target has no issues.yml) are not the coalesced attempt's.
-  return { actions: eventActionsIn(workdir).filter(({ branch }) => branch !== HELD), reports }
-}
-
-/** @failure A branch merged in a second round gets its first merge's item event written again, a second event once km's 14-day operation-id window has passed. @level l2 @consumer Yrd post-merge item events (#31194, @cto 8a9995af) @testonly none */
-it("writes each merge's item event once when one branch merges in two rounds", async () => {
-  const queue = await eventQueue((calls) => eventDeclared(calls))
-  const {
-    merges: [first, second],
-  } = await mergeTwice(queue)
-  // One provider call per merge: the second round asked only for its own.
-  expect(callLines(queue.calls)).toEqual([mergedCall(queue.remote, first), mergedCall(queue.remote, second)])
-  expect(eventActionsIn(queue.workdir)).toContainEqual(notRewritten(first))
-}, 60000)
-
-/** @failure Yrd's startup catch-up writes a twice-merged branch's earlier item event again, a second event once km's 14-day operation-id window has passed. @level l2 @consumer Yrd startup catch-up item events (its nudge in queue-core-commands.ts gives target and base both the declared target; #31194, @cto 8a9995af) @testonly none */
-it("writes only a twice-merged branch's latest item event on startup catch-up", async () => {
-  const queue = await eventQueue((calls) => eventDeclared(calls))
-  const {
-    merges: [first, second],
-  } = await mergeTwice(queue)
-  writeFileSync(queue.calls, "")
-  const declared = (await queue.seed(["--git-dir", queue.remote, "rev-parse", "main"])).trim()
-  const { actions } = await coalescedAttempt(queue, [{ target: declared, base: declared }])
-  expect(callLines(queue.calls)).toEqual([mergedCall(queue.remote, second)])
-  expect(actions).toContainEqual(notRewritten(first))
-}, 60000)
-
-/** @failure Two rounds of one branch coalesced into one post-merge attempt lose the first merge's item event (the attempt kept the newer round's base), or rounds on unrelated bases have one picked silently. @level l2 @consumer Yrd post-merge item events (#31194, @cto 8a9995af condition 2) @testonly none */
-it.each(["ordered", "unrelated"] as const)(
-  "resolves a coalesced attempt's earliest round base: %s bases",
-  async (bases) => {
-    const queue = await eventQueue((calls) => eventDeclared(calls))
-    const {
-      merges: [first, second],
-      bases: [firstBase, secondBase],
-    } = await mergeTwice(queue)
-    writeFileSync(queue.calls, "")
-    if (bases === "ordered") {
-      const { actions } = await coalescedAttempt(queue, [
-        { target: first, base: firstBase },
-        { target: second, base: secondBase },
-      ])
-      // Both deliveries are this attempt's: each written once, in history order.
-      expect(callLines(queue.calls)).toEqual([mergedCall(queue.remote, first), mergedCall(queue.remote, second)])
-      expect(actions.filter(({ status }) => status === "fulfilled").map(({ mergeSha }) => mergeSha)).toEqual([
-        first,
-        second,
-      ])
-      return
-    }
-    // Two children of the first round's base, neither an ancestor of the other: no earliest exists.
-    const tree = (await queue.git(["rev-parse", `${firstBase}^{tree}`])).trim()
-    const [left, right] = await Promise.all(
-      ["left", "right"].map(async (side) =>
-        (await queue.git(["commit-tree", tree, "-p", firstBase, "-m", side])).trim(),
-      ),
-    )
-    const { actions, reports } = await coalescedAttempt(queue, [
-      { target: first, base: left! },
-      { target: second, base: right! },
-    ])
-    const refusal = `merged events not recorded: this attempt's round bases ${left}, ${right} are unrelated; neither is an ancestor of the other`
-    expect(callLines(queue.calls)).toEqual([])
-    expect(actions).toEqual([
-      expect.objectContaining({ branch: TWICE, mergeSha: "", status: "unavailable", diagnostic: refusal }),
-    ])
-    expect(reports).toContain(refusal)
-  },
-  60000,
-)
-
-/** @failure Undetected loss (@cto 8a9995af condition 3 asked for this result): a round's post-merge attempt never completes and the same branch merges again under `run`, which runs no startup catch-up, so the earlier merge's item event is never written. @level l2 @consumer Yrd post-merge item events (#31194, @cto 8a9995af) @testonly none */
-it("never writes an earlier event whose attempt did not complete before the branch merged again without a catch-up", async () => {
-  // The provider waits for `released` before it logs anything, so the first round's attempt cannot complete.
-  const queue = await eventQueue((calls) => ({
-    event: [
-      "sh",
-      "-c",
-      'while [ ! -e "$7" ]; do sleep 0.05; done; ' + EVENT_WRITE + "printf '{\"applied\":true}\\n'",
-      "event",
-      "<raw>",
-      "<kind>",
-      "<source>",
-      "<text>",
-      "<id>",
-      calls,
-      calls + ".released",
-    ],
-  }))
+): Promise<Readonly<{ merge: string; base: string; diagnostics: string[] }>> => {
   await submitChange(queue, TWICE, ISSUE_31194, "first")
   const stop = new AbortController(),
     diagnostics: string[] = []
-  let first: string | undefined
-  let rounds = 0
+  let rounds = 0,
+    merge = "",
+    base = ""
   try {
     expect(
       await coreQueueCommand(
@@ -1887,8 +1602,8 @@ it("never writes an earlier event whose attempt did not complete before the bran
           afterRound: async (outcome) => {
             rounds++
             if (outcome.merged.includes(TWICE)) {
-              first = (await readStatus(queue.store, "main", TWICE)).merge!
-              // Stopping `up` ends the waiting attempt with the event unwritten.
+              merge = (await readStatus(queue.store, "main", TWICE)).merge!
+              base = outcome.base
               stop.abort()
             } else if (rounds > 12) stop.abort()
           },
@@ -1900,28 +1615,13 @@ it("never writes an earlier event whose attempt did not complete before the bran
   } finally {
     stop.abort()
   }
-  expect(first).toBeDefined()
-  expect(callLines(queue.calls)).toEqual([])
-  writeFileSync(queue.calls + ".released", "")
-  await submitChange(queue, TWICE, ISSUE_31194, "second")
-  expect(
-    await coreQueueCommand(
-      queue.repo,
-      fixtureIo(queue.repo, diagnostics),
-      { command: "run" },
-      {
-        workdir: queue.workdir,
-        json: true,
-      },
-    ),
-    diagnostics.join(" "),
-  ).toBe(0)
-  const second = (await readStatus(queue.store, "main", TWICE)).merge!
-  expect(second).not.toBe(first)
-  // The loss: only the second merge's event was ever written; the first is skipped as already delivered.
-  expect(callLines(queue.calls)).toEqual([mergedCall(queue.remote, second)])
-  expect(eventActionsIn(queue.workdir)).toContainEqual(notRewritten(first!))
-}, 60000)
+  return { merge, base, diagnostics }
+}
+
+/**
+ * Runs `up` until TWICE has merged twice, each merge's own attempt ending before the next submit, so the two rounds
+ * never share one attempt; returns each merge and the base its round was judged against.
+ */
 /**
  * @failure A failed post-merge issue update is dropped: later attempts carry only their own merge, so the failed
  *   branch's issue stays open with its code on main until the next service restart's catch-up (77 min, 37513).
