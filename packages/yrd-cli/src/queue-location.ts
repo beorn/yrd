@@ -26,7 +26,8 @@ import {
   type QueueAddress,
 } from "./address.ts"
 import { repositoryHere, unaddressedRepository } from "./declaration.ts"
-import { mainCheckoutOf, outermostRepository } from "./main-checkout.ts"
+import { findGitProjectRoot } from "removely"
+import { mainCheckoutOf } from "./main-checkout.ts"
 
 /**
  * A cold component store: a bare Git directory kept for custody (a retained module
@@ -159,9 +160,32 @@ export function yrdOwnLocation(): string {
  * The MAIN checkout of the repository the running Yrd ships in, or why there is none.
  *
  * Yrd usually ships as a submodule (`<host>/vendor/yrd`), so the outermost repository holding it is the host, and the
- * host's main checkout is the one that declares its `yrd.workdir`. Both rules live once, in main-checkout.ts, which
- * the host launcher imports too (@cto 1444899a D2).
+ * host's main checkout is the one that declares its `yrd.workdir`. The main-checkout rule lives once, in
+ * main-checkout.ts, which the host launcher imports too (@cto 1444899a D2); the outermost walk resolves through
+ * removely's findGitProjectRoot, the one root resolver (hh 25997).
  */
+/**
+ * The outermost repository holding `from`: removely's findGitProjectRoot (the superproject, else the top level, with
+ * every inherited GIT_* variable scrubbed) repeated until it answers itself, so `<host>/vendor/yrd` (or a linked
+ * worktree's copy) answers `<host>` however deep the nesting. Throws naming `from` when it is in no repository.
+ */
+export function outermostRepository(from: string): string {
+  let repository = findGitProjectRoot(from)
+  if (repository === null) throw new Error(`${from} is in no git repository (removely findGitProjectRoot found none)`)
+  for (let level = 0; level < OUTERMOST_REPOSITORY_LEVELS; level++) {
+    const parent = findGitProjectRoot(repository)
+    if (parent === null) {
+      throw new Error(`${repository} left its git repository while resolving the outermost one from ${from}`)
+    }
+    if (parent === repository) return repository
+    repository = parent
+  }
+  throw new Error(`outermost repository not reached after ${OUTERMOST_REPOSITORY_LEVELS} levels from ${from}`)
+}
+
+/** How many superprojects up the outermost-repository walk goes before it refuses, never spinning (@cto 11ca9716). */
+const OUTERMOST_REPOSITORY_LEVELS = 16
+
 function ownRepository(location: string): Readonly<{ repository: string } | { none: string }> {
   if (!existsSync(location)) return { none: `${location} does not exist` }
   if (repositoryHere(location) === undefined) return { none: `${location} is in no repository` }

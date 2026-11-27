@@ -12,6 +12,10 @@
  * `<main>/.git`, so its parent IS main — for the main checkout and for every linked worktree alike (a seat home, a
  * `/hh/dev-rev/<sha>` revision checkout). `git worktree list`'s first entry is the fallback for a `--separate-git-dir`
  * layout. A root that cannot be derived REFUSES by name; it never falls back to the caller's own checkout.
+ *
+ * The outermost-repository walk (submodule -> superproject) is NOT here: it is a root resolution, and removely's
+ * findGitProjectRoot is the one root resolver (hh 25997), which this launcher-loaded file cannot import. It lives in
+ * queue-location.ts.
  */
 import { existsSync, realpathSync } from "node:fs"
 import { join } from "node:path"
@@ -52,28 +56,4 @@ export function mainCheckoutOf(from: string): string {
     )
   }
   return realpathSync(root)
-}
-
-/**
- * The outermost repository holding `from`: its own top level, then each superproject that has it as a submodule, so
- * `<host>/vendor/yrd` (or a linked worktree's copy) answers `<host>`. Throws naming `from` when it is in no repository.
- */
-export function outermostRepository(from: string): string {
-  const top = git(from, ["rev-parse", "--show-toplevel"])
-  if (top.status !== 0 || top.stdout === "") {
-    throw new Error(
-      `${from} is in no git repository (git rev-parse --show-toplevel: ${top.stderr || `exit ${top.status}`})`,
-    )
-  }
-  let repository = top.stdout
-  for (;;) {
-    const parent = git(repository, ["rev-parse", "--show-superproject-working-tree"])
-    if (parent.status !== 0) {
-      throw new Error(
-        `git rev-parse --show-superproject-working-tree failed in ${repository}: ${parent.stderr || `exit ${parent.status}`}`,
-      )
-    }
-    if (parent.stdout === "" || parent.stdout === repository) return repository
-    repository = parent.stdout
-  }
 }
