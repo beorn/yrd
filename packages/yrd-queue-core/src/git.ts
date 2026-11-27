@@ -546,15 +546,11 @@ export async function invokeGit(
   const { args, cwd, selection } = invocation
   const abort = new AbortController()
   const protocol = selection?.contract === "root-v1" && !observation ? new GitProtocol(abort) : undefined
-  // Worktree custody reads the complete index to find gitlinks, even in large leaf components.
-  const maxStdoutBytes =
-    selection?.contract !== "root-v1" &&
-    args.length === 3 &&
-    args[0] === "ls-files" &&
-    args[1] === "--stage" &&
-    args[2] === "-z"
-      ? 32 * 1024 * 1024
-      : undefined
+  // Worktree custody compares the index and HEAD gitlinks, even in large leaf components.
+  const indexRead = args.length === 3 && args[0] === "ls-files" && args[1] === "--stage" && args[2] === "-z"
+  const headTreeRead =
+    args.length === 4 && args[0] === "ls-tree" && args[1] === "-r" && args[2] === "-z" && args[3] === "HEAD"
+  const maxStdoutBytes = selection?.contract !== "root-v1" && (indexRead || headTreeRead) ? 32 * 1024 * 1024 : undefined
   const timeoutMs =
     selection?.contract !== "root-v1"
       ? options.timeoutMs

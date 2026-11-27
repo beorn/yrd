@@ -90,9 +90,9 @@ function declareGit(root: string, value: string, file?: string): void {
 }
 
 describe("the git runner", () => {
-  // @failure An intact native Git index above the default capture budget is refused during candidate cleanup.
+  // @failure An intact native Git index or tree above the default capture budget is refused during candidate cleanup.
   // @level l2; @consumer Yrd candidate cleanup; @testonly none
-  it("returns the complete native index above the default capture budget", async () => {
+  it("returns complete native custody reads above the default capture budget", async () => {
     const root = temporaryRoot("large-native-index")
     await using process = createProcess({ cwd: root })
     const git = gitIn(root, process)
@@ -103,13 +103,22 @@ describe("the git runner", () => {
       { length: 93_000 },
       (_, row) => `100644 ${blob} 0\t${prefix}${String(row).padStart(6, "0")}\0`,
     ).join("")
-    expect(Buffer.byteLength(index)).toBeGreaterThan(16 * 1024 * 1024)
     await git(["update-index", "-z", "--index-info"], index)
+    await git(["-c", "user.name=fixture", "-c", "user.email=fixture@yrd.test", "commit", "--quiet", "-m", "fixture"])
 
-    const result = await gitRunner.seamProcess(git, root).run({ repo: root, args: ["ls-files", "--stage", "-z"] })
-
-    expect(result.code).toBe(0)
-    expect(Bun.CryptoHasher.hash("sha256", result.stdout, "hex")).toBe(Bun.CryptoHasher.hash("sha256", index, "hex"))
+    const tree = index.replaceAll(`100644 ${blob} 0\t`, `100644 blob ${blob}\t`)
+    const seam = gitRunner.seamProcess(git, root)
+    for (const [args, expected] of [
+      [["ls-files", "--stage", "-z"], index],
+      [["ls-tree", "-r", "-z", "HEAD"], tree],
+    ] as const) {
+      expect(Buffer.byteLength(expected)).toBeGreaterThan(16 * 1024 * 1024)
+      const result = await seam.run({ repo: root, args })
+      expect(result.code).toBe(0)
+      expect(Bun.CryptoHasher.hash("sha256", result.stdout, "hex")).toBe(
+        Bun.CryptoHasher.hash("sha256", expected, "hex"),
+      )
+    }
   })
 
   // @failure An incomplete index read appears complete, or safe cleanup silently drops the worktree.
