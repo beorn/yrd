@@ -288,6 +288,7 @@ function buildProgram(
       releaseCheckout?: boolean
       retire?: boolean
       tip?: string
+      supersededBy?: string
       submodules?: boolean
       dryRun?: boolean
       apply?: boolean
@@ -307,6 +308,27 @@ function buildProgram(
       throw new Error(
         "--discard requires drop <branch> (--local | --retire) --tip <full-commit>; --release-checkout requires --local",
       )
+    }
+    if (options.supersededBy !== undefined) {
+      // @cto rulings (task/incident-clear-body, 44e1fa74): the undo pointer rides only on a reviewed discard, whose
+      // retirement row it joins; anywhere else no row would carry it, so it is refused rather than ignored.
+      if (
+        command !== "drop" ||
+        !options.discard ||
+        (!options.retire && !options.local) ||
+        options.releaseCheckout ||
+        branch === undefined
+      ) {
+        throw new Error(
+          "--superseded-by requires drop <branch> (--local | --retire) --discard --tip <full-commit> --issue <id> --reason <why>; " +
+            "it records the commit that superseded the discarded tip on that retirement row",
+        )
+      }
+      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(options.supersededBy)) {
+        throw new Error(
+          `--superseded-by ${options.supersededBy} is not a full commit oid; name the superseding commit's full hash`,
+        )
+      }
     }
     if (
       command === "drop" &&
@@ -428,7 +450,7 @@ function buildProgram(
       | {
           command: "withdraw" | "drop"
           branch: string
-          retire?: Readonly<{ tip: string; discard?: boolean; issue?: string; dryRun?: true }>
+          retire?: Readonly<{ tip: string; discard?: boolean; issue?: string; supersededBy?: string; dryRun?: true }>
         }
       | { command: "drop-issue"; issue: string; submodules?: boolean; apply?: boolean; dryRun?: boolean }
       | {
@@ -438,6 +460,7 @@ function buildProgram(
           issue?: string
           releaseCheckout?: boolean
           discard?: boolean
+          supersededBy?: string
           submodules?: boolean
           dryRun?: boolean
           apply?: boolean
@@ -447,6 +470,7 @@ function buildProgram(
         command: "drop-local",
         ...(options.repo === undefined ? {} : { authorRepo: options.repo }),
         discard: options.discard,
+        ...(options.supersededBy === undefined ? {} : { supersededBy: options.supersededBy }),
         releaseCheckout: options.releaseCheckout,
         submodules: options.submodules,
         dryRun: options.dryRun,
@@ -465,6 +489,7 @@ function buildProgram(
                 tip: options.tip,
                 ...(options.discard === undefined ? {} : { discard: options.discard }),
                 ...(options.issue === undefined ? {} : { issue: options.issue }),
+                ...(options.supersededBy === undefined ? {} : { supersededBy: options.supersededBy }),
                 ...(options.dryRun ? { dryRun: true as const } : {}),
               },
             }
@@ -1641,6 +1666,10 @@ function buildProgram(
         "retire an ended origin branch, or end a draft whose exact tip is already accepted by fresh origin main; requires --tip and --reason. A branch the merge already removed needs no retire: the merge commit names its tip as a parent and is the custody proof",
       )
       .option("--tip <commit>", "expected full current commit for --local or --retire")
+      .option(
+        "--superseded-by <commit>",
+        "with --local --discard or --retire --discard, the full commit that superseded the discarded tip; recorded beside that tip on the retirement rows (and a root dropped event) so a wrong discard can be undone before gc",
+      )
       .option("--repo <path>", REPO_HELP)
       .option(
         "--issue <id>",

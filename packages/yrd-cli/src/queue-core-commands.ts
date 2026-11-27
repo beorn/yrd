@@ -521,7 +521,7 @@ export type CoreQueueCommand =
       by: string
       reason?: string
       recipient?: string
-      retire?: Readonly<{ tip: string; discard?: boolean; issue?: string; dryRun?: true }>
+      retire?: Readonly<{ tip: string; discard?: boolean; issue?: string; supersededBy?: string; dryRun?: true }>
     }>
   | Readonly<{
       command: "drop-issue"
@@ -536,6 +536,8 @@ export type CoreQueueCommand =
   | Readonly<{
       command: "drop-local"
       discard?: boolean
+      /** With discard: the full commit that superseded the discarded tip (@cto 44e1fa74). */
+      supersededBy?: string
       releaseCheckout?: boolean
       submodules?: boolean
       dryRun?: boolean
@@ -1105,6 +1107,7 @@ export async function coreQueueCommand(
                 issue: request.issue,
                 reason: request.reason,
                 discard: request.discard,
+                ...(request.supersededBy === undefined ? {} : { supersededBy: request.supersededBy }),
               }
             : {
                 branch: request.branch,
@@ -1113,6 +1116,7 @@ export async function coreQueueCommand(
                 reason: request.reason,
                 ...(request.retire?.discard ? { discard: true } : {}),
                 ...(request.retire?.issue === undefined ? {} : { issue: request.retire.issue }),
+                ...(request.retire?.supersededBy === undefined ? {} : { supersededBy: request.retire.supersededBy }),
                 ...(request.retire?.dryRun ? { dryRun: true as const } : {}),
               },
       }).catch((cause: unknown) => {
@@ -2310,6 +2314,20 @@ export async function coreQueueCommand(
           )
         }
       }
+      const supersededBy = request.command === "drop-local" ? request.supersededBy : undefined
+      if (supersededBy !== undefined) {
+        if (request.command !== "drop-local" || request.discard !== true) {
+          throw new Error("--superseded-by requires drop <branch> --local --discard")
+        }
+        // An undo pointer the object store cannot resolve could never restore the discard, so it is refused first.
+        try {
+          await authorGit(["cat-file", "-e", `${supersededBy}^{commit}`])
+        } catch (cause) {
+          throw new Error(`--superseded-by ${supersededBy} is not a commit in ${authorRepo}: ${String(cause)}`, {
+            cause,
+          })
+        }
+      }
       if (request.branch === config.target.branch || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(request.tip)) {
         throw new Error("drop --local requires a non-target branch and a full expected commit oid")
       }
@@ -2493,6 +2511,11 @@ export async function coreQueueCommand(
                 })
               : undefined
           const reason = request.reason ?? "explicit local branch cleanup"
+          // The dropped event's content is the reason, so the superseding commit rides there beside the kept tip.
+          const notes = [
+            ...(discardNote === undefined ? [] : [discardNote]),
+            ...(supersededBy === undefined ? [] : [`superseded by ${supersededBy}`]),
+          ]
           const result = await retireLocalBranch({
             repo: authorRepo,
             git: authorGit,
@@ -2501,11 +2524,20 @@ export async function coreQueueCommand(
             actor: request.by,
             owner: change?.submitter,
             issue: bound,
-            reason: discardNote === undefined ? reason : `${reason} (${discardNote})`,
+            reason: notes.length === 0 ? reason : `${reason} (${notes.join("; ")})`,
+            ...(supersededBy === undefined ? {} : { supersededBy }),
             dryRun: false,
             log,
             protections: async () => {
-              const read = await readBranchProtections(io, { repo: authorRepo, branch, tip: head, issue: bound })
+              const read = await readBranchProtections(io, {
+                repo: authorRepo,
+                branch,
+                tip: head,
+                issue: bound,
+                // @cto 44e1fa74: tell the host this is the explicit discard and which --issue it carries, so a free-text
+                // binding equal to it exactly reads only the branch-drop authority; a differing --issue was kept above.
+                ...(request.discard === true && issue !== undefined ? { discard: { issue } } : {}),
+              })
               bindingUnresolved = read.bindingUnresolved
               return read.protections
             },
@@ -2530,7 +2562,11 @@ export async function coreQueueCommand(
             ...(result.archiveRef === undefined ? {} : { archiveRef: result.archiveRef }),
             // 33188: an explicit withdrawal reads as one on the receipt, and names the event that kept the tip.
             ...(request.discard === true && result.outcome === "removed"
-              ? { intent: "local-discard" as const, actor: request.by }
+              ? {
+                  intent: "local-discard" as const,
+                  actor: request.by,
+                  ...(supersededBy === undefined ? {} : { supersededBy }),
+                }
               : {}),
             // The event that keeps the tip lives on the change chain at origin (30683).
             ...(result.outcome === "removed" && result.event !== undefined
