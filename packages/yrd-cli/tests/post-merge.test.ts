@@ -313,6 +313,7 @@ it.each([
   { mode: "observed-merge" },
   { mode: "observed-legacy" },
   { mode: "provider-lost-reply" },
+  { mode: "close-id-moved" },
   { mode: "resolve-retry" },
   { mode: "walk-retry" },
 ] as const)(
@@ -325,6 +326,7 @@ it.each([
       mode === "reuse-predeclaration" ||
       mode === "concurrent" ||
       mode === "provider-lost-reply" ||
+      mode === "close-id-moved" ||
       mode === "resolve-retry" ||
       mode === "walk-retry" ||
       mode === "observed-legacy"
@@ -377,7 +379,10 @@ it.each([
                   resolveCalls,
                 ]
               : [process.execPath, fakeProvider, "resolve", "<raw>"],
-        close: ["sh", "-c", closeScript, "close", "<key>", "<reason>", "<id>", closeCalls, closeReady, closeRelease],
+        close:
+          mode === "close-id-moved"
+            ? [process.execPath, fakeProvider, "close-id-moved", "<key>", "<reason>", "<id>", closeCalls]
+            : ["sh", "-c", closeScript, "close", "<key>", "<reason>", "<id>", closeCalls, closeReady, closeRelease],
       }),
     )
     const issueDeclaration = readFileSync(join(repo, "issues.yml"), "utf8")
@@ -825,6 +830,67 @@ it.each([
         .map((line) => line.split("\t"))
       expect(calls).toHaveLength(2)
       expect(calls[0]).toEqual(calls[1])
+      expect(readPostMergeIssueDiagnostics(workdir)).toEqual([])
+      return
+    }
+    if (mode === "close-id-moved") {
+      // The provider refuses the carried id because the request recorded under it differs, and answers the closed
+      // issue's settled id with no-change. The closer must take that as fulfilled and record the effect, so a restart
+      // neither calls the provider again nor re-escalates the failure (#38945).
+      const mergedBranches = ["task/first", "task/second"]
+      for (const branch of mergedBranches) {
+        const { history } = await readBranchHistory(store, "main", branch)
+        await using runner = createPostMerge({
+          workdir,
+          launchEvent: testLauncher,
+          cwd: repo,
+          git,
+          store,
+          cleanup: async () => {},
+          report: (message) => diagnostics.push(message),
+        })
+        runner.nudge({
+          ...context,
+          target: history!.state.merge!,
+          merged: [branch],
+          projectRoot: repo,
+          queueBranch: "main",
+        })
+        await runner[Symbol.asyncDispose]()
+      }
+      const calls = readFileSync(closeCalls, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => line.split("\t"))
+      expect(calls).toHaveLength(expectedCloses * 2)
+      for (let index = 0; index < calls.length; index += 2) {
+        expect(calls[index]![2]).not.toMatch(/:settled$/u)
+        expect(calls[index + 1]![0]).toBe(calls[index]![0])
+        expect(calls[index + 1]![2]).toBe(calls[index]![2]! + ":settled")
+      }
+      expect(Object.values((await readEventQueue(store, "main")).issueEffects)).toHaveLength(expectedCloses)
+      expect(readPostMergeIssueDiagnostics(workdir)).toEqual([])
+      const mergedReading = await readBranchHistory(store, "main", "task/second")
+      const action = {
+        ...context,
+        target: mergedReading.history!.state.merge!,
+        merged: mergedBranches,
+        projectRoot: repo,
+        queueBranch: "main",
+      }
+      await using restart = createPostMerge({
+        workdir,
+        launchEvent: testLauncher,
+        cwd: repo,
+        git,
+        store,
+        cleanup: async () => {},
+        report: (message) => diagnostics.push(message),
+      })
+      restart.nudge(action)
+      await restart[Symbol.asyncDispose]()
+      expect(readFileSync(closeCalls, "utf8").trim().split("\n")).toHaveLength(expectedCloses * 2)
+      expect(Object.values((await readEventQueue(store, "main")).issueEffects)).toHaveLength(expectedCloses)
       expect(readPostMergeIssueDiagnostics(workdir)).toEqual([])
       return
     }

@@ -50,6 +50,32 @@ export type AbandonedPostMerge = Readonly<{ branch: string; attempts: number; re
 /** What one attempt left owed: the branches its failure is charged to, and why. Empty when it settled. */
 type AttemptOutcome = Readonly<{ failed: readonly string[]; reason: string; evidence: string }>
 
+/**
+ * A provider refuses a replayed operation id whose recorded request differs from this attempt's: the identity moved
+ * since the attempt that landed it (a key that changed between resolves, or a request rebuilt from the current
+ * state). Only this refusal earns the one settled retry; every other failure is carried as before. #38947 gives the
+ * refusal a typed code; until it lands, the sentence is the only thing a provider says (@cto 61719dc4 condition 1).
+ */
+const STATE_OPERATION_ID_MOVED = /already belongs to another request/u
+
+/**
+ * A provider's stderr belongs to the attempt's own report, not the closer's process stream: the failure diagnostic
+ * already carries its last line, and buffering the rest into whole reported lines keeps every chunk with the round's
+ * evidence instead of escaping through the caller (yrd #38945).
+ */
+function reportedProviderStderr(report: (message: string) => void): (text: string) => void {
+  let pending = ""
+  return (chunk) => {
+    pending += chunk
+    const lines = pending.split("\n")
+    pending = lines.pop() ?? ""
+    for (const line of lines) {
+      const text = line.trim()
+      if (text !== "") report(`issuesProvider: ${text}`)
+    }
+  }
+}
+
 const failingStatus = (status: unknown): boolean =>
   status === "failed" || status === "unavailable" || status === "record-failed"
 
@@ -471,6 +497,7 @@ async function closeMergedIssues(
             const resolved = await runIssuesVerb({
               verb: "resolve",
               args: [reference.value],
+              stderr: reportedProviderStderr(input.report),
               projectRoot: input.projectRoot,
               // The queue's own clone holds the delivered merge; the project root may not have fetched it yet (38780).
               declarationRepository: input.store.repo,
@@ -535,6 +562,7 @@ async function closeMergedIssues(
                 verb: "close",
                 args: [key, "completed"],
                 id: providerId,
+                stderr: reportedProviderStderr(input.report),
                 projectRoot: input.projectRoot,
                 declarationRepository: input.store.repo,
                 declarationCommit: mergeSha,
@@ -547,6 +575,35 @@ async function closeMergedIssues(
               })
               if (!closed.ok) {
                 const diagnostic = closed.message
+                // A retry of this key can carry an identity that moved since the attempt that landed it: the
+                // provider then refuses the id because the request recorded under it differs, and no effect was
+                // written (the attempt died between the apply and its record). A fresh, deterministic id settles
+                // it without re-deciding anything: closing an issue this merge already closed answers no-change,
+                // and an issue still open is closed now, which is the same intent. One retry per key per attempt,
+                // and the recorded effect below is what stops the carrying.
+                if (STATE_OPERATION_ID_MOVED.test(diagnostic)) {
+                  const settled = await runIssuesVerb({
+                    verb: "close",
+                    args: [key, "completed"],
+                    id: `${providerId}:settled`,
+                    stderr: reportedProviderStderr(input.report),
+                    projectRoot: input.projectRoot,
+                    declarationRepository: input.store.repo,
+                    declarationCommit: mergeSha,
+                    targetCommit: input.target,
+                    cwd: input.cwd,
+                    env: input.env,
+                    signal: input.stop,
+                    timeoutMs: UPDATE_TIMEOUT_MS,
+                    noProgressTimeoutMs: UPDATE_TIMEOUT_MS,
+                  })
+                  if (settled.ok) {
+                    closedKeys.set(providerId, true)
+                    declaration = settled.envelope.declaration
+                    outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
+                    continue
+                  }
+                }
                 closedKeys.set(providerId, false)
                 keysClosed = false
                 outcomes.push({

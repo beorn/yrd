@@ -51,6 +51,20 @@ if (mode === "json") {
     process.exit(9)
   }
   process.stdout.write(`${JSON.stringify(page.page)}\n`)
+} else if (mode === "close-id-moved") {
+  const [key, reason, id, callsLog] = rest
+  if (key === undefined || reason === undefined || id === undefined || callsLog === undefined) {
+    throw new Error("close-id-moved requires key, reason, id and a calls log")
+  }
+  appendFileSync(callsLog, `${key}\t${reason}\t${id}\n`)
+  if (id.endsWith(":settled")) {
+    process.stdout.write(`${JSON.stringify({ noChange: true })}\n`)
+  } else {
+    process.stderr.write(
+      `issues close: State operation id ${JSON.stringify(id)} already belongs to another request (different fingerprint: recorded close-with-evidence:aaaa, requested close-with-evidence:bbbb)\n`,
+    )
+    process.exit(3)
+  }
 } else if (mode === "count") {
   const [callsLog, bytes] = rest
   if (callsLog === undefined || bytes === undefined) throw new Error("count requires a calls log and bytes")
