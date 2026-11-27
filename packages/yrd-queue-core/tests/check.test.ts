@@ -616,9 +616,10 @@ describe("a check log and the text the queue read", () => {
       } as unknown as ProcessResult),
     })
     expect(result).toMatchObject({ result: "stuck", exit: "timeout" })
-    expect(result.why).toBe(
-      `killed at the 420 s bound in stage site-build full, ${rss}; log named no usable YRD-CHECK-RESULT`,
-    )
+    expect(result.why).toContain(`killed at the 420 s bound in stage site-build full, ${rss}`)
+    // #38908: the kill names the host load it ran under, so a kill can be read as load rather than as a bad
+    // change. The numbers are the host's, not the test's, so only their shape is pinned here.
+    expect(result.why).toMatch(/, host load \d+\.\d+ over \d+ core\(s\); log named no usable YRD-CHECK-RESULT$/u)
   })
 
   it("propagates a reader exception and closes its partial log", async () => {
