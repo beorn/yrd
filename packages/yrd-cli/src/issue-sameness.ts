@@ -24,6 +24,10 @@ export type IssueComparerInput = Readonly<{
  * structure. When the provider says that raw is missing from saved state, the comparer asks once more for the
  * text after the last `/`, as its own opaque raw key, through this same memo. It names that one key, or the
  * lookup's own failure. That ask never makes the two spellings one issue.
+ *
+ * One leading `#` is how a reference is written, never what it names (38903): `34127` and `#34127` are one issue
+ * before the provider is asked, so a provider that is down, silent or absent cannot split one issue into two
+ * bindings over punctuation. km resolves and shows both with one key; GitHub spells the same issue `#N`.
  */
 export function issueComparer(input: IssueComparerInput): SameIssue {
   const resolutions = new Map<string, Promise<Resolution>>()
@@ -35,7 +39,7 @@ export function issueComparer(input: IssueComparerInput): SameIssue {
     return reading
   }
   return async (a, b) => {
-    if (a === b) return { same: true }
+    if (a === b || sigilSpelling(a) === sigilSpelling(b)) return { same: true }
     const [left, right] = await Promise.all([resolveOnce(a), resolveOnce(b)])
     if ("key" in left && "key" in right) {
       return left.key === right.key ? { same: true } : { same: false, resolved: true }
@@ -43,6 +47,11 @@ export function issueComparer(input: IssueComparerInput): SameIssue {
     const why = [left, right].flatMap((resolution) => ("why" in resolution ? [resolution.why] : []))
     return { same: false, resolved: false, why: why.join("; ") }
   }
+}
+
+/** The key a reference names, without the one `#` a reference may be written with. Never more than one. */
+function sigilSpelling(raw: string): string {
+  return raw.length > 1 && raw.startsWith("#") ? raw.slice(1) : raw
 }
 
 /** Appended to a mismatch receipt: what the comparer said beyond the two spellings it names. */

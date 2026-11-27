@@ -74,6 +74,27 @@ describe("issueComparer (31060)", () => {
     expect(calls(root)).toEqual([])
   })
 
+  it("one leading # is the sigil spelling of the same key, so a dead provider cannot split 34127 from #34127", async () => {
+    // 38903: `34127` and `#34127` are one issue whatever the provider says, because `#` is how a reference is
+    // written, never what it names. km answers both with one key, GitHub spells the same issue `#N`, and a
+    // provider that is down must not turn punctuation into a conflicting binding.
+    const dead = resolving('printf \'"%s": issue not found in saved state\\n\' "$1" >&2; exit 1')
+    expect(await comparer(dead)("34127", "#34127")).toEqual({ same: true })
+    expect(calls(dead)).toEqual([])
+  })
+
+  it("a second sigil, or a sigil inside the key, is a different key and goes to resolve (@cto 38903)", async () => {
+    // The equivalence is exactly one leading `#` on an otherwise byte-equal key. Anything else that differs is
+    // a different key until the provider says otherwise, so a scoped or doubled spelling is resolved, never guessed.
+    const root = resolving(
+      `case "$1" in 34127|'#34127') printf '{"keys":["k-34127"]}\\n';; *) printf '{"keys":["k-other"]}\\n';; esac`,
+    )
+    const same = comparer(root)
+    expect(await same("##34127", "34127")).toEqual({ same: false, resolved: true })
+    expect(await same("hh#34127", "34127")).toEqual({ same: false, resolved: true })
+    expect(calls(root).sort()).toEqual(["##34127", "34127", "hh#34127"])
+  })
+
   it("two spellings resolving to one key are one issue; each distinct raw is resolved once per comparer", async () => {
     const root = resolving(ONE_ISSUE)
     const same = comparer(root)
@@ -82,7 +103,7 @@ describe("issueComparer (31060)", () => {
     expect(await same("26585", "31060")).toEqual({ same: false, resolved: true })
     expect(calls(root).sort()).toEqual(["#26585", "26585", "31060", "@hh/tooling/26585-proof"])
     // A new invocation's comparer never reuses the earlier answers.
-    expect(await comparer(root)("26585", "#26585")).toEqual({ same: true })
+    expect(await comparer(root)("26585", "@hh/tooling/26585-proof")).toEqual({ same: true })
     expect(calls(root).filter((raw) => raw === "26585")).toHaveLength(2)
   })
 
@@ -114,7 +135,7 @@ describe("issueComparer (31060)", () => {
 
   it("a provider that outlives the bound falls back to exact and says it was killed", async () => {
     const root = resolving("sleep 5")
-    const judged = await comparer(root, 200)("26585", "#26585")
+    const judged = await comparer(root, 200)("26585", "31060")
     expect(judged).toMatchObject({ same: false, resolved: false })
     expect("why" in judged ? judged.why : "").toMatch(/resolve 26585: .*killed after 200 ms/u)
   })
@@ -188,10 +209,11 @@ describe("issueComparer (31060)", () => {
     { name: "an issues.yml without resolve", verbs: { view: ["sh", "-c", "printf '{}'"] } },
   ])("$name falls back to exact and says no store was asked", async ({ verbs }) => {
     const root = project(verbs === undefined ? undefined : () => verbs)
-    const judged = await comparer(root)("26585", "#26585")
+    // Two keys, not two spellings of one: the sigil pair answers without a store (38903).
+    const judged = await comparer(root)("26585", "31060")
     expect(judged).toMatchObject({ same: false, resolved: false })
     const why = "why" in judged ? judged.why : ""
     expect(why).toContain(`26585 was not checked against an issues store, because ${root} declares none for it`)
-    expect(why).toContain("#26585 was not checked against an issues store")
+    expect(why).toContain("31060 was not checked against an issues store")
   })
 })
