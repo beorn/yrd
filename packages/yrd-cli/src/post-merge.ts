@@ -334,7 +334,10 @@ type Survival =
  */
 async function survivalOf(git: GitRunner, base: string, landing: string, commit: string): Promise<Survival> {
   const paths = await changedPathsOf(git, commit)
+  // `--literal-pathspecs` (@cto ea5c5f52): a path with `*`, `[` or a leading `:` is otherwise read as a glob or as
+  // pathspec magic, which can match some other file and decide a reverted change survived.
   const net = await git([
+    "--literal-pathspecs",
     "diff",
     "--name-only",
     "-z",
@@ -349,6 +352,7 @@ async function survivalOf(git: GitRunner, base: string, landing: string, commit:
   // `--full-history`, because default simplification prunes a commit whose path the tip no longer has — exactly the
   // supersession this reads for.
   const later = await git([
+    "--literal-pathspecs",
     "log",
     "--format=%H",
     "--no-merges",

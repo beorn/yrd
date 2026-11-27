@@ -84,6 +84,78 @@ const closedKeys = (path: string): string[] =>
     : []
 
 /**
+ * @cto ea5c5f52: a path with a glob character is a literal path here. Without `--literal-pathspecs` the trailer
+ * commit's `rules[1].txt` would read as a glob matching the surviving `rules1.txt`, the net diff would look non-empty
+ * and the reverted change would close an issue it never delivered.
+ */
+it("reads a path with a glob character as a literal path", async () => {
+  const { repo, workdir, git, closeCalls, queue } = await world()
+  const launches: IssueEventLaunchInput[] = []
+  const capture = (input: IssueEventLaunchInput): IssueEventLaunch => {
+    launches.push(input)
+    return { launched: true, log: `${input.workdir}/logs/issue-events/${input.opId}.log` }
+  }
+  await queue("task/glob")
+  writeFileSync(join(repo, "rules[1].txt"), "the change that is later taken back\n")
+  await git(["add", "rules[1].txt"])
+  await git(["commit", "--quiet", "-m", "feat: a ruleset with a bracketed name\n\nCloses: issue-glob"])
+  const trailerCommit = (await git(["rev-parse", "HEAD"])).trim()
+  await git(["rm", "--quiet", "rules[1].txt"])
+  await git(["commit", "--quiet", "-m", "fix: take the bracketed ruleset out\n\nRefs: issue-glob"])
+  const superseding = (await git(["rev-parse", "HEAD"])).trim()
+  // The decoy: a surviving file the glob would match if the path were not literal.
+  writeFileSync(join(repo, "rules1.txt"), "survives\n")
+  await git(["add", "rules1.txt"])
+  await git(["commit", "--quiet", "-m", "docs: the surviving sibling"])
+  await submit(git, "origin", {
+    branch: "task/glob",
+    submitter: "fixture",
+    target: { remote: "origin", branch: "main" },
+  })
+  await git(["checkout", "--quiet", "main"])
+
+  const stop = new AbortController()
+  const merged: string[] = []
+  const diagnostics: string[] = []
+  try {
+    expect(
+      await coreQueueCommand(
+        repo,
+        {
+          cwd: repo,
+          stdout: (line) => diagnostics.push(line),
+          stderr: (line) => diagnostics.push(line),
+          localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
+        },
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterRound: async (outcome) => {
+            merged.push(...outcome.merged)
+            if (!merged.includes("task/glob")) return
+            await vi.waitFor(() => expect(launches.some((launch) => launch.opId.includes("superseded"))).toBe(true), {
+              timeout: 20000,
+            })
+            stop.abort()
+          },
+        },
+        { workdir, json: true, launchEvent: capture, projectRoot: repo },
+      ),
+      diagnostics.join(" "),
+    ).toBe(0)
+  } finally {
+    stop.abort()
+  }
+
+  expect(closedKeys(closeCalls), "the glob-matching sibling does not keep a reverted change alive").toEqual([])
+  const refused = launches.find((launch) => launch.issue === "issue-glob" && launch.opId.includes("superseded"))
+  expect(refused).toBeDefined()
+  expect(refused?.text).toContain(trailerCommit.slice(0, 12))
+  expect(refused?.text).toContain(superseding.slice(0, 12))
+}, 180_000)
+
+/**
  * AC2: a branch or env issue link records a merged event at most. It is never closing intent, whatever the merge
  * commit's own `Issue:` header says.
  */
