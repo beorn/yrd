@@ -164,6 +164,32 @@ describe("the git runner", () => {
     expect(existsSync(candidate)).toBe(false)
   })
 
+  // @failure Cleanup trusts a successful root-v1 enumeration whose stdout may be incomplete.
+  // @level l2; @consumer Yrd candidate cleanup; @testonly none
+  it("keeps a candidate when root-v1 custody cannot be established", async () => {
+    const source = temporaryRoot("root-v1-custody")
+    const candidate = join(source, "candidate")
+    const native = gitIn(source)
+    await native(["init", "--quiet"])
+    writeFileSync(join(source, "tracked"), "candidate content\n")
+    await native(["add", "tracked"])
+    await native(["-c", "user.name=fixture", "-c", "user.email=fixture@yrd.test", "commit", "--quiet", "-m", "fixture"])
+    const commit = (await native(["rev-parse", "HEAD"])).trim()
+    const executable = protocolExecutable(
+      source,
+      'frame({version:1, token, ready:true}); closeSync(3); const git=Bun.which("git"); if (!git || !process.execve) throw new Error("native Git required"); process.execve(git, [git, ...process.argv.slice(3)], process.env);',
+    )
+    await using process = createProcess({ cwd: source })
+    const tree = await freshWorktree(native, source, commit, candidate, {
+      process,
+      selection: { executable, contract: "root-v1", scope: "local", origin: "fixture" },
+    })
+
+    await expect(discardWorktree(tree)).rejects.toThrow(/root-v1.*custody.*39095/u)
+    expect(readFileSync(join(candidate, "tracked"), "utf8")).toBe("candidate content\n")
+    expect(await native(["worktree", "list", "--porcelain"])).toContain(`worktree ${candidate}\n`)
+  })
+
   // @failure: a late notification makes an old ending visible, or selection truncates a listed history.
   // @level l2; @consumer queue list acquisition; @testonly none
   it("selects current recorded endings and reads every selected history completely", async () => {
