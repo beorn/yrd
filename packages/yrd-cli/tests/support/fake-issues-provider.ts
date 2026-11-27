@@ -7,6 +7,8 @@
  *   rail-telemetry <refusal>  write km's lookup counters, then the refusal, and exit 1
  *   rail-telemetry-envelope <reason>  write km's counters, then a JSON envelope whose skipped[].reason is the
  *                                 refusal at a position past 300 characters, and exit 1
+ *   rail-refusal-envelope <reason>  write km's counters, then km's own refused envelope whose refusal.reason sits
+ *                                 past 300 characters (the operation id is echoed first), and exit 1
  *   raised <message>  write a code frame, then `TypeError: <message>`, and exit 1 (a provider that threw)
  *   sleep  sleep 30 s (the caller's timeout must kill it)
  *   stall  write one stderr line, then sleep 30 s silently (the no-progress lease must kill it)
@@ -114,6 +116,22 @@ if (mode === "json") {
           reason,
         },
       ],
+    })}\n`,
+  )
+  process.exit(1)
+} else if (mode === "rail-refusal-envelope") {
+  // km's own refusal envelope: the reason follows the operation id it echoes, past a 300-character text cut (#38952).
+  const [reason] = rest
+  if (reason === undefined) throw new Error("rail-refusal-envelope requires a reason")
+  process.stderr.write("lookup-substeps start=1 end=2 route=certified outcome=ledger-hit\n")
+  process.stdout.write(
+    `${JSON.stringify({
+      kmOutcome: 1,
+      verb: "bd close",
+      ref: "01M8CN5GQF7FDHJKCC45RDVRR7",
+      operationId: `yrd1-0${"a".repeat(58)}`,
+      status: "refused",
+      refusal: { kind: "landing-failed", reason },
     })}\n`,
   )
   process.exit(1)

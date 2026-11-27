@@ -153,9 +153,10 @@ function providerDiagnostic(stderr: string): string | undefined {
 }
 
 /**
- * A `--json` provider may name its refusal only in the envelope it printed, under `skipped[].reason`, while stderr
- * carries counters alone (#38952). Read that field, never the envelope as text: the reason sits well past the
- * 300-character bound a one-line diagnostic keeps, so a text cut hides exactly the cause a caller needs.
+ * A `--json` provider may name its refusal only in the envelope it printed — km's rail writes `refusal.reason`, and a
+ * batch write's `skipped[].reason` — while stderr carries counters alone (#38952). Read those fields, never the
+ * envelope as text: the reason sits well past the 300-character bound a one-line diagnostic keeps (behind the
+ * operation id the rail echoes first), so a text cut hides exactly the cause a caller needs.
  */
 function stdoutRefusal(stdout: string): string | undefined {
   let parsed: unknown
@@ -170,6 +171,11 @@ function stdoutRefusal(stdout: string): string | undefined {
     return undefined
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined
+  const refusal = (parsed as { refusal?: unknown }).refusal
+  if (refusal !== null && typeof refusal === "object" && typeof (refusal as { reason?: unknown }).reason === "string") {
+    const line = (refusal as { reason: string }).reason.replace(/\s+/gu, " ")
+    return line.length > 300 ? `${line.slice(0, 300)}…` : line
+  }
   const skipped = (parsed as { skipped?: unknown }).skipped
   if (!Array.isArray(skipped)) return undefined
   const reasons = skipped.flatMap((entry) =>
