@@ -8,7 +8,7 @@
  * @testonly none
  * @consumer Hightea's km-source page reader · the Workboard grouping · every `yrd issues` row reader
  */
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { safeRemoveSync } from "removely"
@@ -380,13 +380,54 @@ describe("#37838 computed in_progress", () => {
   })
 })
 
+describe("hh #38996 the in-progress legs run beside the native read", () => {
+  // @failure The holds and activity legs ran only after the provider answered, so every `yrd issues list` paid the
+  //          activity journal read (~1 s on /hh/pm) on top of the page read and could not reach the 2 s open list.
+  //          The environment leg starting before the provider process starts is the proof that they overlap.
+  it("starts the environment read before the provider process starts", async () => {
+    const root = join(realpathSync(mkdtempSync(join(tmpdir(), "yrd-in-progress-overlap-"))), "project")
+    roots.push(join(root, ".."))
+    mkdirSync(root, { recursive: true })
+    const marker = join(root, "..", "environments-started")
+    const starts = join(root, "..", "provider-starts.jsonl")
+    git(root, "init", "--quiet", "--initial-branch=main")
+    writeFileSync(
+      join(root, "issues.yml"),
+      `view: ${JSON.stringify([BUN, PROVIDER, "trace", "<key>", marker, starts])}\n`,
+    )
+    git(root, "add", "-A")
+    git(root, "commit", "--quiet", "-m", "seed")
+    await runIssuesVerb({
+      verb: "view",
+      args: ["issue-1"],
+      projectRoot: root,
+      cwd: root,
+      environments: async () => {
+        writeFileSync(marker, "")
+        return []
+      },
+      stderr: () => {},
+    })
+    // `trace` records whether the marker existed when the provider started (its field keeps the queue-test name).
+    expect(JSON.parse(readFileSync(starts, "utf8").trim())).toEqual({ key: "issue-1", queueOutputEmitted: true })
+  })
+})
+
 describe("#37838 a declared activity source that failed", () => {
   // @cto 8e7cbb99: an empty activity set says "nobody wrote", which a failed read never established. A known hold
   // still answers true; every other row says null, and the diagnostic the caller already wrote stays the only claim.
   const page = {
     rows: [
-      { path: "a/1-held.md", version: "v1", row: { id: "a/1-held.md", title: "held", status: "todo", owner: "@dev/1" } },
-      { path: "a/2-free.md", version: "v1", row: { id: "a/2-free.md", title: "free", status: "todo", owner: "@dev/2" } },
+      {
+        path: "a/1-held.md",
+        version: "v1",
+        row: { id: "a/1-held.md", title: "held", status: "todo", owner: "@dev/1" },
+      },
+      {
+        path: "a/2-free.md",
+        version: "v1",
+        row: { id: "a/2-free.md", title: "free", status: "todo", owner: "@dev/2" },
+      },
     ],
     next: null,
     complete: true,

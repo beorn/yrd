@@ -435,6 +435,52 @@ async function mainRefToRead(repository: string, env: NodeJS.ProcessEnv): Promis
  */
 const LIST_PAGE_TRAVERSE_BOUND = 256
 
+type Settled<T> = Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: unknown }>
+
+/** The in-progress inputs of one read: the environment holds, and the owner-activity journal when one is declared. */
+type InProgressRead = Readonly<{
+  now: number
+  holds: Settled<readonly IssuesEnvironmentHold[]>
+  activity?: Settled<readonly IssuesActivityEvent[]>
+}>
+
+/**
+ * Start both in-progress legs at once (hh #38996). Neither leg rejects: each settles into its value or its error, so
+ * a caller that returns early on a failed native read leaves no unhandled rejection behind, and the caller decides
+ * what a failed leg means exactly where it did when the legs ran one after the other. `now` is taken at the start,
+ * so the activity window and the annotation read the same instant.
+ */
+function startInProgressRead(
+  readEnvironments: NonNullable<RunIssuesVerbOptions["environments"]>,
+  activityArgv: readonly string[] | undefined,
+  where: Readonly<{ root: string; cwd: string }>,
+  runDeclared: ListPageRead["runDeclared"],
+): Promise<InProgressRead> {
+  const now = Date.now()
+  const settle = <T>(work: () => Promise<T>): Promise<Settled<T>> =>
+    work().then(
+      (value): Settled<T> => ({ ok: true, value }),
+      (error: unknown): Settled<T> => ({ ok: false, error }),
+    )
+  const holds = settle(() => readEnvironments(where))
+  const activity =
+    activityArgv === undefined
+      ? undefined
+      : settle(async () => {
+          const answered = await runDeclared(
+            substituteArgv(activityArgv, { cutoff: String(now - OWNER_ACTIVITY_WINDOW_MS) }),
+            commandText(activityArgv),
+          )
+          if (!answered.ok) throw new Error(answered.message)
+          return readActivity(answered.stdout)
+        })
+  return Promise.all([holds, activity]).then(([h, a]) => ({
+    now,
+    holds: h,
+    ...(a === undefined ? {} : { activity: a }),
+  }))
+}
+
 type ListPageRead = Readonly<{
   verb: IssuesVerb
   command: string
@@ -905,6 +951,13 @@ export async function runIssuesVerb(
   const wantsProgress = verb === "list-page" && pageRequestProgress(request.values.page)
   const progressOnly = wantsProgress && pageRequestNamesOnlyProgress(request.values.page)
   const providerValues = withoutProgress(request.values)
+  // hh #38996: the in-progress inputs (environment holds and the owner-activity journal) do not depend on the native
+  // read, so they start now and run beside it instead of after it — on `list` the activity leg alone added ~1 s to
+  // every answer. Each leg settles into a value or its error; the block below reports both exactly as before.
+  const inProgressRead =
+    IN_PROGRESS_VERBS.has(verb) && options.environments !== undefined
+      ? startInProgressRead(options.environments, declaration.activity, { root, cwd: options.cwd }, runDeclared)
+      : undefined
   let parsed: unknown
   let streamedPages: Record<string, unknown>[] | undefined
   if (progressOnly) {
@@ -982,10 +1035,13 @@ export async function runIssuesVerb(
         "progress:true needs an environment source on this read; this caller supplied none, so no hold was read",
       )
     }
+    // Started before the native read (see `inProgressRead`); `readEnvironments` is defined here, so it is too.
+    const read = await (inProgressRead ??
+      startInProgressRead(readEnvironments, declaration.activity, { root, cwd: options.cwd }, runDeclared))
     let holds: readonly IssuesEnvironmentHold[] | undefined
-    try {
-      holds = await readEnvironments({ root, cwd: options.cwd })
-    } catch (error) {
+    if (read.holds.ok) holds = read.holds.value
+    else {
+      const error = read.holds.error
       const detail = `in_progress columns unavailable: ${error instanceof Error ? error.message : String(error)}`
       if (wantsProgress) {
         return fail(
@@ -1001,19 +1057,13 @@ export async function runIssuesVerb(
       writeStderr(`yrd issues ${verb}: ${detail}\n`)
     }
     if (holds !== undefined) {
-      const now = Date.now()
+      const now = read.now
       let activity: readonly IssuesActivityEvent[] | undefined
       const activityArgv = declaration.activity
-      if (activityArgv !== undefined) {
-        const activityCommand = commandText(activityArgv)
-        try {
-          const answered = await runDeclared(
-            substituteArgv(activityArgv, { cutoff: String(now - OWNER_ACTIVITY_WINDOW_MS) }),
-            activityCommand,
-          )
-          if (!answered.ok) throw new Error(answered.message)
-          activity = readActivity(answered.stdout)
-        } catch (error) {
+      if (read.activity !== undefined) {
+        if (read.activity.ok) activity = read.activity.value
+        else {
+          const error = read.activity.error
           writeStderr(
             `yrd issues ${verb}: owner-activity columns unavailable: ${
               error instanceof Error ? error.message : String(error)
