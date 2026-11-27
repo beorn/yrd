@@ -5,6 +5,8 @@
  *   text   print a line that is not JSON and exit 0
  *   exit3  write "fake provider refused" to stderr and exit 3
  *   rail-telemetry <refusal>  write km's lookup counters, then the refusal, and exit 1
+ *   rail-telemetry-envelope <reason>  write km's counters, then a JSON envelope whose skipped[].reason is the
+ *                                 refusal at a position past 300 characters, and exit 1
  *   raised <message>  write a code frame, then `TypeError: <message>`, and exit 1 (a provider that threw)
  *   sleep  sleep 30 s (the caller's timeout must kill it)
  *   stall  write one stderr line, then sleep 30 s silently (the no-progress lease must kill it)
@@ -93,6 +95,27 @@ if (mode === "json") {
   if (refusal === undefined) throw new Error("rail-telemetry requires a refusal")
   process.stderr.write("lookup-substeps start=1 end=2 route=certified outcome=ledger-hit\n")
   process.stderr.write(`${refusal}\n`)
+  process.exit(1)
+} else if (mode === "rail-telemetry-envelope") {
+  // The refusal sits past 300 characters of envelope, where a one-line text cut would hide it (#38952).
+  const [reason] = rest
+  if (reason === undefined) throw new Error("rail-telemetry-envelope requires a reason")
+  process.stderr.write("lookup-substeps start=1 end=2 route=certified outcome=ledger-hit\n")
+  process.stdout.write(
+    `${JSON.stringify({
+      applied: [],
+      skipped: [
+        {
+          ref: "@km/work/a",
+          changedPaths: Array.from(
+            { length: 12 },
+            (_, index) => `/hh/var/wt/${index}-a-long-worktree-path-${"x".repeat(40)}`,
+          ),
+          reason,
+        },
+      ],
+    })}\n`,
+  )
   process.exit(1)
 } else if (mode === "raised") {
   const [message] = rest

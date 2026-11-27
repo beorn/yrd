@@ -152,6 +152,37 @@ function providerDiagnostic(stderr: string): string | undefined {
   return line.length > 300 ? `${line.slice(0, 300)}…` : line
 }
 
+/**
+ * A `--json` provider may name its refusal only in the envelope it printed, under `skipped[].reason`, while stderr
+ * carries counters alone (#38952). Read that field, never the envelope as text: the reason sits well past the
+ * 300-character bound a one-line diagnostic keeps, so a text cut hides exactly the cause a caller needs.
+ */
+function stdoutRefusal(stdout: string): string | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(stdout)
+  } catch {
+    // No envelope is not a fault: a provider that prints no JSON names its refusal on stderr (or not at all), and
+    // the failure keeps naming its exit code. A `{`-prefixed answer that does not parse also lands here, so the
+    // named cause is the counters-free stderr when there is one.
+    // silent-fallback-allow: the caller already reports "provider ended with exit N", so no failure is swallowed —
+    // only the attempt to read a field this envelope does not carry.
+    return undefined
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined
+  const skipped = (parsed as { skipped?: unknown }).skipped
+  if (!Array.isArray(skipped)) return undefined
+  const reasons = skipped.flatMap((entry) =>
+    entry !== null && typeof entry === "object" && typeof (entry as { reason?: unknown }).reason === "string"
+      ? [(entry as { reason: string }).reason]
+      : [],
+  )
+  const reason = reasons.at(-1)
+  if (reason === undefined) return undefined
+  const line = reason.replace(/\s+/gu, " ")
+  return line.length > 300 ? `${line.slice(0, 300)}…` : line
+}
+
 function isExpectedOwner(value: unknown): value is string | null {
   return value === null || typeof value === "string"
 }
@@ -831,9 +862,9 @@ export async function runIssuesVerb(
     }
     if (result.exitCode !== 0 || result.signal !== null) {
       const how = result.signal === null ? `exit ${result.exitCode}` : `signal ${result.signal}`
-      // A provider that answers --json may name its refusal only in the JSON envelope it still printed (km's
-      // `skipped[].reason`), while stderr carries counters alone (#38952): read stderr first, then that envelope.
-      const diagnostic = providerDiagnostic(result.stderr) ?? providerDiagnostic(result.stdout)
+      // A provider that answers --json may name its refusal only in the envelope it still printed (km's
+      // `skipped[].reason`), while stderr carries counters alone (#38952): read stderr first, then that field.
+      const diagnostic = providerDiagnostic(result.stderr) ?? stdoutRefusal(result.stdout)
       return fail(
         1,
         ISSUES_CODES.providerFailed,
