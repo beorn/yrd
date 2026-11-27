@@ -12,12 +12,15 @@ import { realpathSync } from "node:fs"
 import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { createLogger } from "loggily"
 import { safeRemoveSync } from "removely"
 import { assertStreamComplete, RETENTION_STREAM_QUEUE_LINES } from "git-super/process"
 import { adaptProcessGit } from "../src/git-super.ts"
 import { createProcess } from "../src/index.ts"
 
 const MESSAGES = { timedOut: "timed out", capped: "capped", failed: "incomplete", warned: "warned" }
+// These fixtures intentionally exceed the capture limit. Keep their expected warnings inside the fixture.
+const silentLog = createLogger("test", [{ level: "silent" }])
 const GIT_ENV = {
   ...process.env,
   GIT_AUTHOR_NAME: "stream test",
@@ -35,7 +38,9 @@ function git(repo: string, ...args: readonly string[]): string {
  * The Git port's `stream` is optional, while this suite exists to exercise exactly that method: a port without one
  * is a failure of what is being tested, not a reason to skip it.
  */
-function streaming(adapted: ReturnType<typeof adaptProcessGit>): NonNullable<ReturnType<typeof adaptProcessGit>["stream"]> {
+function streaming(
+  adapted: ReturnType<typeof adaptProcessGit>,
+): NonNullable<ReturnType<typeof adaptProcessGit>["stream"]> {
   const stream = adapted.stream
   if (stream === undefined) throw new Error("adaptProcessGit answered a Git port with no stream method")
   return stream
@@ -58,7 +63,7 @@ async function bigBlobRepo(): Promise<{ repo: string; sha: string; bytes: number
 describe("adaptProcessGit stream", () => {
   test("reads past the host's 16 MiB capture limit completely, where the buffered run truncates", async () => {
     const { repo, sha, bytes } = await bigBlobRepo()
-    await using process = createProcess({ cwd: repo })
+    await using process = createProcess({ cwd: repo, inject: { log: silentLog } })
     const adapted = adaptProcessGit(process)
     try {
       const buffered = await adapted.run({ repo, args: ["cat-file", "blob", sha] })
@@ -78,7 +83,7 @@ describe("adaptProcessGit stream", () => {
 
   test("a slow consumer keeps the queue at its bound instead of buffering the stream", async () => {
     const { repo, sha } = await bigBlobRepo()
-    await using process = createProcess({ cwd: repo })
+    await using process = createProcess({ cwd: repo, inject: { log: silentLog } })
     const adapted = adaptProcessGit(process)
     try {
       const highs: number[] = []
@@ -117,8 +122,20 @@ describe("adaptProcessGit stream", () => {
   })
 
   test("stdout capture truncation is not a stream failure; stderr truncation and an unproven verdict are", async () => {
-    const stdoutTruncation = { stream: "stdout" as const, totalBytes: 900, keptBytes: 100, droppedBytes: 800, limitBytes: 100 }
-    const stderrTruncation = { stream: "stderr" as const, totalBytes: 900, keptBytes: 100, droppedBytes: 800, limitBytes: 100 }
+    const stdoutTruncation = {
+      stream: "stdout" as const,
+      totalBytes: 900,
+      keptBytes: 100,
+      droppedBytes: 800,
+      limitBytes: 100,
+    }
+    const stderrTruncation = {
+      stream: "stderr" as const,
+      totalBytes: 900,
+      keptBytes: 100,
+      droppedBytes: 800,
+      limitBytes: 100,
+    }
     const fake = (result: Record<string, unknown>) =>
       adaptProcessGit({
         async run(request) {
@@ -127,15 +144,23 @@ describe("adaptProcessGit stream", () => {
         },
       })
 
-    const complete = streaming(fake({ outputTruncation: [stdoutTruncation] }))({ repo: "/repo", args: ["ls-tree", "-r"] })
-    expect(await (async () => {
-      const lines: string[] = []
-      for await (const line of complete.lines) lines.push(line)
-      return lines
-    })()).toEqual(["one", "two"])
+    const complete = streaming(fake({ outputTruncation: [stdoutTruncation] }))({
+      repo: "/repo",
+      args: ["ls-tree", "-r"],
+    })
+    expect(
+      await (async () => {
+        const lines: string[] = []
+        for await (const line of complete.lines) lines.push(line)
+        return lines
+      })(),
+    ).toEqual(["one", "two"])
     expect(await complete.outcome).toMatchObject({ code: 0 })
 
-    const stderrTruncated = streaming(fake({ outputTruncation: [stderrTruncation] }))({ repo: "/repo", args: ["ls-tree"] })
+    const stderrTruncated = streaming(fake({ outputTruncation: [stderrTruncation] }))({
+      repo: "/repo",
+      args: ["ls-tree"],
+    })
     for await (const _line of stderrTruncated.lines) {
       // drained for the outcome
     }
@@ -149,11 +174,13 @@ describe("adaptProcessGit stream", () => {
   })
 
   test("a timeout and an abort both settle the framing as incomplete", async () => {
-    const timedOut = streaming(adaptProcessGit({
-      async run() {
-        return { exitCode: 0, signal: null, stdout: "", stderr: "", durationMs: 1, timedOut: true }
-      },
-    }))({ repo: "/repo", args: ["ls-tree"] })
+    const timedOut = streaming(
+      adaptProcessGit({
+        async run() {
+          return { exitCode: 0, signal: null, stdout: "", stderr: "", durationMs: 1, timedOut: true }
+        },
+      }),
+    )({ repo: "/repo", args: ["ls-tree"] })
     for await (const _line of timedOut.lines) {
       // drained for the outcome
     }
@@ -162,14 +189,16 @@ describe("adaptProcessGit stream", () => {
     expect(() => assertStreamComplete(timedOutOutcome, MESSAGES)).toThrow("timed out")
 
     const controller = new AbortController()
-    const aborted = streaming(adaptProcessGit({
-      async run(request) {
-        request.onOutput?.({ stream: "stdout", chunk: new TextEncoder().encode("kept\n") })
-        await new Promise((resolve) => setTimeout(resolve, 5))
-        controller.abort()
-        return { exitCode: 143, signal: "SIGKILL", stdout: "", stderr: "", durationMs: 5, timedOut: false }
-      },
-    }))({ repo: "/repo", args: ["ls-tree"], signal: controller.signal })
+    const aborted = streaming(
+      adaptProcessGit({
+        async run(request) {
+          request.onOutput?.({ stream: "stdout", chunk: new TextEncoder().encode("kept\n") })
+          await new Promise((resolve) => setTimeout(resolve, 5))
+          controller.abort()
+          return { exitCode: 143, signal: "SIGKILL", stdout: "", stderr: "", durationMs: 5, timedOut: false }
+        },
+      }),
+    )({ repo: "/repo", args: ["ls-tree"], signal: controller.signal })
     const lines: string[] = []
     for await (const line of aborted.lines) lines.push(line)
     const abortedOutcome = await aborted.outcome
