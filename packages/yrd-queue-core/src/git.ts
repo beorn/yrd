@@ -546,6 +546,15 @@ export async function invokeGit(
   const { args, cwd, selection } = invocation
   const abort = new AbortController()
   const protocol = selection?.contract === "root-v1" && !observation ? new GitProtocol(abort) : undefined
+  // Worktree custody reads the complete index to find gitlinks, even in large leaf components.
+  const maxStdoutBytes =
+    selection?.contract !== "root-v1" &&
+    args.length === 3 &&
+    args[0] === "ls-files" &&
+    args[1] === "--stage" &&
+    args[2] === "-z"
+      ? 32 * 1024 * 1024
+      : undefined
   const timeoutMs =
     selection?.contract !== "root-v1"
       ? options.timeoutMs
@@ -565,6 +574,7 @@ export async function invokeGit(
       argv: [selection?.executable ?? "git", ...(protocol === undefined ? [] : ["--protocol-fd=3"]), ...args],
       cwd,
       captureRawOutput: true,
+      ...(maxStdoutBytes === undefined ? {} : { maxStdoutBytes }),
       ...(runEnv === undefined ? {} : { env: runEnv }),
       ...(input === undefined ? {} : { stdin: input }),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
@@ -617,8 +627,14 @@ function incompleteGitResult(result: ProcessResult, requireCompleteCapture = tru
   ) {
     return `Git process did not settle completely: signal=${String(result.signal)}, timedOut=${String(result.timedOut)}, stalled=${String(result.stalled ?? false)}, escapedDescendant=${String(result.escapedDescendant ?? false)}, sweepFailure=${String(result.sweepFailure ?? "none")}`
   }
-  if (requireCompleteCapture && (result.outputTruncation?.length ?? 0) > 0) {
-    return "Git output capture is incomplete; raw evidence records the retained bytes and any gap"
+  if (requireCompleteCapture && result.outputTruncation?.length) {
+    const streams = result.outputTruncation
+      .map(({ stream, totalBytes, limitBytes }) => {
+        const field = stream === "stdout" ? "maxStdoutBytes" : "maxOutputBytes"
+        return `${stream} read ${totalBytes} bytes with a ${limitBytes}-byte budget (${field})`
+      })
+      .join(", ")
+    return `Git output capture is incomplete: ${streams}; raw evidence records the retained bytes and any gap`
   }
   return undefined
 }

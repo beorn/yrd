@@ -37,6 +37,8 @@ export type ProcessRequest = Readonly<{
   /** Expose the existing bounded capture's exact raw head and tail alongside
    * its decoded display text, without another capture or byte budget. */
   captureRawOutput?: true
+  /** Override the stdout capture budget for this command. Stderr still uses the process default. */
+  maxStdoutBytes?: number
   /** One optional duplex byte stream on child descriptor 3. Its traffic is
    * separate from ordinary output and never renews the output-progress lease. */
   extraStdio?: Readonly<{
@@ -473,6 +475,7 @@ export function createProcess(
         throw new RangeError("yrd: Process postExitDrainGraceMs must be a positive integer")
       }
       const postExitDrainGraceMs = request.postExitDrainGraceMs ?? DEFAULT_POST_EXIT_DRAIN_GRACE_MS
+      const maxStdoutBytes = positiveInteger(request.maxStdoutBytes ?? maxOutputBytes, "maxStdoutBytes")
       requireSpawnDirectory(argv, request.cwd ?? cwd)
 
       // Keep the run scope independent: parent Scope disposal is child-first,
@@ -613,7 +616,7 @@ export function createProcess(
           try {
             const read = await readBounded(
               stream,
-              maxOutputBytes,
+              name === "stdout" ? maxStdoutBytes : maxOutputBytes,
               name,
               renewProgressLease,
               request.onOutput,

@@ -29,7 +29,7 @@ import * as gitRunner from "../src/git.ts"
 import { readEventChains, readEventCommitMetadata } from "../src/event-read.ts"
 import { openLog, readRunLog } from "../src/log.ts"
 import { gitSuperExecution, verifyCandidate } from "../src/verifying.ts"
-import { freshWorktree } from "../src/worktree.ts"
+import { discardWorktree, freshWorktree } from "../src/worktree.ts"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 
 if (false) {
@@ -90,6 +90,71 @@ function declareGit(root: string, value: string, file?: string): void {
 }
 
 describe("the git runner", () => {
+  // @failure An intact native Git index above the default capture budget is refused during candidate cleanup.
+  // @level l2; @consumer Yrd candidate cleanup; @testonly none
+  it("returns the complete native index above the default capture budget", async () => {
+    const root = temporaryRoot("large-native-index")
+    await using process = createProcess({ cwd: root })
+    const git = gitIn(root, process)
+    await git(["init", "--quiet"])
+    const blob = (await git(["hash-object", "-w", "--stdin"], "index fixture\n")).trim()
+    const prefix = "tracked-" + "x".repeat(120)
+    const index = Array.from(
+      { length: 93_000 },
+      (_, row) => `100644 ${blob} 0\t${prefix}${String(row).padStart(6, "0")}\0`,
+    ).join("")
+    expect(Buffer.byteLength(index)).toBeGreaterThan(16 * 1024 * 1024)
+    await git(["update-index", "-z", "--index-info"], index)
+
+    const result = await gitRunner.seamProcess(git, root).run({ repo: root, args: ["ls-files", "--stage", "-z"] })
+
+    expect(result.code).toBe(0)
+    expect(Bun.CryptoHasher.hash("sha256", result.stdout, "hex")).toBe(Bun.CryptoHasher.hash("sha256", index, "hex"))
+  })
+
+  // @failure An incomplete index read appears complete, or safe cleanup silently drops the worktree.
+  // @level l2; @consumer Yrd candidate cleanup; @testonly none
+  it("preserves the candidate when its native index exceeds the stdout budget", async () => {
+    const source = temporaryRoot("candidate-overflow")
+    const candidate = join(source, "candidate")
+    await using process = createProcess({ cwd: source })
+    let budget: number | undefined
+    const git = gitIn(source, {
+      run(request) {
+        // Lower the real collector's budget by one byte for the candidate read only.
+        return process.run(
+          request.cwd === candidate && request.maxStdoutBytes !== undefined && budget !== undefined
+            ? { ...request, maxStdoutBytes: budget }
+            : request,
+        )
+      },
+    })
+    await git(["init", "--quiet"])
+    await git(["config", "user.name", "fixture"])
+    await git(["config", "user.email", "fixture@yrd.test"])
+    writeFileSync(join(source, "tracked"), "candidate content\n")
+    await git(["add", "tracked"])
+    await git(["commit", "--quiet", "-m", "fixture"])
+    const commit = (await git(["rev-parse", "HEAD"])).trim()
+    const tree = await freshWorktree(git, source, commit, candidate)
+    const bytes = Buffer.byteLength(await git(["ls-files", "--stage", "-z"]))
+    budget = bytes - 1
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      await expect(discardWorktree(tree)).rejects.toThrow(
+        `stdout read ${bytes} bytes with a ${budget}-byte budget (maxStdoutBytes)`,
+      )
+    } finally {
+      warn.mockRestore()
+    }
+
+    expect(readFileSync(join(candidate, "tracked"), "utf8")).toBe("candidate content\n")
+    expect(await git(["worktree", "list", "--porcelain"])).toContain(`worktree ${candidate}\n`)
+    budget = undefined
+    await discardWorktree(tree)
+    expect(existsSync(candidate)).toBe(false)
+  })
+
   // @failure: a late notification makes an old ending visible, or selection truncates a listed history.
   // @level l2; @consumer queue list acquisition; @testonly none
   it("selects current recorded endings and reads every selected history completely", async () => {
