@@ -876,7 +876,7 @@ type ComponentRetirementInput = Readonly<{
     issue?: string
     reason?: string
     discard?: boolean
-    /** The full commit that superseded a discarded origin tip; recorded beside it (@cto, task/incident-clear-body). */
+    /** The full commit that superseded a discarded tip; recorded beside it (@cto, task/incident-clear-body, 44e1fa74). */
     supersededBy?: string
     dryRun?: true
   }>
@@ -980,14 +980,8 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
   }
   const supersededBy = request.supersededBy
   if (supersededBy !== undefined) {
-    if (
-      destination !== "origin" ||
-      request.discard !== true ||
-      !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(supersededBy)
-    ) {
-      throw new Error(
-        `${repo}: --superseded-by needs drop --retire --discard and a full commit oid; received ${supersededBy}`,
-      )
+    if (request.discard !== true || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(supersededBy)) {
+      throw new Error(`${repo}: --superseded-by needs drop --discard and a full commit oid; received ${supersededBy}`)
     }
     // An undo pointer the object store cannot resolve could never restore the discard, so it is refused before any decision.
     try {
@@ -1298,6 +1292,7 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
           ? (request.reason ?? "")
           : (request.reason ?? "explicit local branch cleanup"),
       log: { write: (record) => log().write(record) },
+      ...(request.discard === true && !merged ? supersededRow : {}),
       // The explicit local-loss call is procedural owner/Chief policy, not provider payload authentication.
       disposition:
         request.discard === true && !merged
@@ -1324,6 +1319,7 @@ export async function retireComponentBranch(input: ComponentRetirementInput) {
             actor: retirement.actor,
             issue: retirement.issue,
             uniqueCommits: retirement.disposition.uniqueCommits,
+            ...supersededRow,
           }
         : {}),
       ...(headMove === undefined ? {} : { headMove }),

@@ -3691,23 +3691,103 @@ describe("a queue is the selected origin branch carrying config", () => {
    */
   it.each([
     [["task/x", "--retire", "--tip", "a".repeat(40), "--reason", "r", "--superseded-by", "b".repeat(40)], "requires"],
-    [
-      ["task/x", "--local", "--discard", "--tip", "a".repeat(40), "--reason", "r", "--superseded-by", "b".repeat(40)],
-      "requires",
-    ],
+    [["task/x", "--local", "--tip", "a".repeat(40), "--reason", "r", "--superseded-by", "b".repeat(40)], "requires"],
     [
       ["task/x", "--retire", "--discard", "--tip", "a".repeat(40), "--reason", "r", "--superseded-by", "e4f6a3da"],
       "full",
     ],
-  ])("refuses --superseded-by outside a full-commit origin discard %j", async (args, kind) => {
+    [
+      ["task/x", "--local", "--discard", "--tip", "a".repeat(40), "--reason", "r", "--superseded-by", "e4f6a3da"],
+      "full",
+    ],
+  ])("refuses --superseded-by outside a full-commit discard %j", async (args, kind) => {
     const out = capture(outsideRepositoryRoot())
     expect(await runYrdProcess(["bun", "yrd", "drop", ...args, "--json"], out.io)).toBe(2)
     expect(out.stderr()).toContain(
       kind === "requires"
-        ? "--superseded-by requires drop <branch> --retire --discard"
+        ? "--superseded-by requires drop <branch> (--local | --retire) --discard"
         : "--superseded-by e4f6a3da is not a full commit oid",
     )
     expect(out.stdout()).toBe("")
+  })
+
+  /** @failure A wrong root discard cannot be undone from the object store before gc because nothing names the
+   *          commit that superseded it, and the host reader cannot tell an explicit exact-binding discard from a bare
+   *          drop (@cto 44e1fa74, task/incident-clear-body).
+   * @level l2 @consumer an owner discarding a superseded ROOT branch with --superseded-by
+   */
+  it("records head and superseded-by on a root local discard and tells the host it is one", async () => {
+    const repo = await world("checks: []\n")
+    const git = gitIn(repo)
+    const branch = "task/superseded-root"
+    const issue = "wire:41d40099"
+    const base = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", base, new Date())
+    await git(["checkout", "--quiet", "-b", branch])
+    await git(["commit", "--quiet", "--allow-empty", "-m", `superseded work\n\nRefs: ${issue}`])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    const store = createEventStore(repo, "origin", git.selection)
+    await (
+      await openEvents({ ...store, ref: changesRef("main", branch), writer: "fixture" })
+    ).append(
+      [
+        changeInput("opened", { queueTip, at: new Date(), commit: head, by: "fixture", issue }),
+        changeInput("cancelled", { queueTip, at: new Date(), commit: head, reason: "withdrawn", by: "fixture" }),
+      ],
+      { expect: null },
+    )
+    const argv = (extra: string[]) => [
+      "bun",
+      "yrd",
+      "drop",
+      branch,
+      "--local",
+      "--discard",
+      "--tip",
+      head,
+      "--issue",
+      issue,
+      "--reason",
+      "superseded",
+      "--submitter",
+      "@dev/fixer",
+      "--json",
+      ...extra,
+    ]
+    const missing = capture(repo)
+    expect(await runYrdProcess(argv(["--superseded-by", "e".repeat(40)]), missing.io)).toBe(2)
+    expect(missing.stderr()).toContain(`--superseded-by ${"e".repeat(40)} is not a commit in ${repo}`)
+    expect((await git(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(head)
+    const out = capture(repo)
+    const told: unknown[] = []
+    out.io.localBranchProtections = async (input) => {
+      told.push(input.discard)
+      return { protections: [], evidence: [] }
+    }
+    expect(await runYrdProcess(argv(["--superseded-by", base]), out.io), out.stderr()).toBe(0)
+    expect(told.length).toBeGreaterThan(0)
+    for (const discard of told) expect(discard).toEqual({ issue })
+    const report = JSON.parse(out.stdout()) as { removed: { head: string; supersededBy?: string }[] }
+    expect(report.removed).toEqual([
+      expect.objectContaining({ branch, head, intent: "local-discard", supersededBy: base }),
+    ])
+    // The cancelled event that already keeps the exact tip is reused; superseded-by rides on the receipt and run-log rows.
+    const dropped = (await readBranchHistory(store, "main", branch)).history?.events.at(-1)
+    expect(dropped?.links).toContain(head)
+    const logs = join(await workdirOf(git), "logs")
+    const rows = readdirSync(logs)
+      .filter((name) => name.endsWith(".jsonl"))
+      .flatMap((name) => readRunLog(logs, name.slice(0, -6)))
+    expect(rows).toContainEqual(
+      expect.objectContaining({
+        kind: "local-branch-retirement",
+        branch,
+        head,
+        supersededBy: base,
+        outcome: "removed",
+      }),
+    )
   })
 
   /** @failure 33188: a withdrawn root branch whose content will never be submitted has no route, so the owner
@@ -6767,6 +6847,7 @@ describe("component-local retirement without a component queue", () => {
     "discard-no-reason",
     "discard-unbound",
     "discard-bound",
+    "discard-superseded",
     "discard-mismatch",
     "discard-conflict",
     "discard-held",
@@ -7050,7 +7131,7 @@ describe("component-local retirement without a component queue", () => {
               : "28824",
           ]),
       ...(discard ? ["--discard"] : []),
-      ...(mode === "origin-discard-superseded" ? ["--superseded-by", baseTip] : []),
+      ...(mode === "origin-discard-superseded" || mode === "discard-superseded" ? ["--superseded-by", baseTip] : []),
       ...(mode === "origin-discard-superseded-missing" ? ["--superseded-by", "e".repeat(40)] : []),
       "--reason",
       mode === "discard-no-reason" || mode === "origin-discard-no-reason" ? "" : "explicit reviewed component drop",
@@ -7191,6 +7272,7 @@ describe("component-local retirement without a component queue", () => {
       const removed = [
         "discard-unbound",
         "discard-bound",
+        "discard-superseded",
         "discard-contained",
         "origin-discard-unbound",
         "origin-discard-bound",
@@ -7226,6 +7308,7 @@ describe("component-local retirement without a component queue", () => {
           [
             "discard-unbound",
             "discard-bound",
+            "discard-superseded",
             "origin-discard-unbound",
             "origin-discard-bound",
             "origin-discard-superseded",
@@ -7269,7 +7352,8 @@ describe("component-local retirement without a component queue", () => {
           // The discarded tip is on every row already; the superseding commit rides beside it when one was named,
           // so a wrong discard can be undone from the object store before gc.
           const removedRow = rows[result]!
-          const supersededBy = mode === "origin-discard-superseded" ? baseTip : undefined
+          const supersededBy =
+            mode === "origin-discard-superseded" || mode === "discard-superseded" ? baseTip : undefined
           expect(decisions[0]?.supersededBy).toBe(supersededBy)
           expect(removedRow.supersededBy).toBe(supersededBy)
           expect(removedRow.head).toBe(tip)

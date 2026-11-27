@@ -310,11 +310,17 @@ function buildProgram(
       )
     }
     if (options.supersededBy !== undefined) {
-      // @cto ruling (task/incident-clear-body): the undo pointer rides only on the reviewed origin discard, whose
+      // @cto rulings (task/incident-clear-body, 44e1fa74): the undo pointer rides only on a reviewed discard, whose
       // retirement row it joins; anywhere else no row would carry it, so it is refused rather than ignored.
-      if (command !== "drop" || !options.retire || !options.discard || options.local || branch === undefined) {
+      if (
+        command !== "drop" ||
+        !options.discard ||
+        (!options.retire && !options.local) ||
+        options.releaseCheckout ||
+        branch === undefined
+      ) {
         throw new Error(
-          "--superseded-by requires drop <branch> --retire --discard --tip <full-commit> --issue <id> --reason <why>; " +
+          "--superseded-by requires drop <branch> (--local | --retire) --discard --tip <full-commit> --issue <id> --reason <why>; " +
             "it records the commit that superseded the discarded tip on that retirement row",
         )
       }
@@ -454,6 +460,7 @@ function buildProgram(
           issue?: string
           releaseCheckout?: boolean
           discard?: boolean
+          supersededBy?: string
           submodules?: boolean
           dryRun?: boolean
           apply?: boolean
@@ -463,6 +470,7 @@ function buildProgram(
         command: "drop-local",
         ...(options.repo === undefined ? {} : { authorRepo: options.repo }),
         discard: options.discard,
+        ...(options.supersededBy === undefined ? {} : { supersededBy: options.supersededBy }),
         releaseCheckout: options.releaseCheckout,
         submodules: options.submodules,
         dryRun: options.dryRun,
@@ -1660,7 +1668,7 @@ function buildProgram(
       .option("--tip <commit>", "expected full current commit for --local or --retire")
       .option(
         "--superseded-by <commit>",
-        "with --retire --discard, the full commit that superseded the discarded tip; recorded beside that tip on the retirement row so a wrong discard can be undone before gc",
+        "with --local --discard or --retire --discard, the full commit that superseded the discarded tip; recorded beside that tip on the retirement rows (and a root dropped event) so a wrong discard can be undone before gc",
       )
       .option("--repo <path>", REPO_HELP)
       .option(

@@ -25,6 +25,8 @@ export type LocalBranchRetirement = Readonly<{
   owner?: string
   issue?: string
   reason: string
+  /** An explicit discard's superseding commit, recorded beside the kept or lost tip so a wrong discard can be undone. */
+  supersededBy?: string
   /** Read the same eligibility and protections without writing custody or deleting a ref. */
   dryRun?: boolean
   /** A proven worktree-less retained store: its own attached HEAD is not a live checkout (30094). */
@@ -253,6 +255,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
           target: disposition.target,
           targetRef: disposition.targetRef,
           uniqueCommits: disposition.uniqueCommits,
+          ...(input.supersededBy === undefined ? {} : { supersededBy: input.supersededBy }),
           pid: process.pid,
         })
         const fd = openSync(disposition.log.path, "r")
@@ -360,6 +363,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     actor,
     owner: input.owner,
     issue,
+    ...(input.supersededBy === undefined ? {} : { supersededBy: input.supersededBy }),
     ...(result.archiveRef === undefined ? {} : { archive: result.archiveRef }),
     reason: result.reason,
     ...(result.detail === undefined ? {} : { detail: result.detail }),
