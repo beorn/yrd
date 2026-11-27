@@ -2378,6 +2378,64 @@ it("reruns a check the bound killed before it named a verdict", async () => {
   ])
 })
 
+/** @failure #38908: a terminfo-merge kill at its 420 s bound under load stopped the whole line instead of
+ * withdrawing the change, so every submitter waited until @chief withdrew it by hand.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("withdraws a change whose check the bound killed twice once the phase has judged", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/bound-kill-withdrawn", "one.txt")
+  await submitCommit(w, "task/after-bound-kill", "two.txt")
+  // The first change hangs past its bound on both attempts; the change behind
+  // it names a verdict, so the line has somewhere to go once it moves.
+  const script = join(w.workdir, "bound-kill-two-checks.sh")
+  writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      'if [ -e two.txt ]; then echo \'YRD-CHECK-RESULT {"result":"pass","exit":0}\'; exit 0; fi',
+      "sleep 30",
+      "",
+    ].join("\n"),
+  )
+  chmodSync(script, 0o755)
+  const judged = join(w.workdir, "bound-kill-judge.sh")
+  writeFileSync(judged, ["#!/bin/sh", 'echo \'YRD-CHECK-RESULT {"result":"pass","exit":0}\'', ""].join("\n"))
+  chmodSync(judged, 0o755)
+
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [
+      { name: "judge", run: judged, timeoutMs: 500 },
+      { name: "verify", run: script, timeoutMs: 500 },
+    ],
+    notify: undefined,
+  })
+
+  expect(outcome).toMatchObject({
+    exitCode: 1,
+    failed: ["task/bound-kill-withdrawn"],
+    merged: ["task/after-bound-kill"],
+    stuck: [],
+  })
+  const change = await readStatus(store, "main", "task/bound-kill-withdrawn")
+  expect(change.status).toBe("failed")
+  expect(change.reason).toMatch(/^verify killed at the 1 s bound/u)
+  expect(change.reason).toContain("no usable YRD-CHECK-RESULT")
+  // #38908: the bound reports the host it ran under, so a kill can be read as load or as a bad change.
+  expect(change.reason).toContain("host load")
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/bound-kill-withdrawn") })).events()
+  expect(events.find((event) => event.type === "stuck")).toBeUndefined()
+  expect(events.find((event) => event.type === "failed")?.props.filter(([key]) => key === "Check")).toEqual([
+    ["Check", expect.stringMatching(/^judge exit=0 .*result=pass attempt=1 phase=merge /u)],
+    ["Check", expect.stringMatching(/^verify exit=timeout .*result=stuck attempt=1 phase=merge /u)],
+    ["Check", expect.stringMatching(/^judge exit=0 .*result=pass attempt=2 phase=merge /u)],
+    ["Check", expect.stringMatching(/^verify exit=timeout .*result=stuck attempt=2 phase=merge /u)],
+  ])
+})
+
 /** @failure #38739: a second verdictless bound kill was not the line's answer, or the first attempt's evidence was lost.
  * @level l3 @consumer queue operator and submitter
  */
