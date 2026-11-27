@@ -2,6 +2,7 @@
 import { mkdirSync, readFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { dirname, join } from "node:path"
+import { pidPresence } from "@yrd/process"
 import { readCommitSubmodules } from "git-super/commit-graph"
 import { Conflict, PublicationRejected, RetriesExhausted, openEvents, trailer } from "./git.ts"
 import {
@@ -64,6 +65,8 @@ import {
   type GitRunner,
 } from "./git.ts"
 import {
+  readJournalLine,
+  readRetainedFile,
   recentCasRefusalStreak,
   recentCasRefusals,
   recentPublicationNotLanded,
@@ -404,6 +407,44 @@ async function settleEventNotice(
     }
   }
   throw new Error(`event queue ${url}#${queue}: ${message.branch} notice ${entry.name} has no final result`)
+}
+
+/**
+ * The pid a round's own journal header names, which is the liveness fact the
+ * runner already reads (watch-runner's `.pid`/`kill -0` test). A round that
+ * died leaves the file; one still executing answers for it (#38855).
+ */
+function roundHeaderPid(
+  workdir: string,
+  run: string,
+): Readonly<{ kind: "pid"; pid?: number } | { kind: "unreadable"; reason: string }> {
+  const path = join(workdir, "logs", `${run}.jsonl`)
+  let text: string
+  try {
+    text = readFileSync(path, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      return { kind: "unreadable", reason: `round journal ${path} cannot be read: ${String(error)}` }
+    }
+    // Retention compresses a finished round to its `.gz` copy; a round still
+    // holding a change in `merging` is never old enough to be compressed, so
+    // this branch reads it only to say why it could not.
+    try {
+      text = readRetainedFile(path).toString("utf8")
+    } catch (retainedError) {
+      return { kind: "unreadable", reason: `round journal ${path} cannot be read: ${String(retainedError)}` }
+    }
+  }
+  const first = text.split("\n", 1)[0] ?? ""
+  const read = readJournalLine(first, 1)
+  if (read.value === undefined) {
+    return { kind: "unreadable", reason: `round journal ${path} ${read.malformed ?? "has no first record"}` }
+  }
+  if (read.value.kind !== "run") {
+    return { kind: "unreadable", reason: `round journal ${path} opens with ${read.value.kind}, not a run header` }
+  }
+  const pid = read.value.pid
+  return { kind: "pid", ...(typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? { pid } : {}) }
 }
 
 export async function eventQueueRun(
@@ -805,6 +846,78 @@ export async function eventQueueRun(
     }
     log.write({ branch, head, kind: "branch-deleted" })
     branches.push(`deleted ${branch} at ${head.slice(0, 12)}, merged`)
+  }
+
+  /**
+   * Settles a change whose `merging` round died (#38855, @cto 4b259503). A round
+   * that dies between its `merging` event and its landing leaves the change owned
+   * by nothing: no later round re-picks it, and it is counted in line around it.
+   * This runs under the lock every round already holds, before the round picks
+   * anything, and reuses the runner's own liveness fact (the journal header's pid,
+   * `kill -0`); it adds no timer, watcher or state. The settle is evidence, never
+   * age: the candidate's ancestry against the target decides merged or re-queued.
+   * A check that cannot be read leaves the change exactly where it is, and names
+   * itself, so nothing is retried silently.
+   */
+  const settleOrphanedMerging = async (changes: Map<string, EventChange>): Promise<void> => {
+    const unreadable = (branch: string, run: string | undefined, why: string): void => {
+      log.write({ kind: "warning", subject: "orphan-check-unreadable", branch, round: run ?? "none", reason: why })
+    }
+    for (const [branch, change] of [...changes]) {
+      if (change.status !== "merging") continue
+      const run = change.run
+      if (run === undefined) {
+        unreadable(branch, undefined, "orphan check unreadable: the merging change records no round")
+        continue
+      }
+      const header = roundHeaderPid(options.workdir, run)
+      if (header.kind === "unreadable") {
+        unreadable(branch, run, `orphan check unreadable: ${header.reason}`)
+        continue
+      }
+      if (header.pid === undefined) {
+        unreadable(branch, run, "orphan check unreadable: the round's header names no pid")
+        continue
+      }
+      if (pidPresence(header.pid) === "present") continue
+      const commit = change.commit
+      const tip = change.tip
+      const candidate = change.candidate ?? commit
+      if (candidate === undefined || commit === undefined || tip === undefined) {
+        unreadable(branch, run, "orphan check unreadable: the merging change records no candidate or tip")
+        continue
+      }
+      let landed: boolean
+      try {
+        landed = await withRemoteSeamGap("orphanAncestry", () => isAncestor(git, commit, target))
+      } catch (error) {
+        unreadable(branch, run, `orphan check unreadable: ${error instanceof Error ? error.message : String(error)}`)
+        continue
+      }
+      // A submission already on the target is not orphaned work: this same round's
+      // observed-merge reading settles it, with the delivery intersection as its
+      // evidence, a few steps below. Only the other half needs a writer here: a
+      // change that never landed and whose round is gone.
+      if (landed) continue
+      const reason = `merging round ${run} (pid ${String(header.pid)}) lost its process; re-queued`
+      const want = "verifying"
+      const written = await appendOwnedChange("orphanSettleWrite", store, queue, branch, tip, {
+        type: want,
+        at: new Date(),
+        commit: candidate,
+        reason,
+        title: `${want} ${branch}`,
+        run: log.id,
+      })
+      const after = await readChange(branch, "orphanSettleRead")
+      if (after.status !== want || after.tip !== written) {
+        throw new Error(
+          `yrd queue ${queue}: orphan settle for ${branch} wrote ${written} but read back ${after.status} at ${after.tip ?? "no tip"}`,
+        )
+      }
+      changes.set(branch, after)
+      log.write({ kind: "change", branch, head: change.commit, decision: want, reason })
+    }
   }
   const result = (
     exitCode: 0 | 1 | 2,
@@ -1214,6 +1327,12 @@ export async function eventQueueRun(
     })
   }
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
+
+  // #38855: settle a change whose merging round died BEFORE this round picks
+  // anything. The lock is already held here (every round-runner takes it), and
+  // the test is the runner's own; a foreground `yrd merge` names one change and
+  // picks nothing, so it leaves the rest of the line alone.
+  if (options.only === undefined) await settleOrphanedMerging(changes)
   // WHEN THE QUEUE LAST JUDGED A CHANGE (25669): the latest merged or failed
   // ending on any chain, read from the chains themselves so a relaunched service
   // knows it without having watched it happen. A cancel is a person's act, not the

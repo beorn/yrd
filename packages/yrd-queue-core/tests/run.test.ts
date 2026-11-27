@@ -68,7 +68,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import type { CheckedTree, CheckSpec, Git, PauseRecord, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
 import { resolveGitSelection } from "../src/git.ts"
 import * as verifying from "../src/verifying.ts"
-import { appendChangeEvent, appendPublishedMerge, QUEUE_RUN_WRITER } from "../src/events.ts"
+import { appendChangeEvent, appendPublishedMerge, QUEUE_RUN_WRITER, readChangeEvents } from "../src/events.ts"
 import { eventNoticeOwed } from "../src/event-run.ts"
 import { settledBaseCommit } from "../src/settled-base.ts"
 import { prepareWorktree, SetupFailed } from "../src/worktree.ts"
@@ -1788,6 +1788,131 @@ it("reverifies an unfinished event phase in a later round", async () => {
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/reverify"] })
   expect((await readStatus(store, "main", "task/reverify")).candidate).toBe(await remoteTarget(w))
+})
+
+/**
+ * Put one change into `merging` under a round journal of its own, as a round
+ * that died between its merging event and its landing leaves it: the header's
+ * pid is `pid`, which the case chooses dead or alive.
+ */
+async function mergingUnderRound(
+  w: World,
+  store: ReturnType<typeof createEventStore>,
+  branch: string,
+  pid: number,
+): Promise<Readonly<{ run: string; head: string; journal: string }>> {
+  const head = await submitCommit(w, branch, `${branch.replace("/", "-")}.txt`)
+  const queued = await readStatus(store, "main", branch)
+  if (queued.tip === undefined) throw new Error("submitted event has no tip")
+  const run = openLog(join(w.workdir, "logs"))
+  run.write({
+    kind: "run",
+    pid,
+    target: "main",
+    gitlink: w.target,
+    config: "test-config",
+    checks: [],
+    effectiveChecks: [],
+  })
+  const verifying = await appendChangeEvent(store, "main", branch, queued.tip, {
+    type: "verifying",
+    at: new Date(),
+    commit: head,
+    run: run.id,
+  })
+  const checking = await appendChangeEvent(store, "main", branch, verifying, {
+    type: "checking",
+    at: new Date(),
+    commit: head,
+    run: run.id,
+  })
+  await appendChangeEvent(store, "main", branch, checking, {
+    type: "merging",
+    at: new Date(),
+    commit: head,
+    reason: "merge checks passed (verify)",
+    run: run.id,
+  })
+  return { run: run.id, head, journal: run.path }
+}
+
+/** @failure A merging change whose round is alive is settled out from under that round.
+ * @level l3 @consumer queue operator and the round still merging
+ */
+it("leaves a merging change alone while its round answers for it", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await mergingUnderRound(w, store, "task/live-merge", process.pid)
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
+
+  expect(outcome.exitCode).toBe(0)
+  // The settle writes nothing for a change whose round answers for it. What the
+  // round path then does with such a change is its own pre-existing reading, and
+  // this case deliberately does not assert that: it asserts the reconcile is silent.
+  expect(logRecords(outcome)).not.toContainEqual(expect.objectContaining({ subject: "orphan-check-unreadable" }))
+  expect(logRecords(outcome)).not.toContainEqual(
+    expect.objectContaining({ kind: "change", branch: "task/live-merge", decision: "verifying" }),
+  )
+  const chain = await readChangeEvents(
+    store,
+    "main",
+    "task/live-merge",
+    (await readStatus(store, "main", "task/live-merge")).tip ?? "",
+  )
+  expect(
+    chain.some((event) => event.props.some(([key, value]) => key === "Reason" && value.includes("lost its process"))),
+  ).toBe(false)
+})
+
+/** @failure A change killed mid-merge before its push stayed in merging forever and the line grew around it.
+ * @level l3 @consumer queue operator and every later submitter
+ */
+it("re-queues a merging change whose round died, and the same round merges it", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const dead = exitedPid()
+  const killed = await mergingUnderRound(w, store, "task/orphan", dead)
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/orphan"] })
+  const settled = await readStatus(store, "main", "task/orphan")
+  expect(settled.status).toBe("merged")
+  const chain = await readChangeEvents(store, "main", "task/orphan", settled.tip ?? "")
+  const requeued = chain.find(
+    (event) =>
+      event.type === "verifying" && (event.props.find(([key]) => key === "Reason")?.[1] ?? "").includes(killed.run),
+  )
+  expect(requeued?.props).toContainEqual([
+    "Reason",
+    `merging round ${killed.run} (pid ${String(dead)}) lost its process; re-queued`,
+  ])
+  // The round re-verifies it after the settle, so the chain carries the fixture's
+  // own verifying, the settle's, and the round's.
+  expect(chain.filter((event) => event.type === "verifying").length).toBeGreaterThanOrEqual(2)
+})
+
+/** @failure A merge that landed before its round died was queued again and merged a second time.
+ * @level l3 @consumer queue operator and the target's history
+ */
+it("settles a merging change found on main as merged, without a second merge", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const killed = await mergingUnderRound(w, store, "task/pushed", exitedPid())
+  await w.git(["push", "--quiet", "origin", `${killed.head}:main`])
+  const before = (await w.git(["rev-parse", "main"])).trim()
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
+
+  expect(outcome.exitCode).toBe(0)
+  const settled = await readStatus(store, "main", "task/pushed")
+  expect(settled.status).toBe("merged")
+  expect(settled.merge).toBe(killed.head)
+  expect((await w.git(["rev-parse", "main"])).trim()).toBe(before)
 })
 
 /** @failure A configured event runner could report success without running the target's merge check.
