@@ -550,7 +550,7 @@ export async function invokeGit(
   const indexRead = args.length === 3 && args[0] === "ls-files" && args[1] === "--stage" && args[2] === "-z"
   const headTreeRead =
     args.length === 4 && args[0] === "ls-tree" && args[1] === "-r" && args[2] === "-z" && args[3] === "HEAD"
-  const maxStdoutBytes = selection?.contract !== "root-v1" && (indexRead || headTreeRead) ? 32 * 1024 * 1024 : undefined
+  const maxStdoutBytes = indexRead || headTreeRead ? 128 * 1024 * 1024 : undefined
   const timeoutMs =
     selection?.contract !== "root-v1"
       ? options.timeoutMs
