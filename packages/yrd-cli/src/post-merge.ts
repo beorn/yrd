@@ -59,6 +59,15 @@ type AttemptOutcome = Readonly<{ failed: readonly string[]; reason: string; evid
 const STATE_OPERATION_ID_MOVED = /already belongs to another request/u
 
 /**
+ * The settled retry's id suffix, and the reason it is a hyphen: km names its pending-publication ref after the
+ * operation id, so an id must satisfy `[A-Za-z0-9][A-Za-z0-9._-]*` and never contain `..` or end in `.lock`. The
+ * obvious `:settled` cannot name a ref, so every retry was refused before it could land — the branch stayed carried
+ * and the closer re-escalated a close that had already applied (38844 via #38952). Deterministic, so a replay is
+ * still one write.
+ */
+const SETTLED_RETRY_SUFFIX = "-settled"
+
+/**
  * A provider's stderr belongs to the attempt's own report, not the closer's process stream: the failure diagnostic
  * already carries its last line, and buffering the rest into whole reported lines keeps every chunk with the round's
  * evidence instead of escaping through the caller (yrd #38945).
@@ -581,11 +590,12 @@ async function closeMergedIssues(
                 // it without re-deciding anything: closing an issue this merge already closed answers no-change,
                 // and an issue still open is closed now, which is the same intent. One retry per key per attempt,
                 // and the recorded effect below is what stops the carrying.
+                let failure = diagnostic
                 if (STATE_OPERATION_ID_MOVED.test(diagnostic)) {
                   const settled = await runIssuesVerb({
                     verb: "close",
                     args: [key, "completed"],
-                    id: `${providerId}:settled`,
+                    id: `${providerId}${SETTLED_RETRY_SUFFIX}`,
                     stderr: reportedProviderStderr(input.report),
                     projectRoot: input.projectRoot,
                     declarationRepository: input.store.repo,
@@ -603,6 +613,10 @@ async function closeMergedIssues(
                     outcomes.push({ branch, mergedEvent: mergedEvent.id, mergeSha, providerId, status: "fulfilled" })
                     continue
                   }
+                  // The retry's own failure is part of this attempt's evidence: the first refusal alone cannot say
+                  // whether the retry was refused, lost, or never landed, and swallowing it hid why a carried branch
+                  // never settled (#38952).
+                  failure = `${diagnostic}; settled retry: ${settled.message}`
                 }
                 closedKeys.set(providerId, false)
                 keysClosed = false
@@ -612,11 +626,9 @@ async function closeMergedIssues(
                   mergeSha,
                   providerId,
                   status: "failed",
-                  diagnostic,
+                  diagnostic: failure,
                 })
-                input.report(
-                  `issuesProvider.close ${JSON.stringify(key)} failed for ${branch}@${mergeSha}: ${diagnostic}`,
-                )
+                input.report(`issuesProvider.close ${JSON.stringify(key)} failed for ${branch}@${mergeSha}: ${failure}`)
                 continue
               }
               closedKeys.set(providerId, true)

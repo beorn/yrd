@@ -10,6 +10,8 @@
  *   rail-refusal-envelope <reason>  write km's counters, then km's own refused envelope whose refusal.reason sits
  *                                 past 300 characters (the operation id is echoed first), and exit 1
  *   rail-refusal-envelope-stderr <reason>  the same envelope, written to stderr after the counters, and exit 1
+ *   close-id-moved[-behind-telemetry]  refuse the first close id, answer the ref-safe settled retry with no-change
+ *   close-id-moved-settled-refused  refuse both, so the attempt can prove it reports the retry's own failure
  *   raised <message>  write a code frame, then `TypeError: <message>`, and exit 1 (a provider that threw)
  *   sleep  sleep 30 s (the caller's timeout must kill it)
  *   stall  write one stderr line, then sleep 30 s silently (the no-progress lease must kill it)
@@ -57,13 +59,43 @@ if (mode === "json") {
     process.exit(9)
   }
   process.stdout.write(`${JSON.stringify(page.page)}\n`)
-} else if (mode === "close-id-moved" || mode === "close-id-moved-behind-telemetry") {
+} else if (
+  mode === "close-id-moved" ||
+  mode === "close-id-moved-behind-telemetry" ||
+  mode === "close-id-moved-settled-refused"
+) {
   const [key, reason, id, callsLog] = rest
   if (key === undefined || reason === undefined || id === undefined || callsLog === undefined) {
     throw new Error("close-id-moved requires key, reason, id and a calls log")
   }
   appendFileSync(callsLog, `${key}\t${reason}\t${id}\n`)
-  if (id.endsWith(":settled")) {
+  // km names its pending-publication ref after the operation id, so an id must satisfy `[A-Za-z0-9][A-Za-z0-9._-]*`
+  // and never contain `..` or end in `.lock` (km-storage pending-publication.ts). A retry id outside that grammar is
+  // refused before any write, which is how a `:settled` retry could never land while its failure went unreported
+  // (38844 via #38952). Enforced here so such an id fails the test instead of the queue.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(id) || id.includes("..") || id.endsWith(".lock")) {
+    process.stdout.write(
+      `${JSON.stringify({
+        status: "unknown",
+        refusal: {
+          kind: "landing-unknown",
+          reason: `pending publication: operation id ${JSON.stringify(id)} cannot name a ref`,
+          retryable: false,
+        },
+      })}\n`,
+    )
+    process.exit(1)
+  }
+  if (mode === "close-id-moved-settled-refused" && id.endsWith("-settled")) {
+    process.stdout.write(
+      `${JSON.stringify({
+        status: "refused",
+        refusal: { kind: "landing-failed", reason: "settled retry refused by the fake provider", retryable: false },
+      })}\n`,
+    )
+    process.exit(1)
+  }
+  if (id.endsWith("-settled")) {
     process.stdout.write(`${JSON.stringify({ noChange: true })}\n`)
   } else {
     // km's rail writes its counters before the refusal it explains (#38952).

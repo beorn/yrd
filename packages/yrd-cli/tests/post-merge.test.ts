@@ -315,6 +315,7 @@ it.each([
   { mode: "provider-lost-reply" },
   { mode: "close-id-moved" },
   { mode: "close-id-moved-behind-telemetry" },
+  { mode: "close-id-moved-settled-refused" },
   { mode: "resolve-retry" },
   { mode: "walk-retry" },
 ] as const)(
@@ -329,6 +330,7 @@ it.each([
       mode === "provider-lost-reply" ||
       mode === "close-id-moved" ||
       mode === "close-id-moved-behind-telemetry" ||
+      mode === "close-id-moved-settled-refused" ||
       mode === "resolve-retry" ||
       mode === "walk-retry" ||
       mode === "observed-legacy"
@@ -382,7 +384,9 @@ it.each([
                 ]
               : [process.execPath, fakeProvider, "resolve", "<raw>"],
         close:
-          mode === "close-id-moved" || mode === "close-id-moved-behind-telemetry"
+          mode === "close-id-moved" ||
+          mode === "close-id-moved-behind-telemetry" ||
+          mode === "close-id-moved-settled-refused"
             ? [process.execPath, fakeProvider, mode, "<key>", "<reason>", "<id>", closeCalls]
             : ["sh", "-c", closeScript, "close", "<key>", "<reason>", "<id>", closeCalls, closeReady, closeRelease],
       }),
@@ -835,6 +839,39 @@ it.each([
       expect(readPostMergeIssueDiagnostics(workdir)).toEqual([])
       return
     }
+    if (mode === "close-id-moved-settled-refused") {
+      // A settled retry that fails too is part of the attempt's evidence: reporting only the first refusal left a
+      // carried branch unable to say why it never settled (#38952).
+      const { history } = await readBranchHistory(store, "main", "task/first")
+      await using runner = createPostMerge({
+        workdir,
+        launchEvent: testLauncher,
+        cwd: repo,
+        git,
+        store,
+        cleanup: async () => {},
+        report: (message) => diagnostics.push(message),
+      })
+      runner.nudge({
+        ...context,
+        target: history!.state.merge!,
+        merged: ["task/first"],
+        projectRoot: repo,
+        queueBranch: "main",
+      })
+      await runner[Symbol.asyncDispose]()
+      const calls = readFileSync(closeCalls, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => line.split("\t"))
+      expect(calls).toHaveLength(2)
+      expect(calls[1]![2]).toBe(`${calls[0]![2]}-settled`)
+      const [recorded] = readPostMergeIssueDiagnostics(workdir)
+      expect(recorded?.branch).toBe("task/first")
+      expect(recorded?.diagnostic).toContain("settled retry: ")
+      expect(recorded?.diagnostic).toContain("settled retry refused by the fake provider")
+      return
+    }
     if (mode === "close-id-moved" || mode === "close-id-moved-behind-telemetry") {
       // The provider refuses the carried id because the request recorded under it differs, and answers the closed
       // issue's settled id with no-change. The closer must take that as fulfilled and record the effect, so a restart
@@ -866,9 +903,11 @@ it.each([
         .map((line) => line.split("\t"))
       expect(calls).toHaveLength(expectedCloses * 2)
       for (let index = 0; index < calls.length; index += 2) {
-        expect(calls[index]![2]).not.toMatch(/:settled$/u)
+        expect(calls[index]![2]).not.toMatch(/-settled$/u)
         expect(calls[index + 1]![0]).toBe(calls[index]![0])
-        expect(calls[index + 1]![2]).toBe(calls[index]![2]! + ":settled")
+        expect(calls[index + 1]![2]).toBe(calls[index]![2]! + "-settled")
+        // km names a pending-publication ref after the id, so a retry id outside that grammar can never land.
+        expect(calls[index + 1]![2]).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u)
       }
       expect(Object.values((await readEventQueue(store, "main")).issueEffects)).toHaveLength(expectedCloses)
       expect(readPostMergeIssueDiagnostics(workdir)).toEqual([])
