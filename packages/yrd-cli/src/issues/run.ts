@@ -154,20 +154,31 @@ function providerDiagnostic(stderr: string): string | undefined {
 
 /**
  * A `--json` provider may name its refusal only in the envelope it printed — km's rail writes `refusal.reason`, and a
- * batch write's `skipped[].reason` — while stderr carries counters alone (#38952). Read those fields, never the
- * envelope as text: the reason sits well past the 300-character bound a one-line diagnostic keeps (behind the
- * operation id the rail echoes first), so a text cut hides exactly the cause a caller needs.
+ * batch write's `skipped[].reason` — and km prints that envelope on stderr too, after its counters (#38952). Read
+ * those fields, never the envelope as text: the reason sits well past the 300-character bound a one-line diagnostic
+ * keeps (behind the operation id the rail echoes first), so a text cut hides exactly the cause a caller needs. The
+ * envelope is one line among the stream's lines, so each line is tried.
  */
-function stdoutRefusal(stdout: string): string | undefined {
+function jsonRefusal(stream: string): string | undefined {
+  for (const raw of stream.split("\n")) {
+    const line = raw.trim()
+    if (!line.startsWith("{")) continue
+    const reason = envelopeRefusal(line)
+    if (reason !== undefined) return reason
+  }
+  return undefined
+}
+
+/** The cause a JSON envelope carries, if it carries one. */
+function envelopeRefusal(text: string): string | undefined {
   let parsed: unknown
   try {
-    parsed = JSON.parse(stdout)
+    parsed = JSON.parse(text)
   } catch {
-    // No envelope is not a fault: a provider that prints no JSON names its refusal on stderr (or not at all), and
-    // the failure keeps naming its exit code. A `{`-prefixed answer that does not parse also lands here, so the
-    // named cause is the counters-free stderr when there is one.
-    // silent-fallback-allow: the caller already reports "provider ended with exit N", so no failure is swallowed —
-    // only the attempt to read a field this envelope does not carry.
+    // A line that only starts with `{` is not an envelope; the caller keeps looking, and a provider that names
+    // nothing at all still fails with its exit code. Nothing is swallowed: no refusal is reported as absent.
+    // silent-fallback-allow: this reads one optional field of a provider's own output; the failure keeps its exit code
+    // and the counters-free stderr when no envelope names a cause.
     return undefined
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined
@@ -869,8 +880,10 @@ export async function runIssuesVerb(
     if (result.exitCode !== 0 || result.signal !== null) {
       const how = result.signal === null ? `exit ${result.exitCode}` : `signal ${result.signal}`
       // A provider that answers --json may name its refusal only in the envelope it still printed (km's
-      // `skipped[].reason`), while stderr carries counters alone (#38952): read stderr first, then that field.
-      const diagnostic = providerDiagnostic(result.stderr) ?? stdoutRefusal(result.stdout)
+      // `refusal.reason`, a batch write's `skipped[].reason`), and km writes that envelope to stderr as well — where
+      // the text heuristic would keep it as one 300-character line cut before the cause (#38952). Parse the envelope
+      // on either stream first, then fall back to the provider's own words.
+      const diagnostic = jsonRefusal(result.stdout) ?? jsonRefusal(result.stderr) ?? providerDiagnostic(result.stderr)
       return fail(
         1,
         ISSUES_CODES.providerFailed,
