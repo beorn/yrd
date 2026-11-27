@@ -134,7 +134,13 @@ type IssueDiagnostic = Readonly<{
 type IssueAction = Omit<IssueDiagnostic, "diagnostic"> &
   (
     | { status: "fulfilled" }
-    | { status: "skipped" }
+    | {
+        status: "skipped"
+        reason?: string
+        /** Set by the superseded-trailer rule (38978), so a skip that left an issue open can still be read. */
+        commit?: string
+        superseding?: readonly string[]
+      }
     /** The write left with a detached child (hh #38766); `log` is where that child's own outcome lands. */
     | { status: "launched"; log: string }
     | { status: "failed" | "unavailable" | "record-failed"; diagnostic: string }
@@ -240,6 +246,19 @@ export function readPostMergeIssueDiagnostics(
       const identity = JSON.stringify([item.branch, item.mergedEvent, item.mergeSha, item.providerId])
       // A launched write has no outcome here to report (hh #38766): the detached child owns it, and its own `failed`
       // event on the issue is the notify. Only rows this process judged stay diagnostics.
+      // hh 38978: a trailer the landing did not carry leaves the issue OPEN, so this skip is not a clean ending and
+      // must reach the submitter the way a refusal does — queue diagnostics, not only the attempt log (@cto 5db8edbf).
+      if (item.status === "skipped" && item.reason === "trailer-commit-superseded") {
+        const tookBack = (item.superseding ?? []).map((sha) => sha.slice(0, 12)).join(", ")
+        found.set(identity, {
+          branch: item.branch,
+          mergedEvent: item.mergedEvent,
+          mergeSha: item.mergeSha,
+          providerId: item.providerId,
+          diagnostic: `${item.branch}@${item.mergeSha}: closing trailer commit ${String(item.commit ?? "?")} did not survive the landing — ${tookBack === "" ? "the landing changed nothing" : `${tookBack} took its change back`}; the issue was left open`,
+        })
+        continue
+      }
       if (item.status === "skipped" || item.status === "fulfilled" || item.status === "launched") {
         found.delete(identity)
         continue
@@ -269,7 +288,88 @@ type ComponentUnread = Readonly<{
   diagnostic?: string
 }>
 
-type ClosingReference = Readonly<{ value: string; commit: string; trailer: string; component?: string }>
+/**
+ * A trailer commit that did not survive its own landing (hh 38978): the landing's net diff over that commit's paths is
+ * empty, so the change it names was reverted or removed again inside the same range. `superseding` names the commits
+ * in the range that took the paths back, so a report can say which commit undid which.
+ */
+type Superseded = Readonly<{
+  base: string
+  landing: string
+  superseding: readonly string[]
+  /** `landing-empty` is the empty-commit case: nothing changed at all, so there is no commit to name. */
+  why: "landing-empty" | "paths-taken-back"
+}>
+
+type ClosingReference = Readonly<{
+  value: string
+  commit: string
+  trailer: string
+  component?: string
+  /** Present only when the commit's change did not survive: the closer leaves the issue open and says why. */
+  superseded?: Superseded
+}>
+
+/** The paths one commit changed against its first parent; a root commit against nothing. */
+async function changedPathsOf(git: GitRunner, commit: string): Promise<readonly string[]> {
+  const parents = (await git(["rev-list", "--parents", "-n", "1", commit])).trim().split(" ")
+  const out =
+    parents.length === 1
+      ? await git(["diff-tree", "--root", "--no-commit-id", "-r", "--name-only", "-z", "--no-renames", commit])
+      : await git(["diff", "--name-only", "-z", "--no-renames", parents[1] as string, commit])
+  return out.split("\0").filter((path) => path !== "")
+}
+
+type Survival =
+  | Readonly<{ survived: true }>
+  | Readonly<{ survived: false; superseding: readonly string[]; why: "landing-empty" | "paths-taken-back" }>
+
+/**
+ * Whether a closing trailer's commit survived its landing (hh 38978, cdde7969): the landing's net diff, restricted to
+ * the paths that commit changed, is not empty. An empty commit carries no paths of its own — seats use one to hold
+ * nothing but a trailer — so for it the whole landing's net diff is the question instead (@cto 5db8edbf): a landing
+ * that changed something closes, a landing that changed nothing closes nothing. The verdict is read from the same range
+ * the trailers were read from, root or component, so a landing that reverted its own work cannot close what it did not
+ * deliver.
+ */
+async function survivalOf(git: GitRunner, base: string, landing: string, commit: string): Promise<Survival> {
+  const paths = await changedPathsOf(git, commit)
+  // `--literal-pathspecs` (@cto ea5c5f52): a path with `*`, `[` or a leading `:` is otherwise read as a glob or as
+  // pathspec magic, which can match some other file and decide a reverted change survived.
+  const net = await git([
+    "--literal-pathspecs",
+    "diff",
+    "--name-only",
+    "-z",
+    "--no-renames",
+    base,
+    landing,
+    ...(paths.length === 0 ? [] : ["--", ...paths]),
+  ])
+  if (net.split("\0").some((path) => path !== "")) return { survived: true }
+  // An empty commit names no paths of its own, so no commit took anything back: the landing itself delivered nothing.
+  if (paths.length === 0) return { survived: false, superseding: [], why: "landing-empty" }
+  // `--full-history`, because default simplification prunes a commit whose path the tip no longer has — exactly the
+  // supersession this reads for.
+  const later = await git([
+    "--literal-pathspecs",
+    "log",
+    "--format=%H",
+    "--no-merges",
+    "--full-history",
+    `${commit}..${landing}`,
+    "--",
+    ...paths,
+  ])
+  return {
+    survived: false,
+    superseding: later
+      .split("\n")
+      .map((sha) => sha.trim())
+      .filter((sha) => sha !== ""),
+    why: "paths-taken-back",
+  }
+}
 
 /**
  * The closing trailers in every component range a landing moved (29630, @cto 5a66fb46): each changed gitlink, from
@@ -334,7 +434,14 @@ async function* componentClosingReferences(
       continue
     }
     for await (const reference of closingReferencesOf(child, [`${old}..${row.sha}`], branch)) {
-      yield { ...reference, component }
+      const survival = await survivalOf(child, old, row.sha, reference.commit)
+      yield {
+        ...reference,
+        component,
+        ...(survival.survived
+          ? {}
+          : { superseded: { base: old, landing: row.sha, superseding: survival.superseding, why: survival.why } }),
+      }
     }
     yield { unread: true, component, status: "fulfilled", reason: "component-read" }
     yield* componentClosingReferences(child, checkout, old, row.sha, branch, component)
@@ -359,12 +466,21 @@ async function closeMergedIssues(
     report: (message: string) => void
     stop?: AbortSignal
     knownQueue?: EventQueue
+    /** The target's remote name, read only to name the repository on a superseded commit's event (38978). */
+    remote?: string
+    /** The issue-event edge, so a trailer the landing did not carry still leaves a merged event naming both commits. */
+    launchEvent?: (input: IssueEventLaunchInput) => IssueEventLaunch
   }>,
 ): Promise<Readonly<{ outcomes: Array<Record<string, unknown>>; queue?: EventQueue }>> {
   const outcomes: Array<Record<string, unknown>> = []
   let completed = input.knownQueue
   // Each key's close in this round: true closed, false failed (29630).
   const closedKeys = new Map<string, boolean>()
+  // The repository's own URL, read once, only to name it on an event for a superseded trailer (38978).
+  let eventUrl: string | undefined
+  let eventUrlUnreadable: string | undefined
+  // Whether each landing's own declaration carries the `event` verb, read once per merge.
+  const eventDeclared = new Map<string, boolean>()
 
   for (const branch of new Set(input.branches)) {
     if (input.stop?.aborted) return { outcomes, queue: completed }
@@ -483,6 +599,92 @@ async function closeMergedIssues(
             }
             if (resolvedRaw.has(reference.value)) continue
             resolvedRaw.add(reference.value)
+            // hh 38978: a closing trailer whose commit the landing did not carry closes nothing. Decided before the
+            // no-resend record, because a landing that reverted its own work is not a delivery of that work.
+            const landing = observed ? segment.head : mergeSha
+            const survival =
+              reference.component === undefined
+                ? await survivalOf(input.git, base, landing, reference.commit)
+                : undefined
+            const superseded =
+              reference.superseded ??
+              (survival === undefined || survival.survived
+                ? undefined
+                : { base, landing, superseding: survival.superseding, why: survival.why })
+            if (superseded !== undefined) {
+              const tookBack =
+                superseded.why === "landing-empty"
+                  ? "the landing itself changed nothing"
+                  : superseded.superseding.length === 0
+                    ? "a later commit in the range"
+                    : superseded.superseding.map((sha) => sha.slice(0, 12)).join(", ")
+              const where = reference.component === undefined ? "" : ` in ${reference.component}`
+              const said = `${branch}@${mergeSha}: ${reference.trailer}: ${reference.value} on ${reference.commit}${where} did not survive this landing — ${tookBack} took its change back; the issue is left open`
+              input.report(said)
+              let recorded: string | undefined
+              // The same declaration that lets `merged` be written at all (recordMergedEvents), read here so a
+              // project that declares no `event` verb is said plainly instead of failing inside the child.
+              if (eventDeclared.get(mergeSha) === undefined) {
+                try {
+                  eventDeclared.set(mergeSha, await declaresEvent(input.git, mergeSha))
+                } catch (cause) {
+                  eventDeclared.set(mergeSha, false)
+                  input.report(
+                    `${branch}@${mergeSha}: issues.yml at the merge is unreadable, so the superseded-trailer event for ${reference.value} was not written: ${String(cause)}`,
+                  )
+                }
+              }
+              if (
+                input.launchEvent !== undefined &&
+                input.remote !== undefined &&
+                eventDeclared.get(mergeSha) === true
+              ) {
+                if (eventUrl === undefined && eventUrlUnreadable === undefined) {
+                  try {
+                    eventUrl = await remoteUrl(input.git, input.remote)
+                  } catch (cause) {
+                    eventUrlUnreadable = String(cause)
+                  }
+                }
+                if (eventUrl === undefined) {
+                  input.report(
+                    `${branch}@${mergeSha}: the superseded-trailer event for ${reference.value} was not written: remote ${input.remote} has no readable URL: ${String(eventUrlUnreadable)}`,
+                  )
+                } else {
+                  const launch = input.launchEvent({
+                    kind: "merged",
+                    issue: reference.value,
+                    source: mergedEventSource(eventUrl, mergeSha),
+                    text: said,
+                    opId: `${mergedEventOperationId(mergeSha)}-superseded-${reference.commit.slice(0, 12)}`,
+                    projectRoot: input.projectRoot,
+                    declaration: { repository: input.store.repo, commit: mergeSha, target: input.target },
+                    cwd: input.cwd,
+                    workdir: input.workdir,
+                    env: input.env ?? process.env,
+                  })
+                  recorded = launch.launched ? launch.log : undefined
+                  if (!launch.launched) {
+                    input.report(
+                      `${branch}@${mergeSha}: the superseded-trailer event for ${reference.value} was not launched: ${launch.why}`,
+                    )
+                  }
+                }
+              }
+              outcomes.push({
+                branch,
+                mergedEvent: mergedEvent.id,
+                mergeSha,
+                providerId: `${trailerEffectId(mergeSha, "close", "completed", reference.value)}-superseded`,
+                status: "skipped",
+                reason: "trailer-commit-superseded",
+                commit: reference.commit,
+                superseding: superseded.superseding,
+                ...(reference.component === undefined ? {} : { component: reference.component }),
+                ...(recorded === undefined ? {} : { log: recorded }),
+              })
+              continue
+            }
             // 29630 (@cto baa5a4f1): the no-resend record is keyed on the merge and the trailer value it carries, and is
             // read before resolve, so an issue the provider re-keyed after a human reopened it is not closed again.
             const trailerId = trailerEffectId(mergeSha, "close", "completed", reference.value)
@@ -1164,6 +1366,8 @@ export function createPostMerge<C extends Context>(
           report: options.report,
           stop: options.stop,
           knownQueue: completedQueue?.branch === context.queueBranch ? completedQueue.value : undefined,
+          ...(context.remote === undefined ? {} : { remote: context.remote }),
+          launchEvent: options.launchEvent ?? launchIssueEvent,
         })
         issueActions = [...issueActions, ...closed.outcomes]
         if (
