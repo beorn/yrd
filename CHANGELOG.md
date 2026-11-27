@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A `#` before an issue key is notation, not a different issue (hh 38903): `yrd submit` answered `34127` and
+  `#34127` as two conflicting bindings whenever the project's declared `resolve` verb did not answer, so a provider
+  that was down, slow or absent refused a branch over punctuation. One leading `#` on an otherwise byte-equal key is
+  now the same issue before `resolve` is asked; `##34127`, `hh#34127` and every other differing spelling still go to
+  the provider exactly as before (@cto 2026-11-27 refines ruling 26852baa).
+
 - A captured git invocation keeps its raw output files only when they can be needed (hh 38654, @cto 2026-11-25): a
   cleanly finished plumbing query (`rev-parse`, `ls-tree`, `ls-files`, `cat-file`, `config`, `merge-base`, ref and
   diff listings) writes no `*.stdout.bin`/`*.stderr.bin` at all, and its journal row carries the argv, exit, duration
