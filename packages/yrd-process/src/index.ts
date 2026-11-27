@@ -14,7 +14,13 @@ export {
   type YrdFailure,
 } from "./failure.ts"
 
-export { adaptProcessGit, cleanGitEnvironment, gitFailure, type GitProcessDefaults } from "./git-super.ts"
+export {
+  adaptProcessGit,
+  cleanGitEnvironment,
+  gitCaptureOptions,
+  gitFailure,
+  type GitProcessDefaults,
+} from "./git-super.ts"
 
 export { pidPresence, processStartIdentity, type ProcessStartIdentity } from "./pid-identity.ts"
 export { describeRssAtKill, readRssAtKill, type RssAtKill } from "./rss-at-kill.ts"

@@ -19,6 +19,32 @@ import { createProcess } from "../src/index.ts"
 const silentLog = createLogger("test", [{ level: "silent" }])
 
 describe("adaptProcessGit", () => {
+  test("raises stdout capture only for complete worktree index and tree reads", async () => {
+    const oid = "a".repeat(40)
+    const fullReads = [
+      ["ls-files", "--stage", "-z"],
+      ["ls-tree", "-r", "-z", "HEAD"],
+      ["ls-tree", "-r", "-z", "--full-tree", "HEAD"],
+      ["ls-tree", "-r", "-z", "--full-tree", oid],
+      ["-c", "core.hooksPath=/dev/null", "ls-tree", "-r", "-t", "-z", "--full-tree", oid],
+    ]
+    const otherReads = [
+      ["ls-files", "--stage", "-z", "--", "vendor"],
+      ["ls-tree", "-r", "-z", "--full-tree", oid, "--", "vendor"],
+      ["ls-tree", "-r", "-z", "--full-tree", "other-branch"],
+      ["status", "--porcelain"],
+    ]
+    const limits: (number | undefined)[] = []
+    const git = adaptProcessGit({
+      async run(request) {
+        limits.push(request.maxStdoutBytes)
+        return { exitCode: 0, signal: null, stdout: "", stderr: "", durationMs: 1, timedOut: false }
+      },
+    })
+    for (const args of [...fullReads, ...otherReads]) await git.run({ repo: "/repo", args })
+    expect(limits).toEqual([...fullReads.map(() => 128 * 1024 * 1024), ...otherReads.map(() => undefined)])
+  })
+
   test("scrubs the caller's Git routing variables and keeps the rest", async () => {
     const asyncRequests: unknown[] = []
     const git = adaptProcessGit(
@@ -62,14 +88,15 @@ describe("adaptProcessGit", () => {
       }
       cli("add", "-A")
       cli("-c", "user.email=test@main.hh.invalid", "-c", "user.name=test", "commit", "--quiet", "-m", "seed")
-      const written = execFileSync("git", ["-C", root, "ls-tree", "-r", "-z", "HEAD"], { stdio: "pipe" }).byteLength
+      const args = ["ls-tree", "-r", "-z", "HEAD", "--", "."]
+      const written = execFileSync("git", ["-C", root, ...args], { stdio: "pipe" }).byteLength
       const limit = 1024
       expect(written, "the fixture must write past the cap for the row to mean anything").toBeGreaterThan(limit)
 
       // The truncation warn is this fixture's own, so it owns the logger that emits it
       // instead of leaking a WARN into the run.
       await using process = createProcess({ maxOutputBytes: limit, inject: { log: silentLog } })
-      const result = await adaptProcessGit(process).run({ repo: root, args: ["ls-tree", "-r", "-z", "HEAD"] })
+      const result = await adaptProcessGit(process).run({ repo: root, args })
 
       expect(result.code).toBe(0)
       expect(result.failure, "a truncated capture must never read as a complete one").toBeDefined()

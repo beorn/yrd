@@ -1,6 +1,6 @@
 import { createGitLineStream } from "git-super/process"
 import type { GitProcess, GitProcessResult } from "git-super/process"
-import type { OutputTruncation, Process } from "./index.ts"
+import type { OutputTruncation, Process, ProcessRequest } from "./index.ts"
 
 export type GitProcessDefaults = Readonly<{
   env?: NodeJS.ProcessEnv
@@ -27,6 +27,23 @@ function gitEnvironment(source: NodeJS.ProcessEnv, overlay: NodeJS.ProcessEnv | 
   }
 }
 
+/** Complete index and tree reads used to materialize or retire worktree pins. */
+export function gitCaptureOptions(args: readonly string[]): Pick<ProcessRequest, "maxStdoutBytes"> {
+  const command = args[0] === "-c" && args[1] === "core.hooksPath=/dev/null" ? args.slice(2) : args
+  const fullIndex = command.length === 3 && command[0] === "ls-files" && command[1] === "--stage" && command[2] === "-z"
+  if (fullIndex) return { maxStdoutBytes: 128 * 1024 * 1024 }
+  if (command[0] !== "ls-tree" || command[1] !== "-r") return {}
+  const output = command[2] === "-t" ? 3 : 2
+  if (command[output] !== "-z") return {}
+  const headTree = output === 2 && command.length === 4 && command[3] === "HEAD"
+  const tree = command[output + 2]
+  const fullTree =
+    command.length === output + 3 &&
+    command[output + 1] === "--full-tree" &&
+    (tree === "HEAD" || /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(tree ?? ""))
+  return headTree || fullTree ? { maxStdoutBytes: 128 * 1024 * 1024 } : {}
+}
+
 /** Yrd's only adapter from its supervised process port to git-super's Git port. */
 export function adaptProcessGit(process: Pick<Process, "run">, defaults: GitProcessDefaults = {}): GitProcess {
   return {
@@ -37,6 +54,7 @@ export function adaptProcessGit(process: Pick<Process, "run">, defaults: GitProc
         argv,
         cwd: request.repo,
         env,
+        ...gitCaptureOptions(request.args),
         ...(request.stdin === undefined ? {} : { stdin: request.stdin }),
         ...((request.signal ?? defaults.signal) === undefined ? {} : { signal: request.signal ?? defaults.signal }),
         ...((request.timeoutMs ?? defaults.timeoutMs) === undefined

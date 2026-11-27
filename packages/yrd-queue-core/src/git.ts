@@ -19,7 +19,14 @@ import { randomUUID } from "node:crypto"
 import { accessSync, constants, statSync } from "node:fs"
 import { basename, isAbsolute, resolve, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
-import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
+import {
+  createProcess,
+  gitCaptureOptions,
+  resolveExecutable,
+  type Process,
+  type ProcessRequest,
+  type ProcessResult,
+} from "@yrd/process"
 import { createShellBackend, GitSignaled, GitTimeout, type GitomicBackend } from "gitomic"
 import type { Event } from "gitomic/events"
 import { GIT_REPOSITORY_LOCAL_ENV_VARS } from "removely"
@@ -544,11 +551,6 @@ export async function invokeGit(
   observation = false,
 ): Promise<GitInvocation> {
   const { args, cwd, selection } = invocation
-  // Worktree custody compares the index and HEAD gitlinks, even in large leaf components.
-  const indexRead = args.length === 3 && args[0] === "ls-files" && args[1] === "--stage" && args[2] === "-z"
-  const headTreeRead =
-    args.length === 4 && args[0] === "ls-tree" && args[1] === "-r" && args[2] === "-z" && args[3] === "HEAD"
-  const maxStdoutBytes = indexRead || headTreeRead ? 128 * 1024 * 1024 : undefined
   const abort = new AbortController()
   const protocol = selection?.contract === "root-v1" && !observation ? new GitProtocol(abort) : undefined
   const timeoutMs =
@@ -570,7 +572,7 @@ export async function invokeGit(
       argv: [selection?.executable ?? "git", ...(protocol === undefined ? [] : ["--protocol-fd=3"]), ...args],
       cwd,
       captureRawOutput: true,
-      ...(maxStdoutBytes === undefined ? {} : { maxStdoutBytes }),
+      ...gitCaptureOptions(args),
       ...(runEnv === undefined ? {} : { env: runEnv }),
       ...(input === undefined ? {} : { stdin: input }),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),

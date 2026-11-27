@@ -126,13 +126,15 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
       } catch (cause) {
         if (!madeWorktree) return failure("provision-failed", cause)
         const undone: string[] = []
+        let removedWorktree = false
         try {
           await worktrees.remove(path, { operation: `remove half-made environment ${path}` })
+          removedWorktree = true
           undone.push(`removed the half-made environment ${path}`)
         } catch (removal) {
           undone.push(`could not remove the half-made environment ${path}: ${messageOf(removal)}`)
         }
-        if (madeBranch !== undefined) {
+        if (madeBranch !== undefined && removedWorktree) {
           // Compare-and-delete: only the branch this call created, and only while it still points where it was made.
           const deleted = await git.run(repo, ["update-ref", "-d", madeBranch.ref, madeBranch.at], true)
           undone.push(
@@ -140,6 +142,8 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
               ? `deleted ${madeBranch.ref} (${madeBranch.at.slice(0, 12)})`
               : `could not delete ${madeBranch.ref}: ${deleted.stderr.trim()}`,
           )
+        } else if (madeBranch !== undefined) {
+          undone.push(`retained ${madeBranch.ref} for recovery of the registered environment`)
         }
         return failure("provision-failed", `${messageOf(cause)}; ${undone.join("; ")}`)
       }
