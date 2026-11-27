@@ -3197,7 +3197,9 @@ export async function eventQueueRun(
             type: "failed",
             at: new Date(),
             ...evidence,
-            reason,
+            // @cto on #38908: the submitter must be told what to DO about a kill it can neither
+            // reproduce nor repair — the bound is the host's as much as the change's.
+            reason: `${reason}. Killed at its bound under that host load: resubmit when the load is lower, or the check needs a longer bound`,
           })
           await tell(branch, "failed", withdrawn)
           log.write({

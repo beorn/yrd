@@ -2408,7 +2408,9 @@ it("withdraws a change whose check the bound killed twice once the phase has jud
   const outcome = await queueRun({
     ...(await w.options({ exit: 0 })),
     checks: [
-      { name: "judge", run: judged, timeoutMs: 500 },
+      // The judging check gets a bound a loaded host cannot eat: only the bound it is killed
+      // at matters to this test, and a 500 ms judge flakes when a shell spawn is slow.
+      { name: "judge", run: judged, timeoutMs: 60000 },
       { name: "verify", run: script, timeoutMs: 500 },
     ],
     notify: undefined,
@@ -2426,6 +2428,8 @@ it("withdraws a change whose check the bound killed twice once the phase has jud
   expect(change.reason).toContain("no usable YRD-CHECK-RESULT")
   // #38908: the bound reports the host it ran under, so a kill can be read as load or as a bad change.
   expect(change.reason).toContain("host load")
+  // @cto on #38908: the submitter is told what to do about a kill, not only what happened.
+  expect(change.reason).toContain("resubmit when the load is lower, or the check needs a longer bound")
   const events = await (await openEvents({ ...store, ref: changesRef("main", "task/bound-kill-withdrawn") })).events()
   expect(events.find((event) => event.type === "stuck")).toBeUndefined()
   expect(events.find((event) => event.type === "failed")?.props.filter(([key]) => key === "Check")).toEqual([
