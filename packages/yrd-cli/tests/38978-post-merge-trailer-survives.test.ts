@@ -22,7 +22,6 @@ afterEach(() => {
   for (const root of roots.splice(0)) safeRemoveSync(root, { within: tmpdir(), allowMissing: true })
 })
 
-const CLI = join(import.meta.dirname, "..", "..", "..", "bin", "yrd")
 const fakeProvider = join(import.meta.dirname, "support", "fake-issues-provider.ts")
 
 /** One queue on a bare remote, an author clone, and a provider that logs each close key. */
@@ -83,6 +82,66 @@ const closedKeys = (path: string): string[] =>
         .filter((line) => line !== "")
         .map((line) => line.split("\t")[0] as string)
     : []
+
+/**
+ * AC2: a branch or env issue link records a merged event at most. It is never closing intent, whatever the merge
+ * commit's own `Issue:` header says.
+ */
+it("records a bound issue as a merged event and never closes it", async () => {
+  const { repo, workdir, git, closeCalls, queue } = await world()
+  const launches: IssueEventLaunchInput[] = []
+  const capture = (input: IssueEventLaunchInput): IssueEventLaunch => {
+    launches.push(input)
+    return { launched: true, log: `${input.workdir}/logs/issue-events/${input.opId}.log` }
+  }
+  await queue("task/bound")
+  writeFileSync(join(repo, "bound.txt"), "work with no closing trailer\n")
+  await git(["add", "bound.txt"])
+  await git(["commit", "--quiet", "-m", "docs: work bound to an issue, and no trailer"])
+  await submit(git, "origin", {
+    branch: "task/bound",
+    submitter: "fixture",
+    issue: "issue-bound",
+    target: { remote: "origin", branch: "main" },
+  })
+  await git(["checkout", "--quiet", "main"])
+
+  const stop = new AbortController()
+  const merged: string[] = []
+  const diagnostics: string[] = []
+  try {
+    expect(
+      await coreQueueCommand(
+        repo,
+        {
+          cwd: repo,
+          stdout: (line) => diagnostics.push(line),
+          stderr: (line) => diagnostics.push(line),
+          localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
+        },
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterRound: async (outcome) => {
+            merged.push(...outcome.merged)
+            if (!merged.includes("task/bound")) return
+            await vi.waitFor(() => expect(launches.length).toBeGreaterThan(0), { timeout: 20000 })
+            stop.abort()
+          },
+        },
+        { workdir, json: true, launchEvent: capture, projectRoot: repo },
+      ),
+      diagnostics.join(" "),
+    ).toBe(0)
+  } finally {
+    stop.abort()
+  }
+
+  expect(closedKeys(closeCalls), "a binding never closes").toEqual([])
+  expect(launches.map((launch) => launch.issue)).toContain("issue-bound")
+  expect(launches.every((launch) => launch.opId.includes("superseded") === false)).toBe(true)
+}, 180_000)
 
 /**
  * @cto 5db8edbf: an empty trailer commit carries no paths of its own, so the whole landing's net diff decides —
@@ -159,7 +218,7 @@ it("decides an empty trailer commit by the whole landing's net diff", async () =
 }, 180_000)
 
 it("leaves an issue open when its closing trailer's change did not survive the landing", async () => {
-  const { repo, workdir, git, closeCalls, queue, store } = await world()
+  const { repo, workdir, git, closeCalls, queue } = await world()
   const launches: IssueEventLaunchInput[] = []
   const capture = (input: IssueEventLaunchInput): IssueEventLaunch => {
     launches.push(input)
@@ -171,7 +230,6 @@ it("leaves an issue open when its closing trailer's change did not survive the l
   writeFileSync(join(repo, "seed.txt"), "seed\n")
   await git(["add", "seed.txt"])
   await git(["commit", "--quiet", "-m", "Bind work to issue-super\n\nRefs: issue-super"])
-  const boundary = (await git(["rev-parse", "HEAD"])).trim()
   writeFileSync(join(repo, "firewall.rules"), "open ssh to the world\n")
   await git(["add", "firewall.rules"])
   await git(["commit", "--quiet", "-m", "feat: the firewall, first attempt\n\nCloses: issue-super"])
@@ -188,7 +246,6 @@ it("leaves an issue open when its closing trailer's change did not survive the l
     target: { remote: "origin", branch: "main" },
   })
   await git(["checkout", "--quiet", "main"])
-  void boundary
 
   // The control: the same trailer on a commit whose change IS the landing.
   await queue("task/control")
@@ -255,5 +312,4 @@ it("leaves an issue open when its closing trailer's change did not survive the l
   expect(supersededEvent?.text).toContain("did not survive this landing")
   expect(diagnostics.join(" ")).toContain("did not survive this landing")
   expect(merged).toEqual(expect.arrayContaining(["task/superseded", "task/control"]))
-  void store
 }, 180_000)
