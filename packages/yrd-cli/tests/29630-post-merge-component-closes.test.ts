@@ -279,6 +279,47 @@ it("closes an issue named only by a component commit's Closes trailer, once, thr
   expect(actions.filter(({ status }) => status === "failed" || status === "unavailable")).toEqual([])
 }, 60000)
 
+/** @failure A component range closes an issue from a `Closes:` trailer whose change a later commit in the same component range took back (the cdde7969 shape, hh 38978). @level l2 @consumer hh 38978 component-range close survival @testonly none */
+it("leaves a component's Closes issue open when a later commit in the same range took the change back", async () => {
+  const world = await submoduleQueue()
+  const component = gitIn(join(world.repo, COMPONENT))
+  await component(["checkout", "--quiet", "--detach"])
+  writeFileSync(join(world.repo, COMPONENT, "two.txt"), "first attempt\n")
+  await component(["add", "two.txt"])
+  await component(["commit", "--quiet", "-m", "one: the second file\n\nCloses: issue-component-super"])
+  const trailerCommit = (await component(["rev-parse", "HEAD"])).trim()
+  await component(["rm", "--quiet", "two.txt"])
+  await component([
+    "commit",
+    "--quiet",
+    "-m",
+    "one: the second file is not ours to add, take it out\n\nRefs: issue-component-super",
+  ])
+  const superseding = (await component(["rev-parse", "HEAD"])).trim()
+  // A real change after the revert, so the component range is not empty overall and only the paths decide.
+  writeFileSync(join(world.repo, COMPONENT, "one.txt"), "kept\n")
+  await component(["commit", "--quiet", "-am", "one: an unrelated change"])
+  const pin = (await component(["rev-parse", "HEAD"])).trim()
+  const branch = "task/raise-component-superseded"
+  await landRaise(world, branch, pin, "raise vendor/one")
+  await runQueue(world, branch, walked(branch))
+  const merge = (await readStatus(world.store, "main", branch)).merge!
+  expect(lines(world.closeCalls), "nothing in the component range survives to close").toEqual([])
+  const actions = attempts(world.workdir).flatMap(issueActions)
+  expect(actions.filter(({ status }) => status === "failed" || status === "unavailable")).toEqual([])
+  expect(actions).toContainEqual(
+    expect.objectContaining({
+      branch,
+      mergeSha: merge,
+      status: "skipped",
+      reason: "trailer-commit-superseded",
+      component: COMPONENT,
+      commit: trailerCommit,
+      superseding: [superseding],
+    }),
+  )
+}, 60000)
+
 /** @failure A merge's `Closes:` issue stays open because the project root's local main lags the merge (yrd-issues-no-main, hh 38606). @level l2 @consumer hh 29630 post-merge close against a shared-main projection @testonly none */
 it("closes a root commit's Closes issue when the project root's local main still lags the merge", async () => {
   const world = await submoduleQueue()
