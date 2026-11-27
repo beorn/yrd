@@ -90,9 +90,9 @@ function declareGit(root: string, value: string, file?: string): void {
 }
 
 describe("the git runner", () => {
-  // @failure An intact native Git index or tree above the default capture budget is refused during candidate cleanup.
+  // @failure An intact Git index or tree above the default capture budget is refused during candidate cleanup.
   // @level l2; @consumer Yrd candidate cleanup; @testonly none
-  it("returns complete native custody reads above the default capture budget", async () => {
+  it("returns complete custody reads above the default capture budget on both Git contracts", async () => {
     const root = temporaryRoot("large-native-index")
     await using process = createProcess({ cwd: root })
     const git = gitIn(root, process)
@@ -107,17 +107,23 @@ describe("the git runner", () => {
     await git(["-c", "user.name=fixture", "-c", "user.email=fixture@yrd.test", "commit", "--quiet", "-m", "fixture"])
 
     const tree = index.replaceAll(`100644 ${blob} 0\t`, `100644 blob ${blob}\t`)
-    const seam = gitRunner.seamProcess(git, root)
+    const wrappedGit = gitIn(root, process, {
+      executable: join(gitSuperBin, "git-super"),
+      contract: "root-v1",
+      scope: "local",
+      origin: "fixture",
+    })
     for (const [args, expected] of [
       [["ls-files", "--stage", "-z"], index],
       [["ls-tree", "-r", "-z", "HEAD"], tree],
     ] as const) {
       expect(Buffer.byteLength(expected)).toBeGreaterThan(16 * 1024 * 1024)
-      const result = await seam.run({ repo: root, args })
-      expect(result.code).toBe(0)
-      expect(Bun.CryptoHasher.hash("sha256", result.stdout, "hex")).toBe(
-        Bun.CryptoHasher.hash("sha256", expected, "hex"),
-      )
+      const digest = Bun.CryptoHasher.hash("sha256", expected, "hex")
+      for (const selected of [git, wrappedGit]) {
+        const result = await gitRunner.seamProcess(selected, root).run({ repo: root, args })
+        expect(result.code).toBe(0)
+        expect(Bun.CryptoHasher.hash("sha256", result.stdout, "hex")).toBe(digest)
+      }
     }
   })
 
@@ -162,32 +168,6 @@ describe("the git runner", () => {
     budget = undefined
     await discardWorktree(tree)
     expect(existsSync(candidate)).toBe(false)
-  })
-
-  // @failure Cleanup trusts a successful root-v1 enumeration whose stdout may be incomplete.
-  // @level l2; @consumer Yrd candidate cleanup; @testonly none
-  it("keeps a candidate when root-v1 custody cannot be established", async () => {
-    const source = temporaryRoot("root-v1-custody")
-    const candidate = join(source, "candidate")
-    const native = gitIn(source)
-    await native(["init", "--quiet"])
-    writeFileSync(join(source, "tracked"), "candidate content\n")
-    await native(["add", "tracked"])
-    await native(["-c", "user.name=fixture", "-c", "user.email=fixture@yrd.test", "commit", "--quiet", "-m", "fixture"])
-    const commit = (await native(["rev-parse", "HEAD"])).trim()
-    const executable = protocolExecutable(
-      source,
-      'frame({version:1, token, ready:true}); closeSync(3); const git=Bun.which("git"); if (!git || !process.execve) throw new Error("native Git required"); process.execve(git, [git, ...process.argv.slice(3)], process.env);',
-    )
-    await using process = createProcess({ cwd: source })
-    const tree = await freshWorktree(native, source, commit, candidate, {
-      process,
-      selection: { executable, contract: "root-v1", scope: "local", origin: "fixture" },
-    })
-
-    await expect(discardWorktree(tree)).rejects.toThrow(/root-v1.*custody.*39095/u)
-    expect(readFileSync(join(candidate, "tracked"), "utf8")).toBe("candidate content\n")
-    expect(await native(["worktree", "list", "--porcelain"])).toContain(`worktree ${candidate}\n`)
   })
 
   // @failure: a late notification makes an old ending visible, or selection truncates a listed history.

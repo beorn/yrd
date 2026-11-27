@@ -548,13 +548,6 @@ export async function invokeGit(
   const indexRead = args.length === 3 && args[0] === "ls-files" && args[1] === "--stage" && args[2] === "-z"
   const headTreeRead =
     args.length === 4 && args[0] === "ls-tree" && args[1] === "-r" && args[2] === "-z" && args[3] === "HEAD"
-  if ((indexRead || headTreeRead) && selection?.contract === "root-v1") {
-    return {
-      ...invocation,
-      failure:
-        "root-v1 can return a partial Git listing with exit zero. Worktree custody is unproven. Keep the worktree until #39095 is fixed.",
-    }
-  }
   const maxStdoutBytes = indexRead || headTreeRead ? 128 * 1024 * 1024 : undefined
   const abort = new AbortController()
   const protocol = selection?.contract === "root-v1" && !observation ? new GitProtocol(abort) : undefined
