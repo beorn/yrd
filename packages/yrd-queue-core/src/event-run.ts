@@ -2931,6 +2931,16 @@ export async function eventQueueRun(
       }
       const stopped = decisionResults.find(({ run }) => run.result !== "pass")
       const stoppedCheck = stopped?.run
+      /**
+       * #38908: a check that ran BEFORE the stopped one, in the same phase, and
+       * judged it — the phase's verdict already exists, so a bound kill on top
+       * of it is unmeasured about this change rather than about the queue.
+       */
+      const judgedEarlierInPhase =
+        stopped !== undefined &&
+        decisionResults
+          .slice(0, decisionResults.indexOf(stopped))
+          .some((prior) => prior.phase === stopped.phase && prior.run.result === "pass")
       if (setupDecision !== undefined) {
         const ended = await appendOwnedChange("setupDecisionWrite", store, queue, branch, tip, {
           type: setupDecision.kind,
@@ -3170,10 +3180,38 @@ export async function eventQueueRun(
       }
       if (stoppedCheck?.result === "stuck") {
         // A bound kill is named as one (@cto dd0e43f2): "<check> killed at the 420 s bound…", never "could not judge".
-        const reason =
-          stoppedCheck.exit === "timeout" && stoppedCheck.why !== undefined
-            ? `${stoppedCheck.name} ${stoppedCheck.why} (log ${stoppedCheck.log})`
-            : `${stoppedCheck.name} could not judge (${stoppedCheck.why ?? `exit ${String(stoppedCheck.exit)}`}; log ${stoppedCheck.log})`
+        const boundKilled = stoppedCheck.exit === "timeout" && stoppedCheck.why !== undefined
+        const reason = boundKilled
+          ? `${stoppedCheck.name} ${stoppedCheck.why} (log ${stoppedCheck.log})`
+          : `${stoppedCheck.name} could not judge (${stoppedCheck.why ?? `exit ${String(stoppedCheck.exit)}`}; log ${stoppedCheck.log})`
+        // #38908: the one rerun (#38739) was spent on the same verdictless
+        // bound kill, and an earlier check in this phase already judged the
+        // change — a 5 min 56 s site build passes at load 45 and is killed at
+        // 7 min at load 99. What is unmeasured is this change's own run, not
+        // the queue's ground, so withdraw it with the kill's reason as a failed
+        // check is withdrawn and let the line move. A bound kill with no
+        // earlier verdict in its phase is still unmeasured ground and still
+        // stops the line.
+        if (boundKilled && judgedEarlierInPhase) {
+          const withdrawn = await appendOwnedChange("stoppedFailedWrite", store, queue, branch, tip, {
+            type: "failed",
+            at: new Date(),
+            ...evidence,
+            // @cto on #38908: the submitter must be told what to DO about a kill it can neither
+            // reproduce nor repair — the bound is the host's as much as the change's.
+            reason: `${reason}. Killed at its bound under that host load: resubmit when the load is lower, or the check needs a longer bound`,
+          })
+          await tell(branch, "failed", withdrawn)
+          log.write({
+            kind: "change",
+            branch,
+            head,
+            decision: "failed",
+            reason: `${stoppedCheck.name} was killed at its bound on both attempts`,
+          })
+          failed.push(branch)
+          continue
+        }
         const ended = await appendOwnedChange("retriedStuckWrite", store, queue, branch, tip, {
           type: "stuck",
           at: new Date(),

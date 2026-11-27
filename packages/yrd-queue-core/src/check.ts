@@ -38,6 +38,7 @@
  */
 
 import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs"
+import { availableParallelism } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { createProcess, describeRssAtKill, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import type { JournalCheck } from "./log.ts"
@@ -212,11 +213,36 @@ export type CheckResult = Readonly<{
 /**
  * #38739: the bound ended this run before its log named a verdict, so the run
  * is unmeasured rather than a judgment and the round reruns the check once.
- * Only a second verdictless bound kill stops the line. A kill the log rescued
- * with a verdict carries that verdict, so it is not this.
+ * What the second one does is event-run's to decide (#38908): when the phase
+ * already has a passing verdict, the change is withdrawn with the kill's
+ * reason; a phase with no earlier verdict is still the queue's ground and
+ * stops the line. A kill the log rescued with a verdict carries that verdict,
+ * so it is not this.
  */
 export function boundKilledWithoutVerdict(run: Pick<CheckResult, "result" | "exit">): boolean {
   return run.result === "stuck" && run.exit === "timeout"
+}
+
+/**
+ * #38908: a check's wall clock is a property of the host as much as of the
+ * change — a site build that passes in 5 min 56 s at load 45 runs past 7 min at
+ * load 99 — so a bound kill says what the host was doing, read once at the
+ * kill. Load is the kernel's 1-minute average over the CPUs this process may
+ * use; an unreadable /proc names its errno rather than going blank.
+ */
+export function describeHostLoadAtKill(): string {
+  const cores = String(availableParallelism())
+  let text: string
+  try {
+    text = readFileSync("/proc/loadavg", "utf8")
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code
+    return `host load unreadable: ${typeof code === "string" ? code : error instanceof Error ? error.message : String(error)}`
+  }
+  const oneMinute = text.trim().split(/\s+/u)[0]
+  return oneMinute === undefined
+    ? "host load unreadable: /proc/loadavg named no fields"
+    : `host load ${oneMinute} over ${cores} core(s)`
 }
 
 /**
@@ -1012,7 +1038,8 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
       exit: "timeout",
       result: "stuck",
       why: why(
-        `killed at the ${String(Math.round(timeoutMs / 1000))} s bound${stage}, ${describeRssAtKill(result.rssAtKill)}; ` +
+        `killed at the ${String(Math.round(timeoutMs / 1000))} s bound${stage}, ${describeRssAtKill(result.rssAtKill)}, ` +
+          `${describeHostLoadAtKill()}; ` +
           `log named no usable ${CHECK_RESULT_MARKER}`,
       ),
     }
