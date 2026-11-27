@@ -476,6 +476,15 @@ describe("yrd issues", () => {
     expect(ran.stderr).not.toContain("provider ended with exit 1: lookup-substeps")
   })
 
+  it("reads km's refused envelope's refusal.reason past the operation id a text cut stops at (#38952)", async () => {
+    const reason = 'State operation id "yrd1-0" already belongs to another request (different fingerprint: a, b)'
+    const root = project({ "issues.yml": declare({ list: provider("rail-refusal-envelope", reason) }) })
+    const ran = await yrd(root, "issues", "list")
+    expect(ran.exitCode).toBe(1)
+    expect(ran.stderr).toContain(`provider ended with exit 1: ${reason}`)
+    expect(ran.stderr).not.toContain("provider ended with exit 1: lookup-substeps")
+  })
+
   it("refuses a close reason outside completed|not-planned with exit 2 (rule: bad arguments)", async () => {
     const root = project({ "issues.yml": declare({ close: provider("json", "<key>", "<reason>", "<id>") }) })
     const ran = await yrd(root, "issues", "close", "k", "drop", "--id", "ev1")
