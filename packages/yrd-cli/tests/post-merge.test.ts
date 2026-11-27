@@ -314,6 +314,7 @@ it.each([
   { mode: "observed-legacy" },
   { mode: "provider-lost-reply" },
   { mode: "close-id-moved" },
+  { mode: "close-id-moved-behind-telemetry" },
   { mode: "resolve-retry" },
   { mode: "walk-retry" },
 ] as const)(
@@ -327,6 +328,7 @@ it.each([
       mode === "concurrent" ||
       mode === "provider-lost-reply" ||
       mode === "close-id-moved" ||
+      mode === "close-id-moved-behind-telemetry" ||
       mode === "resolve-retry" ||
       mode === "walk-retry" ||
       mode === "observed-legacy"
@@ -380,8 +382,8 @@ it.each([
                 ]
               : [process.execPath, fakeProvider, "resolve", "<raw>"],
         close:
-          mode === "close-id-moved"
-            ? [process.execPath, fakeProvider, "close-id-moved", "<key>", "<reason>", "<id>", closeCalls]
+          mode === "close-id-moved" || mode === "close-id-moved-behind-telemetry"
+            ? [process.execPath, fakeProvider, mode, "<key>", "<reason>", "<id>", closeCalls]
             : ["sh", "-c", closeScript, "close", "<key>", "<reason>", "<id>", closeCalls, closeReady, closeRelease],
       }),
     )
@@ -833,7 +835,7 @@ it.each([
       expect(readPostMergeIssueDiagnostics(workdir)).toEqual([])
       return
     }
-    if (mode === "close-id-moved") {
+    if (mode === "close-id-moved" || mode === "close-id-moved-behind-telemetry") {
       // The provider refuses the carried id because the request recorded under it differs, and answers the closed
       // issue's settled id with no-change. The closer must take that as fulfilled and record the effect, so a restart
       // neither calls the provider again nor re-escalates the failure (#38945).

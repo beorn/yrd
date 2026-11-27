@@ -134,12 +134,18 @@ function commandText(argv: readonly string[]): string {
  * code (docs/principles.md § Fail Loud, Fail Now). A line shaped `Name: detail` is the provider's named refusal, so
  * the last such line wins; otherwise the first non-empty line is the provider's first word. ANSI is stripped and
  * whitespace collapses, so the detail stays one field of one message.
+ *
+ * km's state rail writes its lookup counters (`lookup-substeps route=… outcome=ledger-hit`) to stderr BEFORE the
+ * refusal they explain, and a counter is never a cause: passing it on hid "already belongs to another request" and
+ * left a closer unable to recognise a refusal it already handles (#38952). Counters are dropped, not reordered.
  */
+const RAIL_LOOKUP_COUNTERS = /^lookup-substeps\s/u
+
 function providerDiagnostic(stderr: string): string | undefined {
   const lines = stderr
     .split("\n")
     .map((line) => line.replace(/\u001b\[[0-9;]*m/gu, "").trim())
-    .filter((line) => line !== "")
+    .filter((line) => line !== "" && !RAIL_LOOKUP_COUNTERS.test(line))
   if (lines.length === 0) return undefined
   const named = lines.filter((line) => /^(?:[A-Za-z]*Error|[a-z][a-z0-9-]*):\s*\S/u.test(line))
   const line = (named.at(-1) ?? lines[0]!).replace(/\s+/gu, " ")
@@ -825,7 +831,9 @@ export async function runIssuesVerb(
     }
     if (result.exitCode !== 0 || result.signal !== null) {
       const how = result.signal === null ? `exit ${result.exitCode}` : `signal ${result.signal}`
-      const diagnostic = providerDiagnostic(result.stderr)
+      // A provider that answers --json may name its refusal only in the JSON envelope it still printed (km's
+      // `skipped[].reason`), while stderr carries counters alone (#38952): read stderr first, then that envelope.
+      const diagnostic = providerDiagnostic(result.stderr) ?? providerDiagnostic(result.stdout)
       return fail(
         1,
         ISSUES_CODES.providerFailed,

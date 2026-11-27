@@ -4,6 +4,7 @@
  *   json   print {"argv": [...rest]} and exit 0
  *   text   print a line that is not JSON and exit 0
  *   exit3  write "fake provider refused" to stderr and exit 3
+ *   rail-telemetry <refusal>  write km's lookup counters, then the refusal, and exit 1
  *   raised <message>  write a code frame, then `TypeError: <message>`, and exit 1 (a provider that threw)
  *   sleep  sleep 30 s (the caller's timeout must kill it)
  *   stall  write one stderr line, then sleep 30 s silently (the no-progress lease must kill it)
@@ -51,7 +52,7 @@ if (mode === "json") {
     process.exit(9)
   }
   process.stdout.write(`${JSON.stringify(page.page)}\n`)
-} else if (mode === "close-id-moved") {
+} else if (mode === "close-id-moved" || mode === "close-id-moved-behind-telemetry") {
   const [key, reason, id, callsLog] = rest
   if (key === undefined || reason === undefined || id === undefined || callsLog === undefined) {
     throw new Error("close-id-moved requires key, reason, id and a calls log")
@@ -60,6 +61,10 @@ if (mode === "json") {
   if (id.endsWith(":settled")) {
     process.stdout.write(`${JSON.stringify({ noChange: true })}\n`)
   } else {
+    // km's rail writes its counters before the refusal it explains (#38952).
+    if (mode === "close-id-moved-behind-telemetry") {
+      process.stderr.write("lookup-substeps start=1 end=2 route=certified outcome=ledger-hit\n")
+    }
     process.stderr.write(
       `issues close: State operation id ${JSON.stringify(id)} already belongs to another request (different fingerprint: recorded close-with-evidence:aaaa, requested close-with-evidence:bbbb)\n`,
     )
@@ -83,6 +88,12 @@ if (mode === "json") {
 } else if (mode === "exit3") {
   process.stderr.write("fake provider refused\n")
   process.exit(3)
+} else if (mode === "rail-telemetry") {
+  const [refusal] = rest
+  if (refusal === undefined) throw new Error("rail-telemetry requires a refusal")
+  process.stderr.write("lookup-substeps start=1 end=2 route=certified outcome=ledger-hit\n")
+  process.stderr.write(`${refusal}\n`)
+  process.exit(1)
 } else if (mode === "raised") {
   const [message] = rest
   if (message === undefined) throw new Error("raised requires a message")
