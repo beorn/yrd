@@ -29,6 +29,7 @@ import {
   refAt,
   selectionFor,
   submit,
+  trailer,
   writeQueueEvent,
   type Git,
   type SameIssue,
@@ -1765,6 +1766,9 @@ describe("event submit", () => {
       "task/advance",
     )?.events
     expect(events?.map((event) => event.type)).toEqual(["opened", "cancelled", "opened"])
+    // #38923 (@chief ruling 2026-11-26): a resubmit of the same branch at a new head SUPERSEDES the earlier head. The
+    // cancelled row names why, so a reader of this one chain can never treat the stale head as still open and land it.
+    expect(trailer(events?.[1]!, "Reason")).toBe("resubmitted")
     expect((await readStatus(store(w), "main", "task/advance")).commit).toBe(second)
     expect(first).not.toBe(second)
   })
