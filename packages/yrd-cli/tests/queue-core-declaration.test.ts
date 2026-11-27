@@ -9515,4 +9515,126 @@ describe("drop --local --release-checkout", () => {
     },
     30_000,
   )
+
+  /** @failure A recorded binding that names no bead (free text such as a Wire message id) has no retirement route,
+   * although an explicit `--issue` can name the bead that now owns the work (38941). The absent binding must retire
+   * and record the rebinding; a binding that DOES resolve and differs must still refuse as a mismatch.
+   * @level l3 @consumer `yrd drop <branch> --local` and the host protections read it makes
+   */
+  it("retires a branch whose recorded binding names no bead when --issue names a present one (38941)", async () => {
+    type Report = {
+      removed: { branch: string; head: string; reason: string }[]
+      kept: { branch: string; reason: string; detail?: string }[]
+      failed: unknown[]
+    }
+    const repo = await world("checks: []\n")
+    const git = gitIn(repo)
+    const present = "@example/32907-software-factory-hill-climb"
+    const other = "@example/11111-old-binding"
+    writeFileSync(
+      join(repo, "issues.yml"),
+      JSON.stringify({
+        resolve: [
+          "sh",
+          "-c",
+          `case "$1" in ${present}|32907|${other}) printf '{"keys":["%s"]}\\n' "$1";; *) printf '"%s": issue not found in saved state\\n' "$1" >&2; exit 1;; esac`,
+          "resolve",
+          "<raw>",
+        ],
+      }),
+    )
+    await git(["add", "issues.yml"])
+    await git(["commit", "--quiet", "-am", "declare resolve"])
+    await git(["push", "--quiet", "origin", "main"])
+    const rootTip = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", rootTip, new Date())
+    const chainFor = (branch: string, issue: string) =>
+      openEvents({
+        ...createEventStore(repo, "origin", git.selection),
+        ref: changesRef("main", branch),
+        writer: "fixture",
+      })
+    const branch = "task/incident-clear-body"
+    await git(["checkout", "--quiet", "-b", branch, rootTip])
+    await git(["commit", "--quiet", "--allow-empty", "-m", `withdrawn work\n\nRefs: wire:41d40099`])
+    const tip = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    await chainFor(branch, "wire:41d40099").then((chain) =>
+      chain.append(
+        [
+          changeInput("opened", { queueTip, at: new Date(), commit: tip, by: "@dev/12", issue: "wire:41d40099" }),
+          changeInput("cancelled", { queueTip, at: new Date(), commit: tip, reason: "withdrawn", by: "@dev/12" }),
+        ],
+        { expect: null },
+      ),
+    )
+    const hostInputs: { issue?: string; rebind?: { issue: string } }[] = []
+    const drop = async (target: string, issue: string, expectedExit: number) => {
+      const out = capture(repo)
+      out.io.localBranchProtections = async (candidate) => {
+        hostInputs.push(candidate)
+        return { protections: [], evidence: [] }
+      }
+      const exit = await runYrdProcess(
+        [
+          "bun",
+          "yrd",
+          "drop",
+          target,
+          "--local",
+          "--tip",
+          tip,
+          "--issue",
+          issue,
+          "--reason",
+          "superseded by a merged change",
+          "--submitter",
+          "@dev/19",
+          "--json",
+        ],
+        out.io,
+      )
+      expect.soft(exit, out.stderr()).toBe(expectedExit)
+      return JSON.parse(out.stdout()) as Report
+    }
+    const retired = await drop(branch, present, 0)
+    expect(retired.failed).toEqual([])
+    expect(retired.kept).toEqual([])
+    expect(retired.removed).toEqual([
+      expect.objectContaining({
+        branch,
+        head: tip,
+        reason: expect.stringContaining(`rebound from wire:41d40099 to ${present} by @dev/19`),
+      }),
+    ])
+    // The host is told the recorded binding (for its own refusal) and the present issue that stands in for it.
+    expect(hostInputs.at(-1)).toMatchObject({ issue: "wire:41d40099", rebind: { issue: present } })
+    expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).trim()).toBe("")
+
+    // A recorded binding that resolves and differs is still a mismatch, refused before any host read or mutation.
+    const recordedBranch = "task/11111-old-binding"
+    await git(["branch", recordedBranch, rootTip])
+    await chainFor(recordedBranch, other).then((chain) =>
+      chain.append(
+        [
+          changeInput("opened", { queueTip, at: new Date(), commit: rootTip, by: "@dev/12", issue: other }),
+          changeInput("cancelled", { queueTip, at: new Date(), commit: rootTip, reason: "withdrawn", by: "@dev/12" }),
+        ],
+        { expect: null },
+      ),
+    )
+    const reads = hostInputs.length
+    const refused = await drop(recordedBranch, present, 1)
+    expect(refused.kept).toEqual([
+      expect.objectContaining({
+        branch: recordedBranch,
+        reason: "mismatch",
+        detail: expect.stringContaining(`recorded issue ${other} differs from requested ${present}`),
+      }),
+    ])
+    expect(hostInputs.length).toBe(reads)
+    expect((await git(["for-each-ref", "--format=%(refname)", `refs/heads/${recordedBranch}`])).trim()).toBe(
+      `refs/heads/${recordedBranch}`,
+    )
+  }, 60_000)
 })

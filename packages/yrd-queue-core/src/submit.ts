@@ -294,9 +294,17 @@ export type AdmissionOutcome = Readonly<
  * A host's answer to whether two differing raw issue keys name one issue (31060). Core parses no key; the host
  * asks its issues provider. `resolved: false` means the provider gave no answer, so the keys compare exactly and
  * `why` says what it returned.
+ *
+ * `absent` on that variant is a different answer from silence: it lists each raw key, trimmed, that the provider
+ * said names no issue at all (km: "issue not found in saved state"). A recorded binding in that list is not a
+ * conflicting binding, so a retirement may stand in a present issue and record the rebinding (38941); a provider
+ * that is merely slow, down or undeclared never lists a key, so a real mismatch can never be waved through. A key
+ * the provider resolved — even to an issue other than the requested one — is never listed.
  */
 export type IssueSameness = Readonly<
-  { same: true } | { same: false; resolved: true } | { same: false; resolved: false; why: string }
+  | { same: true }
+  | { same: false; resolved: true }
+  | { same: false; resolved: false; why: string; absent?: readonly string[] }
 >
 
 /** Asked only for byte-unequal keys. */

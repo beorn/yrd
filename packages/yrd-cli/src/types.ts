@@ -79,6 +79,8 @@ export type YrdCliIO = {
    * `discard` is present only on an explicit reviewed `drop --discard` (origin, or a queue-backed root's local
    * drop) and carries its supplied --issue,
    * so a host may tell an exact-binding discard from a bare drop; Yrd still checks the exact-tip binding itself.
+   * `rebind` is present only when the recorded binding names no bead and an explicit --issue named a present one
+   * (38941): the host reads that issue's holds instead of refusing, and the caller records the rebinding.
    */
   localBranchProtections:
     | ((
@@ -89,6 +91,7 @@ export type YrdCliIO = {
           issue?: string
           retainedCheckout?: string
           discard?: Readonly<{ issue?: string }>
+          rebind?: Readonly<{ issue: string }>
         }>,
         budget?: CloseExecutionBudget,
       ) => Promise<LocalBranchProtectionResult>)

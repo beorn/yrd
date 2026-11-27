@@ -25,7 +25,7 @@ import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
 import { readIssueDisplay } from "./issue-resolver.ts"
-import { issueComparer, samenessDetail } from "./issue-sameness.ts"
+import { issueComparer, namesNoBead, samenessDetail } from "./issue-sameness.ts"
 import { formatYrdCommand } from "./command-format.ts"
 import { type AbandonedPostMerge, createPostMerge, readPostMergeIssueDiagnostics } from "./post-merge.ts"
 import { repositoryHere } from "./declaration.ts"
@@ -2445,15 +2445,22 @@ export async function coreQueueCommand(
             continue
           }
           const bound = change?.issue ?? issue
+          // 38941: a recorded binding the provider says names no bead is not a conflicting binding, so an explicit
+          // --issue naming a present bead stands in for it and the rebinding is recorded on the dropped event.
+          let rebound: Readonly<{ from: string; to: string }> | undefined
           if (issue !== undefined && bound !== undefined) {
             const judged = await sameIssue(bound, issue)
             if (!judged.same) {
-              kept.push({
-                ...row,
-                reason: "mismatch",
-                detail: `recorded issue ${bound} differs from requested ${issue}${samenessDetail(bound, issue, judged)}`,
-              })
-              continue
+              if (bound !== issue && namesNoBead(judged, bound) && !namesNoBead(judged, issue)) {
+                rebound = { from: bound, to: issue }
+              } else {
+                kept.push({
+                  ...row,
+                  reason: "mismatch",
+                  detail: `recorded issue ${bound} differs from requested ${issue}${samenessDetail(bound, issue, judged)}`,
+                })
+                continue
+              }
             }
           }
           if (head !== request.tip) {
@@ -2515,6 +2522,7 @@ export async function coreQueueCommand(
           const notes = [
             ...(discardNote === undefined ? [] : [discardNote]),
             ...(supersededBy === undefined ? [] : [`superseded by ${supersededBy}`]),
+            ...(rebound === undefined ? [] : [`rebound from ${rebound.from} to ${rebound.to} by ${request.by}`]),
           ]
           const result = await retireLocalBranch({
             repo: authorRepo,
@@ -2523,7 +2531,8 @@ export async function coreQueueCommand(
             tip: head,
             actor: request.by,
             owner: change?.submitter,
-            issue: bound,
+            // 38941: the tombstone names the issue that now owns the work; the note above keeps the old binding.
+            issue: rebound === undefined ? bound : rebound.to,
             reason: notes.length === 0 ? reason : `${reason} (${notes.join("; ")})`,
             ...(supersededBy === undefined ? {} : { supersededBy }),
             dryRun: false,
@@ -2536,7 +2545,10 @@ export async function coreQueueCommand(
                 issue: bound,
                 // @cto 44e1fa74: tell the host this is the explicit discard and which --issue it carries, so a free-text
                 // binding equal to it exactly reads only the branch-drop authority; a differing --issue was kept above.
+                // 38941: a recorded binding that names no bead, stood in for by a present --issue, is the same
+                // declaration, and the host must read the present issue's holds instead of refusing.
                 ...(request.discard === true && issue !== undefined ? { discard: { issue } } : {}),
+                ...(rebound === undefined ? {} : { rebind: { issue: rebound.to } }),
               })
               bindingUnresolved = read.bindingUnresolved
               return read.protections
@@ -2627,7 +2639,29 @@ export async function coreQueueCommand(
         throw new Error(`drop: target ${eventStore.remote}#${config.target.branch} is absent`)
       }
       let retirementCount: number | undefined
+      // 38941: an explicit --issue stands in for a recorded binding the provider says names no bead, and the rebinding
+      // is recorded on the dropped event. A binding that does resolve and differs still refuses, before any mutation.
+      let retireRebind: Readonly<{ from: string; to: string }> | undefined
       if (request.retire !== undefined) {
+        if (request.retire.issue !== undefined) {
+          const { history } = await readBranchHistory(eventStore, config.target.branch, request.branch)
+          const recorded = history?.state.issue
+          if (recorded !== undefined && recorded !== request.retire.issue) {
+            const judged = await issueComparer({
+              projectRoot: repo,
+              cwd: repo,
+              ...(env === undefined ? {} : { env }),
+              stderr: (text) => io.stderr(text),
+            })(recorded, request.retire.issue)
+            if (judged.same) retireRebind = { from: recorded, to: request.retire.issue }
+            else if (!namesNoBead(judged, recorded) || namesNoBead(judged, request.retire.issue)) {
+              throw new Error(
+                `recorded issue ${recorded} differs from requested ${request.retire.issue}` +
+                  `${samenessDetail(recorded, request.retire.issue, judged)}`,
+              )
+            } else retireRebind = { from: recorded, to: request.retire.issue }
+          }
+        }
         // Hydrate the origin tip (or a completed drop's keeping history) before counting in this replica.
         if ((await readRemoteCommit(git, eventStore.remote, `refs/heads/${request.branch}`)) === undefined) {
           const { history } = await readBranchHistory(eventStore, config.target.branch, request.branch)
@@ -2658,8 +2692,23 @@ export async function coreQueueCommand(
           ...(trackingRepo === undefined ? {} : { trackingRepo }),
           ...(request.retire === undefined ? {} : { retire: request.retire }),
           protections: async (tip, issue) =>
-            (await readBranchProtections(io, { repo, branch: request.branch, tip, issue })).protections,
-          ...(request.reason === undefined ? {} : { note: request.reason }),
+            (
+              await readBranchProtections(io, {
+                repo,
+                branch: request.branch,
+                tip,
+                issue,
+                ...(retireRebind === undefined ? {} : { rebind: { issue: retireRebind.to } }),
+              })
+            ).protections,
+          ...(request.reason === undefined
+            ? {}
+            : {
+                note:
+                  retireRebind === undefined
+                    ? request.reason
+                    : `${request.reason} (rebound from ${retireRebind.from} to ${retireRebind.to} by ${request.by})`,
+              }),
           ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
         }
         if (request.retire?.dryRun) {

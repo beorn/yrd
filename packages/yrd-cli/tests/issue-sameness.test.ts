@@ -95,6 +95,44 @@ describe("issueComparer (31060)", () => {
     expect(calls(root).sort()).toEqual(["##34127", "34127", "hh#34127"])
   })
 
+  it("a raw the provider says names no issue is listed absent, and only that raw (38941)", async () => {
+    // A recorded binding such as `wire:41d40099` is free text: km answers that it names no issue. That is not the
+    // same answer as a provider that never replied, and only this answer lets a retirement stand in a present issue.
+    const root = resolving(
+      `case "$1" in @hh/tooling/32907-software-factory-hill-climb) printf '{"keys":["k-32907"]}\\n';; *) printf '"%s": issue not found in saved state\\n' "$1" >&2; exit 1;; esac`,
+    )
+    expect(await comparer(root)("wire:41d40099", "wire:41d4eeee")).toMatchObject({
+      same: false,
+      resolved: false,
+      absent: ["wire:41d40099", "wire:41d4eeee"],
+    })
+    // A recorded binding that names no issue, asked against a present one: the recorded side alone is absent, which
+    // is what lets the retirement proceed; the present issue is never listed.
+    expect(await comparer(root)("wire:41d40099", "@hh/tooling/32907-software-factory-hill-climb")).toMatchObject({
+      same: false,
+      resolved: false,
+      absent: ["wire:41d40099"],
+    })
+    // A recorded binding that does resolve is never listed, so a retirement keyed on it still refuses as a mismatch.
+    expect(await comparer(root)("@hh/tooling/32907-software-factory-hill-climb", "wire:41d4eeee")).toMatchObject({
+      same: false,
+      resolved: false,
+      absent: ["wire:41d4eeee"],
+    })
+  })
+
+  it("silence is never absent, and a stale path whose leaf resolves is not absent either (38941)", async () => {
+    const silent = await comparer(resolving("sleep 5"), 200)("wire:41d40099", "wire:41d4eeee")
+    expect(silent).toMatchObject({ same: false, resolved: false })
+    expect(silent).not.toHaveProperty("absent")
+    const stale = resolving(
+      `case "$1" in @pm/infra/old/31262-name) printf '"%s": issue not found in saved state\\n' "$1" >&2; exit 1;; 31262-name) printf '{"keys":["@pm/infra/31262-name"]}\\n';; *) printf '"%s": issue not found in saved state\\n' "$1" >&2; exit 1;; esac`,
+    )
+    const judged = await comparer(stale)("@pm/infra/old/31262-name", "wire:41d4eeee")
+    // The stale path's leaf still resolves, so that raw is never absent, even beside a raw that is.
+    expect(judged).toMatchObject({ same: false, resolved: false, absent: ["wire:41d4eeee"] })
+  })
+
   it("two spellings resolving to one key are one issue; each distinct raw is resolved once per comparer", async () => {
     const root = resolving(ONE_ISSUE)
     const same = comparer(root)

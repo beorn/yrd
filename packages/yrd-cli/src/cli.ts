@@ -340,8 +340,13 @@ function buildProgram(
     if (command === "drop" && options.reason?.trim() === "<why>" && (options.retire || options.releaseCheckout)) {
       throw new Error("replace --reason <why> with the reason for this retirement")
     }
+    // 38941: `drop <branch> --issue <id>` declares the issue that now owns a branch whose recorded binding names no
+    // bead. Yrd compares the two and refuses a binding that resolves and differs, so this is a declaration, never a
+    // way to retire someone else's branch quietly.
+    const declaresRebind = command === "drop" && branch !== undefined && options.issue !== undefined
     if (
       options.local !== true &&
+      !declaresRebind &&
       !(options.retire && options.discard && branch !== undefined) &&
       (branch === undefined) === (options.issue === undefined)
     ) {
@@ -354,7 +359,6 @@ function buildProgram(
       options.retire &&
       (command !== "drop" ||
         options.local ||
-        (options.issue !== undefined && !options.discard) ||
         branch === undefined ||
         options.tip === undefined ||
         (!options.discard && !options.reason?.trim()))

@@ -3,7 +3,7 @@ import { ISSUE_DISPLAY_TIMEOUT_MS } from "./issue-resolver.ts"
 import { ISSUES_CODES } from "./issues/declaration.ts"
 import { runIssuesVerb } from "./issues/run.ts"
 
-type Resolution = Readonly<{ key: string } | { why: string }>
+type Resolution = Readonly<{ key: string } | { why: string; absent?: true }>
 
 export type IssueComparerInput = Readonly<{
   /** The project whose `issues.yml` declares `resolve`. */
@@ -28,6 +28,11 @@ export type IssueComparerInput = Readonly<{
  * One leading `#` is how a reference is written, never what it names (38903): `34127` and `#34127` are one issue
  * before the provider is asked, so a provider that is down, silent or absent cannot split one issue into two
  * bindings over punctuation. km resolves and shows both with one key; GitHub spells the same issue `#N`.
+ *
+ * When the provider answers that a raw names no issue at all, that raw is listed in `absent` (38941): the pair is
+ * still not one issue, but the listed raw is not a conflicting binding either, so a retirement may stand a present
+ * issue in for it and record the rebinding. Only that exact answer counts. A provider that never answered, or one
+ * whose raw had a `/` leaf that did resolve, is silence or a stale path and contributes nothing to `absent`.
  */
 export function issueComparer(input: IssueComparerInput): SameIssue {
   const resolutions = new Map<string, Promise<Resolution>>()
@@ -45,7 +50,8 @@ export function issueComparer(input: IssueComparerInput): SameIssue {
       return left.key === right.key ? { same: true } : { same: false, resolved: true }
     }
     const why = [left, right].flatMap((resolution) => ("why" in resolution ? [resolution.why] : []))
-    return { same: false, resolved: false, why: why.join("; ") }
+    const absent = [a, b].filter((raw, index) => "absent" in (index === 0 ? left : right)).map((raw) => raw.trim())
+    return { same: false, resolved: false, why: why.join("; "), ...(absent.length === 0 ? {} : { absent }) }
   }
 }
 
@@ -58,6 +64,14 @@ function sigilSpelling(raw: string): string {
 export function samenessDetail(a: string, b: string, judged: Awaited<ReturnType<SameIssue>>): string {
   if (judged.same) return ""
   return judged.resolved ? `; ${a} and ${b} resolve to different issues` : `; ${judged.why}`
+}
+
+/**
+ * 38941: the provider answered that this raw names no issue at all. Never true for silence, for a provider that was
+ * not declared, or for a stale path whose leaf still resolves, so it can never stand in for a real binding.
+ */
+export function namesNoBead(judged: Awaited<ReturnType<SameIssue>>, raw: string): boolean {
+  return judged.same === false && "absent" in judged && judged.absent?.includes(raw.trim()) === true
 }
 
 async function resolveRaw(
@@ -100,7 +114,12 @@ async function resolveRaw(
         .at(-1)
       const found = leaf !== undefined && leaf !== raw ? await resolveOnce(leaf) : undefined
       const hint = found === undefined ? "" : "key" in found ? `; the current issue is ${found.key}` : `; ${found.why}`
-      return { why: `${raw} no longer resolves${hint}; the provider said: ${line}` }
+      // The raw itself names no issue: it is not a stale path whose leaf still resolves.
+      const absent = found === undefined || "absent" in found
+      return {
+        why: `${raw} no longer resolves${hint}; the provider said: ${line}`,
+        ...(absent ? { absent: true as const } : {}),
+      }
     }
     return { why: `resolve ${raw}: ${outcome.message}${line === undefined ? "" : `; the provider said: ${line}`}` }
   }
