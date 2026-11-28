@@ -6861,12 +6861,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       const repo = await world()
       const run = capture(repo)
 
-      const request =
-        command === "list"
-          ? { command }
-          : command === "drop-local"
-            ? { command, branch: "task/29600", tip: "a".repeat(40), by: "tester", issue: "29600" }
-            : { command, issue: "29600", by: "tester" }
+      const request = command === "list" ? { command } : { command, issue: "29600", by: "tester" }
       const exit = await coreQueueCommand(repo, run.io, request, { queue: "main" })
 
       expect(exit).toBe(2)

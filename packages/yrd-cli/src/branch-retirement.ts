@@ -940,7 +940,8 @@ export async function componentRetirementOwner(
       ).trim()
     }
   }
-  const standalone = input.standaloneOwnsItself === true && owner === "" && retainedComponentStoreHere(repo) === undefined
+  const standalone =
+    input.standaloneOwnsItself === true && owner === "" && retainedComponentStoreHere(repo) === undefined
   while (owner !== "") {
     const ownerGit = gitIn(owner, undefined, selection, { env })
     const queue = await remoteHead(ownerGit, "origin")

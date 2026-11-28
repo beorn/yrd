@@ -17,6 +17,7 @@ import type { YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
 afterAll(() => {
+  // raw-delete-allow: this file's own mkdtemp fixture roots, as cli-drop-retained-store.test.ts cleans its own
   for (const root of roots) rmSync(root, { recursive: true, force: true })
 })
 
@@ -109,7 +110,11 @@ it("keeps and reports an unmerged branch in a standalone checkout, pushing nothi
   }
   expect(report.removed).toEqual([])
   expect(report.kept).toEqual([
-    expect.objectContaining({ branch: world.branch, head: world.tip, detail: expect.stringContaining("is not merged") }),
+    expect.objectContaining({
+      branch: world.branch,
+      head: world.tip,
+      detail: expect.stringContaining("is not merged"),
+    }),
   ])
   expect((await world.git(["rev-parse", `refs/heads/${world.branch}`])).trim()).toBe(world.tip)
   expect(await world.git(["ls-remote", "origin"])).toBe(originBefore)
