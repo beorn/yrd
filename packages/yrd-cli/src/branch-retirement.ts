@@ -890,6 +890,9 @@ export async function componentRetirementOwner(
     selection: GitSelection
     env?: NodeJS.ProcessEnv
     targetDeclared?: boolean
+    /** A plain local drop: a standalone checkout owns its own branches (see below). Release and origin
+     * retirement never set it, so they keep their refusal. */
+    standaloneOwnsItself?: boolean
   }>,
 ) {
   const { repo, git, selection, env, targetDeclared } = input
@@ -937,6 +940,7 @@ export async function componentRetirementOwner(
       ).trim()
     }
   }
+  const standalone = input.standaloneOwnsItself === true && owner === "" && retainedComponentStoreHere(repo) === undefined
   while (owner !== "") {
     const ownerGit = gitIn(owner, undefined, selection, { env })
     const queue = await remoteHead(ownerGit, "origin")
@@ -964,6 +968,23 @@ export async function componentRetirementOwner(
     const config = await readConfig(git, target, { remote: "origin", branch: queue })
     return { owner: repo, ownerGit: git, queue, config, logDirectory: join(repo, "logs") }
   }
+  // A standalone checkout (no superproject, no declaration of its own, not a retained store; /hh/hallo) had no
+  // owner, so `drop --local` refused "needs a queue" and the command guard's branch-delete remedy had no route
+  // (@chief 5b9098ee). It is its own owner, as a cold store is: the branch goes only once its origin main holds the
+  // exact tip, and is otherwise kept and reported. Its log lives in its own Yrd workdir, never inside the checkout.
+  if (standalone) {
+    const remotes = (await git(["remote"])).split("\n").filter((name) => name.trim() !== "")
+    if (!remotes.includes("origin")) {
+      throw new Error(
+        `${repo}: standalone checkout has no origin remote, so no published main can prove its branches; nothing was removed`,
+      )
+    }
+    const queue = await remoteHead(git, "origin")
+    const target = await readRemoteCommit(git, "origin", `refs/heads/${queue}`)
+    if (target === undefined) throw new Error(`${repo}: owning queue target origin/${queue} is absent`)
+    const config = await readConfig(git, target, { remote: "origin", branch: queue })
+    return { owner: repo, ownerGit: git, queue, config, logDirectory: undefined as string | undefined }
+  }
   return undefined
 }
 
@@ -971,7 +992,7 @@ export async function componentRetirementOwner(
 export async function retireComponentBranch(input: ComponentRetirementInput) {
   const { repo, git, selection, env, io, request, destination } = input
   const worktreeLess = retainedComponentStoreHere(repo) !== undefined
-  const parent = await componentRetirementOwner(input)
+  const parent = await componentRetirementOwner({ ...input, standaloneOwnsItself: destination === "local" })
   if (parent === undefined) return undefined
   const { owner, ownerGit, queue, config } = parent
   const targetBranch = await remoteHead(git, "origin")

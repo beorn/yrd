@@ -6840,7 +6840,22 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(error.message).not.toContain("is older than")
   })
 
-  it.each(["list", "drop-local", "drop-issue"] as const)(
+  // A plain `drop --local` in a standalone checkout no longer refuses here: the checkout owns its own branches
+  // (@chief 5b9098ee; cli-drop-standalone-checkout.test.ts). Its --release-checkout form still refuses with the hint.
+  it("a plain drop-local in a standalone checkout with no config reaches its own retirement, not the refusal", async () => {
+    const repo = await world()
+    const run = capture(repo)
+    const exit = await coreQueueCommand(
+      repo,
+      run.io,
+      { command: "drop-local", branch: "task/29600", tip: "a".repeat(40), by: "tester", issue: "29600" },
+      { queue: "main" },
+    )
+    expect(run.stderr()).not.toContain("needs a queue")
+    expect(exit, run.stderr() + run.stdout()).not.toBe(0)
+  })
+
+  it.each(["list", "drop-issue"] as const)(
     "refuses %s on a selected branch with no config and names the cure",
     async (command) => {
       const repo = await world()
