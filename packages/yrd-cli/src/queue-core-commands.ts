@@ -298,6 +298,7 @@ import {
   launchIssueEvent,
   type IssueEventLaunch,
   type IssueEventLaunchInput,
+  type IssueEventSubmitter,
 } from "./issue-event-edge.ts"
 
 function issueOutput(io: YrdCliIO, branch: string, resolution: IssueResolution | undefined) {
@@ -325,6 +326,7 @@ async function launchSubmitEvent(input: {
   readonly workdir: string
   readonly env: NodeJS.ProcessEnv | undefined
   readonly targetRemote: string
+  readonly eventSubmitter?: IssueEventSubmitter
   readonly submitted: Readonly<{ branch: string; head: string; issue?: IssueResolution }>
 }): Promise<void> {
   const { submitted } = input
@@ -349,6 +351,7 @@ async function launchSubmitEvent(input: {
     issue,
     source: issueEventSource(url, submitted.head),
     text: `${submitted.branch} submitted at ${submitted.head}`,
+    ...(input.eventSubmitter === undefined ? {} : { submitter: input.eventSubmitter }),
     opId: issueEventOperationId("submitted", submitted.head),
     projectRoot: input.repo,
     cwd: input.repo,
@@ -498,6 +501,7 @@ export type CoreQueueCommand =
       command: "submit"
       branch?: string
       submitter: string
+      eventSubmitter?: IssueEventSubmitter
       issue?: string
       dryRun?: boolean
       prepare?: boolean
@@ -3265,6 +3269,7 @@ export async function coreQueueCommand(
           workdir,
           env,
           targetRemote: config.target.remote,
+          eventSubmitter: request.eventSubmitter,
           submitted,
         })
         emit(
@@ -3360,6 +3365,7 @@ export async function coreQueueCommand(
         workdir,
         env,
         targetRemote: config.target.remote,
+        eventSubmitter: request.eventSubmitter,
         submitted,
       })
       const { stop: acceptedUnder, ...accepted } = submitted

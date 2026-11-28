@@ -71,5 +71,6 @@ export function isIssuesVerb(value: string): value is IssuesVerb {
 /** The placeholders a verb's argv may carry: its operands, plus `<id>` on a write verb. */
 export function allowedPlaceholders(verb: IssuesVerb): readonly string[] {
   if (verb === "assign") return [...ISSUES_VERBS.assign, "id", "expected-owner", "requester"]
+  if (verb === "event") return [...ISSUES_VERBS.event, "id", "submitter"]
   return ISSUES_WRITE_VERBS.has(verb) ? [...ISSUES_VERBS[verb], "id"] : ISSUES_VERBS[verb]
 }

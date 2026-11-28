@@ -38,6 +38,8 @@ Rules about the file itself:
 - The machine's storage path is Git configuration (`yrd.workdir`), not part of this file. See [operations.md](operations.md#where-things-are).
 - `issuesProvider` (both `read` and `update`) was retired in #29630. A declaration that still carries it is read with the key ignored, so past declarations stay readable, and the declaration in force says so on stderr. Issue display reads `issues.yml`'s `view`, and Yrd's post-merge closer closes the issues a merge's `Closes:`/`Fixes:`/`Resolves:` trailers name through `issues.yml` at `--project-root`.
 
+An `event` entry in `issues.yml` can include `<submitter>` as one argv element. The value is JSON. On submit it carries the selected `name` and a `source` of `explicit` or `default`. When an explicit name differs from the configured default, `launchIdentity` carries the default name. An event without submitter provenance supplies `null`. The tracker controls what its declared command does with that data.
+
 ## The check environment
 
 A check's environment is built, not inherited. It gets:

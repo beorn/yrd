@@ -81,6 +81,8 @@ export type RunIssuesVerbOptions = Readonly<{
   expectedOwner?: IssuesAssignmentAudit["expectedOwner"]
   /** Provider-neutral requester audit data. The provider validates its own authority policy. */
   requestedBy?: IssuesAssignmentAudit["requestedBy"]
+  /** Optional submitter provenance for event declarations using <submitter>. */
+  eventSubmitter?: string
   /** The project root; absent, the toplevel of `cwd`'s repository. */
   projectRoot?: string
   /** Read this exact ancestor of main; automatic effects use their delivered merge commit. */
@@ -294,6 +296,16 @@ function checkRequest(
       `kind must be ${ISSUES_EVENT_KINDS.join(", ")}`,
     )
   }
+  if (options.eventSubmitter !== undefined && (verb !== "event" || values.kind !== "submitted")) {
+    return fail(2, ISSUES_CODES.badArguments, verb, "--submitter applies only to submitted events")
+  }
+  if (verb === "event") {
+    const submitter = options.eventSubmitter
+    if (submitter !== undefined && !validEventSubmitter(submitter)) {
+      return fail(2, ISSUES_CODES.badArguments, verb, "--submitter requires submitter provenance as JSON")
+    }
+    values.submitter = submitter ?? "null"
+  }
   const { expectedOwner, requestedBy } = options
   if ((expectedOwner !== undefined || requestedBy !== undefined) && verb !== "assign") {
     return fail(2, ISSUES_CODES.badArguments, verb, "--expected-owner and --requested-by apply only to assign")
@@ -329,6 +341,24 @@ function checkRequest(
     }
   }
   return { ok: true, values }
+}
+
+function validEventSubmitter(json: string): boolean {
+  let input: unknown
+  try {
+    input = JSON.parse(json)
+  } catch {
+    return false
+  }
+  if (input === null || typeof input !== "object") return false
+  const { name, source, launchIdentity } = input as Record<string, unknown>
+  return (
+    typeof name === "string" &&
+    name.trim().length > 0 &&
+    ((source === "default" && launchIdentity === undefined) ||
+      (source === "explicit" &&
+        (launchIdentity === undefined || (typeof launchIdentity === "string" && launchIdentity.trim().length > 0))))
+  )
 }
 
 async function git(

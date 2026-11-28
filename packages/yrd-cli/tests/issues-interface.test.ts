@@ -537,6 +537,39 @@ describe("yrd issues", () => {
     )
   })
 
+  it("passes submitter provenance only to event declarations that request it", async () => {
+    const operands = ["<raw>", "<kind>", "<source>", "<text>", "<id>"]
+    const optedIn = project({ "issues.yml": declare({ event: provider("json", ...operands, "<submitter>") }) })
+    const historyOnly = project({ "issues.yml": declare({ event: provider("json", ...operands) }) })
+    const provenance = JSON.stringify({ name: "@josé/team", source: "explicit", launchIdentity: "@runner" })
+    const event = ["opaque issue", "submitted", "repository@head", "change submitted"]
+    const submitted = ["issues", "event", ...event, "--id", "submission", "--submitter", provenance]
+    const claimed = await yrd(optedIn, ...submitted)
+    expect(claimed.exitCode, claimed.stderr).toBe(0)
+    expect(envelopeOf(claimed).result).toEqual({ argv: [...event, "submission", provenance] })
+    const legacy = await yrd(historyOnly, ...submitted)
+    expect(legacy.exitCode, legacy.stderr).toBe(0)
+    expect(envelopeOf(legacy).result).toEqual({ argv: [...event, "submission"] })
+    const merged = await yrd(
+      optedIn,
+      "issues",
+      "event",
+      "opaque issue",
+      "merged",
+      "repository@merge",
+      "merged",
+      "--id",
+      "merge",
+    )
+    expect(merged.exitCode, merged.stderr).toBe(0)
+    expect(envelopeOf(merged).result).toEqual({
+      argv: ["opaque issue", "merged", "repository@merge", "merged", "merge", "null"],
+    })
+    const invalid = await yrd(optedIn, "issues", "event", ...event, "--id", "invalid", "--submitter", "not JSON")
+    expect(invalid.exitCode).toBe(2)
+    expect(invalid.stderr).toContain("--submitter requires submitter provenance as JSON")
+  })
+
   // hh #38766 (@cto 15f0394a): a launch may be detached, so the child that saw the failure is the only one left to say so.
   it("writes the caller's fallback event when the declared write cannot land, and nothing extra when it lands", async () => {
     const calls = join(scratch(), "event-calls.txt")

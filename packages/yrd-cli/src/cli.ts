@@ -95,6 +95,7 @@ import {
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { formatYrdCommand } from "./command-format.ts"
 import { componentsHoldingBranch, componentDropHint } from "./branch-retirement.ts"
+import type { IssueEventSubmitter } from "./issue-event-edge.ts"
 
 /** The seat a submit names. Never the git author: the fleet's git identity
  * names nobody (ruling @i/10-yrd/24028). */
@@ -227,14 +228,26 @@ function submitterOption(
   options: Pick<SubmitOptions, "submitter" | "notify">,
   env: NodeJS.ProcessEnv,
   io: YrdCliIO,
-): string {
+): Readonly<{ submitter: string; eventSubmitter?: IssueEventSubmitter }> {
   if (options.notify !== undefined) {
     io.stderr("yrd: `--notify` is now `--submitter`\n")
     if (options.submitter !== undefined && options.submitter !== options.notify) {
       throw new Error("--submitter and --notify name different submitters; use one value")
     }
   }
-  return resolveSubmitter(options.submitter ?? options.notify, env)
+  const declared = options.submitter ?? options.notify
+  const submitter = resolveSubmitter(declared, env)
+  if (submitter === "unknown") return { submitter }
+  if (!declared?.trim()) return { submitter, eventSubmitter: { name: submitter, source: "default" } }
+  const launchIdentity = env[DEFAULT_SUBMITTER_ENV]?.trim()
+  return {
+    submitter,
+    eventSubmitter: {
+      name: submitter,
+      source: "explicit",
+      ...(launchIdentity && launchIdentity !== submitter ? { launchIdentity } : {}),
+    },
+  }
 }
 
 function buildProgram(
@@ -649,7 +662,7 @@ function buildProgram(
       io,
       {
         command: "submit",
-        submitter: submitterOption(options, env, io),
+        ...submitterOption(options, env, io),
         ...(branch === undefined ? {} : { branch }),
         ...(options.issue === undefined ? {} : { issue: options.issue }),
         ...(options.dryRun === true ? { dryRun: true } : {}),
@@ -1589,7 +1602,7 @@ function buildProgram(
         {
           branch,
           command: "merge",
-          submitter: submitterOption(options, env, io),
+          submitter: submitterOption(options, env, io).submitter,
           ...(options.issue === undefined ? {} : { issue: options.issue }),
           ...(noCheck ? { noCheck: true } : {}),
           ...(author === undefined
@@ -2076,6 +2089,7 @@ function buildProgram(
           `record this event kind, under the id's own -failed replay key, when the declared write fails (one of ${ISSUES_EVENT_KINDS.join(", ")})`,
         )
         .option("--on-failure-text <text>", "the fallback event's text; defaults to the failed write's own text")
+        .option("--submitter <json>", "submitter provenance for a submitted event")
     }
     command.action(async (...received: unknown[]) => {
       const args = received.slice(0, operands.length) as string[]
@@ -2085,6 +2099,7 @@ function buildProgram(
         timeoutMs?: number
         expectedOwner?: string
         requestedBy?: string
+        submitter?: string
         onFailureKind?: string
         onFailureText?: string
         declarationRepository?: string
@@ -2131,6 +2146,7 @@ function buildProgram(
         ...(options.declarationCommit === undefined ? {} : { declarationCommit: options.declarationCommit }),
         ...(options.targetCommit === undefined ? {} : { targetCommit: options.targetCommit }),
         ...(options.id === undefined ? {} : { id: options.id }),
+        ...(options.submitter === undefined ? {} : { eventSubmitter: options.submitter }),
         ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       })

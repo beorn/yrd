@@ -38,11 +38,13 @@ describe("the issue-event edge's launch", () => {
   it("starts the CLI's own issues event verb detached, with the bound, and leaves the outcome in the queue's log tree", () => {
     const workdir = tmp()
     const spawned: Array<{ argv: readonly string[]; options: Record<string, unknown> }> = []
+    const submitter = { name: "@dev/author", source: "explicit", launchIdentity: "@dev/runner" } as const
     const outcome = launchIssueEvent({
       kind: "submitted",
       issue: "#38766",
       source: "github.com/beorn/hh-dev@abc",
       text: "task/38766 submitted at abc",
+      submitter,
       opId: "yrd-submitted-abc",
       projectRoot: "/hh/dev",
       cwd: "/hh/dev",
@@ -72,6 +74,8 @@ describe("the issue-event edge's launch", () => {
       "/hh/dev",
       "--timeout-ms",
       String(ISSUE_EVENT_EDGE_TIMEOUT_MS),
+      "--submitter",
+      JSON.stringify(submitter),
     ])
     // The child owns stdout and stderr (one shared descriptor), so its refusal is written by name.
     expect(spawned[0]?.options).toMatchObject({ cwd: "/hh/dev", env: { PATH: "/usr/bin" } })

@@ -21,6 +21,12 @@ export const ISSUE_EVENT_EDGE_TIMEOUT_MS = 60_000
 /** The change transitions this edge writes. Both replay under a key named after the head they were observed at. */
 export type IssueEventEdgeKind = "submitted" | "merged"
 
+export type IssueEventSubmitter = Readonly<{
+  name: string
+  source: "explicit" | "default"
+  launchIdentity?: string
+}>
+
 /**
  * What the child records when its own write cannot land (hh #38766, @cto 15f0394a). A detached child owns an outcome
  * the round can no longer see, so the one reader that can still say "this write failed" is the child: it writes this
@@ -49,6 +55,7 @@ export type IssueEventLaunchInput = Readonly<{
   readonly issue: string
   readonly source: string
   readonly text: string
+  readonly submitter?: IssueEventSubmitter
   readonly opId: string
   /** The project whose `issues.yml` declares `event`. */
   readonly projectRoot: string
@@ -101,6 +108,7 @@ export function launchIssueEvent(input: IssueEventLaunchInput): IssueEventLaunch
     input.projectRoot,
     "--timeout-ms",
     String(ISSUE_EVENT_EDGE_TIMEOUT_MS),
+    ...(input.submitter === undefined ? [] : ["--submitter", JSON.stringify(input.submitter)]),
     ...(input.fallback === undefined
       ? []
       : ["--on-failure-kind", input.fallback.kind, "--on-failure-text", input.fallback.text]),
