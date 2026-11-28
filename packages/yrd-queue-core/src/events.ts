@@ -102,6 +102,7 @@ export const EVENT_TRAILERS = {
   floors: "Floors",
   gitlinks: "Gitlinks",
   componentAuthors: "Component-Authors",
+  submitterProvenance: "Submitter-Provenance",
   issueEffect: "Issue-Effect",
   tip: "Tip",
   uniqueCommits: "Unique-Commits",
@@ -310,6 +311,8 @@ export function issueProviderId(
     .digest("hex")}`
 }
 
+export type SubmitterProvenance = Readonly<{ name: string; source: "explicit" | "default"; launchIdentity?: string }>
+
 type ChangeInputDetails = Readonly<{
   queueTip: string
   at: Date
@@ -331,6 +334,7 @@ type ChangeInputDetails = Readonly<{
   run?: string
   landedGitlinks?: readonly CommitGitlink[]
   componentAuthors?: readonly ComponentAuthor[]
+  submitterProvenance?: SubmitterProvenance
   advanced?: AdvancedDrop
 }>
 
@@ -651,6 +655,12 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
     if (type !== "opened") throw new TypeError("Component-Authors: belongs on opened")
     props.push([EVENT_TRAILERS.componentAuthors, JSON.stringify(checkedComponentAuthors(details.componentAuthors))])
   }
+  if (details.submitterProvenance !== undefined) {
+    if (type !== "opened" || details.submitterProvenance.name !== details.by) {
+      throw new TypeError("Submitter-Provenance belongs on opened and must name its By value")
+    }
+    props.push([EVENT_TRAILERS.submitterProvenance, JSON.stringify(details.submitterProvenance)])
+  }
   props.push(...evidenceProps(type, details))
   return {
     type,
@@ -665,6 +675,27 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
 }
 
 type EventShape = Pick<Event, "id" | "type" | "props" | "links"> & Partial<Pick<Event, "writer">>
+
+export function readSubmitterProvenance(event: EventShape): SubmitterProvenance | undefined {
+  const value = prop(event, EVENT_TRAILERS.submitterProvenance)
+  if (value === undefined) return undefined
+  try {
+    const { name, source, launchIdentity } = JSON.parse(value) as Record<string, unknown>
+    if (
+      event.type !== "opened" ||
+      typeof name !== "string" ||
+      !name.trim() ||
+      name !== prop(event, EVENT_TRAILERS.by) ||
+      (source !== "explicit" && source !== "default") ||
+      (launchIdentity !== undefined &&
+        (source !== "explicit" || typeof launchIdentity !== "string" || !launchIdentity.trim()))
+    )
+      throw new Error("expected the opened submitter with its identity source")
+    return { name, source, ...(launchIdentity === undefined ? {} : { launchIdentity }) }
+  } catch (cause) {
+    throw new Error(`event ${event.id}: malformed Submitter-Provenance`, { cause })
+  }
+}
 
 /** What the queue projection reads; a not-yet-written event is validated in this shape, never as a full Event. */
 type QueueEventShape = EventShape & Pick<Event, "parent" | "writer">

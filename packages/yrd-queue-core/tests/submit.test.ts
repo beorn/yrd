@@ -1387,14 +1387,35 @@ describe("event submit", () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/retry", "one.txt")
     const request = { branch: "task/retry", submitter: "@dev/2", target: { branch: "main", remote: "origin" } }
-    const first = await submit(w.git, "origin", request)
-    const again = await submit(w.git, "origin", request)
+    const provenance = { name: "@dev/2", source: "default" } as const
+    const first = await submit(w.git, "origin", { ...request, submitterProvenance: provenance })
+    const retryCaller = { name: "@dev/3", source: "explicit", launchIdentity: "@dev/4" } as const
+    const again = await submit(w.git, "origin", {
+      ...request,
+      submitter: retryCaller.name,
+      submitterProvenance: retryCaller,
+    })
     expect(again).toMatchObject({ head, retry: true, opened: first.opened })
+    expect(first.submitterProvenance).toEqual(provenance)
+    expect(again.submitterProvenance).toEqual(provenance)
     expect(
       (await listChangeHistories(store(w), "main", { branches: "all" })).histories
         .get("task/retry")
         ?.events.map((event) => event.type),
     ).toEqual(["opened"])
+  })
+
+  it("does not attach submitter provenance retroactively to an old opened event", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/legacy-retry", "one.txt")
+    const request = { branch: "task/legacy-retry", submitter: "@dev/2", target: { branch: "main", remote: "origin" } }
+    const first = await submit(w.git, "origin", request)
+    const again = await submit(w.git, "origin", {
+      ...request,
+      submitterProvenance: { name: request.submitter, source: "explicit" },
+    })
+    expect(again).toMatchObject({ retry: true, opened: first.opened })
+    expect(again.submitterProvenance).toBeUndefined()
   })
 
   const GITHUB_5XX = [

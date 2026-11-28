@@ -326,8 +326,12 @@ async function launchSubmitEvent(input: {
   readonly workdir: string
   readonly env: NodeJS.ProcessEnv | undefined
   readonly targetRemote: string
-  readonly eventSubmitter?: IssueEventSubmitter
-  readonly submitted: Readonly<{ branch: string; head: string; issue?: IssueResolution }>
+  readonly submitted: Readonly<{
+    branch: string
+    head: string
+    issue?: IssueResolution
+    submitterProvenance?: IssueEventSubmitter
+  }>
 }): Promise<void> {
   const { submitted } = input
   if (submitted.issue === undefined) {
@@ -351,7 +355,7 @@ async function launchSubmitEvent(input: {
     issue,
     source: issueEventSource(url, submitted.head),
     text: `${submitted.branch} submitted at ${submitted.head}`,
-    ...(input.eventSubmitter === undefined ? {} : { submitter: input.eventSubmitter }),
+    ...(submitted.submitterProvenance === undefined ? {} : { submitter: submitted.submitterProvenance }),
     opId: issueEventOperationId("submitted", submitted.head),
     projectRoot: input.repo,
     cwd: input.repo,
@@ -3194,6 +3198,7 @@ export async function coreQueueCommand(
         const submission = {
           branch: prepared.branch,
           submitter: request.submitter,
+          submitterProvenance: request.eventSubmitter,
           target: config.target,
           expectedTargetHead: captured.oid,
           ...(fetchedQueue === undefined ? {} : { fetchedQueueRefs: fetchedQueue }),
@@ -3269,7 +3274,6 @@ export async function coreQueueCommand(
           workdir,
           env,
           targetRemote: config.target.remote,
-          eventSubmitter: request.eventSubmitter,
           submitted,
         })
         emit(
@@ -3291,6 +3295,7 @@ export async function coreQueueCommand(
       const submission = {
         branch,
         submitter: request.submitter,
+        submitterProvenance: request.eventSubmitter,
         target: config.target,
         expectedTargetHead: captured.oid,
         ...(fetchedQueue === undefined ? {} : { fetchedQueueRefs: fetchedQueue }),
@@ -3365,7 +3370,6 @@ export async function coreQueueCommand(
         workdir,
         env,
         targetRemote: config.target.remote,
-        eventSubmitter: request.eventSubmitter,
         submitted,
       })
       const { stop: acceptedUnder, ...accepted } = submitted

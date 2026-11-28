@@ -63,7 +63,9 @@ import {
   readBranchHistory,
   readEventOps,
   readEventOpsWithRefs,
+  readSubmitterProvenance,
   type ComponentAuthor,
+  type SubmitterProvenance,
 } from "./events.ts"
 import { archivedChangesPrefix, assertBranch, classifyQueueRef, pauseRef, queueRefPrefix } from "./refs.ts"
 import { verifyCandidate, type Verification, type SettledGitlink } from "./verifying.ts"
@@ -270,6 +272,7 @@ export type SubmitRequest = Readonly<{
    */
   fetchedQueueRefs?: ReadonlyMap<string, string>
   submitter: string
+  submitterProvenance?: SubmitterProvenance
   issue?: string
   /** The host's judgment whether two differing raw issue keys name one issue (31060); absent, keys compare exactly. */
   sameIssue?: SameIssue
@@ -324,6 +327,7 @@ export type Submitted = Readonly<{
   targetHead: string
   /** The opened event or legacy record's sha. */
   opened: string
+  submitterProvenance?: SubmitterProvenance
   /** True when this branch already had an open change at this head, so this was a retry. */
   retry: boolean
   /** Gitlinks this change moved whose commits submit published to their submodule remotes (24454). */
@@ -1278,6 +1282,7 @@ async function submitEvent(
       at: new Date(),
       commit: head,
       by: request.submitter,
+      ...(request.submitterProvenance === undefined ? {} : { submitterProvenance: request.submitterProvenance }),
       ...(componentAuthors.length === 0 ? {} : { componentAuthors }),
       ...(inspected.issue === undefined ? {} : { issue: inspected.issue.issue }),
       title: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
@@ -1333,7 +1338,7 @@ async function submitEvent(
           ]),
     ]
     let retry = false
-    let retryOpened: string | undefined
+    let retryOpened: Event | undefined
     let written: readonly PendingWarning[] = []
     // Lease the authoritative queue tip beside this change. A new maintenance
     // event between the read and publish makes the whole atomic push fail.
@@ -1360,7 +1365,7 @@ async function submitEvent(
           current.status === "checking" ||
           current.status === "stuck")
       if (retry) {
-        retryOpened = events.findLast((event) => event.type === "opened")?.id
+        retryOpened = events.findLast((event) => event.type === "opened")
         if (warningInputs.length === 0) return []
         const currentSegment = events.slice(events.findLastIndex((event) => event.type === "opened"))
         written = warningInputs.filter(
@@ -1456,8 +1461,9 @@ async function submitEvent(
       refuseMaintenance(moved.stop, remote, request.target.branch, published)
       throw error
     }
-    const opened = retryOpened ?? result.events.findLast((event) => event.type === "opened")?.id
-    if (opened === undefined) throw new Error(`${ref} in ${root}: submit published no opened event`)
+    const openedEvent = retryOpened ?? result.events.findLast((event) => event.type === "opened")
+    if (openedEvent === undefined) throw new Error(`${ref} in ${root}: submit published no opened event`)
+    const submitterProvenance = readSubmitterProvenance(openedEvent)
     const appended = result.events.filter(
       (event) =>
         event.type === "admission-warning" && event.props.some(([key, value]) => key === "Commit" && value === head),
@@ -1477,7 +1483,8 @@ async function submitEvent(
       branch: request.branch,
       head,
       targetHead: inspected.targetHead,
-      opened,
+      opened: openedEvent.id,
+      ...(submitterProvenance === undefined ? {} : { submitterProvenance }),
       retry,
       published,
       verifying: inspected.verifying,
