@@ -689,8 +689,9 @@ export function readSubmitterProvenance(event: EventShape): SubmitterProvenance 
       (source !== "explicit" && source !== "default") ||
       (launchIdentity !== undefined &&
         (source !== "explicit" || typeof launchIdentity !== "string" || !launchIdentity.trim()))
-    )
+    ) {
       throw new Error("expected the opened submitter with its identity source")
+    }
     return { name, source, ...(launchIdentity === undefined ? {} : { launchIdentity }) }
   } catch (cause) {
     throw new Error(`event ${event.id}: malformed Submitter-Provenance`, { cause })
