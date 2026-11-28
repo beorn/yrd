@@ -372,6 +372,59 @@ it.each(["forward", "divergent", "partial", "unmoved"] as const)(
   120_000,
 )
 
+/** @failure Repeated forward component updates can keep one checked change rejudging indefinitely.
+ * @level l3 @consumer queue operator
+ * Each round uses the persisted event chain and actual GitSuper publication against local remotes.
+ */
+it("stops on the fourth forward component move and reports all four moves", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const branch = "task/forward-component-limit"
+  await submitGitlink(w, branch, await aheadOfSubmodule(w, "authored"))
+  const rootBefore = await remoteTip(w.git, "refs/heads/main")
+  const component = gitIn(join(dirname(w.work), "submodule-work"))
+  const advances: string[] = []
+  await using real = createProcess({ cwd: w.work })
+
+  for (const attempt of [1, 2, 3, 4]) {
+    const process: Process = {
+      ...real,
+      async run(request) {
+        if (isGitSuper(request.argv, "push") && advances.length < attempt) {
+          const before = advances.at(-1) ?? w.main
+          const after = (
+            await component([
+              "commit-tree",
+              `${before}^{tree}`,
+              "-p",
+              before,
+              "-m",
+              `external component move ${attempt}`,
+            ])
+          ).trim()
+          await component(["push", "--quiet", "origin", `${after}:refs/heads/main`])
+          advances.push(after)
+        }
+        return real.run(request)
+      },
+    }
+    const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [], process })
+    expect(advances).toHaveLength(attempt)
+    expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
+    expect(await submoduleMain(w)).toBe(advances.at(-1))
+    if (attempt < 4) {
+      expect(outcome).toMatchObject({ exitCode: 0, deferred: [branch], stuck: [], merged: [] })
+    } else {
+      expect(outcome).toMatchObject({ exitCode: 2, deferred: [], stuck: [branch], merged: [] })
+    }
+  }
+
+  const state = await readStatus(eventStore(w), "main", branch)
+  expect(state.status).toBe("stuck")
+  expect(state.reason).toContain("component recomposition limit")
+  for (const advance of advances) expect(state.reason).toContain(advance)
+}, 120_000)
+
 /** @failure A well-formed git-super success with an empty repository list records
  * published while no child ref moved — git-super's JSON is taken as the proof of
  * its own push (27098 step 4).
