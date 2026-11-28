@@ -2533,12 +2533,13 @@ export async function coreQueueCommand(
             ...(supersededBy === undefined ? [] : [`superseded by ${supersededBy}`]),
             ...(rebound === undefined ? [] : [`rebound from ${rebound.from} to ${rebound.to} by ${request.by}`]),
           ]
-          // #39255 (@cto b3b69ea0, ruling B): a drop that names --local never publishes. Custody goes to origin only
-          // when origin already holds the tip — in its target, on this branch's change chain, or on one of its
-          // branches; otherwise the dropped event stays in this repo's common git dir and nothing is pushed.
+          // #39255 (@cto b3b69ea0, ruling B): a drop that names --local never publishes a never-submitted branch.
+          // Custody goes to origin when origin already knows the branch or tip — a change chain for it, its target,
+          // or one of its branches; otherwise the dropped event stays in this repo's common git dir, nothing pushed.
+          // A submitted change's advanced tip still writes its dropped event to the existing chain (30683, 37360).
           const originHolds =
+            history !== undefined ||
             (await isAncestorOf(authorGit, head, target)) ||
-            (history?.events.some((event) => event.links.includes(head)) ?? false) ||
             (
               await authorGit([
                 "for-each-ref",

@@ -36,6 +36,7 @@ import {
   assertPlainEventQueueConfig,
   changeInput,
   changesRef,
+  localCustodyRef,
   createEventQueue,
   createEventStore,
   drop,
@@ -3697,14 +3698,16 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect(await git(["for-each-ref", "refs/yrd/", "refs/archive/"])).toBe("")
         return
       }
+      // #39255: a never-submitted root branch's discard keeps its tip in the local custody ref, not on origin's chain;
+      // the event there still records the issue, the actor and the reason.
       const history = (await readBranchHistory(createEventStore(repo, "origin", git.selection), "main", branch)).history
-      expect(history?.events.at(-1)?.links).toContain(tip)
-      expect(history?.state.issue).toBe(issue)
-      expect(history?.events).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ content: reason, props: expect.arrayContaining([["By", "fixture"]]) }),
-        ]),
-      )
+      expect(history).toBeUndefined()
+      const kept = (await git(["rev-parse", localCustodyRef("main", branch)])).trim()
+      expect((await git(["rev-list", "--parents", "-n", "1", kept])).trim().split(" ")).toContain(tip)
+      const event = await git(["log", "-1", "--format=%B", kept])
+      expect(event).toContain(`"issue":${JSON.stringify(issue)}`)
+      expect(event).toContain(`"by":"fixture"`)
+      expect(event).toContain(JSON.stringify(reason).slice(1, -1))
     },
     60_000,
   )
@@ -4618,9 +4621,11 @@ describe("a queue is the selected origin branch carrying config", () => {
       removed: { branch: string; archiveRef?: string; recovery?: string }[]
     }
     expect(manualReport.removed).toEqual([expect.objectContaining({ branch: "task/manual-only" })])
-    // 30683: the dropped event on the chain keeps the tip, and the recovery reads it back from there.
+    // 30683 as narrowed by #39255: this never-submitted tip stays in the local custody ref, and the recovery
+    // recreates the branch from it without a fetch.
     expect(manualReport.removed[0]!.archiveRef).toBeUndefined()
-    expect(manualReport.removed[0]!.recovery).toContain(changesRef("main", "task/manual-only"))
+    expect((await git(["rev-parse", localCustodyRef("main", "task/manual-only")])).trim()).toMatch(/^[0-9a-f]{40,64}$/u)
+    expect(manualReport.removed[0]!.recovery).not.toContain("fetch")
     const remoteRefs = await git(["ls-remote", "origin"])
     const originRecovery = manualReport.removed[0]!.recovery
     if (originRecovery === undefined) throw new Error("the dropped event supplied no recovery command")
@@ -5601,6 +5606,8 @@ describe("a queue is the selected origin branch carrying config", () => {
     await git(["checkout", "--quiet", "-b", "task/retry"])
     await git(["commit", "--quiet", "--allow-empty", "-m", `work\n\nRefs: ${issue}`])
     const head = (await git(["rev-parse", "HEAD"])).trim()
+    // #39255: origin custody applies to a tip origin already holds, so the branch is published before the refusal.
+    await git(["push", "--quiet", "origin", "task/retry"])
     await git(["checkout", "--quiet", "main"])
     const hook = join(dirname(repo), "remote.git", "hooks", "pre-receive")
     writeFileSync(hook, "#!/bin/sh\necho fixture-origin-refusal >&2\nexit 1\n")
