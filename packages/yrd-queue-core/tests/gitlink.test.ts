@@ -39,6 +39,7 @@ import { appendChangeEvent } from "../src/events.ts"
 import { mergeBases } from "../src/git.ts"
 import { publishMovedGitlinks } from "../src/submit.ts"
 import { publishCheckedChildren } from "../src/publication.ts"
+import { transientPushRetry } from "../src/transient-push.ts"
 import { gitSuperBin, siblingGitSuperBin, superprojectRoot } from "../../../tests/support/git-super-bin.ts"
 
 // The root Vitest project seals PATH in its setup beforeEach. Reassert this
@@ -423,6 +424,135 @@ it("stops on the fourth forward component move and reports all four moves", asyn
   expect(state.status).toBe("stuck")
   expect(state.reason).toContain("component recomposition limit")
   for (const advance of advances) expect(state.reason).toContain(advance)
+}, 120_000)
+
+/** @failure An HTTP 503 while proving a child advance can be mistaken for a failed push.
+ * @level l3 @consumer queue operator
+ * A real atomic stale lease must stop the line when the independent Gitomic proof fetch fails.
+ */
+it("stops when the child ancestry proof fetch returns 503 after an atomic stale lease", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const branch = "task/proof-fetch-503"
+  await submitGitlink(w, branch, await aheadOfSubmodule(w, "authored"))
+  const rootBefore = await remoteTip(w.git, "refs/heads/main")
+  const component = gitIn(join(dirname(w.work), "submodule-work"))
+  const advance = (await component(["commit-tree", `${w.main}^{tree}`, "-p", w.main, "-m", "external advance"])).trim()
+  const fixtureGit = join(dirname(w.work), "git-proof-503")
+  writeFileSync(
+    fixtureGit,
+    [
+      "#!/bin/sh",
+      "for arg do",
+      '  if [ "$arg" = fetch ]; then',
+      "    echo 'fatal: unable to access https://git-super.test/owned/submodule.git/: The requested URL returned error: 503' >&2",
+      "    exit 128",
+      "  fi",
+      "done",
+      'exec git "$@"',
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  )
+
+  const createBackend = gitomic.createShellBackend
+  const proofFetch = createBackend({ gitExecutable: fixtureGit }).fetchRefs
+  if (proofFetch === undefined) throw new Error("fixture Gitomic backend lacks fetchRefs")
+  let publishAttempts = 0
+  let proofError: string | undefined
+  using sleep = vi.spyOn(transientPushRetry, "sleep").mockResolvedValue(undefined)
+  using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
+    const backend = createBackend(options)
+    const fetchRefs = backend.fetchRefs
+    if (fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs")
+    return {
+      ...backend,
+      async fetchRefs(repo, refs, remote, opts) {
+        if (publishAttempts === 0 || refs !== "refs/heads/main") return fetchRefs(repo, refs, remote, opts)
+        try {
+          return await proofFetch(repo, refs, remote, opts)
+        } catch (error) {
+          proofError = String(error)
+          throw error
+        }
+      },
+    }
+  })
+
+  await using real = createProcess({ cwd: w.work })
+  const process: Process = {
+    ...real,
+    async run(request) {
+      if (!isGitSuper(request.argv, "push")) return real.run(request)
+      publishAttempts++
+      if (publishAttempts === 1) await component(["push", "--quiet", "origin", `${advance}:refs/heads/main`])
+      const refused = await real.run(request)
+      expect(refused.exitCode).toBe(2)
+      return refused
+    },
+  }
+  const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [], process })
+  const status = await readStatus(eventStore(w), "main", branch)
+
+  expect(proofError).toMatch(/git fetch failed \(128\).*returned error: 503/su)
+  expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
+  expect(await submoduleMain(w)).toBe(advance)
+  expect(outcome).toMatchObject({ exitCode: 2, merged: [], stuck: [branch] })
+  expect(status).toMatchObject({
+    status: "stuck",
+    reason: expect.stringContaining("could not verify the component advance"),
+  })
+  expect(publishAttempts).toBe(1)
+  expect(sleep).not.toHaveBeenCalled()
+}, 120_000)
+
+/** @failure A child publication transport failure could lose its retry when proof failures stop the line.
+ * @level l3 @consumer queue operator
+ * Inject the existing GitSuper push-rejected result and let the retry publish the checked candidate normally.
+ */
+it("retries a 503 from the leased child push itself", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const branch = "task/child-push-503"
+  const ahead = await aheadOfSubmodule(w, "authored")
+  await submitGitlink(w, branch, ahead)
+  let attempts = 0
+  using sleep = vi.spyOn(transientPushRetry, "sleep").mockResolvedValue(undefined)
+  using stderr = vi.spyOn(globalThis.process.stderr, "write").mockReturnValue(true)
+  await using real = createProcess({ cwd: w.work })
+  const process: Process = {
+    ...real,
+    async run(request) {
+      if (!isGitSuper(request.argv, "push")) return real.run(request)
+      attempts++
+      if (attempts !== 1) return real.run(request)
+      return {
+        exitCode: 2,
+        signal: null,
+        stderr: "",
+        durationMs: 1,
+        timedOut: false,
+        stdout: JSON.stringify({
+          state: "failed",
+          partial: false,
+          repositories: [],
+          detail: {
+            code: "push-rejected",
+            phase: "leased-child-push",
+            message: "git push failed (exit 128)\nfatal: The requested URL returned error: 503",
+          },
+        }),
+      }
+    },
+  }
+  const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [], process })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [branch], stuck: [] })
+  expect(attempts).toBe(2)
+  expect(sleep).toHaveBeenCalledOnce()
+  expect(stderr.mock.calls).toEqual([[expect.stringMatching(/transient 5xx push attempt 1\/3 .*returned error: 503/u)]])
+  expect(await submoduleMain(w)).toBe(ahead)
+  expect(await gitlinkAt(w, await remoteTip(w.git, "refs/heads/main"))).toBe(ahead)
 }, 120_000)
 
 /** @failure A well-formed git-super success with an empty repository list records

@@ -85,7 +85,7 @@ import {
 import { queueRefPrefix, runIndexRef } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
 import { revertedPathsFinding, revertedPathsReason, revertGuardAction } from "./revert-guard.ts"
-import { publishCheckedChildren } from "./publication.ts"
+import { publishCheckedChildren, type ChildPublication } from "./publication.ts"
 import { withRemoteSeam, withRemoteSeamGap } from "./remote-calls.ts"
 import { SETUP, SetupFailed, discardWorktree } from "./worktree.ts"
 import { installInputsChanged } from "./install-inputs.ts"
@@ -187,6 +187,12 @@ const COMPONENT_FORWARD_MOVE_REASON = "component main moved forward after judgme
 const CAS_HISTORY_BUDGET_NAME = "cas-history-journals"
 const CAS_HISTORY_JOURNAL_BUDGET = 128
 type ExhaustedCasHistory = NonNullable<ReturnType<typeof recentCasRefusalStreak>["windowExhausted"]>
+
+function childPushRetryText({ state, detail }: ChildPublication): string {
+  // A stale lease is a known push refusal. The holder lookup and the independent ancestry read can both report 5xx.
+  if (state !== "refused" || detail?.code === "destination-changed") return ""
+  return detail?.message ?? ""
+}
 
 /** A definite no-progress event-chain refusal at one of the run's own transaction sites. */
 export class QueueRunEventRetryExhausted extends Error {
@@ -2021,7 +2027,7 @@ export async function eventQueueRun(
         {
           repository: options.repo,
           ref,
-          text: (published) => (published.state === "refused" ? published.evidence : ""),
+          text: childPushRetryText,
           note: noteTransient,
         },
       )
@@ -2055,7 +2061,7 @@ export async function eventQueueRun(
       const moves = [...priorMoves, reason].map((recorded) => recorded.slice(COMPONENT_FORWARD_MOVE_REASON.length))
       refusal = `component recomposition limit (${COMPONENT_RECOMPOSE_LIMIT}) reached: ${moves.join(" | ")}`
     } else if (child.state === "refused") {
-      const hit = matchTransientPush5xx(child.evidence)
+      const hit = matchTransientPush5xx(childPushRetryText(child))
       if (hit !== undefined) {
         return holdTransientPublication(branch, head, marker, hit, "component publication", current)
       }
