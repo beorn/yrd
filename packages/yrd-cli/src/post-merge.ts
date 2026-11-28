@@ -310,13 +310,29 @@ type ClosingReference = Readonly<{
   superseded?: Superseded
 }>
 
-/** The paths one commit changed against its first parent; a root commit against nothing. */
-async function changedPathsOf(git: GitRunner, commit: string): Promise<readonly string[]> {
-  const parents = (await git(["rev-list", "--parents", "-n", "1", commit])).trim().split(" ")
-  const out =
-    parents.length === 1
-      ? await git(["diff-tree", "--root", "--no-commit-id", "-r", "--name-only", "-z", "--no-renames", commit])
-      : await git(["diff", "--name-only", "-z", "--no-renames", parents[1] as string, commit])
+/**
+ * The paths one commit changed: against its first parent, a root commit against nothing. A merge is read against the
+ * parent the landing's base already holds (hh 39213): a branch that merged main in before submit has main's later
+ * landings on its first-parent side, and reading the merge against that parent named those landings as its own change
+ * and then as the commits that took it back. Against the base-held parent, the merge's change is the branch's work.
+ * A merge with no parent in the base keeps the first parent.
+ */
+async function changedPathsOf(git: GitRunner, commit: string, base: string): Promise<readonly string[]> {
+  const [, ...parents] = (await git(["rev-list", "--parents", "-n", "1", commit])).trim().split(" ")
+  if (parents.length === 0) {
+    const out = await git(["diff-tree", "--root", "--no-commit-id", "-r", "--name-only", "-z", "--no-renames", commit])
+    return out.split("\0").filter((path) => path !== "")
+  }
+  let against = parents[0] as string
+  if (parents.length > 1) {
+    for (const parent of parents) {
+      if (await isAncestor(git, parent, base)) {
+        against = parent
+        break
+      }
+    }
+  }
+  const out = await git(["diff", "--name-only", "-z", "--no-renames", against, commit])
   return out.split("\0").filter((path) => path !== "")
 }
 
@@ -333,7 +349,7 @@ type Survival =
  * deliver.
  */
 async function survivalOf(git: GitRunner, base: string, landing: string, commit: string): Promise<Survival> {
-  const paths = await changedPathsOf(git, commit)
+  const paths = await changedPathsOf(git, commit, base)
   // `--literal-pathspecs` (@cto ea5c5f52): a path with `*`, `[` or a leading `:` is otherwise read as a glob or as
   // pathspec magic, which can match some other file and decide a reverted change survived.
   const net = await git([

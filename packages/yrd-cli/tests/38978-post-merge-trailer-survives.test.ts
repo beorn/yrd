@@ -385,3 +385,78 @@ it("leaves an issue open when its closing trailer's change did not survive the l
   expect(diagnostics.join(" ")).toContain("did not survive this landing")
   expect(merged).toEqual(expect.arrayContaining(["task/superseded", "task/control"]))
 }, 180_000)
+
+/**
+ * hh 39213: a branch that merges main in before submit carries main's later landings in its range. Its `Closes:` on
+ * that merge commit closes the issue: the merge's own change is the branch's work, read against the parent the landing
+ * already holds, never the landings it pulled in from main (task/39204 was left open with seven of them named as
+ * "took its change back", although every file it changed landed unchanged).
+ */
+it("closes an issue whose closing trailer sits on the branch's merge of main", async () => {
+  const { repo, workdir, git, closeCalls, queue } = await world()
+  const launches: IssueEventLaunchInput[] = []
+  const capture = (input: IssueEventLaunchInput): IssueEventLaunch => {
+    launches.push(input)
+    return { launched: true, log: `${input.workdir}/logs/issue-events/${input.opId}.log` }
+  }
+  await queue("task/merged-main")
+  writeFileSync(join(repo, "guard.ts"), "export const faster = true\n")
+  await git(["add", "guard.ts"])
+  await git(["commit", "--quiet", "-m", "perf: the guard is faster\n\nRefs: issue-merged"])
+  // Another change lands on main meanwhile; the branch then merges main in and puts its closing trailer there.
+  await git(["checkout", "--quiet", "-b", "elsewhere", "origin/main"])
+  writeFileSync(join(repo, "inventory.md"), "someone else's landing\n")
+  await git(["add", "inventory.md"])
+  await git(["commit", "--quiet", "-m", "docs: someone else's landing"])
+  await git(["push", "--quiet", "origin", "HEAD:main"])
+  await git(["checkout", "--quiet", "task/merged-main"])
+  await git(["fetch", "--quiet", "origin"])
+  await git(["merge", "--quiet", "--no-ff", "-m", "Merge origin/main\n\nCloses: issue-merged", "origin/main"])
+  await submit(git, "origin", {
+    branch: "task/merged-main",
+    submitter: "fixture",
+    target: { remote: "origin", branch: "main" },
+  })
+  await git(["checkout", "--quiet", "main"])
+
+  const stop = new AbortController()
+  const merged: string[] = []
+  const diagnostics: string[] = []
+  try {
+    expect(
+      await coreQueueCommand(
+        repo,
+        {
+          cwd: repo,
+          stdout: (line) => diagnostics.push(line),
+          stderr: (line) => diagnostics.push(line),
+          localBranchProtections: async () => ({ protections: ["fixture hold"], evidence: [] }),
+        },
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterRound: async (outcome) => {
+            merged.push(...outcome.merged)
+            if (!merged.includes("task/merged-main")) return
+            await vi.waitFor(
+              () => {
+                expect(closedKeys(closeCalls), diagnostics.join(" ")).toEqual(["issue-merged"])
+              },
+              { timeout: 20000 },
+            )
+            stop.abort()
+          },
+        },
+        { workdir, json: true, launchEvent: capture, projectRoot: repo },
+      ),
+      diagnostics.join(" "),
+    ).toBe(0)
+  } finally {
+    stop.abort()
+  }
+
+  expect(closedKeys(closeCalls), diagnostics.join(" ")).toEqual(["issue-merged"])
+  expect(diagnostics.join(" ")).not.toContain("did not survive this landing")
+  expect(launches.some((launch) => launch.opId.includes("superseded"))).toBe(false)
+}, 180_000)
