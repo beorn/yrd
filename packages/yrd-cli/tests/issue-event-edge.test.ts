@@ -8,7 +8,7 @@
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
   ISSUE_EVENT_EDGE_TIMEOUT_MS,
   issueEventOperationId,
@@ -151,6 +151,34 @@ describe("the issue-event edge's launch", () => {
     })
     expect(outcome.launched).toBe(false)
     expect(outcome.launched ? "" : outcome.why).toMatch(/could not be opened/u)
+  })
+
+  it("re-enters a standalone Bun script without a launcher selector", async () => {
+    const workdir = tmp()
+    const script = join(workdir, "yrd.ts")
+    const log = join(workdir, "logs", "issue-events", "standalone-submitted.log")
+    const modulePath = join(import.meta.dirname, "..", "src", "issue-event-edge.ts")
+    writeFileSync(
+      script,
+      `
+import { launchIssueEvent } from ${JSON.stringify(modulePath)}
+if (process.argv[2] !== undefined) {
+  if (process.argv[2] !== "issues") throw new Error("Unexpected selector: " + process.argv[2])
+  console.log("detached event command reached")
+} else {
+  const outcome = launchIssueEvent({
+    kind: "submitted", issue: "#29527", source: "github.com/beorn/hh-dev@abc", text: "submitted",
+    opId: "standalone-submitted", workdir: ${JSON.stringify(workdir)}, cwd: ${JSON.stringify(workdir)},
+    projectRoot: ${JSON.stringify(workdir)}, env: process.env,
+  })
+  if (!outcome.launched) throw new Error(outcome.why)
+}`,
+    )
+    const ran = Bun.spawnSync([process.execPath, script], { stdout: "pipe", stderr: "pipe" })
+    expect(ran.exitCode, ran.stderr.toString()).toBe(0)
+    await vi.waitFor(() => expect(readFileSync(log, "utf8")).toContain("detached event command reached"), {
+      timeout: 5000,
+    })
   })
 
   it("a launched write never keeps the caller's process alive", () => {

@@ -10,7 +10,7 @@
  * is reported inline by the caller; a launch that succeeds but does not land leaves its evidence in that file, named.
  */
 import { closeSync, mkdirSync, openSync, writeSync } from "node:fs"
-import { join } from "node:path"
+import { basename, isAbsolute, join } from "node:path"
 import { normalizedRemote } from "@yrd/queue-core"
 import type { ISSUES_EVENT_KINDS } from "@yrd/issues"
 import { resolveExecutable } from "@yrd/process"
@@ -153,7 +153,11 @@ function selfInvocation(named: readonly string[] | undefined): string[] {
   if (named !== undefined) return [...named]
   const [executable, script] = process.argv
   if (executable === undefined) throw new Error("issue event edge: this process has no executable to re-enter")
-  return script !== undefined && /\.[cm]?[jt]s$/u.test(script) ? [executable, script, "yrd"] : [executable]
+  if (script === undefined || script === executable || !isAbsolute(script)) return [executable]
+  const entry = basename(script)
+  if (entry === "yrd-runtime.mjs") return [executable, script, "yrd"]
+  if (entry === "yrd" || entry === "git-yrd" || /\.[cm]?[jt]s$/u.test(entry)) return [executable, script]
+  return [executable]
 }
 
 function definedEnv(env: NodeJS.ProcessEnv): Record<string, string> {
