@@ -1782,7 +1782,9 @@ describe("yrd env open leaves the target's declared environment omissions out (h
       run.stderr(),
     ).toBe(0)
     const bay = join(w.work, ".bays", "whole")
-    expect(readFileSync(join(bay, "vendor", "dependency", "content", "artifacts", "corpus.txt"), "utf8")).toBe("large\n")
+    expect(readFileSync(join(bay, "vendor", "dependency", "content", "artifacts", "corpus.txt"), "utf8")).toBe(
+      "large\n",
+    )
     expect(run.stderr()).not.toContain("left out of the checkout")
   })
 
@@ -1805,7 +1807,9 @@ describe("yrd env open leaves the target's declared environment omissions out (h
   ])("an omission that %s refuses by name and leaves no environment", async (_name, omit, message) => {
     const w = await omittingWorld(omit)
     const run = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "refused", "--expires", "1d"], run.io)).not.toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "refused", "--expires", "1d"], run.io)).not.toBe(
+      0,
+    )
     expect(run.stderr()).toContain(message)
     expect(existsSync(join(w.work, ".bays", "refused"))).toBe(false)
   })

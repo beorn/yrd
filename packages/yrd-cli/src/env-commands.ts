@@ -891,7 +891,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: EnvironmentCo
     },
   )
   // hh#39162: what the target leaves out of every environment's checkout, unless --full keeps it.
-  const omitted = options.full === true ? [] : (config.environments?.omitCheckoutDirectories ?? [])
+  const omitted = options.full === true ? [] : (config?.environments?.omitCheckoutDirectories ?? [])
   // 27147: a submodule the base declares `private = true` is left empty and uninitialized; a detached
   // environment's freshWorktree reads the declaration itself.
   let provisioned: { path: string; headSha: string; baseSha: string; adoption: ProvisionedBay["adoption"] | "detached" }
@@ -1448,8 +1448,9 @@ export async function retainedEnvironments(
       return 0
     }
     const chunkSize = options.chunkSize ?? RETAINED_CHUNK_SIZE
-    if (!Number.isInteger(chunkSize) || chunkSize < 0)
+    if (!Number.isInteger(chunkSize) || chunkSize < 0) {
       throw new Error("--chunk-size must be zero or a positive whole number")
+    }
     const args = [
       "super",
       ...(options.json === true ? ["--json"] : []),

@@ -27,6 +27,8 @@ const QUEUE_KEYS = {
   derive: "supported",
   deriveRootPaths: "supported",
   retention: "supported",
+  // hh#39162: read only by `yrd env open`; an event runner's checkouts are not environments.
+  environments: "supported",
   teardown: "refused",
 } as const satisfies Record<keyof QueueConfig, "supported" | "refused">
 const CHECK_KEYS = new Set([
