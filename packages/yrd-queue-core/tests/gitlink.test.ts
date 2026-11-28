@@ -267,6 +267,164 @@ it("runs a gitlink-bearing event change through the checked candidate", async ()
   expect(state.candidate).toBe(await remoteTip(w.git, "refs/heads/main"))
 })
 
+/** @failure A component main moves after the candidate is checked but before the leased child push.
+ * @level l3 @consumer queue operator and component author
+ * Earlier races cover movement before compose or a root lease after the child push.
+ */
+it.each(["forward", "divergent", "partial", "unmoved"] as const)(
+  "handles a %s component main move at publication",
+  async (movement) => {
+    let w = await world()
+    const other = movement === "partial" ? await addSecondChild(w) : undefined
+    if (other !== undefined) w = { ...w, git: gitIn(w.work) }
+    await createWorldEventQueue(w)
+    const branch = `task/${movement}-component-lease`
+    const ahead = await aheadOfSubmodule(w, `authored-${movement}`)
+    if (other === undefined) await submitGitlink(w, branch, ahead)
+    else await submitTwoChildren(w, branch, other.ahead, ahead)
+    const rootBefore = await remoteTip(w.git, "refs/heads/main")
+    const component = gitIn(join(dirname(w.work), "submodule-work"))
+    let nextMain = w.main
+    if (movement === "divergent") nextMain = w.offMain
+    else if (movement !== "unmoved") {
+      nextMain = (
+        await component(["commit-tree", `${w.main}^{tree}`, "-p", w.main, "-m", "external component advance"])
+      ).trim()
+    }
+
+    await using real = createProcess({ cwd: w.work })
+    let moved = false
+    const process: Process = {
+      ...real,
+      async run(request) {
+        if (!moved && isGitSuper(request.argv, "push")) {
+          moved = true
+          if (movement === "unmoved") {
+            const hook = join(dirname(w.work), "submodule.git", "hooks", "pre-receive")
+            writeFileSync(
+              hook,
+              '#!/bin/sh\nwhile read old new ref; do\n  test "$ref" != refs/heads/main || exit 1\ndone\n',
+              {
+                mode: 0o755,
+              },
+            )
+          } else {
+            await component([
+              "push",
+              "--quiet",
+              `--force-with-lease=refs/heads/main:${w.main}`,
+              "origin",
+              `${nextMain}:refs/heads/main`,
+            ])
+          }
+        }
+        return real.run(request)
+      },
+    }
+    const check = { run: "git rev-parse HEAD", on: ["merge"] as const }
+    const first = await queueRun({ ...(await w.options(check)), notify: [], process })
+    expect(moved).toBe(true)
+    expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
+    expect(await submoduleMain(w)).toBe(nextMain)
+
+    if (movement !== "forward") {
+      expect(first).toMatchObject({ exitCode: 2, merged: [], stuck: [branch] })
+      const status = await readStatus(eventStore(w), "main", branch)
+      expect(status.reason).toContain("frozen component publication")
+      expect(status.reason).toContain("destination-changed (leased-child-push)")
+      if (other !== undefined) {
+        expect((await gitIn(other.remote)(["rev-parse", "refs/heads/main"])).trim()).toBe(other.ahead)
+      }
+      return
+    }
+
+    expect(first).toMatchObject({ exitCode: 0, deferred: [branch], merged: [], stuck: [] })
+    const deferred = await readStatus(eventStore(w), "main", branch)
+    expect(deferred).toMatchObject({ status: "verifying", reason: expect.stringContaining(nextMain) })
+    const second = await queueRun({ ...(await w.options(check)), notify: [] })
+    expect(second).toMatchObject({ exitCode: 0, merged: [branch], stuck: [] })
+    const rootAfter = await remoteTip(w.git, "refs/heads/main")
+    const merged = await readStatus(eventStore(w), "main", branch)
+    if (merged.tip === undefined) throw new Error("merged fixture has no event-chain tip")
+    const events = await readChangeEvents(eventStore(w), "main", branch, merged.tip)
+    const checked = events.filter((event) => event.type === "merging")
+    expect(checked).toHaveLength(2)
+    expect(rootAfter).not.toBe(deferred.candidate)
+    for (const candidate of [deferred.candidate, rootAfter]) {
+      expect(checked).toContainEqual(
+        expect.objectContaining({
+          props: expect.arrayContaining([
+            ["Commit", candidate],
+            ["Reason", expect.stringContaining("merge checks passed (submodule-check)")],
+          ]),
+        }),
+      )
+    }
+
+    const landed = (await w.git(["rev-parse", `${rootAfter}:submodule`])).trim()
+    expect(landed).toBe(await submoduleMain(w))
+    const checkParent = async (parent: string) =>
+      expect((await component(["merge-base", parent, landed])).trim()).toBe(parent)
+    await component(["fetch", "--quiet", "origin", "main"])
+    await checkParent(nextMain)
+    await checkParent(ahead)
+  },
+  120_000,
+)
+
+/** @failure Repeated forward component updates can keep one checked change rejudging indefinitely.
+ * @level l3 @consumer queue operator
+ * Each round uses the persisted event chain and actual GitSuper publication against local remotes.
+ */
+it("stops on the fourth forward component move and reports all four moves", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const branch = "task/forward-component-limit"
+  await submitGitlink(w, branch, await aheadOfSubmodule(w, "authored"))
+  const rootBefore = await remoteTip(w.git, "refs/heads/main")
+  const component = gitIn(join(dirname(w.work), "submodule-work"))
+  const advances: string[] = []
+  await using real = createProcess({ cwd: w.work })
+
+  for (const attempt of [1, 2, 3, 4]) {
+    const process: Process = {
+      ...real,
+      async run(request) {
+        if (isGitSuper(request.argv, "push") && advances.length < attempt) {
+          const before = advances.at(-1) ?? w.main
+          const after = (
+            await component([
+              "commit-tree",
+              `${before}^{tree}`,
+              "-p",
+              before,
+              "-m",
+              `external component move ${attempt}`,
+            ])
+          ).trim()
+          await component(["push", "--quiet", "origin", `${after}:refs/heads/main`])
+          advances.push(after)
+        }
+        return real.run(request)
+      },
+    }
+    const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [], process })
+    expect(advances).toHaveLength(attempt)
+    expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
+    expect(await submoduleMain(w)).toBe(advances.at(-1))
+    if (attempt < 4) {
+      expect(outcome).toMatchObject({ exitCode: 0, deferred: [branch], stuck: [], merged: [] })
+    } else {
+      expect(outcome).toMatchObject({ exitCode: 2, deferred: [], stuck: [branch], merged: [] })
+    }
+  }
+
+  const state = await readStatus(eventStore(w), "main", branch)
+  expect(state.status).toBe("stuck")
+  expect(state.reason).toContain("component recomposition limit")
+  for (const advance of advances) expect(state.reason).toContain(advance)
+}, 120_000)
+
 /** @failure A well-formed git-super success with an empty repository list records
  * published while no child ref moved — git-super's JSON is taken as the proof of
  * its own push (27098 step 4).
@@ -1071,27 +1229,28 @@ it.each([
   expect(rows.some((row) => row.kind === "narrowing")).toBe(refused)
 })
 
-/** @failure A third component value could be silently recomposed after a durable marker.
+/** @failure A forward move could replace the checked candidate without recording a new judgment.
  * @level l3 @consumer queue operator
- * The frozen source must remain visible for repair when Git-super refuses its lease.
+ * The frozen source stays visible when the queue records that its publication lease was lost.
  */
-it("keeps the event candidate and stops on a third component main value", async () => {
+it("keeps the checked event candidate visible when a forward component move defers publication", async () => {
   const w = await world()
   await createWorldEventQueue(w)
   const ahead = await aheadOfSubmodule(w, "event-third")
   await submitGitlink(w, "task/event-third", ahead)
   const rootBefore = await remoteTip(w.git, "refs/heads/main")
   await using real = createProcess({ cwd: w.work })
-  let sawMarker = false
+  let checkedCandidate: string | undefined
+  let advancedMain: string | undefined
   const racing: Process = {
     ...real,
     async run(request) {
-      if (isGitSuper(request.argv, "push") && !sawMarker) {
+      if (isGitSuper(request.argv, "push") && checkedCandidate === undefined) {
         const marker = await readStatus(eventStore(w), "main", "task/event-third")
         expect(marker).toMatchObject({ status: "merging" })
-        expect(marker.candidate).toBeDefined()
-        sawMarker = true
-        await advanceSubmodule(w, "a third main value")
+        if (marker.candidate === undefined) throw new Error("merging event lost its checked candidate")
+        checkedCandidate = marker.candidate
+        advancedMain = await advanceSubmodule(w, "a third main value")
       }
       return real.run(request)
     },
@@ -1099,13 +1258,14 @@ it("keeps the event candidate and stops on a third component main value", async 
 
   const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [], process: racing })
 
-  expect(sawMarker).toBe(true)
-  expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/event-third"], merged: [] })
+  expect(checkedCandidate).toBeDefined()
+  if (advancedMain === undefined) throw new Error("component main did not advance during publication")
+  expect(outcome).toMatchObject({ exitCode: 0, deferred: ["task/event-third"], stuck: [], merged: [] })
   expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
+  expect(await submoduleMain(w)).toBe(advancedMain)
   const state = await readStatus(eventStore(w), "main", "task/event-third")
-  expect(state).toMatchObject({ status: "stuck" })
-  expect(state.candidate).toBeDefined()
-  expect(state.reason).toMatch(/refs\/heads\/main|component|submodule/u)
+  expect(state).toMatchObject({ status: "verifying", candidate: checkedCandidate })
+  expect(state.reason).toContain(advancedMain)
 })
 
 /** @failure A root lease loss after child publication could strand the event as merging.

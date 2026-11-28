@@ -179,6 +179,8 @@ import { QueuePaused, stuckCures } from "./pause.ts"
 const DEFAULT_QUEUE_RUN_RETRY_BUDGET_MS = 5_000
 // A merge republishes over queue-ref movers that are only `notified` rows at most this many times per publish.
 const NOTIFIED_PUBLISH_RETRIES = 3
+const COMPONENT_RECOMPOSE_LIMIT = 3
+const COMPONENT_FORWARD_MOVE_REASON = "component main moved forward after judgment: "
 // If all journals are live service rounds at its 120s interval, 128 cover
 // 4h16m, over 42 times the three-refusal page threshold. Manual runs and check
 // journals can shorten the span, so exhaustion is named, never a clean reset.
@@ -2029,13 +2031,39 @@ export async function eventQueueRun(
       log.write({ kind: "discarded", branch, head, reason: discardedJudgementReason(rival, error) })
       return result(failed.length > 0 ? 1 : 0, observedMerged, failed)
     }
-    if (child.state === "refused") {
+    let refusal: string | undefined
+    if (child.state === "recompose") {
+      // Count the recorded deferrals for this submission, including across service restarts.
+      const history = await readHistory(branch, marker, "componentRecomposeHistory")
+      const opened = history.findLastIndex((event) => event.type === "opened")
+      const priorMoves = history.slice(opened + 1).flatMap((event) => {
+        if (event.type !== "verifying") return []
+        const recorded = event.props.find(([key]) => key === EVENT_TRAILERS.reason)?.[1]
+        return recorded?.startsWith(COMPONENT_FORWARD_MOVE_REASON) ? [recorded] : []
+      })
+      const reason = trailerReason(`${COMPONENT_FORWARD_MOVE_REASON}${child.evidence}`)
+      if (priorMoves.length < COMPONENT_RECOMPOSE_LIMIT) {
+        await appendOwnedChange("frozenComponentWrite", store, queue, branch, marker, {
+          type: "verifying",
+          at: new Date(),
+          commit: candidate,
+          reason,
+        })
+        log.write({ kind: "change", branch, head, decision: "deferred", reason })
+        return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch])
+      }
+      const moves = [...priorMoves, reason].map((recorded) => recorded.slice(COMPONENT_FORWARD_MOVE_REASON.length))
+      refusal = `component recomposition limit (${COMPONENT_RECOMPOSE_LIMIT}) reached: ${moves.join(" | ")}`
+    } else if (child.state === "refused") {
       const hit = matchTransientPush5xx(child.evidence)
       if (hit !== undefined) {
         return holdTransientPublication(branch, head, marker, hit, "component publication", current)
       }
+      refusal = child.evidence
+    }
+    if (refusal !== undefined) {
       const description =
-        `${branch}: frozen component publication for ${candidate} refused: ${child.evidence}; ` +
+        `${branch}: frozen component publication for ${candidate} refused: ${refusal}; ` +
         "repair the named component remote/ref, then resume the queue"
       const oneLine = description.replace(/\s+/gu, " ").trim()
       const ended = await appendOwnedChange("refusedPublicationWrite", store, queue, branch, marker, {
@@ -2050,7 +2078,7 @@ export async function eventQueueRun(
         subject: oneLine,
         via: "component publication",
         next: "repair the named component remote/ref, then resume the queue",
-        saw: child.evidence,
+        saw: refusal,
       })
       return result(2, observedMerged, failed, [branch])
     }
@@ -2404,7 +2432,9 @@ export async function eventQueueRun(
         verifyCandidate({
           git,
           repo: options.repo,
-          noFetch: true,
+          // A verifying event with a reason records a lost publication lease.
+          // Re-judgment must observe current component mains even when the old pin was cached.
+          noFetch: selectedChange.status !== "verifying" || selectedChange.reason === undefined,
           targetHead: target,
           head,
           path,
