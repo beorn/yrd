@@ -69,6 +69,7 @@ import {
   previewRetire,
   acceptsMergedLocalRetirement,
   retireLocalBranch,
+  isAncestor as isAncestorOf,
   pauseLine,
   eventDirectMergeCommits,
   eventListRows,
@@ -2532,6 +2533,24 @@ export async function coreQueueCommand(
             ...(supersededBy === undefined ? [] : [`superseded by ${supersededBy}`]),
             ...(rebound === undefined ? [] : [`rebound from ${rebound.from} to ${rebound.to} by ${request.by}`]),
           ]
+          // #39255 (@cto b3b69ea0, ruling B): a drop that names --local never publishes. Custody goes to origin only
+          // when origin already holds the tip — in its target, on this branch's change chain, or on one of its
+          // branches; otherwise the dropped event stays in this repo's common git dir and nothing is pushed.
+          const originHolds =
+            (await isAncestorOf(authorGit, head, target)) ||
+            (history?.events.some((event) => event.links.includes(head)) ?? false) ||
+            (
+              await authorGit([
+                "for-each-ref",
+                "--contains",
+                head,
+                "--format=%(refname)",
+                `refs/remotes/${config.target.remote}/`,
+              ])
+            ).trim() !== ""
+          const localCustody = originHolds
+            ? undefined
+            : { commonDirectory: (await inspectCheckoutGitMetadata(authorRepo)).commonDirectory }
           const result = await retireLocalBranch({
             repo: authorRepo,
             git: authorGit,
@@ -2567,6 +2586,7 @@ export async function coreQueueCommand(
               queue: config.target.branch,
               target,
               ...(advanced === undefined ? {} : { advanced }),
+              ...(localCustody === undefined ? {} : { localCustody }),
             },
           })
           const output = {
@@ -2589,7 +2609,13 @@ export async function coreQueueCommand(
                 }
               : {}),
             // The event that keeps the tip lives on the change chain at origin (30683).
-            ...(result.outcome === "removed" && result.event !== undefined
+            ...(result.outcome === "removed" && result.event !== undefined && localCustody !== undefined
+              ? {
+                  // #39255: the tip never left this repo; its local custody ref keeps it, so no fetch is needed.
+                  custody: `${localCustody.commonDirectory}#${result.event.ref}`,
+                  recovery: `git -C ${shellQuote(authorRepo)} branch ${shellQuote(branch)} ${shellQuote(head)}`,
+                }
+              : result.outcome === "removed" && result.event !== undefined
               ? {
                   recovery:
                     `git -C ${shellQuote(authorRepo)} fetch ${shellQuote(eventStore.remote)} ${shellQuote(result.event.ref)}` +
