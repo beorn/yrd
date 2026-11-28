@@ -17,6 +17,7 @@ import { afterAll, expect, it, vi } from "vitest"
 import {
   createEventQueue,
   createEventStore,
+  localCustodyRef,
   readBranchHistory,
   readConfig,
   retireOriginBranch,
@@ -110,31 +111,122 @@ it("30683: a never-submitted branch's dropped event starts its chain at origin a
   }
   expect(report.removed).toEqual([expect.objectContaining({ branch: "task/never-submitted" })])
   expect(report.removed[0]?.archiveRef).toBeUndefined()
-  // No archive ref anywhere: the dropped event that starts the branch's chain at origin keeps the tip (30683).
+  // No archive ref anywhere (30683). #39255 (@cto b3b69ea0) narrows custody at origin to tips origin already holds:
+  // this never-pushed tip's dropped event stays in the repo's local custody ref, and origin is untouched.
   expect((await git(["for-each-ref", "--format=%(refname)", "refs/archive/"])).trim()).toBe("")
   expect((await git(["ls-remote", "origin", "refs/archive/*"])).trim()).toBe("")
+  expect(await git(["ls-remote", "origin"])).toBe(originRefs)
   const { history } = await readBranchHistory(
     createEventStore(repo, "origin", git.selection),
     "main",
     "task/never-submitted",
   )
-  expect(history?.state).toMatchObject({ status: "cancelled", reason: "dropped", commit: tip })
-  expect(history?.events.at(-1)?.links).toContain(tip)
+  expect(history).toBeUndefined()
+  const kept = (await git(["rev-parse", localCustodyRef("main", "task/never-submitted")])).trim()
+  expect((await git(["rev-list", "--parents", "-n", "1", kept])).trim().split(" ")).toContain(tip)
   expect((await git(["for-each-ref", "refs/heads/task/never-submitted"])).trim()).toBe("")
-  // The recovery command reads the tip back from that chain.
-  expect(report.removed[0]?.recovery).toContain("refs/yrd/main/changes/task/never-submitted")
+  // The recovery command recreates the branch from the locally kept tip; nothing is fetched.
   expect(report.removed[0]?.recovery).toContain(tip)
+  expect(report.removed[0]?.recovery).not.toContain("fetch")
   expect(report.removed[0]?.recovery).not.toContain("--discard")
-  // An absent origin branch with completed-drop history is a successful retry, not unpublished work.
-  const repeated = capture(repo)
-  expect(
-    await runYrdProcess(
-      ["bun", "yrd", "drop", "task/never-submitted", "--retire", "--tip", tip, "--reason", "repeat completed drop"],
-      repeated.io,
-    ),
-    repeated.stderr(),
-  ).toBe(0)
 })
+
+// #39255 (@chief ddc17185): a plain or --discard drop --local of a tip origin has never held must publish nothing.
+// hightea's never-pushed deploy/38680-thread-grant 24a43d0c went to public beorn/hightea inside its dropped event.
+it.each([[[] as string[]], [["--discard", "--reason", "superseded"]]])(
+  "39255: drop --local %j of a tip origin never held leaves origin unchanged",
+  async (extra) => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-drop-local-unpublished-"))
+    roots.push(root)
+    const remote = join(root, "remote.git")
+    const repo = join(root, "repo")
+    const seed = gitIn(root)
+    await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+    await seed(["clone", "--quiet", remote, repo])
+    const git = gitIn(repo)
+    await git(["config", "user.name", "yrd test"])
+    await git(["config", "user.email", "yrd@test.invalid"])
+    writeFileSync(join(repo, ".yrd.yml"), 'checks:\n  - verify: {run: "true"}\n')
+    await git(["add", "."])
+    await git(["commit", "--quiet", "-m", "queue"])
+    await git(["push", "--quiet", "origin", "main"])
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture lost .yrd.yml")
+    await createEventQueue(
+      createEventStore(repo, "origin", git.selection),
+      "main",
+      target,
+      config,
+      new Date("2020-01-01T00:00:00.000Z"),
+    )
+    await git(["checkout", "--quiet", "-b", "deploy/never-pushed"])
+    writeFileSync(join(repo, "private.txt"), "never published\n")
+    await git(["add", "."])
+    await git(["commit", "--quiet", "-m", "private work"])
+    const tip = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    const originBefore = await seed(["--git-dir", remote, "for-each-ref", "--format=%(refname) %(objectname)"])
+
+    // The drop runs from a linked worktree; the custody ref must land in the common git dir, so removing that
+    // worktree cannot drop the kept tip (@cto b3b69ea0).
+    const linked = join(root, "linked")
+    await git(["worktree", "add", "--quiet", "--detach", linked, "main"])
+    const observed = capture(linked)
+    const code = await runYrdProcess(
+      [
+        "bun",
+        "yrd",
+        "drop",
+        "deploy/never-pushed",
+        "--local",
+        "--tip",
+        tip,
+        ...extra,
+        "--submitter",
+        "fixture",
+        "--json",
+      ],
+      observed.io,
+    )
+    expect(code, observed.stderr() + observed.stdout()).toBe(0)
+    expect(await seed(["--git-dir", remote, "for-each-ref", "--format=%(refname) %(objectname)"])).toBe(originBefore)
+    await expect(seed(["--git-dir", remote, "cat-file", "-e", `${tip}^{commit}`])).rejects.toThrow()
+    const report = JSON.parse(observed.stdout()) as {
+      removed: { branch: string; custody?: string; recovery?: string }[]
+    }
+    expect(report.removed).toEqual([expect.objectContaining({ branch: "deploy/never-pushed" })])
+    const custodyRef = localCustodyRef("main", "deploy/never-pushed")
+    expect(report.removed[0]?.custody).toContain(custodyRef)
+    expect(report.removed[0]?.recovery).not.toContain("fetch")
+    expect((await git(["for-each-ref", "refs/heads/deploy/never-pushed"])).trim()).toBe("")
+
+    await git(["worktree", "remove", "--force", linked])
+    const commonDir = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+    const event = (await git(["--git-dir", commonDir, "rev-parse", custodyRef])).trim()
+    expect((await git(["rev-list", "--parents", "-n", "1", event])).trim().split(" ")).toContain(tip)
+    expect(await git(["log", "-1", "--format=%B", event])).toContain('"location":"local"')
+    // Recovery is the receipt's own command, run in the checkout after the worktree is gone.
+    await git(["branch", "deploy/never-pushed", tip])
+    expect((await git(["rev-parse", "deploy/never-pushed"])).trim()).toBe(tip)
+
+    // @cto e335cb3d: a normal queue publish from this checkout afterwards carries no refs/yrd-local/ to origin.
+    await git(["checkout", "--quiet", "-b", "task/published-after"])
+    writeFileSync(join(repo, "public.txt"), "published\n")
+    await git(["add", "public.txt"])
+    await git(["commit", "--quiet", "-m", "published work"])
+    await git(["push", "--quiet", "origin", "task/published-after"])
+    await git(["checkout", "--quiet", "main"])
+    await submit(git, "origin", {
+      branch: "task/published-after",
+      submitter: "@dev/10",
+      target: { branch: "main", remote: "origin" },
+    })
+    expect(await seed(["--git-dir", remote, "for-each-ref", "refs/yrd/main/changes/task/published-after"])).not.toBe("")
+    expect((await seed(["--git-dir", remote, "for-each-ref", "refs/yrd-local/"])).trim()).toBe("")
+    await expect(seed(["--git-dir", remote, "cat-file", "-e", `${tip}^{commit}`])).rejects.toThrow()
+  },
+)
 
 // 31457: origin retirement publishes through the Gitomic backend, not `git push`, so git never updates the
 // store's tracking ref the way `git push --delete` would; dark-work then re-paged on the retired branch's
@@ -320,6 +412,8 @@ it("refuses loudly and keeps the branch when origin will not take the dropped ev
   await git(["add", "."])
   await git(["commit", "--quiet", "-m", "held"])
   const tip = (await git(["rev-parse", "HEAD"])).trim()
+  // #39255: custody goes to origin only for a tip origin already holds, so this branch is pushed first.
+  await git(["push", "--quiet", "origin", "task/never-submitted"])
   await git(["checkout", "--quiet", "main"])
 
   const observed = capture(repo)
@@ -564,12 +658,11 @@ it("--repo names the author store, so a drop aimed at another checkout retires t
   )
   if (code !== 0) throw new Error(`exit ${code}: ${observed.stderr()}`)
   expect((await git(["for-each-ref", "refs/heads/task/elsewhere"])).trim()).toBe("")
-  const { history } = await readBranchHistory(
-    createEventStore(repo, "origin", git.selection),
-    "main",
-    "task/elsewhere",
-  )
-  expect(history?.state).toMatchObject({ status: "cancelled", reason: "dropped", commit: tip })
+  // #39255: the never-pushed tip is kept in the --repo checkout's own custody ref, not published to origin.
+  const kept = (await git(["rev-parse", localCustodyRef("main", "task/elsewhere")])).trim()
+  expect((await git(["rev-list", "--parents", "-n", "1", kept])).trim().split(" ")).toContain(tip)
+  const { history } = await readBranchHistory(createEventStore(repo, "origin", git.selection), "main", "task/elsewhere")
+  expect(history).toBeUndefined()
 })
 
 it("--repo refuses a path that is not a git repository instead of reporting the branch already gone", async () => {

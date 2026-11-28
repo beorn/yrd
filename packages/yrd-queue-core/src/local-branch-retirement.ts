@@ -56,6 +56,9 @@ export type LocalBranchRetirement = Readonly<{
         /** The owner's drop of a tip past `recorded`: a cancelled chain's dropped event keeps both and records what
          * the target lacks (30683); a merged chain's retained event keeps the tip, its merged ending `recorded` (30999). */
         advanced?: Readonly<{ recorded: string; ended: "cancelled" | "merged" | "failed" } & Omit<AdvancedDrop, "tip">>
+        /** #39255 (@cto b3b69ea0): no origin ref, change chain or target holds the tip, so the dropped event stays in
+         * this repo's common git dir under refs/yrd-local/, a namespace no origin fetch mirrors, and nothing is pushed. */
+        localCustody?: Readonly<{ commonDirectory: string }>
       }>
     | Readonly<{
         kind: "landed"
@@ -224,7 +227,23 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     if (kept === undefined) kept = await reachability()
     const alreadyMerged =
       kept === undefined && disposition.kind === "closed" && (await isAncestor(git, tip, disposition.target))
-    if (kept === undefined && !input.dryRun && disposition.kind === "closed" && !alreadyMerged) {
+    if (
+      kept === undefined &&
+      !input.dryRun &&
+      disposition.kind === "closed" &&
+      !alreadyMerged &&
+      disposition.localCustody
+    ) {
+      custody = await writeLocalCustody(git, disposition.localCustody.commonDirectory, {
+        queue: disposition.queue,
+        branch,
+        tip,
+        actor,
+        ...(issue === undefined ? {} : { issue }),
+        reason,
+        ...(disposition.advanced === undefined ? {} : { recorded: disposition.advanced.recorded }),
+      })
+    } else if (kept === undefined && !input.dryRun && disposition.kind === "closed" && !alreadyMerged) {
       // The event that keeps the exact tip is on origin's chain before the local name can go (30683).
       const advanced = disposition.advanced
       custody = await drop(disposition.store, {
@@ -317,6 +336,16 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
             }
           }
           if (custody === undefined || disposition.kind !== "closed") return
+          if (disposition.localCustody) {
+            const held = await readLocalCustody(git, disposition.localCustody.commonDirectory, custody.ref)
+            if (held?.event !== custody.event || !held.parents.includes(tip)) {
+              throw new RetirementKept({
+                code: "moved",
+                detail: `${custody.ref} in ${disposition.localCustody.commonDirectory}: expected event ${custody.event} keeping ${tip}; read ${held?.event ?? "absent"}`,
+              })
+            }
+            return
+          }
           // The shared chain readback: a chain that no longer keeps the tip keeps the branch (30683).
           await readKeptCustody(disposition.store, {
             queue: disposition.queue,
@@ -370,4 +399,72 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     outcome: result.outcome,
   })
   return result
+}
+
+/** #39255: where a drop that must not publish keeps its tip — the author repo's common git dir, outside refs/yrd/,
+ * which mirrors origin. One ref per branch; a later drop of the same name chains onto the earlier event. */
+export function localCustodyRef(queue: string, branch: string): string {
+  return `refs/yrd-local/${queue}/dropped/${branch}`
+}
+
+const LOCAL_CUSTODY_IDENTITY = ["-c", "user.name=yrd", "-c", "user.email=yrd@local.invalid"] as const
+
+/** Write the dropped event as a commit whose parents keep the tip (and the recorded commit of an advanced drop),
+ * then move the custody ref to it only if the ref still reads what this writer saw. Nothing is pushed. */
+async function writeLocalCustody(
+  git: Git,
+  commonDirectory: string,
+  event: Readonly<{
+    queue: string
+    branch: string
+    tip: string
+    actor: string
+    issue?: string
+    reason: string
+    recorded?: string
+  }>,
+): Promise<Dropped> {
+  const ref = localCustodyRef(event.queue, event.branch)
+  const at = ["--git-dir", commonDirectory] as const
+  const previous = (await readLocalCustody(git, commonDirectory, ref))?.event
+  const keeps = [event.tip, ...(event.recorded === undefined || event.recorded === event.tip ? [] : [event.recorded])]
+  const body = JSON.stringify({
+    type: "dropped",
+    location: "local",
+    queue: event.queue,
+    branch: event.branch,
+    commit: event.tip,
+    by: event.actor,
+    ...(event.issue === undefined ? {} : { issue: event.issue }),
+    reason: event.reason,
+    ...(event.recorded === undefined ? {} : { recorded: event.recorded }),
+    at: new Date().toISOString(),
+  })
+  const tree = (await git([...at, "rev-parse", `${event.tip}^{tree}`])).trim()
+  const parents = [...keeps, ...(previous === undefined ? [] : [previous])].flatMap((parent) => ["-p", parent])
+  const message = `yrd local drop ${event.branch}\n\n${body}`
+  const commit = (await git([...LOCAL_CUSTODY_IDENTITY, ...at, "commit-tree", tree, ...parents, "-m", message])).trim()
+  // The all-zero old value means "must not exist yet", so two writers cannot both start this branch's custody.
+  await git([
+    ...at,
+    "update-ref",
+    "-m",
+    `yrd local drop ${event.branch}`,
+    ref,
+    commit,
+    previous ?? "0".repeat(commit.length),
+  ])
+  return { queue: event.queue, branch: event.branch, head: event.tip, ref, event: commit }
+}
+
+async function readLocalCustody(
+  git: Git,
+  commonDirectory: string,
+  ref: string,
+): Promise<Readonly<{ event: string; parents: readonly string[] }> | undefined> {
+  const at = ["--git-dir", commonDirectory] as const
+  const event = (await git([...at, "for-each-ref", "--format=%(objectname)", ref])).trim()
+  if (event === "") return undefined
+  const parents = (await git([...at, "rev-list", "--parents", "-n", "1", event])).trim().split(/\s+/u).slice(1)
+  return { event, parents }
 }
