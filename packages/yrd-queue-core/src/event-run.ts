@@ -2029,6 +2029,17 @@ export async function eventQueueRun(
       log.write({ kind: "discarded", branch, head, reason: discardedJudgementReason(rival, error) })
       return result(failed.length > 0 ? 1 : 0, observedMerged, failed)
     }
+    if (child.state === "recompose") {
+      const reason = `component main moved forward after judgment: ${child.evidence}`
+      await appendOwnedChange("frozenComponentWrite", store, queue, branch, marker, {
+        type: "verifying",
+        at: new Date(),
+        commit: candidate,
+        reason,
+      })
+      log.write({ kind: "change", branch, head, decision: "deferred", reason })
+      return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch])
+    }
     if (child.state === "refused") {
       const hit = matchTransientPush5xx(child.evidence)
       if (hit !== undefined) {
@@ -2404,7 +2415,9 @@ export async function eventQueueRun(
         verifyCandidate({
           git,
           repo: options.repo,
-          noFetch: true,
+          // A verifying event with a reason records a lost publication lease.
+          // Re-judgment must observe current component mains even when the old pin was cached.
+          noFetch: selectedChange.status !== "verifying" || selectedChange.reason === undefined,
           targetHead: target,
           head,
           path,

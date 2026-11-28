@@ -1,13 +1,13 @@
 /** Child-first publication of a checked merge, shared by legacy and event markers. */
 import type { Process } from "@yrd/process"
 import { createLocalGitProcess } from "git-super/process"
-import { readFrozenPushIntent } from "git-super/push-intent"
-import { gitlinkRows, readRemoteCommit, type Git, type GitInvocationOptions } from "./git.ts"
+import { readFrozenPushIntent, type FrozenPushIntent } from "git-super/push-intent"
+import { gitlinkRows, isAncestor, readRemoteCommit, runnerFor, type Git, type GitInvocationOptions } from "./git.ts"
 import { requireFrozenGitSuper } from "./git-super-selection.ts"
 import { gitSuperExecution, readSuperMergeDetail, type SuperMergeDetail } from "./verifying.ts"
 
 export type ChildPublication = Readonly<{
-  state: "published" | "refused"
+  state: "published" | "refused" | "recompose"
   moved: readonly string[]
   evidence: string
   detail?: SuperMergeDetail
@@ -87,17 +87,20 @@ export async function publishCheckedChildren(
     throw new Error("git-super push JSON has no boolean partial or repositories array")
   }
   const moved: string[] = []
+  const refused: RefusedChildRef[] = []
+  let incomplete = false
   for (const repository of result.repositories) {
     if (typeof repository !== "object" || repository === null) {
       throw new Error("git-super push repository is not an object")
     }
-    const row = repository as { repository?: unknown; refs?: unknown }
+    const row = repository as { repository?: unknown; refs?: unknown; state?: unknown }
     if (typeof row.repository !== "string" || !Array.isArray(row.refs)) {
       throw new Error("git-super push repository is incomplete")
     }
+    let hasRefusal = false
     for (const ref of row.refs) {
       if (typeof ref !== "object" || ref === null) throw new Error("git-super push ref is not an object")
-      const value = ref as { state?: unknown; destination?: unknown; source?: unknown }
+      const value = ref as { state?: unknown; destination?: unknown; source?: unknown; detail?: unknown }
       if (
         typeof value.state !== "string" ||
         typeof value.destination !== "string" ||
@@ -107,7 +110,15 @@ export async function publishCheckedChildren(
       }
       if (value.state === "updated") {
         moved.push(`${row.repository} ${value.destination} -> ${value.source.slice(0, 12)}`)
+      } else if (value.state === "failed" && isLeasedChildRefusal(value.detail)) {
+        hasRefusal = true
+        refused.push({ repository: row.repository, source: value.source, destination: value.destination })
+      } else if (value.state !== "unchanged" && value.state !== "not-run") {
+        incomplete = true
       }
+    }
+    if (row.state !== "unchanged" && row.state !== "not-run" && !(row.state === "failed" && hasRefusal)) {
+      incomplete = true
     }
   }
   const detail = result.detail === undefined ? undefined : readSuperMergeDetail(result.detail)
@@ -129,11 +140,57 @@ export async function publishCheckedChildren(
     evidence = `${evidence}; independent remote proof refused: ${proof.disagreement}`
     return { state: "refused", moved, evidence }
   }
+  if (
+    execution.exitCode === 2 &&
+    result.state === "failed" &&
+    !result.partial &&
+    !incomplete &&
+    moved.length === 0 &&
+    refused.length > 0 &&
+    isLeasedChildRefusal(detail)
+  ) {
+    try {
+      const advances = await proveForwardChildMoves(options.git, plan.expected, refused)
+      if (advances !== undefined) return { state: "recompose", moved, evidence: `${evidence}; ${advances.join(", ")}` }
+    } catch (error) {
+      evidence = `${evidence}; could not verify the component advance: ${String(error)}`
+    }
+  }
   return { state: "refused", moved, evidence, ...(detail === undefined ? {} : { detail }) }
 }
 
 /** A child ref the frozen push intent expects to find on its remote after the push. */
-type ExpectedChildRef = Readonly<{ destination: string; path: string; remote: string; source: string }>
+type ExpectedChildRef = NonNullable<FrozenPushIntent["children"][number]["publication"]> &
+  Readonly<{ path: string; remote: string }>
+type RefusedChildRef = Readonly<{ repository: string; source: string; destination: string }>
+
+function isLeasedChildRefusal(detail: unknown): boolean {
+  if (typeof detail !== "object" || detail === null) return false
+  const { code, phase } = detail as { code?: unknown; phase?: unknown }
+  return code === "destination-changed" && phase === "leased-child-push"
+}
+
+/** A stale lease report names the attempted ref, but cannot prove what now holds it. */
+async function proveForwardChildMoves(
+  git: Git,
+  expected: readonly ExpectedChildRef[],
+  refused: readonly RefusedChildRef[],
+): Promise<readonly string[] | undefined> {
+  const advances: string[] = []
+  for (const refusal of refused) {
+    const matches = expected.filter(
+      (child) => child.source === refusal.source && child.destination === refusal.destination,
+    )
+    const child = matches.length === 1 ? matches[0] : undefined
+    if (child?.expectedDestination.state !== "oid" || !child.destination.startsWith("refs/heads/")) return undefined
+    const before = child.expectedDestination.oid
+    const childGit = runnerFor(git).at(refusal.repository)
+    const after = await readRemoteCommit(childGit, child.remote, child.destination)
+    if (after === undefined || after === before || !(await isAncestor(childGit, before, after))) return undefined
+    advances.push(`${child.path} ${child.destination} advanced from ${before} to ${after}`)
+  }
+  return advances
+}
 
 /**
  * The LOCAL half of the independent publication proof (27098 step 4), read from the candidate's
@@ -189,10 +246,9 @@ async function readFrozenPublicationPlan(
         ? []
         : [
             {
-              destination: child.publication.destination,
+              ...child.publication,
               path: child.path,
               remote: child.remote,
-              source: child.publication.source,
             },
           ],
     ),
