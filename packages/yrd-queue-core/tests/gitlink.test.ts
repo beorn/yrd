@@ -267,6 +267,71 @@ it("runs a gitlink-bearing event change through the checked candidate", async ()
   expect(state.candidate).toBe(await remoteTip(w.git, "refs/heads/main"))
 })
 
+/** @failure A component main moves after the candidate is checked but before the leased child push.
+ * @level l3 @consumer queue operator and component author
+ * Earlier races cover movement before compose or a root lease after the child push.
+ */
+it.each(["forward", "divergent"] as const)(
+  "handles a %s component main move at publication",
+  async (movement) => {
+    const w = await world()
+    await createWorldEventQueue(w)
+    const branch = `task/${movement}-component-lease`
+    const ahead = await aheadOfSubmodule(w, `authored-${movement}`)
+    await submitGitlink(w, branch, ahead)
+    const rootBefore = await remoteTip(w.git, "refs/heads/main")
+    const component = gitIn(join(dirname(w.work), "submodule-work"))
+    const nextMain =
+      movement === "forward"
+        ? (
+            await component(["commit-tree", `${w.main}^{tree}`, "-p", w.main, "-m", "external component advance"])
+          ).trim()
+        : w.offMain
+
+    await using real = createProcess({ cwd: w.work })
+    let moved = false
+    const process: Process = {
+      ...real,
+      async run(request) {
+        if (!moved && isGitSuper(request.argv, "push")) {
+          moved = true
+          await component([
+            "push",
+            "--quiet",
+            `--force-with-lease=refs/heads/main:${w.main}`,
+            "origin",
+            `${nextMain}:refs/heads/main`,
+          ])
+        }
+        return real.run(request)
+      },
+    }
+    const check = { run: "git rev-parse HEAD", on: ["merge"] as const }
+    const first = await queueRun({ ...(await w.options(check)), notify: [], process })
+    expect(moved).toBe(true)
+    expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
+    expect(await submoduleMain(w)).toBe(nextMain)
+
+    if (movement === "divergent") {
+      expect(first).toMatchObject({ exitCode: 2, merged: [], stuck: [branch] })
+      expect((await readStatus(eventStore(w), "main", branch)).reason).toContain("frozen component publication")
+      return
+    }
+
+    expect(first).toMatchObject({ exitCode: 0, deferred: [branch], merged: [], stuck: [] })
+    const second = await queueRun({ ...(await w.options(check)), notify: [] })
+    expect(second).toMatchObject({ exitCode: 0, merged: [branch], stuck: [] })
+    const landed = (await w.git(["rev-parse", `${await remoteTip(w.git, "refs/heads/main")}:submodule`])).trim()
+    expect(landed).toBe(await submoduleMain(w))
+    const checkParent = async (parent: string) =>
+      expect((await component(["merge-base", parent, landed])).trim()).toBe(parent)
+    await component(["fetch", "--quiet", "origin", "main"])
+    await checkParent(nextMain)
+    await checkParent(ahead)
+  },
+  120_000,
+)
+
 /** @failure A well-formed git-super success with an empty repository list records
  * published while no child ref moved — git-super's JSON is taken as the proof of
  * its own push (27098 step 4).
