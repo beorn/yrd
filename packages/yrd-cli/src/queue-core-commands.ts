@@ -2617,12 +2617,12 @@ export async function coreQueueCommand(
                   recovery: `git -C ${shellQuote(authorRepo)} branch ${shellQuote(branch)} ${shellQuote(head)}`,
                 }
               : result.outcome === "removed" && result.event !== undefined
-              ? {
-                  recovery:
-                    `git -C ${shellQuote(authorRepo)} fetch ${shellQuote(eventStore.remote)} ${shellQuote(result.event.ref)}` +
-                    ` && git -C ${shellQuote(authorRepo)} branch ${shellQuote(branch)} ${shellQuote(head)}`,
-                }
-              : {}),
+                ? {
+                    recovery:
+                      `git -C ${shellQuote(authorRepo)} fetch ${shellQuote(eventStore.remote)} ${shellQuote(result.event.ref)}` +
+                      ` && git -C ${shellQuote(authorRepo)} branch ${shellQuote(branch)} ${shellQuote(head)}`,
+                  }
+                : {}),
           }
           if (result.outcome === "eligible") eligible.push(output)
           else if (result.outcome === "removed") removed.push(output)

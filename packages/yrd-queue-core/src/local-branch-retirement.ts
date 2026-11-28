@@ -227,7 +227,13 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     if (kept === undefined) kept = await reachability()
     const alreadyMerged =
       kept === undefined && disposition.kind === "closed" && (await isAncestor(git, tip, disposition.target))
-    if (kept === undefined && !input.dryRun && disposition.kind === "closed" && !alreadyMerged && disposition.localCustody) {
+    if (
+      kept === undefined &&
+      !input.dryRun &&
+      disposition.kind === "closed" &&
+      !alreadyMerged &&
+      disposition.localCustody
+    ) {
       custody = await writeLocalCustody(git, disposition.localCustody.commonDirectory, {
         queue: disposition.queue,
         branch,
@@ -439,7 +445,15 @@ async function writeLocalCustody(
   const message = `yrd local drop ${event.branch}\n\n${body}`
   const commit = (await git([...LOCAL_CUSTODY_IDENTITY, ...at, "commit-tree", tree, ...parents, "-m", message])).trim()
   // The all-zero old value means "must not exist yet", so two writers cannot both start this branch's custody.
-  await git([...at, "update-ref", "-m", `yrd local drop ${event.branch}`, ref, commit, previous ?? "0".repeat(commit.length)])
+  await git([
+    ...at,
+    "update-ref",
+    "-m",
+    `yrd local drop ${event.branch}`,
+    ref,
+    commit,
+    previous ?? "0".repeat(commit.length),
+  ])
   return { queue: event.queue, branch: event.branch, head: event.tip, ref, event: commit }
 }
 

@@ -174,7 +174,19 @@ it.each([[[] as string[]], [["--discard", "--reason", "superseded"]]])(
     await git(["worktree", "add", "--quiet", "--detach", linked, "main"])
     const observed = capture(linked)
     const code = await runYrdProcess(
-      ["bun", "yrd", "drop", "deploy/never-pushed", "--local", "--tip", tip, ...extra, "--submitter", "fixture", "--json"],
+      [
+        "bun",
+        "yrd",
+        "drop",
+        "deploy/never-pushed",
+        "--local",
+        "--tip",
+        tip,
+        ...extra,
+        "--submitter",
+        "fixture",
+        "--json",
+      ],
       observed.io,
     )
     expect(code, observed.stderr() + observed.stdout()).toBe(0)
@@ -197,6 +209,22 @@ it.each([[[] as string[]], [["--discard", "--reason", "superseded"]]])(
     // Recovery is the receipt's own command, run in the checkout after the worktree is gone.
     await git(["branch", "deploy/never-pushed", tip])
     expect((await git(["rev-parse", "deploy/never-pushed"])).trim()).toBe(tip)
+
+    // @cto e335cb3d: a normal queue publish from this checkout afterwards carries no refs/yrd-local/ to origin.
+    await git(["checkout", "--quiet", "-b", "task/published-after"])
+    writeFileSync(join(repo, "public.txt"), "published\n")
+    await git(["add", "public.txt"])
+    await git(["commit", "--quiet", "-m", "published work"])
+    await git(["push", "--quiet", "origin", "task/published-after"])
+    await git(["checkout", "--quiet", "main"])
+    await submit(git, "origin", {
+      branch: "task/published-after",
+      submitter: "@dev/10",
+      target: { branch: "main", remote: "origin" },
+    })
+    expect(await seed(["--git-dir", remote, "for-each-ref", "refs/yrd/main/changes/task/published-after"])).not.toBe("")
+    expect((await seed(["--git-dir", remote, "for-each-ref", "refs/yrd-local/"])).trim()).toBe("")
+    await expect(seed(["--git-dir", remote, "cat-file", "-e", `${tip}^{commit}`])).rejects.toThrow()
   },
 )
 
@@ -633,11 +661,7 @@ it("--repo names the author store, so a drop aimed at another checkout retires t
   // #39255: the never-pushed tip is kept in the --repo checkout's own custody ref, not published to origin.
   const kept = (await git(["rev-parse", localCustodyRef("main", "task/elsewhere")])).trim()
   expect((await git(["rev-list", "--parents", "-n", "1", kept])).trim().split(" ")).toContain(tip)
-  const { history } = await readBranchHistory(
-    createEventStore(repo, "origin", git.selection),
-    "main",
-    "task/elsewhere",
-  )
+  const { history } = await readBranchHistory(createEventStore(repo, "origin", git.selection), "main", "task/elsewhere")
   expect(history).toBeUndefined()
 })
 
