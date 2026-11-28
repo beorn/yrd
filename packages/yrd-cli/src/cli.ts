@@ -1884,6 +1884,7 @@ function buildProgram(
       ).preset("manual"),
     )
     .option("--keep", "record this environment as standing so a merge of its branch does not close it")
+    .option("--full", "keep the directories the target's environments.omitCheckoutDirectories leaves out")
     .option(
       "--expires <duration|instant>",
       "keep a bay with no issue until this expiry (duration such as 12h or 7d, at most 7 days, or an ISO instant)",

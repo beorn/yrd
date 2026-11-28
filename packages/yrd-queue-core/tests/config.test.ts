@@ -97,6 +97,28 @@ describe("the queue declaration grammar", () => {
     },
   )
 
+  it("reads environment checkout omissions as a sorted set of literal paths (hh#39162)", () => {
+    const config = parseConfig(
+      "environments:\n  omitCheckoutDirectories: [vendor/term/content/b, vendor/term/content/a, vendor/term/content/b]\n",
+      SOURCE,
+    )
+    expect(config.environments).toEqual({ omitCheckoutDirectories: ["vendor/term/content/a", "vendor/term/content/b"] })
+    expect(parseConfig("{}\n", SOURCE).environments).toBeUndefined()
+  })
+
+  it.each(["[]", "[/corpus]", "[vendor/../corpus]", "['vendor/term/*']", "corpus"])(
+    "refuses malformed environment omissions %s (hh#39162)",
+    (value) => {
+      expect(() => parseConfig(`environments:\n  omitCheckoutDirectories: ${value}\n`, SOURCE)).toThrow(
+        /environments\.omitCheckoutDirectories: must be a non-empty list of literal normalized repository-relative directories/u,
+      )
+    },
+  )
+
+  it("refuses an unknown field inside environments (hh#39162)", () => {
+    expect(() => parseConfig("environments:\n  omit: [a]\n", SOURCE)).toThrow(/environments/u)
+  })
+
   it("reads every supported field and supplies only the declared defaults", () => {
     const config = parseConfig(
       [

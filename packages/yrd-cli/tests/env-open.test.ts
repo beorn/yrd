@@ -1722,3 +1722,91 @@ describe("yrd env open keep-rule (33758): an issue or an expiry, never neither",
     if (read.status === "unreadable") expect(read.why).toContain("expiresAt must be an ISO instant string")
   })
 })
+
+describe("yrd env open leaves the target's declared environment omissions out (hh#39162)", () => {
+  /**
+   * @failure Every environment checked out vendor/terminfo.dev's artifact corpus in full (7.6 GB each, ~80 GB/h of
+   *          root disk on 2026-11-27), although the target already declares that corpus omissible.
+   * @level l2 (real bare remotes, a real submodule, real env open materialization)
+   * @consumer @i/10-yrd/39162-yrd-env-open-and-issue; every seat opening an environment
+   * @testonly none
+   */
+  async function omittingWorld(omit: string): Promise<World> {
+    const w = await world("true")
+    const root = mkdtempSync(join(tmpdir(), "yrd-cli-env-omit-"))
+    roots.push(root)
+    const seed = gitIn(root)
+    const remote = join(root, "remote.git")
+    const work = join(root, "work")
+    await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+    await seed(["clone", "--quiet", remote, work])
+    const git = gitIn(work)
+    await git(["config", "user.email", "env-open@yrd.test"])
+    await git(["config", "user.name", "yrd"])
+    await git(["checkout", "--quiet", "-b", "main"])
+    writeFileSync(join(work, "READY"), "materialized\n")
+    mkdirSync(join(work, "content", "artifacts"), { recursive: true })
+    writeFileSync(join(work, "content", "artifacts", "corpus.txt"), "large\n")
+    await git(["add", "READY", "content"])
+    await git(["commit", "--quiet", "-m", "seed a dependency with a corpus"])
+    await git(["push", "--quiet", "origin", "main"])
+    await w.git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", remote, "vendor/dependency"])
+    writeFileSync(join(w.work, ".yrd.yml"), `setup: "true"\nenvironments:\n  omitCheckoutDirectories: [${omit}]\n`)
+    await w.git(["add", ".yrd.yml"])
+    await w.git(["commit", "--quiet", "-m", "add the dependency and declare its omission"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    return w
+  }
+
+  it("a branch environment leaves the directory out, says so on stderr, and keeps --json stdout unchanged", async () => {
+    const w = await omittingWorld("vendor/dependency/content/artifacts")
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "lean", "--expires", "1d", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+    const bay = join(w.work, ".bays", "lean")
+    expect(existsSync(join(bay, "vendor", "dependency", "READY"))).toBe(true)
+    expect(existsSync(join(bay, "vendor", "dependency", "content", "artifacts"))).toBe(false)
+    expect(run.stderr()).toContain("lean: left out of the checkout: vendor/dependency/content/artifacts")
+    expect(Object.keys(JSON.parse(run.stdout()) as object).sort()).toEqual(
+      ["base", "baseSource", "branch", "head", "name", "path"].sort(),
+    )
+  })
+
+  it("--full keeps the declared directory for work that reads it", async () => {
+    const w = await omittingWorld("vendor/dependency/content/artifacts")
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "whole", "--expires", "1d", "--full"], run.io),
+      run.stderr(),
+    ).toBe(0)
+    const bay = join(w.work, ".bays", "whole")
+    expect(readFileSync(join(bay, "vendor", "dependency", "content", "artifacts", "corpus.txt"), "utf8")).toBe("large\n")
+    expect(run.stderr()).not.toContain("left out of the checkout")
+  })
+
+  it("a detached environment leaves the directory out too", async () => {
+    const w = await omittingWorld("vendor/dependency/content/artifacts")
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const run = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", head, "--bay", "pinned", "--expires", "1d"], run.io),
+      run.stderr(),
+    ).toBe(0)
+    const path = run.stdout().trim()
+    expect(existsSync(join(path, "vendor", "dependency", "READY"))).toBe(true)
+    expect(existsSync(join(path, "vendor", "dependency", "content", "artifacts"))).toBe(false)
+  })
+
+  it.each([
+    ["names no tracked directory", "vendor/dependency/content/missing", "names no tracked directory"],
+    ["is inside no declared submodule", "content/artifacts", "is inside no declared submodule"],
+  ])("an omission that %s refuses by name and leaves no environment", async (_name, omit, message) => {
+    const w = await omittingWorld(omit)
+    const run = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "refused", "--expires", "1d"], run.io)).not.toBe(0)
+    expect(run.stderr()).toContain(message)
+    expect(existsSync(join(w.work, ".bays", "refused"))).toBe(false)
+  })
+})

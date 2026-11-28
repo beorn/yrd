@@ -114,6 +114,8 @@ export type EnvOpenOptions = Readonly<{
   commit?: string
   hold?: string
   keep?: boolean
+  /** hh#39162: keep the target's `environments.omitCheckoutDirectories` in the checkout, for work that reads them. */
+  full?: boolean
   /** `<duration|instant>`; the only legitimate open with no `--issue`, because a detached commit cannot be bound. */
   expires?: string
 }>
@@ -888,6 +890,8 @@ export async function openEnvironment(options: EnvOpenOptions, io: EnvironmentCo
         warnUnknownNotifyEvents(`${target} (${base.slice(0, 12)})`, "env open", unknown, io),
     },
   )
+  // hh#39162: what the target leaves out of every environment's checkout, unless --full keeps it.
+  const omitted = options.full === true ? [] : (config.environments?.omitCheckoutDirectories ?? [])
   // 27147: a submodule the base declares `private = true` is left empty and uninitialized; a detached
   // environment's freshWorktree reads the declaration itself.
   let provisioned: { path: string; headSha: string; baseSha: string; adoption: ProvisionedBay["adoption"] | "detached" }
@@ -896,7 +900,13 @@ export async function openEnvironment(options: EnvOpenOptions, io: EnvironmentCo
     const path = resolve(environments, name)
     if (!path.startsWith(`${environments}/`)) throw new Error(`environment name '${name}' escapes ${environments}`)
     mkdirSync(environments, { recursive: true })
-    await freshWorktree(gitIn(root, provisioningProcess, selection), root, base, path)
+    await freshWorktree(
+      gitIn(root, provisioningProcess, selection),
+      root,
+      base,
+      path,
+      omitted.length === 0 ? {} : { omitCheckoutDirectories: omitted },
+    )
     provisioned = { path, headSha: base, baseSha: base, adoption: "detached" }
   } else {
     const shadow = await branchPathConflict(git, branch)
@@ -933,6 +943,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: EnvironmentCo
           ...(options.issue === undefined ? [] : ["--issue", options.issue]),
           ...(options.hold === undefined ? [] : ["--hold", options.hold]),
           ...(options.keep === true ? ["--keep"] : []),
+          ...(options.full === true ? ["--full"] : []),
           ...(options.expires === undefined ? [] : ["--expires", options.expires]),
           ...(options.json === true ? ["--json"] : []),
         ],
@@ -949,6 +960,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: EnvironmentCo
       branch,
       base,
       originUnreachable: resolvedBase.originUnreachable,
+      ...(omitted.length === 0 ? {} : { omitCheckoutDirectories: omitted }),
     })
     if (result.conclusion !== "success") {
       throw new Error(`yrd: could not open environment '${name}': ${result.error.message}`)
@@ -1048,6 +1060,10 @@ export async function openEnvironment(options: EnvOpenOptions, io: EnvironmentCo
       `${branch} carries no bead id; open bead work with --issue <ref> — it names the branch task/<issue> and binds it with a Refs commit. ` +
         `This bay expires at ${expiresAt}\n`,
     )
+  }
+  // hh#39162: stderr, so --json stdout stays byte-identical for scripted callers.
+  if (omitted.length > 0) {
+    io.stderr(`${name}: left out of the checkout: ${omitted.join(", ")}; yrd env open --full keeps them\n`)
   }
   // `base` is the base the caller REQUESTED, resolved in the owning root repository — never the head the
   // environment happens to stand at: a reused branch's head is reported as `head`, not as `base` (27165).

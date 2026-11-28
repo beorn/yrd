@@ -161,6 +161,11 @@ export type QueueConfig = Readonly<{
    * keeps the whole pass.
    */
   retention?: Readonly<{ holds: readonly string[] }>
+  /**
+   * hh#39162: what every `yrd env open` environment leaves out of its checkout. The same literal repository-relative
+   * directories a check's `omitCheckoutDirectories` takes; `yrd env open --full` keeps them for work that reads them.
+   */
+  environments?: Readonly<{ omitCheckoutDirectories: readonly string[] }>
   /** Target-owned pre-submit policy command. Exit 1 refuses; failures to judge warn. */
   admission?: Readonly<{ run: string; timeoutMs: number }>
   checks: readonly CheckSpec[]
@@ -283,6 +288,7 @@ export function parseConfig(
   const teardown = optionalString(declared, "teardown")
   const admission = readAdmission(declared.admission)
   const retention = readRetention(declared.retention)
+  const environments = readEnvironments(declared.environments)
   const queueRoot = readQueueRoot(declared["queue-root"])
   return {
     archiveAfter: readArchiveAfter(declared["archive-after"]),
@@ -294,6 +300,7 @@ export function parseConfig(
     ignore: readIgnore(declared.ignore),
     ...(admission === undefined ? {} : { admission }),
     ...(retention === undefined ? {} : { retention }),
+    ...(environments === undefined ? {} : { environments }),
     notify,
     setup,
     ...(derive === undefined ? {} : { derive }),
@@ -576,6 +583,7 @@ const TOP_KEYS = [
   "checks",
   "derive",
   "derive-root-paths",
+  "environments",
   "health",
   "ignore",
   "setup",
@@ -597,6 +605,19 @@ function readAdmission(value: unknown): QueueConfig["admission"] {
     throw new Error(".yrd.yml admission.timeoutMs: must be a positive integer")
   }
   return { run: value.run, timeoutMs: value.timeoutMs as number }
+}
+
+function readEnvironments(value: unknown): QueueConfig["environments"] {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) throw new Error(".yrd.yml environments: must be a mapping with omitCheckoutDirectories")
+  onlyKeys(value, ["omitCheckoutDirectories"], ".yrd.yml environments")
+  const directories = value.omitCheckoutDirectories
+  if (!Array.isArray(directories) || directories.length === 0 || !directories.every(isLiteralCheckoutDirectory)) {
+    throw new Error(
+      ".yrd.yml environments.omitCheckoutDirectories: must be a non-empty list of literal normalized repository-relative directories",
+    )
+  }
+  return { omitCheckoutDirectories: [...new Set(directories as string[])].sort() }
 }
 
 function readRetention(value: unknown): QueueConfig["retention"] {

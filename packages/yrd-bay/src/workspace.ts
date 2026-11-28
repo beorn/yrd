@@ -34,6 +34,11 @@ export type ProvisionBayInput = Readonly<{
   /** Root-relative submodule paths left empty and uninitialized (27147). */
   excludedSubmodules?: readonly string[]
   /**
+   * hh#39162: literal root-relative directories inside a declared submodule, left out of that component's fresh
+   * checkout (the target's `environments.omitCheckoutDirectories`). A directory outside every component refuses.
+   */
+  omitCheckoutDirectories?: readonly string[]
+  /**
    * The caller already proved origin unreachable and warned its user (28385 area 11). Provision from
    * what is local instead of asking the same dead remote again; the caller's warning covers the risk.
    */

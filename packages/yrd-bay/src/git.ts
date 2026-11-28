@@ -1,3 +1,4 @@
+import { lstat } from "node:fs/promises"
 import { resolve } from "node:path"
 import { adaptProcessGit, type Process } from "@yrd/process"
 import { worktreeHomeRoot } from "git-super"
@@ -49,6 +50,74 @@ async function remoteBranchHead(git: Git, repo: string, branch: string): Promise
     throw new Error(`origin returned no commit for branch '${branch}'`)
   }
   return headSha
+}
+
+/**
+ * hh#39162: group each omitted directory under the declared submodule that holds it, as git-super's
+ * `checkoutOmissions` takes them (component root-relative path to component-relative directories). Read from the
+ * new worktree's own `.gitmodules`, so the declaration is the commit's. A directory no component holds refuses by
+ * name: a branch environment checks the root out in full, so only a component's checkout can leave it out.
+ */
+async function componentOmissions(
+  git: Git,
+  path: string,
+  directories: readonly string[],
+): Promise<Map<string, string[]>> {
+  const byComponent = new Map<string, string[]>()
+  if (directories.length === 0) return byComponent
+  const declared = await git.run(path, ["config", "-f", ".gitmodules", "--get-regexp", "^submodule\\..*\\.path$"], true)
+  const components = declared.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => line.slice(line.indexOf(" ") + 1))
+  for (const directory of directories) {
+    const component = components
+      .filter((candidate) => directory.startsWith(`${candidate}/`))
+      .sort((a, b) => b.length - a.length)[0]
+    if (component === undefined) {
+      throw new Error(
+        `environment omission ${JSON.stringify(directory)} is inside no declared submodule at ${path}; ` +
+          "a branch environment can leave out only a directory inside a component's checkout",
+      )
+    }
+    const relative = directory.slice(component.length + 1)
+    const group = byComponent.get(component)
+    if (group === undefined) byComponent.set(component, [relative])
+    else group.push(relative)
+  }
+  return byComponent
+}
+
+/**
+ * After materialization, each omitted directory is absent and still names tracked content at the component's HEAD.
+ * The second check is what keeps a renamed directory loud: an omission that names nothing would leave the full
+ * checkout in place and report success.
+ */
+async function verifyOmitted(git: Git, path: string, omissions: ReadonlyMap<string, readonly string[]>): Promise<void> {
+  for (const [component, relatives] of omissions) {
+    for (const relative of relatives) {
+      const tracked = await git.run(resolve(path, component), ["ls-tree", "-d", "HEAD", "--", relative], true)
+      if (tracked.code !== 0 || tracked.stdout.trim() === "") {
+        throw new Error(
+          `environment omission ${component}/${relative} names no tracked directory at ${component}'s HEAD; ` +
+            "correct environments.omitCheckoutDirectories in .yrd.yml",
+        )
+      }
+      if (await exists(resolve(path, component, relative))) {
+        throw new Error(`environment omission ${component}/${relative} is present after materialization at ${path}`)
+      }
+    }
+  }
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await lstat(path)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
+    throw error
+  }
 }
 
 function safeBayPath(root: string, bay: string): string {
@@ -117,10 +186,12 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
             await git.run(path, ["branch", "--set-upstream-to", `origin/${input.branch}`, input.branch])
           }
         }
-        await worktrees.materializeSubmodules(
-          path,
-          input.excludedSubmodules === undefined ? {} : { excludedSubmodules: input.excludedSubmodules },
-        )
+        const omissions = await componentOmissions(git, path, input.omitCheckoutDirectories ?? [])
+        await worktrees.materializeSubmodules(path, {
+          ...(input.excludedSubmodules === undefined ? {} : { excludedSubmodules: input.excludedSubmodules }),
+          ...(omissions.size === 0 ? {} : { checkoutOmissions: omissions }),
+        })
+        await verifyOmitted(git, path, omissions)
         const headSha = await git.commit(path, "HEAD")
         return { status: "completed", conclusion: "success", output: { path, headSha, baseSha, adoption } }
       } catch (cause) {
